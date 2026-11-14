@@ -224,6 +224,77 @@ class ArchiveTest(unittest.TestCase):
             W.via("z", "/elsewhere/labmon")
         self.assertIn("没有与它共用 worker 目录", str(e.exception))
 
+    def test_permanent_delete_checks_worker_and_preserves_other_data(self):
+        from labmon import overview, poolqueues
+        from labmon.records import log_events
+        from labmon.state import save_json, state_dir, usage_file
+        self.hosts_toml(sched="")
+        shared = self.d / "experiment.txt"
+        shared.write_text("实验文件")
+        PJ.put_config("p2", 'id = "p2"\n')
+        PJ._save({"p1": {"id": "p1", "t": 10, "regs": [{"host": "c"}]}, "p2": {"id": "p2", "t": 20}})
+        history = {s: {"project": "p1", "state": s, "dispatch": {"phase": "done"}} for s in ("completed", "withdrawn")}
+        save_json(poolqueues.state_file(), {"workspaces": {"p1": {"root": str(self.d)}, "p2": {}}, "queues": history})
+        usage_file("a").parent.mkdir(parents=True)
+        usage_file("a").write_text("用量历史")
+        log_events([{"kind": "project", "project": "p1", "msg": "旧审计"}])
+        save_json(state_dir() / "snapshot.json", {"generated": 1, "hosts": [
+            {"id": "a", "status": fake_status(running=[running_job("t1", "p1")])}]})
+        self.reg("b", "q2", "p2")
+        self.reg("c", "q1", "p1")
+        status = self.wh / "hosts" / "a" / "status.json"
+        old_status = self.wh / "hosts" / "c" / "status.json"
+        save_json(old_status, {"waiting": [{"project": "p1"}]})
+        save_json(status, fake_status())
+        delete = lambda: PJ.delete("p1", "10", "admin", lambda: None)  # noqa: E731
+        with self.assertRaisesRegex(ConfigError, "队列登记"):
+            delete()
+        (old_status.parent / "queues" / "q1.json").unlink()
+        save_json(status, fake_status(external=[{"project": "p1"}]))
+        with self.assertRaisesRegex(ConfigError, "在跑或等待"):
+            delete()
+        save_json(status, fake_status())
+        overrides = status.with_name("overrides.json")
+        save_json(overrides, [{"kind": "pause", "target": "p1"}])
+        with self.assertRaisesRegex(ConfigError, "暂停或优先"):
+            delete()
+        overrides.unlink()
+        with mock.patch.object(overview, "_project_worker_state", return_value=(None, "坏状态")):
+            with self.assertRaisesRegex(ConfigError, "未能核实"):
+                delete()
+        with mock.patch.object(PJ.shutil, "rmtree", side_effect=OSError("模拟 IO 失败")):
+            with self.assertRaisesRegex(ConfigError, "仍保留"):
+                delete()
+        self.assertIn("p1", PJ.archived())
+        self.assertIn("p1", poolqueues.read()["workspaces"])
+        ver = PJ.get_config("p1")["ver"]
+        self.assertIn("永久删除", delete())
+        self.assertEqual(set(PJ.archived()), {"p2"})
+        self.assertEqual(PJ.registered(), ["p2"])
+        self.assertFalse(PJ.out_dir("p1").parent.exists())
+        self.assertEqual(poolqueues.read(), {"workspaces": {"p2": {}}, "queues": history})
+        self.assertEqual(shared.read_text(), "实验文件")
+        self.assertEqual(usage_file("a").read_text(), "用量历史")
+        self.assertEqual(self.regs_left()["b"], ["q2"])
+        audit = [(r["msg"], r.get("who")) for r in records() if r.get("project") == "p1"]
+        self.assertIn(("旧审计", None), audit)
+        self.assertIn(("永久删除了看板项目 p1", "admin"), audit)
+        with self.assertRaises(PJ.Refused) as ex:
+            PJ.put_config("p1", self.cfg.read_text(), base=ver)
+        self.assertEqual(ex.exception.code, 412)
+        self.assertTrue(PJ.put_config("p1", self.cfg.read_text())["created"])
+
+    def test_permanent_delete_rejects_symlink(self):
+        self.hosts_toml(sched="")
+        PJ._save({"p1": {"id": "p1", "t": 10}})
+        project = PJ.cfg_file("p1").parent
+        moved = self.d / "target"
+        project.rename(moved)
+        project.symlink_to(moved, target_is_directory=True)
+        with self.assertRaisesRegex(ConfigError, "路径"):
+            PJ.delete("p1", "10", "admin", lambda: None)
+        self.assertTrue((moved / "monitor.toml").is_file())
+
     def test_restore_and_ids(self):
         # 恢复：从 projects.json 去掉、记一条；看板上的配置没了时拒绝；project_ids 是登记了的减去已归档的，unknown_project 说“已归档”
         from labmon import api as A
@@ -379,6 +450,59 @@ class ServeSyncTest(unittest.TestCase):
         p.wake.set()
         t.join(10)
         self.assertFalse(t.is_alive())
+
+    def test_delete_refuses_collector_that_has_not_exited(self):
+        from labmon import serve as SV
+        p = SV.Project("p1", interval=3600)
+        srv = SV.Server(("127.0.0.1", 0), [p])
+        self.addCleanup(srv.server_close)
+        inside, go = threading.Event(), threading.Event()
+        thread = threading.Thread(target=p.loop)
+        p.once = lambda: (inside.set(), go.wait(10))
+        p.alive = True
+        thread.start()
+        try:
+            self.assertTrue(inside.wait(5))
+            PJ._save({"p1": {"id": "p1", "t": 10}})
+            srv.sync()
+            with self.assertRaisesRegex(ConfigError, "正在收尾"):
+                srv.delete_project("p1", "10", "admin")
+            self.assertTrue(PJ.cfg_file("p1").is_file())
+        finally:
+            go.set()
+            thread.join(10)
+        srv.delete_project("p1", "10", "admin")
+        self.assertFalse(PJ.cfg_file("p1").exists())
+        self.assertNotIn("p1", srv.leaving)
+
+    def test_delete_route_permissions_and_immediate_listing(self):
+        from fixtures import bearer_opener, make_token
+        from labmon import serve as SV
+        from labmon.state import save_json, state_dir
+        PJ.put_config("owner", 'id = "owner"\n', owner="member")
+        PJ._save({"p1": {"id": "p1", "t": 10}, "owner": {"id": "owner", "t": 20}})
+        save_json(state_dir() / "snapshot.json", {"generated": time.time(), "archived": PJ.archived_rows()})
+        srv = self.srv = SV.Server(("127.0.0.1", 0))
+        srv.sync()
+        boss = login(self)
+        member = make_token(name="member", role="user", scopes=("read", "project"))
+        cli = make_token(name="boss", scopes=("project",))
+        threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        def delete(token, pid, revision):
+            req = post_req(f"{base}/project/delete", json.dumps({"project": pid, "revision": revision}).encode())
+            return bearer_opener(token).open(req)
+
+        for token, pid, revision, code in [(member, "owner", "20", 403), (cli, "p1", "10", 403),
+                                           (boss, "../p1", "10", 400), (boss, "p1", None, 400),
+                                           (boss, "p1", "9", 409), (boss, "other", "10", 409)]:
+            with self.assertRaises(urllib.error.HTTPError) as ex:
+                delete(token, pid, revision)
+            self.assertEqual(ex.exception.code, code)
+        with delete(boss, "p1", "10") as response:
+            self.assertEqual(response.status, 200)
+        with bearer_opener(boss).open(f"{base}/overview.json") as response:
+            self.assertEqual([e["id"] for e in json.load(response)["archived"]], ["owner"])
 
     def test_routes(self):
         # POST /project/archive：项目不在服务里 404；还有实验 409（原因同 archive_block）；不认识的动作 404；proj_info 带上 archive_block

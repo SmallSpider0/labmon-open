@@ -7,13 +7,14 @@ from __future__ import annotations
 
 import json
 import time
+from contextlib import nullcontext
 
 from . import borrow as B
 from . import collect as C
 from . import fleet as F
 from . import projects as PJ
 from . import workerctl as W
-from .config import ConfigError, active_hosts, fmt_time, hosts_file, set_returned, set_sched_ovr, user_hosts
+from .config import HOSTS_LOCK, ConfigError, active_hosts, fmt_time, hosts_file, set_returned, set_sched_ovr, user_hosts
 from .state import snapshot
 
 OVR = {"pause": ("add", "pause"), "resume": ("rm", "pause"), "focus": ("add", "focus"), "unfocus": ("rm", "focus"),
@@ -110,24 +111,24 @@ def override(verb: str, target: str, host_ids: list[str] | None, until: float | 
     经 workerctl.override_each 下给那几台。每台一行：worker 打印的“生效中：…”，或 ssh 连不上的原因。"""
     o = Out()
     action, kind = OVR[verb]
-    if kind == "drain":
-        if host_ids:
-            return usage("drain / undrain 的主机写在位置参数上（labmon drain 29），不用 --host")
-        hs, tgt = [target], None
-    else:
-        hs, tgt = host_ids or [h["id"] for h in active_hosts()], target
-        bad = unknown_project(tgt)
-        if bad:
-            o.err(f"[labmon] {bad}")
-            return o.done(3)
     try:
-        if kind != "drain" and not host_ids:          # 项目级：记在主机清单，看板随 sched.json 写给各在用主机，之后加入的也有（#96）
-            o.p("[labmon] " + set_sched_ovr(kind, tgt, action == "add", until if action == "add" else None))
-            if not (now and kind == "pause" and action == "add"):
-                return o.done(0)
-            rs = W.override_each("add", "pause", tgt, hs if immediate_hosts is None else immediate_hosts, None, True, once=True)    # --now：各在用主机只停一次，暂停由上面那条挡
-        else:
-            rs = W.override_each(action, kind, tgt, hs, until, now)
+        with HOSTS_LOCK if kind != "drain" else nullcontext():
+            if kind == "drain":
+                if host_ids:
+                    return usage("drain / undrain 的主机写在位置参数上（labmon drain 29），不用 --host")
+                hs, tgt = [target], None
+            else:
+                hs, tgt = host_ids or [h["id"] for h in active_hosts()], target
+                if (bad := unknown_project(tgt)) and (action == "add" or tgt not in PJ.archived()):
+                    o.err(f"[labmon] {bad}")
+                    return o.done(3)
+            if kind != "drain" and not host_ids:      # 项目级设置随 sched.json 发给各主机
+                o.p("[labmon] " + set_sched_ovr(kind, tgt, action == "add", until if action == "add" else None))
+                if not (now and kind == "pause" and action == "add"):
+                    return o.done(0)
+                rs = W.override_each("add", "pause", tgt, hs if immediate_hosts is None else immediate_hosts, None, True, once=True)
+            else:
+                rs = W.override_each(action, kind, tgt, hs, until, now)
     except ConfigError as e:
         o.err(f"[labmon] {e}")
         return o.done(3)
@@ -142,11 +143,12 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
     """labmon worker start|stop|status|add|rm|limit|fit：经 workerctl.run_out 一次 ssh；输出是 worker 打印的原文。"""
     if sub not in WORKER_ACTS or not hid:
         return usage(f"不认识的 worker 动作 {sub}")
-    if project and sub != "rm" and unknown_project(project):
-        return usage(unknown_project(project))
     try:
-        rc, out = W.run_out(sub, hid, rest, gpus, project=project if sub != "rm" else None, stop=stop,
-                            **({"expect_project": project} if own and sub in ("add", "rm") else {}))
+        with PJ._reg_locked() if sub == "add" else nullcontext():
+            if project and sub != "rm" and (reason := unknown_project(project)):
+                return usage(reason)
+            rc, out = W.run_out(sub, hid, rest, gpus, project=project if sub != "rm" else None, stop=stop,
+                                **({"expect_project": project} if own and sub in ("add", "rm") else {}))
     except ConfigError as e:
         return {"rc": 3, "out": "", "err": f"[labmon] {e}\n"}
     return {"rc": rc, "out": out, "err": ""}
@@ -168,7 +170,8 @@ def check(pid: str, text: str) -> dict:
     from . import waits
     cfg = PJ.check_config(pid, text, {})
     out = PJ.out_dir(pid)
-    told = waits.check_told(cfg, out / ".labmon" / "wait_state.json")
+    with PJ._reg_locked():
+        told = waits.check_told(cfg, out / ".labmon" / "wait_state.json", remember=PJ.cfg_file(pid).is_file())
     ign = cfg["ignored"]
     cfg = C.lanes_cfg(cfg, snapshot(), out / ".labmon", time.time(), save=False)
     o, after = Out(), []

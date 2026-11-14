@@ -13,6 +13,7 @@
   撤按主机下的暂停、优先，撤主机清单 [sched] 里它的权重、暂停、优先，记进状态目录的 projects.json。不删数据：登记目录（配置、输出）、共享盘、用量记录都留着。
 - 看板服务按 projects.json 摘下与加回（serve.Server.sync）：启动时跳过已归档的，运行中每轮全局采集前对齐。
 - 恢复只把它从 projects.json 去掉（看板服务加回采集）；登记不自动恢复，要跑由实验会话再 worker add（归档时移除了哪些记在条目的 regs 里，页面列出来）。
+- 永久删除由管理员在归档列表操作。只删除看板上的登记目录、归档条目及闲置池工作区绑定，写一条审计。
 """
 from __future__ import annotations
 
@@ -24,14 +25,16 @@ import shutil
 import threading
 import time
 import tomllib
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from stat import S_ISDIR
 
 from . import lan as L
 from . import workerctl as W
-from .config import HOSTS_LOCK, ConfigError, _expand, _write_checked, done_files, done_key, fmt_dur, fmt_time, load, set_project, set_sched_ovr, set_weight
+from .config import HOSTS_LOCK, ConfigError, _expand, _write_checked, done_files, done_key, fmt_dur, fmt_time, load, sched, set_project, set_sched_ovr, set_weight
 from .records import log_events, tell
-from .state import load_json, load_rows, save_json, state_dir, state_root, write_atomic
+from .state import load_json, load_rows, save_json, snapshot, state_dir, state_root, write_atomic
 
 FRESH_S = 600                 # 项目看板与工作台的快照超过这么久（且超过 3 个采集间隔）没更新，不让归档：说不准还有没有实验
 _LOCK = threading.Lock()
@@ -66,6 +69,11 @@ def archived_msg(pid: str) -> str | None:
         return None
     return (f"项目 {pid} 已于 {fmt_time(e['t'])} {e.get('by') or ''}归档，看板不再采集它，各主机上的登记已移除；"
             f"要接着用先 labmon project restore {pid}，再 labmon worker add 登记清单")
+
+
+def archived_rows() -> list[dict]:
+    """当前归档列表，新归档的在前；工作台页面与快照的顺序一致。"""
+    return sorted(archived().values(), key=lambda e: -(e.get("t") or 0))
 
 
 def _save(a: dict) -> None:
@@ -119,7 +127,7 @@ def ver_of(data: str | bytes) -> str:
 @contextmanager
 def _reg_locked():
     """登记目录读 → 改 → 写的整段互斥：页面上改配置（看板服务的线程）与命令行推（另一个进程）不会各读一份旧版本、后写的盖掉先写的。
-    线程之间 _REG，进程之间 projects/registry.lock 上的 flock（同 _locked；不嵌套使用）。"""
+    线程之间 _REG，进程之间 projects/registry.lock 上的 flock。也要锁归档记录时，先锁登记。"""
     with _REG:
         root().mkdir(parents=True, exist_ok=True)
         with open(root() / "registry.lock", "w") as lk:
@@ -268,7 +276,7 @@ def _store(pid: str, text: str, files: dict, cfg: dict, owner: str | None, by: s
 def put_config(pid: str, text: str, files: dict | None = None, base: str | None = None, owner: str | None = None, by: str = "用命令行",
                ops: bool = True, check_owner=None) -> dict:
     """推配置（labmon project push、labmon wait 的同步、PUT /api/project/<id>/config 同用）。files：done_when 用到的文件 {monitor.toml 里写的路径: 内容（本地没有为 None）}。
-    base：上次同步时的版本。还没登记的就是第一次推、登记（不用 base）；已登记的 base 要等于现在的版本，没带回 428、对不上回 412（先拉）；已登记又已归档的 409
+    base：上次同步时的版本。还没登记而且没带 base 的就是第一次推；带了 base 但项目不存在返回 412；已登记的 base 要等于现在的版本，没带回 428、对不上回 412（先拉）；已登记又已归档的 409
     （归档了、看板上却没有配置的照样能推进来，推完再 restore）。整套 config.load 校验、id 要与 pid 相同，不过就不写。
     ops：调用方有没有平台操作的权限（接口按 users.can_ops 给；命令行与迁移在看板那台机器上直接调，算有）：没有时改了 GUARDED（含第一次推就带着）回 403。
     返回 {id, ver, created, changed（改了什么，空的是没改）, archived}。"""
@@ -287,6 +295,8 @@ def put_config(pid: str, text: str, files: dict | None = None, base: str | None 
             if base != cur:
                 raise Refused(412, f"看板上 {pid} 的配置在你上次同步之后改过（多半是页面上改的）：先 labmon project pull 拉回来，再改、再推", cur)
         cfg = check_config(pid, text, files)
+        if not p.is_file() and base is not None:
+            raise Refused(412, f"看板上没有项目 {pid}：要重新登记，请去掉上次同步的版本再推")
         if not ops and _guarded(text) != _guarded(p.read_text() if p.is_file() else ""):
             raise Refused(403, "这次推改了 [[hosts]] 或 [[queues]]（连哪台主机、在主机上跑什么检查、读哪些文件）：经接口改这两段要管理员的 admin 令牌从内网入口推"
                                "（labmon login --admin 后 labmon project push --admin）；别的项照常能推")
@@ -445,7 +455,7 @@ def archive(pid: str, psnap: dict | None, glob: dict | None, interval: float = 6
             set_sched_ovr(kind, pid, False)
         title = (psnap or {}).get("title") or pid
         a = archived()
-        a[pid] = {"id": pid, "title": title, "t": round(time.time()), "by": by, "regs": done, "skipped": skip + [f"{h}（登记没读到）" for h in unread]}
+        a[pid] = {"id": pid, "title": title, "t": round(time.time()), "revision": uuid.uuid4().hex, "by": by, "regs": done, "skipped": skip + [f"{h}（登记没读到）" for h in unread]}
         _save(a)
         msg = (f"归档 {pid}（{title}）：" + (f"移除了 {len(done)} 条登记" if done else "没有要移除的登记") + "，撤掉了它的权重、暂停与优先，看板不再采集它；"
                "登记目录（配置与输出）、共享盘、用量记录都留着，labmon project restore " + pid + " 可加回")
@@ -473,4 +483,48 @@ def restore(pid: str, check_owner=None) -> str:
         _save(a)
         msg = f"恢复 {pid}（{e.get('title') or pid}，{fmt_time(e['t'])} 归档的）：看板接着采集它；登记没恢复，要跑先 labmon worker add … --project {pid}"
         log_events([{"kind": "project", "msg": msg}])
+        return msg
+
+
+def delete(pid: str, revision: str, by: str, check_collector) -> str:
+    """永久删除看板上的归档项目。持登记与归档锁核对状态；清理失败时保留归档条目供重试。"""
+    _valid(pid)
+    from . import overview, poolqueues, pool_supply
+    with HOSTS_LOCK, _reg_locked(), _locked():
+        a = archived()
+        entry = a.get(pid)
+        if not entry:
+            raise ConfigError(f"没有归档的项目 {pid}")
+        if revision != str(entry.get("revision") or entry["t"]):
+            raise ConfigError("项目的归档记录已变化，请刷新后重新确认")
+        check_collector()
+        schedule = sched()
+        if any(pid in schedule.get(kind, {}) for kind in ("weight", "pause", "focus")):
+            raise ConfigError("项目仍有调度权重、暂停或优先设置，请先撤销")
+        if reason := poolqueues.delete_block(pid) or pool_supply.project_hold(pid):
+            raise ConfigError(reason)
+
+        project = cfg_file(pid).parent
+        # 核对目录项的原名，避免大小写不敏感的盘把另一个项目当作目标。
+        if any(p.is_symlink() for p in (root(), project)) or (
+            project.exists() and (not S_ISDIR(project.lstat().st_mode) or pid not in {p.name for p in root().iterdir()})
+        ):
+            raise ConfigError("项目登记目录不是看板状态中的实际目录，请先核对路径")
+        config = cfg_file(pid)
+        if config.is_symlink() or out_dir(pid).is_symlink():
+            raise ConfigError("项目配置或输出目录经符号链接，请先核对路径")
+        cfg = load_cfg(pid) if config.is_file() else {}
+        local = load_json(out_dir(pid) / "snapshot.json", {})
+        overview.check_project_idle(pid, entry, cfg, local, snapshot())
+
+        try:
+            if project.exists():
+                shutil.rmtree(project)
+            poolqueues.unbind_project(pid)
+            del a[pid]
+            _save(a)
+        except OSError as e:
+            raise ConfigError("看板清理未完成，归档条目仍保留，请稍后重试") from e
+        msg = f"永久删除了看板项目 {pid}"
+        log_events([{"kind": "project", "project": pid, "who": by, "msg": msg}])
         return msg

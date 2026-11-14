@@ -4655,12 +4655,12 @@ async function resourceSubmit(form) {
   finally { p.busy = false; render("keep"); }
 }
 // 「归档」与「已归档」抽屉（#97，projects.archive / restore）：做完的项目收起、要时加回。能不能归档由看板算好（项目的 archive_block：null 能，否则一句原因），
-// 页面只照它置灰与写原因。POST /project/archive|restore，回执写在已归档的抽屉顶上（PJMSG），一分钟后收起
+// 页面只照它置灰与写原因。POST /project/archive|restore|delete，回执写在已归档的抽屉顶上（PJMSG），一分钟后收起
 let PJMSG = null;
 const ARCH_DOES = `移除这个项目在各主机上的登记（已归还的主机上留着的也移除），撤掉它的权重与暂停、优先，看板不再采集它。`;
 const ARCH_KEEPS = `不删：看板上的配置与输出目录、共享盘上的文件、用量记录都留着；在侧栏的「已归档」里能恢复（登记要重新 labmon worker add）。`;
 const pjErr = () => POP?.err ? `<div class="rn-err">${esc(POP.err)}</div>` : "";
-const pjGo = (act, id, text) => `<button class="btn pri" data-pj="${act}" data-p="${esc(id)}" ${POP?.busy ? "disabled" : ""}>${POP?.busy ? "正在处理…" : text}</button>`;
+const pjGo = (act, id, text, danger = false) => `<button class="btn ${danger ? " danger" : "pri"}" data-pj="${act}" data-p="${esc(id)}" ${POP?.busy ? "disabled" : ""}>${POP?.busy ? "正在处理…" : text}</button>`;
 // 抽屉最下面的危险区（#133）：一句话说清归档做什么、留什么，按钮红框；确认弹窗里写全（ARCH_DOES、ARCH_KEEPS）
 function projArchSec(p) {
   if (LIVE && !canWrite(p.id)) return "";
@@ -4674,6 +4674,7 @@ function projArchSec(p) {
       ${regs.length ? `这一轮读到 ${nh} 台主机上有它的 ${regs.length} 条登记。` : "这一轮没读到它的登记。"}<br>${ARCH_KEEPS}</div>${pjErr()}`, pjGo("ago", p.id, "归档"));
   return `<section class="card dz"><div class="dz-r"><div><b>归档这个项目</b>${say}${why}</div>${pop ? `<span class="pop-l">${pop}</span>` : ""}</div></section>`;
 }
+const canDeleteProject = () => LIVE && ME?.admin && ME.scopes?.includes("admin");
 function archDrawer() {
   const A = D.archived || [];
   const card = e => {
@@ -4685,9 +4686,14 @@ function archDrawer() {
     const btn = `<button class="btn" data-pj="r" data-p="${esc(e.id)}">${icon("undo")}恢复</button>`;
     const pop = !canWrite(e.id) ? "" : popConfirm(btn, popIs("pr", e.id), !popIs("pr", e.id) ? "" : `<div class="rn-note"><b>恢复 ${esc(e.title || e.id)}</b>：看板接着采集它，项目页回到侧栏。
         登记不自动恢复：要跑先 <code>labmon worker add … --project ${esc(e.id)}</code>。</div>${pjErr()}`, pjGo("rgo", e.id, "恢复"));
-    return dSec(esc(e.title || e.id), kvHtml(kv), pop ? `<span class="pop-l">${pop}</span>` : "");
+    const deleteBtn = `<button class="btn danger" data-pj="d" data-p="${esc(e.id)}">永久删除</button>`;
+    const remove = !canDeleteProject() ? "" : popConfirm(deleteBtn, popIs("pd", e.id),
+      !popIs("pd", e.id) ? "" : `<div class="rn-note"><b>永久删除 ${esc(e.title || e.id)}</b>
+        <div>将删除看板配置、项目缓存和归档记录，删除后无法恢复。共享实验文件、用量和审计记录会保留。</div></div>${pjErr()}`,
+      pjGo("dgo", e.id, "永久删除", true));
+    return dSec(esc(e.title || e.id), kvHtml(kv), [pop, remove].filter(Boolean).map(x => `<span class="pop-l">${x}</span>`).join(""));
   };
-  return dHead(`<span class="fav">${icon("archive")}</span>`, "已归档的项目", "数据都留着；恢复后看板接着采集")
+  return dHead(`<span class="fav">${icon("archive")}</span>`, "已归档的项目", "恢复后看板接着采集")
     + `<div class="db">${typeof PJMSG === "string" ? `<div class="rn-state">${esc(PJMSG)}</div>` : ""}${A.map(card).join("") || `<div class="card empty">没有归档的项目。</div>`}</div>`;
 }
 async function pjAct(act, pid) {
@@ -4719,26 +4725,45 @@ async function pjAct(act, pid) {
     if (POP) accLoad("users");
     return render(false);
   }
+  if (act === "d") {
+    if (!canDeleteProject()) return;
+    const e = (D.archived || []).find(e => e.id === pid);
+    if (!e) return;
+    popToggle("pd", pid, {revision: String(e.revision || e.t)});
+    render(false);
+    return document.querySelector("#drwp .pop")?.scrollIntoView({block: "nearest"});
+  }
+
   if (act === "a" || act === "r") {                  // 「归档」在抽屉底部：弹窗打开后滚进视野
     popToggle(act === "a" ? "pa" : "pr", pid); render(false);
     return document.querySelector("#drwp .pop")?.scrollIntoView({block: "nearest"});
   } else {
-    const P = POP, action = {ago: "archive", rgo: "restore", ownergo: "owner"}[act];
-    if (!P || !action || (action === "owner" && (!canWrite() || !popIs("owner", pid)))) return;
+    const P = POP, action = {ago: "archive", rgo: "restore", ownergo: "owner", dgo: "delete"}[act];
+    const popup = {archive: "pa", restore: "pr", owner: "owner", delete: "pd"}[action];
+    if (!action || !popIs(popup, pid) || P.busy ||
+        (action === "owner" && !canWrite()) || (action === "delete" && !canDeleteProject())) return;
     P.busy = true; P.err = null; render(false);
     try {
-      const r = await postJSON(`project/${action}`, {project: pid, ...(action === "owner" ? {owner: P.owner} : {})});
+      const r = await postJSON(`project/${action}`, {project: pid, ...(action === "owner" ? {owner: P.owner} : {}),
+        ...(action === "delete" ? {revision: P.revision} : {})});
       const j = await r.json().catch(() => ({}));
       if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
-      POP = null; PJMSG = action === "owner" ? {pid, msg: j.msg} : j.msg;
+      if (POP === P) popClose();
+      PJMSG = action === "owner" ? {pid, msg: j.msg} : j.msg;
+      const message = PJMSG;
+      setTimeout(() => { if (PJMSG === message) { PJMSG = null; render(false); } }, 60000);
+      if (action === "delete") {
+        D.archived = (D.archived || []).filter(e => e.id !== pid || String(e.revision || e.t) !== P.revision);
+        render(false);
+        return poll();
+      }
       if (action === "owner") {
         const p = D.projects.find(x => x.id === pid);
         if (p) p.owner = P.owner;
       }
-      setTimeout(() => { PJMSG = null; render(false); }, 60000);
       if (act === "ago") { frameEl(pid)?.remove(); nav(DH.arch()); }       // 项目页没了：回到总览，打开已归档的抽屉看回执
       return collectNow(true);
-    } catch (e) { if (POP) { POP.busy = false; POP.err = e.message || String(e); } }
+    } catch (e) { if (POP === P) { P.busy = false; P.err = e.message || String(e); } }
   }
   render(false);
 }
@@ -5200,7 +5225,7 @@ async function poll() {
   if (TL.d) return;                                       // 正拖着时间线：这次不刷新
   if (route().kind === "pool") void poolLoad();
   if (poolQueueRoute()) void poolQueuesLoad();
-  const gen = D.generated, was = OFFLINE, me = ME;
+  const gen = D.generated, was = OFFLINE, me = ME, archived = JSON.stringify(D.archived);
   try {
     const r = await api("overview.json", {cache: "no-store"});
     if (!r.ok) throw new Error("HTTP " + r.status);
@@ -5220,7 +5245,7 @@ async function poll() {
     }
     if (FKEEP) { if (D.generated < FKEEP.t) D.fleet = FKEEP.fleet; else FKEEP = null; }
   } catch (e) { OFFLINE = pollNet(e, poll); }
-  if (D.generated !== gen || OFFLINE !== was || ME !== me || PENDING) render(false);     // PENDING：上一次被挡住没画（选区放久了也照画，见 editing）
+  if (D.generated !== gen || JSON.stringify(D.archived) !== archived || OFFLINE !== was || ME !== me || PENDING) render(false);     // PENDING：上一次被挡住没画（选区放久了也照画，见 editing）
 }
 // fresh：刚改了配置或状态（保活守护、共享盘归属、预备续租），跳过两次立即采集的最短间隔，免得拿回改之前的快照
 async function collectNow(fresh = false) {

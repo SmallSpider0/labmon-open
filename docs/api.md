@@ -216,12 +216,16 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `PUT /api/project/<id>/config {"text", "files": {done_when 的路径: 内容或 null}}`，头 `If-Match: "<上次同步的版本>"` | 成功 `{"id", "ver", "created", "changed", "archived", "msg"}`，头 `ETag` |
 
 - `ver` 是 monitor.toml 文本的 SHA-256 前 16 位；`files` 的键是登记目录 `files/` 下的位置（`config.done_key`），值是内容的版本。
-- 第一次推就是登记（不用 `If-Match`），`meta.json` 记下推的账号（`owner`）。已登记的：没带 `If-Match` 回 428，与看板上的版本对不上回 412（先 GET 或 `labmon project pull`），两者都带 `{"error", "ver" 看板上现在的版本}`；
+- 第一次推就是登记（不用 `If-Match`），`meta.json` 记下推的账号（`owner`）。带 `If-Match` 但项目不存在时返回 412，旧会话的推送不能因此创建项目。已登记的：没带 `If-Match` 回 428，与看板上的版本对不上回 412（先 GET 或 `labmon project pull`），两者都带 `{"error", "ver" 看板上现在的版本}`；
   已登记又已归档的 409；配置按 `config.load` 校验不过、id 与地址里的不同、id 写法不对、done_when 的文件超过 1 MiB 或一个是另一个的上级目录回 400。都不写。
 - `[[hosts]]` 与 `[[queues]]`（`projects.GUARDED`：连哪台主机、在主机或本机上跑什么检查与 Python、读主机上哪些文件）经接口改要平台操作的权限：管理员、`admin` 作用域、入口获准（`users.can_ops`），
   不然 403，第一次推就带着这两段的同样算改了；按 TOML 解析后比，只动了注释、空白的不算。别的项（标题、计划项、里程碑、告警……）`project` 作用域就能推。
   这是为了 `project` 令牌（不过期、会放在别的机器上）不能借推配置在看板那台机器或服务器上执行命令。命令行也经接口（#162）：改这两段要先 `labmon login --admin`，再 `labmon project push --admin` 从内网入口推（wait 每轮的同步只用 `client.token`，推不上当一条 `sync_error` 报）。
 - `files` 里给 null 的删掉看板上那份，没给的不动；配置里不再用到的删掉。推成了当场对齐看板服务里的项目（新登记的开始采集，改了的下一轮按新配置采）。
+
+### 永久删除归档项目
+
+`POST /project/delete {"project": "<id>", "revision": "<归档版本>"}` 仅管理员可用，令牌须有 `admin` 作用域。确认值取自工作台 `archived` 条目的 `revision`，旧条目取 `t` 的字符串。成功返回 `{"msg"}`；项目未归档、归档版本改变、采集仍在收尾或有活动依赖时返回 409。该操作会写入看板审计记录。
 
 ## 命令行 `labmon user`
 
