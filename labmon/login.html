@@ -1,0 +1,140 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="referrer" content="no-referrer">
+<title>登录 · labmon</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23378ADD'/%3E%3Crect x='7' y='15' width='4.5' height='10' rx='1.5' fill='%23fff'/%3E%3Crect x='13.75' y='10' width='4.5' height='15' rx='1.5' fill='%23fff'/%3E%3Crect x='20.5' y='18' width='4.5' height='7' rx='1.5' fill='%23fff' opacity='.55'/%3E%3Ccircle cx='22.75' cy='10' r='2.6' fill='%235DCAA5'/%3E%3C/svg%3E">
+<style>
+/* 登录页（#160）：看板服务的 /login，配色与工作台同一套 */
+:root {
+  --bg: #f4f5f7; --card: #ffffff; --fg: #1d2330; --muted: #6b7280; --faint: #9aa1ab; --line: #e4e7ec; --soft: #eef0f3;
+  --ok: #1a7f4b; --warn: #a86400; --bad: #c62828; --accent: #2f6fdd;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #121519; --card: #1b1f26; --fg: #e6e8ec; --muted: #9aa3ae; --faint: #6b7380; --line: #2b3139; --soft: #242a32;
+          --ok: #4cc38a; --warn: #f0a640; --bad: #ff6b6b; --accent: #6ea0ff; }
+}
+* { box-sizing: border-box; }
+html, body { min-height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.5 -apple-system, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif;
+       display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px 16px calc(24px + env(safe-area-inset-bottom)); }
+.box { width: 100%; max-width: 380px; }
+.brand { display: flex; align-items: center; gap: 10px; margin: 0 4px 18px; }
+.brand svg { width: 34px; height: 34px; flex: none; }
+.brand b { font-size: 18px; letter-spacing: .2px; }
+.brand span { display: block; font-size: 12px; color: var(--muted); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 6px 22px 22px; box-shadow: 0 10px 30px rgba(15, 23, 42, .06); }
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 0 -22px 18px; padding: 0 18px; }
+.tabs button { border: 0; background: none; font: inherit; font-size: 13.5px; color: var(--muted); padding: 12px 6px 10px; margin-bottom: -1px;
+               border-bottom: 2px solid transparent; cursor: pointer; }
+.tabs button[aria-selected="true"] { color: var(--fg); font-weight: 600; border-bottom-color: var(--accent); }
+label { display: block; font-size: 12.5px; color: var(--muted); margin: 12px 0 5px; }
+label:first-of-type { margin-top: 0; }
+input { width: 100%; font: inherit; font-size: 15px; min-height: 40px; padding: 7px 11px; border: 1px solid var(--line); border-radius: 8px;
+        background: var(--card); color: var(--fg); outline: none; }
+input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent); }
+input.code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; letter-spacing: 2px; text-transform: uppercase; }
+.go { width: 100%; margin-top: 18px; min-height: 42px; border: 1px solid var(--accent); background: var(--accent); color: #fff; font: inherit; font-size: 15px;
+      font-weight: 600; border-radius: 9px; cursor: pointer; }
+.go:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 86%, #000); }
+.go:disabled { opacity: .6; cursor: default; }
+.msg { margin-top: 12px; font-size: 13px; line-height: 1.55; min-height: 0; }
+.msg.bad { color: var(--bad); }
+.msg.ok { color: var(--ok); }
+.hint { font-size: 12.5px; color: var(--muted); line-height: 1.6; margin-top: 14px; }
+.empty { background: color-mix(in srgb, var(--warn) 10%, var(--card)); border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line)); border-radius: 10px;
+         padding: 10px 12px; font-size: 13px; line-height: 1.6; margin-bottom: 14px; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; background: var(--soft); border-radius: 5px; padding: 1px 5px; overflow-wrap: anywhere; }
+.foot { text-align: center; font-size: 12px; color: var(--faint); margin-top: 14px; }
+</style>
+</head>
+<body>
+<main class="box" id="app"></main>
+<script>
+let ME = null;
+let D = /*__DATA__*/null;
+/*__COMMON__*/
+// 登录页的数据由看板服务填（serve.Handler._login_page）：有没有账号、哪个入口、口令下限、锁定规则、登录后回哪（next，已按 safe_next 核过）
+D = D || {empty: false, entry: "lan", entry_name: "内网入口", pw_min: 8, lock_min: 15, fails: 5, next: ""};
+let MODE = new URLSearchParams(location.search).get("setup") != null || D.empty ? "setup" : "login";
+const LOGO = `<svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#378ADD"/><rect x="7" y="15" width="4.5" height="10" rx="1.5" fill="#fff"/><rect x="13.75" y="10" width="4.5" height="15" rx="1.5" fill="#fff"/><rect x="20.5" y="18" width="4.5" height="7" rx="1.5" fill="#fff" opacity=".55"/><circle cx="22.75" cy="10" r="2.6" fill="#5DCAA5"/></svg>`;
+const field = (id, lab, attrs) => `<label for="${id}">${lab}</label><input id="${id}" ${attrs}>`;
+
+function render(msg = "", cls = "bad") {
+  const keep = {};
+  for (const el of document.querySelectorAll("#app input")) keep[el.id] = el.value;
+  const login = MODE === "login";
+  document.getElementById("app").innerHTML = `
+    <div class="brand">${LOGO}<div><b>labmon 看板</b><span>${esc(D.entry_name)}</span></div></div>
+    <div class="card">
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" aria-selected="${login}" data-mode="login">登录</button>
+        <button type="button" role="tab" aria-selected="${!login}" data-mode="setup">用设置码设口令</button>
+      </div>
+      ${D.empty ? `<div class="empty">还没有账号。在跑看板的这台机器的终端里先登记组内人员，再开通第一个管理员：<br><code>labmon user person &lt;人员名&gt;</code>，再用 <code>labmon user add &lt;账号&gt; --person &lt;人员名&gt; --admin</code><br>把它打出的设置码填到下面，设好口令就登录了。</div>` : ""}
+      <form id="f" method="post" autocomplete="on" novalidate>
+        ${field("name", "名字", `name="username" autocomplete="username" autocapitalize="off" spellcheck="false" required`)}
+        ${login ? field("pw", "口令", `name="password" type="password" autocomplete="current-password" required`)
+                : field("code", "设置码", `class="code" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" placeholder="XXXX-XXXX-XXXX" required`)
+                  + field("pw", "新口令", `name="password" type="password" autocomplete="new-password" minlength="${D.pw_min}" required`)
+                  + field("pw2", "再输一遍", `type="password" autocomplete="new-password" required`)}
+        <button class="go" id="go" type="submit">${login ? "登录" : "设好口令并登录"}</button>
+        <div class="msg ${cls}" id="msg" role="status">${esc(msg)}</div>
+      </form>
+      <div class="hint">${login
+        ? `忘了口令：请管理员在「组内服务器 → 人员」里重置，拿到设置码后在「用设置码设口令」里设新的。连着输错 ${D.fails} 次锁 ${D.lock_min} 分钟。`
+        : `设置码由管理员在「组内服务器 → 人员」的详情里开通账号或重置口令时给出（命令行 <code>labmon user add</code>、<code>labmon user reset</code> 也行），24 小时内有效、用一次就作废。口令至少 ${D.pw_min} 个字符。`}</div>
+    </div>
+    <div class="foot">登录后 30 天内这个浏览器不用再登录</div>`;
+  for (const [k, v] of Object.entries(keep)) { const el = document.getElementById(k); if (el) el.value = v; }
+  const first = [...document.querySelectorAll("#app input")].find(el => !el.value);
+  (first || document.getElementById("go"))?.focus?.();
+}
+
+document.addEventListener("click", e => {
+  const b = e.target.closest?.("[data-mode]");
+  if (!b || b.dataset.mode === MODE) return;
+  MODE = b.dataset.mode;
+  render();
+});
+
+document.addEventListener("submit", async e => {
+  e.preventDefault();
+  const v = id => document.getElementById(id)?.value || "";
+  const say = (m, c = "bad") => { const el = document.getElementById("msg"); el.className = "msg " + c; el.textContent = m; };
+  const name = v("name").trim();
+  if (!name) return say("要填名字");
+  if (MODE === "login" && !v("pw")) return say("要填口令");
+  if (MODE === "setup") {
+    if (!v("code").trim()) return say("要填设置码");
+    if (v("pw").length < D.pw_min) return say(`口令至少 ${D.pw_min} 个字符`);
+    if (v("pw") !== v("pw2")) return say("两遍口令不一样");
+  }
+  const go = document.getElementById("go");
+  go.disabled = true;
+  say(MODE === "login" ? "正在登录…" : "正在设口令…", "");
+  try {
+    const r = await postJSON(MODE === "login" ? "api/login" : "api/setup",
+                             MODE === "login" ? {name, password: v("pw")} : {name, code: v("code"), password: v("pw")});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      go.disabled = false;
+      for (const id of ["pw", "pw2"]) { const el = document.getElementById(id); if (el) el.value = ""; }
+      say(j.error || `没成功（${r.status}）`);
+      document.getElementById(MODE === "login" ? "pw" : "code")?.focus?.();
+      return;
+    }
+    say(j.msg || "已登录", "ok");
+    location.replace(new URL("./" + (D.next || ""), location.href).href + location.hash);
+  } catch (err) {
+    go.disabled = false;
+    say(err.down ? netText() + "，过几秒再点一次" : "出错了：" + (err.message || err));      // 连不上不自动重发：登录输错要计数，设置码只能用一次
+  }
+});
+
+render();
+</script>
+</body>
+</html>

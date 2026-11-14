@@ -1,0 +1,176 @@
+"""本机操作服务器上的 labmon worker：部署、拉起、停、看状态、登记队列。每条命令一次 ssh（复用看板的连接）。
+
+    labmon worker start  29                       部署 main 上已提交的 labmon_worker.py 并拉起（已在跑则无缝替换，任务不受影响）
+    labmon worker stop   29                       停 worker（运行中的任务继续跑）
+    labmon worker status 29                       登记的队列、运行中与等待中的任务
+    labmon worker add    29 ROOT JOBS --project a1 [--gpus 0] [--stop term]
+                                                   登记一条队列（ROOT 是服务器上的绝对路径，JOBS 相对 ROOT）
+    labmon worker rm     29 ROOT JOBS              移除登记（已归还的主机经与它共用 worker_home 的在用主机代办，见 via）
+    labmon worker limit  29 [heavy=2 …]           同 tag 同时运行数的上限（heavy= 删掉）
+    labmon pause demo-b [--host 29] [--until 11-10] [--now]   临时指令：暂停、恢复、优先、drain（项目的不带 --host 记在主机清单、所有主机生效；
+    labmon resume demo-b | focus a1 [--until 11-17] | unfocus a1 | drain 29 [--until …] | undrain 29     带 --host 的经 override_each 只下给那几台）
+    labmon project init  29 [项目名]              按共享盘目录规范建目录（给了项目名连 projects/<项目名>/ 一起建），列出可共用的环境、数据集与权重
+
+远端命令的输出由 run_out / override_each 收回来返回，这里不打印：命令行入口（__main__）打印出来，看板服务、借用与续租记进带时刻的日志或事件。
+共享盘根目录是主机的 data_root（缺省 /data/labmon），规范见 data_root_readme.md（部署为其中的 README.md）；
+传到服务器上的这两个文件都取 main 上已提交的版本（committed），工作区里改了一半的、分支上还没合并的都不会被拉起、借用、续租带上去。
+worker 装在 worker_home（缺省 <data_root>/labmon，共享盘上一份供各主机共用）。都可在 ~/.config/labmon/hosts.toml 的 [[hosts]] 里改。
+主机写了 shared（与其它主机共用的目录）时，start 让 worker 限速轮流统计其中第一个的按人用量（同一时刻只有一台在扫）；借来的主机不扫。
+借来的组内服务器（borrow.py）也在这里当主机用（config.user_hosts），id 用组内服务器的。
+"""
+from __future__ import annotations
+
+import json
+import shlex
+import subprocess
+from pathlib import Path
+
+from . import lan as L
+from . import lease as LS
+from .config import ConfigError, active_hosts, all_hosts, home_host, host_defaults, hosts_file, user_hosts
+
+from .labmon_worker import queue_stop_path
+
+HERE = Path(__file__).resolve().parent
+
+
+def host_conf(hid: str) -> dict:
+    hosts = {str(h.get("id")): h for h in user_hosts()}
+    if hid not in hosts:
+        raise ConfigError(f"{hosts_file()} 里没有主机 {hid}")
+    h = host_defaults(hosts[hid])
+    if h.get("returned"):
+        raise ConfigError(f"主机 {hid} 已归还（{h['returned']}）；" + ("再借用 labmon borrow " if h.get("borrow") else "再借到时先 labmon host restore ") + hid)
+    return h
+
+
+def via(hid: str, home: str | None = None) -> dict:
+    """在哪台上操作这台目录下的登记（worker rm）：在用的就是它自己；已归还的、主机清单里已没有的（home 是它的 worker_home，
+    全局快照 regs 里那一项的 home），经一台与它共用 worker_home 的在用主机代办（config.home_host，与 overview.collect 每轮代读登记挑的是同一台），
+    命令照样带 --host hid：改的是共享盘上我们自己 worker_home 里那台的登记文件，不连已归还的那台（借来还了的是别人的服务器）。找不到能代办的报 ConfigError。"""
+    act = active_hosts()
+    if any(str(h["id"]) == hid for h in act):
+        return host_conf(hid)
+    if home is None:
+        home = next((h["worker_home"] for h in all_hosts() if str(h["id"]) == hid), None)
+    o = home_host(home, act) if home else None
+    if o is None:
+        raise ConfigError(f"{hid} 已不在用，又没有与它共用 worker 目录（{home or '不知道在哪'}）的在用主机：它的登记现在动不了")
+    return host_conf(str(o["id"]))
+
+
+DEPLOY_REF = "main"     # 部署到服务器上的只取这个分支：在分支的 worktree 里跑 labmon 也不会把没合并的版本推上去
+START_CHECK_S = 3       # 拉起 worker 后隔多久看它还在不在（启动即崩的报“拉起失败”）
+
+
+def committed(name: str) -> str:
+    """本包里一个文件在 main 上已提交的版本：部署到服务器上的只取它，改了要先合进 main（本地的 main，合并后先 pull）。
+    路径相对本包目录（./），仓库根在哪都一样。"""
+    return subprocess.run(["git", "-C", str(HERE), "show", f"{DEPLOY_REF}:./{name}"], capture_output=True, text=True, check=True).stdout
+
+
+def ssh(h: dict, remote: str, stdin: str = "", timeout: float | None = None) -> tuple[int, str]:
+    """在主机上跑一条命令（stdin 是喂给它的文字），返回 (退出码, 输出)；输出里 stderr 接在 stdout 后面（ssh 连不上的原因也在里面）。"""
+    cmd = L.ssh_argv(h["ssh"], h["port"], known_hosts=h.get("known_hosts")) + [remote] if h.get("ssh") else ["bash", "-c", remote]     # 没有 ssh：本机（测试用）
+    r = (L.ssh_run if h.get("ssh") else subprocess.run)(cmd, input=stdin, capture_output=True, text=True, timeout=timeout)
+    return r.returncode, r.stdout + r.stderr
+
+
+def worker_env(h: dict) -> str:
+    """把主机的部署路径交给普通 worker 和池命令；取值均按 shell 参数转义。"""
+    pairs = (("KA_BIN", h.get("ka_bin")), ("LABMON_POOL_PYTHON", h.get("pool_python")))
+    return " ".join("%s=%s" % (name, shlex.quote(str(value))) for name, value in pairs if value)
+
+
+def pool_remote(h: dict, action: str, args: list[str], *, timeout: float) -> dict:
+    """给受信池试点用的 worker。每次经同一条长连接传入 main 已提交的代码及跑一次命令。"""
+    if action not in ("pool-probe", "pool-trial", "pool-status", "pool-dispatch", "pool-check", "pool-stop", "pool-gate", "pool-route"):
+        raise ConfigError("未知的算力池 worker 动作")
+    LS.need("算力池试点")
+    # 脚本放本地盘，但 HOME 仍指到原 worker 的目录，以便核对既有 worker 与锁。
+    code = committed("labmon_worker.py")
+    launch = ('umask 077; f=$(mktemp /tmp/labmon-pool-worker.XXXXXX) || exit 4; '
+              "trap 'rm -- \"$f\"' EXIT; cat > \"$f\" || exit 4; "
+              f"LABMON_HOME={shlex.quote(h['worker_home'])} LABMON_DATA_ROOT={shlex.quote(h['data_root'])} {worker_env(h)} {shlex.quote(h['python'])} \"$f\" "
+              + shlex.join([action, *args]))
+    # 检查共享盘租约；remote_sh 把结果放在 lok。测试命令在轮询与只读状态之外一律主机实核。
+    launch = LS.remote_sh(h) + 'if [ "$lok" != 0 ]; then exit 7; fi; ' + launch
+    try:
+        rc, out = ssh(h, launch, code, timeout=timeout)
+        result = json.loads(out.strip().splitlines()[-1])
+    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError) as e:
+        raise ConfigError("未收到试点 worker 回执") from e
+    if rc or not isinstance(result, dict) or result.get("error"):
+        raise ConfigError((result.get("error") if isinstance(result, dict) else None) or "试点 worker 未成功")
+    return result
+
+
+def project_init(hid: str, name: str | None) -> tuple[int, str]:
+    """一条连接：建规范目录（和 projects/<名称>/），更新根目录 README，列出现有的共享环境、数据集与权重。返回 (退出码, 输出)。"""
+    h = host_conf(hid)
+    root = h["data_root"].rstrip("/")
+    proj = f"projects/{shlex.quote(name)}" if name else "projects"
+    remote = (f"cd {shlex.quote(root)} && mkdir -p envs datasets weights archive {proj} && "
+              f"cat > README.md.new && mv README.md.new README.md && "
+              f"for d in envs datasets weights; do echo \"$d/：$(ls $d | tr '\\n' ' ')\"; done"
+              + (f" && echo {shlex.quote(f'已建 {root}/projects/{name}/')}" if name else ""))
+    return ssh(h, remote, committed("data_root_readme.md"))
+
+
+def override_each(action: str, kind: str, target: str | None, hosts: list[str], until: float | None = None, now: bool = False,
+                  at: float | None = None, keep: dict | None = None, once: bool = False) -> list[dict]:
+    """在各主机的 worker 目录写只给这几台的临时指令（overrides.json），worker 下一轮生效。项目级的暂停、优先（所有主机）不经这里，
+    记在主机清单（config.set_sched_ovr）。keep：guest 指令给对方留的量（borrow.reserve_for）；once：pause --now 停完就删（暂停由全局的那条挡）。
+    返回每台的结果 [{"host", "rc", "out"}]（out 是 worker 打印的“生效中：…”，或 ssh 连不上的原因）。备用的看板服务上不写（#163）。"""
+    LS.need("临时指令")
+    out = []
+    for hid in hosts:
+        h = host_conf(hid)
+        w = f"env {worker_env(h)} {shlex.quote(h['python'])} {shlex.quote(h['worker_home'] + '/labmon_worker.py')}"
+        args = ["override", action, kind] + ([target] if target else [])
+        extra = (f" --until {until}" if until else "") + (" --now" if now else "") + (f" --at {at}" if at else "") \
+            + (f" --keep {shlex.quote(json.dumps(keep))}" if keep else "") + (" --once" if once else "")
+        rc, text = ssh(h, f"{w} {' '.join(shlex.quote(x) for x in args)}{extra} --host {shlex.quote(hid)}")
+        out.append({"host": hid, "rc": rc, "out": text})
+    return out
+
+
+CHANGE = ("start", "stop", "add", "rm", "limit")     # 改 worker 的子命令（备用时不做）
+
+
+def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: str | None = None, **opts) -> tuple[int, str]:
+    """worker 的部署拉起、停、看状态、登记队列：返回 (退出码, 输出)。add 登记到这台（别的主机上同一条清单的登记搬过来，页面上的「搬到…」就是它）；
+    rm 对已归还的主机经共用 worker_home 的在用主机代办（via；home 同 via）。备用的看板服务上只许看（status、fit），改 worker 的到主那台做（#163）。"""
+    if sub == "add":
+        try:
+            queue_stop_path(opts.get("stop"))
+        except ValueError as e:
+            return 2, str(e)
+    if sub in CHANGE:
+        LS.need(f"worker {sub}")
+    h = via(hid, home) if sub == "rm" else host_conf(hid)
+    home, py = h["worker_home"], h["python"]
+    w = f"env {worker_env(h)} {shlex.quote(py)} {shlex.quote(home + '/labmon_worker.py')}"
+    hq = shlex.quote(hid)
+    if sub == "start":
+        guest = h.get("borrow") and not h["borrow"].get("swap")                  # 直接借来的：不在对方的容器里扫共享盘
+        sh = f" --shared {shlex.quote(h['shared'][0])}" if h["shared"] and not guest else ""      # 共享盘用量由这台的 worker 统计
+        # 一条连接：写入 main 上已提交的 worker，再后台拉起（--replace 让旧 worker 退出、由新进程接管任务）。
+        # 后台那句单独写、不接在 cd 或 && 后面，否则 ssh 会挂到进程结束。
+        # START_CHECK_S 秒后看它还在不在：启动即崩的（输出接的是 /dev/null）带上 worker.log 末尾、退出码 3，调用方报“拉起失败”而不是“已拉起”
+        log = shlex.quote(f"{home.rstrip('/')}/hosts/{hid}/worker.log")
+        remote = (f"mkdir -p {shlex.quote(home)} && cat > {shlex.quote(home + '/labmon_worker.py')}.new && "
+                  f"mv {shlex.quote(home + '/labmon_worker.py')}.new {shlex.quote(home + '/labmon_worker.py')}\n"
+                  f"setsid nohup {w} run --host {hq} --replace{sh} > /dev/null 2>&1 < /dev/null &\n"
+                  f"sleep {START_CHECK_S}; o=$({w} ls --host {hq}); echo \"$o\"\n"
+                  f"case \"$o\" in worker：运行中*) ;; *) echo '---- worker.log 末尾'; tail -n 12 {log}; exit 3;; esac")
+        rc, out = ssh(h, remote, committed("labmon_worker.py"))
+        dirty = subprocess.run(["git", "-C", str(HERE), "diff", "--quiet", DEPLOY_REF, "--", "labmon_worker.py"]).returncode
+        return rc, (f"（工作区的 labmon_worker.py 与 {DEPLOY_REF} 上的不同，部署的是 {DEPLOY_REF} 上已提交的版本）\n" if dirty else "") + out
+    extra = " ".join(shlex.quote(a) for a in args) + (f" --gpus {shlex.quote(gpus)}" if gpus else "")
+    extra += " --idle" if opts.pop("idle", False) else ""
+    extra += "".join(f" --{k.replace('_', '-')} {shlex.quote(v)}" for k, v in opts.items() if v)
+    rc, out = ssh(h, f"{w} {'ls' if sub == 'status' else sub} {extra} --host {hq}")   # 位置参数要在 --host 前
+    if opts.get("expect_project") and rc != 0 and "unrecognized arguments: --expect-project" in out:
+        return rc, "这台主机的 worker 还不支持按项目核对登记，请让管理员更新 worker 后再试"
+    return rc, out

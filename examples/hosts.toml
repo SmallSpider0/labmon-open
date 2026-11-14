@@ -1,0 +1,55 @@
+# labmon 用户级主机清单示例：放到 ~/.config/labmon/hosts.toml（或用环境变量 LABMON_HOSTS 指定）。
+# 各项目共用。字段与 monitor.toml 的 [[hosts]] 相同（逐项说明见 examples/monitor.toml）。
+# 项目的 monitor.toml 只需在队列里写 host = "gpu1"；要补本项目的检查明细时，
+# 写 [[hosts]] id = "gpu1" 再加 [[hosts.checks]]，按 id 与这里合并（mounts 按 path）。
+# 改完不用重启服务：下一轮采集自动重读。
+
+[[hosts]]
+id = "gpu1"
+label = "gpu1（A100×4）"
+ssh = "user@192.0.2.1"
+port = 22
+python = "/usr/bin/python3"
+data_root = "/data/me"             # 必填为你获授权的共享根目录；公共默认 /data/labmon
+# ka_bin = "/data/me/keepalive/bin"  # 可选：已有 ka.sh/ka.env 所在目录
+# pool_python = "/data/me/envs/torch/bin/python"  # 可选：一次性池试点所用、已安装 PyTorch 的解释器
+shared = ["/data"]                # 与其它主机共用的目录（NFS 等）：本机归还后，经共用该目录的在用主机代读队列状态
+# data_root = "/data/me"           # 共享盘上自己的根目录，按目录规范管理（缺省 /data/labmon；labmon project init）
+# worker_home = "/data/me/labmon"  # labmon worker 装在哪（缺省 <data_root>/labmon；放共享盘上一份供各主机共用）
+# returned = "2026-11-04 18:40"   # 已归还：不再连接（用 labmon host return / restore 改，不必手写）
+# 平台上的作业（SCM 平台，见 docs/platform_scm.md）：写了这几项，看板才能判断掉线原因、提醒租期、在主机页上预备续租与续租
+# worker = "auto"                  # 容器重启后本机看板自动拉起 worker（labmon worker stop 过的不拉）
+# lease_days = 7                   # 作业每期几天：从容器启动时间算到期，到期前 24、6 小时提醒
+# platform = "http://platform.example/"   # 作业所在平台的网址：掉线时探一下它能否打开，分辨是平台出问题还是作业被停
+# platform_user = "account"        # 平台账号（密码放钥匙串：security add-generic-password -s labmon-platform -a <账号> -w）
+# platform_job = "MYJOB"           # 自己的作业名：停止前核对作业名、资源池、端口 22→port 都对上
+# platform_pool = "pool-a"         # 作业所在的资源池
+# lease_reserve_h = 24             # 到期前这么多小时还没预备续租就自动预备（0 关掉）
+mounts = [
+  { path = "/data", label = "数据盘", min_gb = 20 },
+  { path = "/tmp", label = "/tmp", max_used_pct = 90 },
+]
+
+[[hosts.checks]]
+id = "keepalive"
+label = "保活在跑"
+if = "test -x /data/bin/keepalive.sh"
+cmd = "/data/bin/keepalive.sh status"
+detail = ["tail -n 1 /data/keepalive.log"]
+when_idle = "队列与保活都没在跑：机器可能因空闲被回收"
+
+# 调度设置（各主机的 worker 共用；看板写成 hosts/<主机>/sched.json）。不写就用缺省值。
+# 放行顺序：focus 的项目先，再比各项目 GPU 用量（卡·时，按半衰期衰减，所有主机一起算）÷ 权重，小的先。
+# [sched]
+# half_life_h = 24      # 用量的半衰期（小时）
+# wait_cap_min = 30     # 卡在资源上等了这么久的请求，后面的只有预计在它放行前跑完的才放
+# [sched.weight]
+# a1 = 2                # 项目 id = 权重；没写的为 1
+# 项目级的暂停与优先（所有主机，含之后加入的）：一般用 labmon pause / focus 或调度卡写，到期后看板删掉那行
+# [sched.pause]
+# demo-b = "2026-11-12 18:00"   # 到期（带年份）；true 为无期限
+# [sched.focus]
+# a1 = true
+
+# 组内服务器（组里别人在用的，只读轮探、平台续租、开关机、换人、借用）写在 [fleet] 段与 [[fleet.servers]]：示例与各字段见 docs/fleet.md“配置”。
+# 没有 [fleet] 段时自用主机也不能在看板上续租，告警会说去平台续。

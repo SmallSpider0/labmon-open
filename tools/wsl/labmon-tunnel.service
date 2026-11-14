@@ -1,0 +1,22 @@
+# dashboard-host 的 WSL 里到 TX 的反向隧道（#165）：TX 上 127.0.0.1:LABMON_PORT → 本机公网入口 127.0.0.1:LABMON_PORT。
+# systemd 用户单元，以看板服务的账号装：~/.config/systemd/user/labmon-tunnel.service，systemctl --user enable --now labmon-tunnel。
+# 名字不要改：看板服务的体检（hostcheck.TUNNEL_UNIT）按这个名字看隧道断没断。装法见 docs/deploy.md「TX：公网入口与看门狗」。
+# 占位：LABMON_PORT 公网入口的端口（labmon service install --public-port 写的那个；不是 8765，#168），两头同一个：
+#        看门狗探 /healthz 时带的 Host 是 127.0.0.1:<TX 那头的端口>，公网入口只认自己的端口；
+#       LABMON_TUNNEL_USER、TX_HOST 隧道账号与 TX 的地址；密钥 ~/.ssh/labmon-tunnel（ssh-keygen -t ed25519，不设口令）。
+[Unit]
+Description=labmon 到 TX 的反向隧道（公网入口）
+After=network-online.target
+
+[Service]
+# -F /dev/null：不读 ~/.ssh/config（ControlMaster 等会让 ssh 立刻退出、转发不归它管）；known_hosts 用单独一份，首次装时 ssh-keyscan 写进去
+ExecStart=/usr/bin/ssh -N -F /dev/null -i %h/.ssh/labmon-tunnel \
+    -o IdentitiesOnly=yes -o BatchMode=yes -o ExitOnForwardFailure=yes \
+    -o ServerAliveInterval=30 -o ServerAliveCountMax=3 \
+    -o StrictHostKeyChecking=yes -o UserKnownHostsFile=%h/.ssh/labmon-tunnel.known_hosts \
+    -R 127.0.0.1:LABMON_PORT:127.0.0.1:LABMON_PORT LABMON_TUNNEL_USER@TX_HOST
+Restart=always
+RestartSec=30
+
+[Install]
+WantedBy=default.target

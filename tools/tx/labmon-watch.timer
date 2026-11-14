@@ -1,0 +1,11 @@
+# TX 上的看门狗定时器（#165）：开机 2 分钟后起，此后每 5 分钟一次。
+[Unit]
+Description=labmon 看门狗每 5 分钟探一次
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

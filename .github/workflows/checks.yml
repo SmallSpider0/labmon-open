@@ -1,0 +1,76 @@
+# 每个 PR 与推到 main 的提交都跑：离线测试、flake8 的 F 类、worker 与探针在 Python 3.8 上能编译能导入。
+# 规则见 AGENTS.md「怎么测」「怎么开发」。测试在 Linux 上跑，不依赖宿主的 /proc、cgroup、launchctl、systemctl、钥匙串（打桩，见 tests/fixtures.py）。
+name: checks
+
+# 仅需检出公开源码；测试只用合成夹具，不使用部署凭据或上传生产产物。
+permissions:
+  contents: read
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一个 PR 推了新提交：取消还没跑完的那一轮
+concurrency:
+  group: checks-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    # 3.11 是本机看板的解释器；3.12 是常驻机 dashboard-host 上 Ubuntu 24.04 的系统 Python（#164）
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.12"]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      # workerctl.committed 只取 main 上已提交的版本；PR 的检出是游离的合并提交，没有本地 main，照远端补一个
+      - name: 本地 main 分支
+        run: git rev-parse --verify -q refs/heads/main || git branch main origin/main
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: actions/setup-node@v5          # tests.test_pages 在 node 里渲染两个页面
+        with:
+          node-version: 22
+      - name: flake8（只查 F 类）
+        run: |
+          python -m pip install --quiet flake8
+          python -m flake8 --select=F --max-line-length=200 labmon tools
+      - name: 离线测试
+        env:
+          LABMON_NO_NOTIFY: "1"
+          LABMON_NO_KEYCHAIN: "1"
+          LABMON_LAN: "off"
+        run: |
+          export LABMON_STATE="$(mktemp -d)"
+          export LABMON_HOSTS="$LABMON_STATE/hosts.toml"
+          : > "$LABMON_HOSTS"
+          python -m unittest discover -s tests -v
+
+  worker-py38:
+    # labmon_worker.py 与 probe.py 在服务器上用系统自带的 Python 3.8 跑、不 import 本包：编译并单独导入一次，
+    # 只抓得到编译期与导入时就求值的 3.9+ 写法（match 语句、导入时求值的 list[str] 注解等）；函数体里用到的新 API
+    # （str.removeprefix 等）要执行到才报错，这里抓不到，写 worker 与探针时自己避开
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    container: python:3.8-slim
+    steps:
+      - uses: actions/checkout@v5
+      - name: Python 3.8 编译并导入
+        working-directory: labmon
+        run: |
+          python --version
+          python -m py_compile labmon_worker.py probe.py
+          python -c "import labmon_worker, probe"
+      # 值守会话的 tools/issue_watch.py 在本机的系统 Python（3.8）上跑，经 labmon.state 读写状态
+      - name: Python 3.8 编译并跑 tools/issue_watch.py
+        run: |
+          python -m py_compile tools/issue_watch.py labmon/state.py
+          LABMON_STATE="$(mktemp -d)" python -I tools/issue_watch.py seen

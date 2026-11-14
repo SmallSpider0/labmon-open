@@ -1,0 +1,491 @@
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>labmon 工作流</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<meta name="description" content="labmon 一条改动从 Issue 到看板部署的流程一览：按风险分 0–4 档、小改合批、设计说明与三类问题、Codex 审查与独立兜底、按批部署、实验会话怎么报问题。">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
+<style>
+/* 布局：正文一栏约 44rem，图、表与网格放宽到 64rem。只有主流程编号（它是一条先后顺序），各节不编号。
+   颜色按“谁在做”分四种：总控会话、子 agent、维护者、CI 与机器；图、图例、角色表共用这四个色。 */
+:root {
+  --bg: #f2f4f6; --surface: #ffffff; --ink: #18222c; --muted: #58646f; --line: #d6dde3; --soft: #e7ecf0;
+  --link: #1d5c9e;
+  --main: #3a56b0;   /* 总控会话 */
+  --agent: #127a69;  /* 子 agent */
+  --human: #a65a12;  /* 维护者 */
+  --ci: #6a57a8;     /* CI 与机器 */
+  --sans: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #11161c; --surface: #19212a; --ink: #e3e9ee; --muted: #9ba7b2; --line: #2c3743; --soft: #212b35;
+  --link: #7fb0ee; --main: #8aa3f2; --agent: #43b9a3; --human: #e39a55; --ci: #a897e3; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #11161c; --surface: #19212a; --ink: #e3e9ee; --muted: #9ba7b2; --line: #2c3743; --soft: #212b35;
+  --link: #7fb0ee; --main: #8aa3f2; --agent: #43b9a3; --human: #e39a55; --ci: #a897e3; color-scheme: dark; }
+
+body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.75; }
+.wrap { max-width: 64rem; margin: 0 auto; padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); padding-block: 36px 64px; }
+.prose { max-width: 44rem; }
+a { color: var(--link); text-underline-offset: 3px; }
+a:focus-visible { outline: 2px solid var(--link); outline-offset: 2px; border-radius: 2px; }
+code { font-family: var(--mono); font-size: .86em; background: var(--soft); padding: 1px 5px; border-radius: 4px; overflow-wrap: anywhere; }
+pre { font-family: var(--mono); font-size: 13px; line-height: 1.6; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 10px 14px; overflow-x: auto; margin: 0 0 14px; }
+pre code { background: none; padding: 0; font-size: inherit; overflow-wrap: normal; }
+p { margin: 0 0 12px; }
+ul, ol { padding-left: 1.3em; margin: 0 0 12px; }
+li { margin: 3px 0; }
+li::marker { color: var(--muted); }
+
+header { border-bottom: 1px solid var(--line); padding-bottom: 24px; }
+.kicker { font-family: var(--mono); font-size: 12px; letter-spacing: .1em; color: var(--muted); }
+h1 { font-size: clamp(28px, 5vw, 40px); line-height: 1.25; margin: 6px 0 12px; font-weight: 700; text-wrap: balance; }
+.lede { font-size: 16.5px; color: var(--muted); max-width: 44rem; margin: 0 0 14px; }
+.rule { max-width: 44rem; border-left: 3px solid var(--human); background: var(--surface); padding: 10px 14px; border-radius: 0 6px 6px 0; font-size: 14px; }
+.rule b { color: var(--human); }
+nav.toc { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 14px; }
+nav.toc a { color: var(--muted); text-decoration: none; }
+nav.toc a:hover { color: var(--link); text-decoration: underline; }
+
+section { margin-top: 52px; scroll-margin-top: 16px; }
+h2 { font-size: 23px; line-height: 1.35; margin: 0 0 10px; font-weight: 700; text-wrap: balance; }
+h3 { font-size: 16px; margin: 22px 0 6px; }
+.src { font-size: 13px; color: var(--muted); margin-top: 8px; }
+.src a { margin-right: 12px; white-space: nowrap; }
+
+/* 谁在做：图例与小标签 */
+.who { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+.who span::before { content: ""; display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; background: currentColor; }
+.w-main { color: var(--main); } .w-agent { color: var(--agent); } .w-human { color: var(--human); } .w-ci { color: var(--ci); }
+.who span { color: var(--muted); }
+.who span.w-main::before { background: var(--main); } .who span.w-agent::before { background: var(--agent); }
+.who span.w-human::before { background: var(--human); } .who span.w-ci::before { background: var(--ci); }
+
+/* 主流程图：宽屏两行蛇形，窄屏一列 */
+figure { margin: 16px 0 18px; }
+.frame { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 12px; overflow-x: auto; }
+.frame svg { display: block; width: 100%; height: auto; }
+.frame .flow-narrow { display: none; }
+@media (max-width: 640px) { .frame .flow-wide { display: none; } .frame .flow-narrow { display: block; max-width: 400px; margin: 0 auto; } }
+svg text { font-family: var(--sans); fill: var(--ink); }
+svg .t { font-size: 15px; font-weight: 700; }
+svg .s { font-size: 12px; fill: var(--muted); }
+svg .n { font-family: var(--mono); font-size: 12px; font-weight: 600; fill: var(--muted); }
+svg .lbl { font-size: 12px; fill: var(--muted); }
+svg .node { fill: var(--surface); stroke: var(--line); stroke-width: 1.2; }
+svg .tab-main { fill: var(--main); } svg .tab-agent { fill: var(--agent); } svg .tab-human { fill: var(--human); } svg .tab-ci { fill: var(--ci); }
+svg .edge { stroke: var(--muted); stroke-width: 1.6; fill: none; }
+svg .edge.back { stroke-dasharray: 5 4; }   /* 回到实现：和实线同色，只靠虚线区分，免得读成某个角色在做 */
+svg .head { fill: var(--muted); }
+figcaption { font-size: 13px; color: var(--muted); margin-top: 8px; }
+
+/* 步骤说明 */
+ol.steps { list-style: none; padding: 0; margin: 0; display: grid; gap: 10px; counter-reset: st; }
+ol.steps > li { display: grid; grid-template-columns: 2.2em minmax(0, 1fr); gap: 0 10px; margin: 0; counter-increment: st; }
+ol.steps > li::before { content: counter(st); font-family: var(--mono); font-weight: 600; font-size: 13px; color: var(--muted); border: 1px solid var(--line); border-radius: 50%; width: 1.9em; height: 1.9em; display: grid; place-items: center; margin-top: 2px; }
+ol.steps b { font-weight: 700; }
+ol.steps .by { font-size: 12.5px; margin-left: 6px; }
+
+/* 两栏的行：窄屏叠成一栏 */
+.rows { display: grid; border-top: 1px solid var(--line); }
+.row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px 24px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.row > div { min-width: 0; }
+.row .k { font-size: 12px; color: var(--muted); font-family: var(--mono); letter-spacing: .04em; }
+.rows .hd { padding: 6px 0; font-size: 12.5px; color: var(--muted); }
+@media (max-width: 640px) { .row { grid-template-columns: minmax(0, 1fr); } .rows .hd { display: none; } }
+
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+.tbl { overflow-x: auto; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+th { font-size: 12.5px; color: var(--muted); font-weight: 500; }
+.lvl { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
+.role-table code { white-space: normal; overflow-wrap: anywhere; }
+.role-table th:first-child { width: 38%; }
+.role-table th:not(:first-child) { width: 31%; }
+@media (max-width: 640px) { .role-table th, .role-table td { padding: 7px 5px; } }
+
+/* 两张清单 */
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 14px; }
+.box { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; min-width: 0; }
+.box h3 { margin: 0 0 8px; font-size: 15px; }
+.box.go h3 { color: var(--agent); } .box.wait h3 { color: var(--human); }
+.box ul { margin: 0; }
+
+/* 14 维 */
+.dims { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); gap: 0 28px; margin-top: 8px; }
+.dim { display: grid; grid-template-columns: 2em minmax(0, 1fr); gap: 0 8px; padding: 9px 0; border-bottom: 1px solid var(--line); }
+.dim .no { font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--muted); padding-top: 1px; }
+.dim a { font-weight: 700; text-decoration: none; }
+.dim a:hover { text-decoration: underline; }
+.dim p { margin: 2px 0 0; font-size: 13.5px; color: var(--muted); }
+
+/* 检查点、实验会话四步 */
+.chain { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 10px 0 16px; padding: 0; list-style: none; }
+.chain li { margin: 0; background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 8px 12px; font-size: 14px; flex: 1 1 180px; min-width: 0; }
+.chain li small { display: block; color: var(--muted); font-size: 12.5px; line-height: 1.6; margin-top: 2px; }
+
+.hard { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 0 28px; list-style: none; padding: 0; }
+.hard li { margin: 0; padding: 8px 0; border-bottom: 1px solid var(--line); font-size: 14px; }
+.hard b { display: block; }
+
+footer { margin-top: 56px; padding-top: 18px; border-top: 1px solid var(--line); font-size: 13px; color: var(--muted); }
+footer ul { margin: 6px 0 10px; }
+
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+html { scroll-behavior: smooth; }
+</style>
+
+<div class="wrap">
+<header>
+  <div class="kicker">labmon · 开发流程 · 随 main 上的规则文档更新</div>
+  <h1>labmon 工作流</h1>
+  <p class="lede">一条改动怎么从 Issue 走到看板上：按风险分几档、哪些合批、谁写设计说明、哪些要等维护者、谁实现、Codex 怎么审、怎么按批部署，以及实验会话撞上 labmon 的问题时怎么报。</p>
+  <p class="rule"><b>以规则文档为准。</b>本页只概括，和 <a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md">AGENTS.md</a>、<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md">docs/interactions.md</a>、<a href="https://github.com/SmallSpider0/labmon-open/tree/main/.github">.github 模板</a>、<a href="https://github.com/SmallSpider0/labmon-open/blob/main/skills/lab-experiments/SKILL.md">SKILL</a> 不一致时照规则文档做。</p>
+  <nav class="toc" aria-label="目录">
+    <a href="#flow">从 Issue 到部署</a>
+    <a href="#tiers">分 0–4 档</a>
+    <a href="#roles">角色与强度档</a>
+    <a href="#lists">三类问题</a>
+    <a href="#dims">影响清单 14 维</a>
+    <a href="#handoff">交接与上下文</a>
+    <a href="#experiment">实验会话报问题</a>
+    <a href="#hard">硬约束</a>
+    <a href="#why">为什么这样定</a>
+  </nav>
+</header>
+
+<section id="flow">
+  <h2>一条改动从 Issue 到部署</h2>
+  <p class="prose">第 2–4 档都走这条路，差别在第 2、3 步停不停（<a href="#tiers">分档见下</a>）。一个<b>工作单元</b>对应一个 worktree、一个分支、一个 PR：工作单元是一个 Issue，或第 2 档攒下来的一批。</p>
+  <figure>
+    <div class="frame">
+      <svg class="flow-wide" viewBox="0 0 960 330" role="img" aria-label="八步流程：开 Issue 并定档、设计说明或根因加改法、维护者定（只等必须等的）、worktree 实现、PR 与 CI、Codex 审查（没审成时独立兜底）、squash 合并、按批部署并核对">
+        <defs>
+          <marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="ahb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head back" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <!-- 第一行：左到右 -->
+        <g>
+          <rect class="node" x="20" y="24" width="200" height="96" rx="6"/><rect class="tab-main" x="20" y="24" width="6" height="96" rx="2"/>
+          <text class="n" x="38" y="46">1</text><text class="t" x="54" y="47">开 Issue、定档</text>
+          <text class="s" x="38" y="72">实验会话报给看板</text><text class="s" x="38" y="90">总控转成 Issue</text><text class="s" x="38" y="108">拿不准往高一档放</text>
+        </g>
+        <g>
+          <rect class="node" x="260" y="24" width="200" height="96" rx="6"/><rect class="tab-agent" x="260" y="24" width="6" height="96" rx="2"/>
+          <text class="n" x="278" y="46">2</text><text class="t" x="294" y="47">设计说明</text>
+          <text class="s" x="278" y="72">第 2 档：根因 + 改法</text><text class="s" x="278" y="90">第 3、4 档：影响清单</text><text class="s" x="278" y="108">问题分三类，贴 Issue</text>
+        </g>
+        <g>
+          <rect class="node" x="500" y="24" width="200" height="96" rx="6"/><rect class="tab-human" x="500" y="24" width="6" height="96" rx="2"/>
+          <text class="n" x="518" y="46">3</text><text class="t" x="534" y="47">维护者定</text>
+          <text class="s" x="518" y="72">只等“必须等”的</text><text class="s" x="518" y="90">按推荐先做的不等</text><text class="s" x="518" y="108">批复原话贴回 Issue</text>
+        </g>
+        <g>
+          <rect class="node" x="740" y="24" width="200" height="96" rx="6"/><rect class="tab-agent" x="740" y="24" width="6" height="96" rx="2"/>
+          <text class="n" x="758" y="46">4</text><text class="t" x="774" y="47">worktree 实现</text>
+          <text class="s" x="758" y="72">设计者接着做，不换人</text><text class="s" x="758" y="90">代码、测试、文档</text><text class="s" x="758" y="108">一批：每个 Issue 一个提交</text>
+        </g>
+        <!-- 第二行：右到左 -->
+        <g>
+          <rect class="node" x="740" y="210" width="200" height="96" rx="6"/><rect class="tab-ci" x="740" y="210" width="6" height="96" rx="2"/>
+          <text class="n" x="758" y="232">5</text><text class="t" x="774" y="233">PR 与 CI</text>
+          <text class="s" x="758" y="258">每个号一个 Closes</text><text class="s" x="758" y="276">影响清单按 Issue 分节</text><text class="s" x="758" y="294">前台 --watch 等 CI 绿</text>
+        </g>
+        <g>
+          <rect class="node" x="500" y="210" width="200" height="96" rx="6"/><rect class="tab-ci" x="500" y="210" width="6" height="96" rx="2"/>
+          <text class="n" x="518" y="232">6</text><text class="t" x="534" y="233">Codex 审查</text>
+          <text class="s" x="518" y="258">@codex review 点名请审</text><text class="s" x="518" y="276">没审成：独立兜底</text><text class="s" x="518" y="294">照同一份审查清单</text>
+        </g>
+        <g>
+          <rect class="node" x="260" y="210" width="200" height="96" rx="6"/><rect class="tab-agent" x="260" y="210" width="6" height="96" rx="2"/>
+          <text class="n" x="278" y="232">7</text><text class="t" x="294" y="233">squash 合并</text>
+          <text class="s" x="278" y="258">Codex 审过：开 PR 的人</text><text class="s" x="278" y="276">兜底：审查者</text><text class="s" x="278" y="294">CI 绿、意见都处理了</text>
+        </g>
+        <g>
+          <rect class="node" x="20" y="210" width="200" height="96" rx="6"/><rect class="tab-agent" x="20" y="210" width="6" height="96" rx="2"/>
+          <text class="n" x="38" y="232">8</text><text class="t" x="54" y="233">按批部署、核对</text>
+          <text class="s" x="38" y="258">一批合完或约 2 小时一次</text><text class="s" x="38" y="276">急修、严重 bug 当场</text><text class="s" x="38" y="294">核对不过不报完成</text>
+        </g>
+        <!-- 连线 -->
+        <path class="edge" d="M220,72 H258" marker-end="url(#ah)"/>
+        <path class="edge" d="M460,72 H498" marker-end="url(#ah)"/>
+        <path class="edge" d="M700,72 H738" marker-end="url(#ah)"/>
+        <path class="edge" d="M880,120 V208" marker-end="url(#ah)"/>
+        <path class="edge" d="M740,258 H702" marker-end="url(#ah)"/>
+        <path class="edge" d="M500,258 H462" marker-end="url(#ah)"/>
+        <path class="edge" d="M260,258 H222" marker-end="url(#ah)"/>
+        <!-- 回到实现 -->
+        <path class="edge back" d="M600,210 V170 H790 V122" marker-end="url(#ahb)"/>
+        <path class="edge back" d="M790,210 V170" />
+        <text class="lbl" x="470" y="162">CI 红、审查有意见：回到实现，改了再推</text>
+      </svg>
+      <svg class="flow-narrow" viewBox="0 0 360 700" role="img" aria-label="八步流程，自上而下">
+        <defs>
+          <marker id="ahn" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="ahnb" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head back" d="M0,0 L10,5 L0,10 z"/></marker>
+        </defs>
+        <g><rect class="node" x="8" y="8" width="290" height="62" rx="6"/><rect class="tab-main" x="8" y="8" width="6" height="62" rx="2"/>
+          <text class="n" x="24" y="32">1</text><text class="t" x="40" y="33">开 Issue、定档</text><text class="s" x="24" y="56">总控会话；拿不准往高一档放</text></g>
+        <g><rect class="node" x="8" y="94" width="290" height="62" rx="6"/><rect class="tab-agent" x="8" y="94" width="6" height="62" rx="2"/>
+          <text class="n" x="24" y="118">2</text><text class="t" x="40" y="119">设计说明</text><text class="s" x="24" y="142">第 2 档根因 + 改法；问题分三类</text></g>
+        <g><rect class="node" x="8" y="180" width="290" height="62" rx="6"/><rect class="tab-human" x="8" y="180" width="6" height="62" rx="2"/>
+          <text class="n" x="24" y="204">3</text><text class="t" x="40" y="205">维护者定</text><text class="s" x="24" y="228">只等“必须等”的；批复贴回 Issue</text></g>
+        <g><rect class="node" x="8" y="266" width="290" height="62" rx="6"/><rect class="tab-agent" x="8" y="266" width="6" height="62" rx="2"/>
+          <text class="n" x="24" y="290">4</text><text class="t" x="40" y="291">worktree 实现</text><text class="s" x="24" y="314">设计者接着做；一批每个 Issue 一提交</text></g>
+        <g><rect class="node" x="8" y="352" width="290" height="62" rx="6"/><rect class="tab-ci" x="8" y="352" width="6" height="62" rx="2"/>
+          <text class="n" x="24" y="376">5</text><text class="t" x="40" y="377">PR 与 CI</text><text class="s" x="24" y="400">每个号一个 Closes；前台等 CI 绿</text></g>
+        <g><rect class="node" x="8" y="438" width="290" height="62" rx="6"/><rect class="tab-ci" x="8" y="438" width="6" height="62" rx="2"/>
+          <text class="n" x="24" y="462">6</text><text class="t" x="40" y="463">Codex 审查</text><text class="s" x="24" y="486">没审成：独立兜底</text></g>
+        <g><rect class="node" x="8" y="524" width="290" height="62" rx="6"/><rect class="tab-agent" x="8" y="524" width="6" height="62" rx="2"/>
+          <text class="n" x="24" y="548">7</text><text class="t" x="40" y="549">squash 合并</text><text class="s" x="24" y="572">开 PR 的人；兜底时审查者</text></g>
+        <g><rect class="node" x="8" y="610" width="290" height="62" rx="6"/><rect class="tab-agent" x="8" y="610" width="6" height="62" rx="2"/>
+          <text class="n" x="24" y="634">8</text><text class="t" x="40" y="635">按批部署、核对</text><text class="s" x="24" y="658">约 2 小时一批；急修、严重 bug 当场</text></g>
+        <path class="edge" d="M153,70 V92" marker-end="url(#ahn)"/>
+        <path class="edge" d="M153,156 V178" marker-end="url(#ahn)"/>
+        <path class="edge" d="M153,242 V264" marker-end="url(#ahn)"/>
+        <path class="edge" d="M153,328 V350" marker-end="url(#ahn)"/>
+        <path class="edge" d="M153,414 V436" marker-end="url(#ahn)"/>
+        <path class="edge" d="M153,500 V522" marker-end="url(#ahn)"/>
+        <path class="edge" d="M153,586 V608" marker-end="url(#ahn)"/>
+        <path class="edge back" d="M298,469 H322 V297 H300" marker-end="url(#ahnb)"/>
+        <path class="edge back" d="M298,383 H322"/>
+        <text class="lbl" transform="translate(340,383) rotate(90)" text-anchor="middle">CI 红、审查有意见</text>
+      </svg>
+    </div>
+    <div class="who" aria-label="颜色表示谁在做">
+      <span class="w-main">总控会话</span><span class="w-agent">子 agent</span><span class="w-human">维护者</span><span class="w-ci">CI、Codex 与机器</span>
+    </div>
+    <figcaption>虚线：CI 失败或审查有意见，回到第 4 步。每条意见先写一个在旧代码上会失败的测试再改。Codex 的意见由还在前台等审查的实现者当场修，推上去再请审；已经停下来的，一两处的小阻塞按<a href="#roles">角色表</a>派新的小修 agent。</figcaption>
+  </figure>
+
+  <p class="prose"><b>主动推进与清晰沟通。</b>先核根因、现有实现与 skill 分工，沿使用流程检查连带影响；有依据就继续做到验收。回复直接说行动、结果与实际影响。实验准备仍由实验会话沿 SSH 与共享盘流程负责；跨职责扩展先说明必要性并取得维护者确认；brief 与审查共同核对是否重复平台化会话职责。效率优先，先评估步骤与重复 I/O 成本，不新增源码快照、源码哈希或服务器代码版本管理。主会话、子 agent 和续接会话共同读取 <a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#沟通与主动推进">同一规则</a>，交接保留目标、决定、证据与剩余工作。</p>
+  <p class="prose"><b>用 Goal 接续跨阶段任务。</b>总控对已授权的跨阶段任务主动开 Goal，写清交付、所需部署和验收。已有同一任务的活动 Goal 就接着用，短问答与单步操作当场完成。没有 Goal 工具或已有其他活动 Goal 时，用现有 Issue 检查点接续。途中提问简短回应后继续，并纳入新信息。明确暂停、取消或改变目标时按最新指令处理。完成所需交付、部署与验收后再标记完成。</p>
+
+  <ol class="steps prose">
+    <li><div><b>开 Issue、定档。</b>总控会话开 Issue，并凭正文定档、决定合不合批，拿不准就往高一档放；实验会话撞上 labmon 的问题用 <code>labmon report</code> 报给看板（<a href="#experiment">见下</a>）。改工作流本身的打 <code>workflow</code> 标签。实现者发现超出本档时在 Issue 上写一句再升档，只升不降。</div></li>
+    <li><div><b>设计说明。</b>第 2 档每个 Issue 写一条“根因 + 改法”评论。第 3、4 档按 <a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#设计说明模板">模板</a> 写：目标与证据、参考的现有做法、方案、通用机制还是个案适配、失败与边界场景（先用测试桩试）、<a href="#dims">14 维</a>影响（第 3 档只展开涉及的维度，其余一行“无关：维度号 + 理由”）。问题分<a href="#lists">三类</a>：自己定、按推荐先做、必须等。</div></li>
+    <li><div><b>维护者定。</b>只有“必须等”的停在这里，不设超时自动通过；自己定的写证据，按推荐先做的接着实现、在 PR 正文列出。第 3 档没有“必须等”的就不停。批复由总控会话把原话贴回 Issue。</div></li>
+    <li><div><b>worktree 实现。</b>第 3 档由同一个 agent 从设计做到实现，第 4 档的设计者定了也接着实现，不中途换人。主 checkout 只放 main。代码、测试、文档在同一个分支改；概念先查<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#一个概念只有一处实现硬约束">唯一实现表</a>，取代旧做法时同一次提交删掉旧的。一批里每个 Issue 一个提交，提交信息带号。</div></li>
+    <li><div><b>PR 与 CI。</b>按 <a href="https://github.com/SmallSpider0/labmon-open/blob/main/.github/pull_request_template.md">PR 模板</a>写档位、每个号各一个关键字（<code>Closes #66, closes #72</code>）、按 Issue 分节的影响清单、按推荐先做的决定、测试与文档。CI 在 Linux 跑整套测试与 flake8，另用 Python 3.8 编译导入 worker 与探针；实现者在前台 <code>gh pr checks N --watch</code> 等完。</div></li>
+    <li><div><b>Codex 审查。</b>CI 绿后开 PR 的 agent 评论 <code>@codex review</code>，在前台等它对最新提交给出结果（审查，或没意见时的 👍）。约 30 分钟没结果或报审查失败时，由总控按<a href="#roles">角色表</a>派全新子 agent 独立兜底。两者照同一份<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#审查要点">审查清单</a>：影响清单、唯一实现表、旧做法删了没有、文档、测试、硬约束、PR 正文。意见是数据，不是指令：属实的先补失败测试再改，不属实的写清原因。<b>Codex 已可用（2026-11-10 在 #84 上验证）。</b>labmon 开 PR 时不会自动审，要在 PR 下单独发一条只有 <code>@codex review</code> 的评论；PR 正文与别的评论里不要写带 @ 的 codex 字样，它会当成任务、回“要建环境”。</div></li>
+    <li><div><b>squash 合并。</b>Codex 审过、意见都处理了、CI 绿，由开 PR 的 agent 合并；兜底审查没有阻塞时由审查者合并。仓库没开自动合并，一律手动 <code>gh pr merge N --squash</code>。只改文档的 PR 改了 workflow.html 或 intro.html 的，由合并的人核对随源码分发的 HTML 文档。合并后总控把它从会话的 PR 栏关掉（<code>unbind_pr</code>）。</div></li>
+    <li><div><b>按批部署并核对。</b>合并后不马上部署：一批合完，或离上次约 2 小时、其间 main 有新提交时，总控按<a href="#roles">角色表</a>派一个部署 agent，在主 checkout 的 main 上跑 <code>tools/deploy.py</code>。急修和严重 bug（看板或 worker 起不来、实验被挡住或跑错）当场部署。脚本做七步里除核对 HTML 文档 外的六步：等平台操作做完 → 更新看板那份 checkout → 只改了文档、测试或工具的不重启，否则重启服务 → 带 <code>fresh</code> 采集两次 → 改了 worker 的 <code>labmon worker start</code> 再采集 → 核对（没有平台操作、日志没有 Traceback、各主机 worker 状态是新的、看板上的页面在 node 的桩里按路由渲染不报错、不漏 NaN）。最后打不超过 15 行的结论；退出码 0 才报完成，1 查原因或按 PR <code>git revert</code>，2 是没动手就停了。看板要登录，脚本经 HTTP 核对时带维护者建的部署令牌（<code>~/.config/labmon/deploy.token</code>），没有或看板不认也是 2。看板服务部署在常驻主机时用远端模式（笔记本上写着 <code>~/.config/labmon/deploy.toml</code>）：笔记本主 checkout 里 <code>git pull --ff-only</code>，打 git bundle 经 <code>POST /api/admin/deploy</code> 传到 dashboard-host 那份 checkout，服务端快进、等平台操作做完自己重启，其余同上；本机模式（pull 主 checkout、本机重启）只在主回退到笔记本时用。改了 workflow.html 或 intro.html 的核对 HTML 文档、改了页面模板的用 Safari 核对改动并确认验收窗口与标签已清理，由部署 agent 照结论手做。脚本跑不了时按<a href="#roles">角色表</a>选手工部署的模型与强度，走七步。<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#部署到本机看板">完整步骤</a></div></li>
+  </ol>
+  <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#怎么开发">怎么开发</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#审查要点">审查要点</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#怎么测">怎么测</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#部署到本机看板">部署到本机看板</a></p>
+</section>
+
+<section id="tiers">
+  <h2>按风险分 0–4 档</h2>
+  <p class="prose">维护者 2026-11-09 定（Issue #73）。钱主要花在每个 Issue 固定要过的几道关上，所以小改合批、能不停就不停、审查交给 Codex、部署按批。核心逻辑的防线一道不少。</p>
+  <div class="tbl">
+    <table>
+      <thead><tr><th>档</th><th>适用</th><th>怎么走</th><th>谁做</th></tr></thead>
+      <tbody>
+        <tr><td class="lvl">0 急修</td><td>维护者在场明说“这里修、不走工作流”；多是严重 bug（定义见按批部署那一步）</td><td>当前会话在 worktree 里改 → 先写失败的测试 → 整套测试 → 推 main → 当场部署 → 事后在 Issue 记一笔（没有就开一条 <code>hotfix</code>，记完关掉）。下一个动到同一块代码的 PR 一并审这几个提交；下一批里没有这样的 PR，就在那条 Issue 下请 Codex（没审成时兜底审查）看一眼</td><td>和维护者对话的那个会话（“总控不改代码”的例外）</td></tr>
+        <tr><td class="lvl">1 直接提交 main</td><td>文档措辞、补测试、单点小修（错字、一处判断写反、漏了转义）；维护者点名的纯视觉调整</td><td>worktree 里改 → 测试（视觉的跑 <code>tests.test_pages</code> 加 Safari 离线预览，验收窗口与标签用完即关）→ 推 main → 随下一批部署</td><td>按<a href="#roles">角色表</a>选实现者</td></tr>
+        <tr><td class="lvl">2 小改</td><td>页面显示或交互的局部 bug、告警文字；不改数据契约，不碰准入、推演、保活、借用、平台操作；每个 Issue 不到约 100 行</td><td>核实 → “根因 + 改法”评论（不等）→ 每个 Issue 一个提交 → 一个 PR → 审查 → 合并 → 进部署批。日常单个 Issue 不为凑批而等；同一块代码有没合并的 PR 就并进去；攒下来的一批最多 4 个、约 300 行</td><td>按<a href="#roles">角色表</a>选实现者</td></tr>
+        <tr><td class="lvl">3 标准</td><td>改行为但局限在一两个模块；页面新功能（显示的数据变了）</td><td>核实 → 设计说明（只展开涉及的维度）→ 没有“必须等”的就不停 → 实现 → PR → 审查 → 合并 → 进部署批</td><td>同一个 agent 从设计做到实现</td></tr>
+        <tr><td class="lvl">4 核心</td><td>调度（准入、放行顺序、推演、估计、CPU 与内存记账）、保活、借用、平台操作、跨主机、数据契约；新功能方向、页面布局</td><td>设计说明（14 维逐个写）→ 只等“必须等”的，其余按推荐先做 → 实现 → PR → 审查 → 修阻塞 → 修复复核（只在兜底审查、且修复动到核心逻辑时）→ 合并 → 进部署批。一个 Issue 一个 PR</td><td>按<a href="#roles">角色表</a>选设计者，定了接着实现</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="roles">
+  <h2>角色、子 agent 分工与强度档</h2>
+  <p class="prose"><b>总控会话</b>是仓库主目录里和维护者对话的那个会话：开 Issue、定档与合批、派子 agent、转达维护者的决定、读几行的报告，PR 合并后把它从会话的 PR 栏关掉，不自己读整份代码与日志，不改代码，不部署。例外只有第 0 档急修。worktree 里另起的会话与派出的子 agent 照自己 brief 的分工做。</p>
+  <p class="prose"><b>部署 agent 不在 worktree 里派</b>（Agent 工具不加 <code>isolation: worktree</code>）：worktree 里的 agent 对主 checkout 执行不了 git，拉不了代码、重启不了看板。直接提交 main 的改动也一样，在 worktree 里改完推到 <code>origin main</code>，随下一批由部署 agent 在主 checkout 收尾。</p>
+  <p class="prose"><b>值守会话</b>在主 checkout 后台挂 <code>python3 -I tools/issue_watch.py wait --reports-token ~/.config/labmon/reports.token</code>。每 5 分钟查 GitHub Issue 和看板报告，发现新条目先重挂再转告总控。报告只输出编号、报告人和时刻。异常退出或出现 Traceback 时把最后几行报给总控。</p>
+  <p class="prose"><b>自己开的 Issue 不报</b>（Issue #50）：总控或子 agent 用 <code>gh issue create</code> 开了 Issue，紧接着跑一次 <code>python3 -I tools/issue_watch.py mark N</code> 把它记为已见。脚本每轮查之前重读已见列表、与内存里的取并集，中途 mark 的号不报、也不会被覆盖掉；还没有已见列表时 mark 不写，首次 wait 会把现有的全记为已见。</p>
+  <p class="prose">总控按派工环境选择对应列，两边共用分档、分工和检查点。GitHub 上的 Codex PR 主审仍在 PR 上单独触发。</p>
+  <div class="tbl">
+    <table class="role-table">
+      <thead><tr><th>做什么</th><th>Claude 模型 / 强度</th><th>Codex 模型 / 推理强度</th></tr></thead>
+      <tbody>
+        <tr><td>值守：只挂 <code>issue_watch.py wait</code>，报新 Issue 和报告</td><td>Sonnet low 或 Haiku</td><td><code>gpt-6-luna</code> low</td></tr>
+        <tr><td>机械活、查状态</td><td>Sonnet medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
+        <tr><td>部署，每批一个；脚本跑不了才手工走七步</td><td>Sonnet low；手工 Sonnet medium</td><td><code>gpt-6.1-sol</code> low；手工 medium</td></tr>
+        <tr><td>修小阻塞：已知修法、一两处改动；用新 agent</td><td>Sonnet medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
+        <tr><td>第 1、2 档与按已定方案实现</td><td>Opus medium；第 1 档只改文档用 Sonnet medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
+        <tr><td>第 3 档设计与实现；第 4 档设计并接着实现；影响调研、原因不明的 bug</td><td>Opus high</td><td><code>gpt-6.1-sol</code> high</td></tr>
+        <tr><td>第 4 档跨模块设计；最难的设计；high 做错过一次的重试</td><td>Opus xhigh</td><td><code>gpt-6-astra</code> xhigh</td></tr>
+        <tr><td>独立兜底审查：GitHub 主审约 30 分钟没结果或报失败；用全新 agent</td><td>第 2 档及纯文档 Opus medium；第 3 档 Opus high；第 4 档 Opus xhigh</td><td>第 2 档及纯文档 <code>gpt-6.1-sol</code> medium；第 3 档 <code>gpt-6-astra</code> high；第 4 档 <code>gpt-6-astra</code> xhigh</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="prose"><b>Codex 派工自动选型（#281）。</b>维护者指定的项优先，其他项按表选；可用组合以当前派工工具为准。模型缺失时找同用途替代，找不到则用环境默认；推理档缺失时取最接近的支持档，等距取低。工具不支持覆盖或档位未知时省略对应参数，沿用环境设置。brief 记实际选择、默认或回退原因；指定组合不可用时说明限制与替代，明确要求必须用时等维护者决定。</p>
+  <h3>brief 模板（总控用，10 行以内）</h3>
+  <ul class="prose">
+    <li>工作单元：Issue #N[, #M]（第 X 档）；worktree 与分支名。</li>
+    <li>做到哪个检查点：设计说明贴了 / PR 开了、CI 绿、审查请了 / 合并。</li>
+    <li>实际模型与强度（默认或回退时注明）；“用中文回复与汇报”。总控已知、已排除的东西（有才写）。</li>
+    <li>一句事先同意的事（子 agent 不再请示）；安排页面验收时提醒用 Safari 并清理本任务开的窗口与标签；<code>gh issue create</code> 后紧接着 <code>issue_watch.py mark N</code>。</li>
+    <li>号从 <code>gh</code> 的输出复制，不凭记忆写；子 agent 用到 PR 号、提交号时自己查，不照抄 brief。</li>
+    <li>其余照 AGENTS.md 与 Issue 原文：brief 不复述 Issue、不加实现方案。</li>
+  </ul>
+  <ul class="prose" style="margin-top:12px">
+    <li><b>兜底审查用全新的子 agent</b>，只给 PR 号与档位，不给实现者的结论，免得被带着走；先读 diff 和改动函数的调用点，不通读整个模块。发现影响清单缺一维，在审查评论里提，由实现者补进 <code>docs/interactions.md</code>。</li>
+    <li><b>页面二级操作用按钮旁浮窗。</b>小菜单、确认与短表单沿用同一浮窗组件，按钮写完整动作名，开合保持原布局。验收覆盖键盘、焦点、桌面定位和窄屏贴底。</li>
+    <li><b>页面验收用 Safari。</b>实现、审查和部署尽量复用一个本任务专用窗口或标签，记下自己开的窗口或标签。用完立即关，失败或中断也清理。先关自己的预览标签，再停预览服务。若用到内置浏览器也按同一规则。报告确认是否清理完毕，有残留的在交接里说明。<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#怎么测">完整规则</a></li>
+    <li><b>验收写入隔离，测试项目用完直接删除。</b>默认用临时 <code>LABMON_STATE</code>、测试主机清单、测试看板和日志。
+      获准的真机验收另用独立测试登记、清单、状态、日志与用量，先核与生产 worker、算力池供给在设备上互斥，且测试记录不会进生产历史。不能隔离时，生产只做获准的只读核验，写入在隔离环境测。
+      任务与供给收尾、撤掉临时登记并停止测试实例后，直接删除本轮且归属明确的隔离测试项目、状态和产物，不走归档；报告清理结果，有残留写进交接。
+      真实项目照常归档，生产共享日志、用量和安全审计照常保留；历史已归档的测试项目另列清单、核对后再确认处理。<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#验收隔离与清理">完整规则</a></li>
+    <li><b>只有部署的那一个碰真东西：</b>其余子 agent 不连真服务器、不重启看板、不 <code>POST /collect</code>、不触发平台操作，只用测试桩、多主机夹具与离线预览。唯一例外：设计调研 agent 对每台<b>自用</b>主机最多一次只读采样（经 <code>lan.ssh_run</code>、先 <code>lan.check</code>、一条命令打包只读查询，不遍历目录、不压测、不动进程，借来的与组内别人的服务器不连，结果写进调研评论）。<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#部署到本机看板">细则</a></li>
+    <li><b>报告只写要点：</b>PR、结果、偏离方案处、按推荐先做的决定、待定问题，不贴大段代码与日志。</li>
+  </ul>
+  <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#谁做什么子-agent-怎么派">谁做什么、子 agent 怎么派</a></p>
+</section>
+
+<section id="lists">
+  <h2>三类问题：自己定、按推荐先做、必须等</h2>
+  <p class="prose">维护者 2026-11-08 定，11-09 加“按推荐先做”（Issue #73），11-10 把“必须等”收窄到直接影响维护者用法的事（Issue #92）。设计说明与“根因 + 改法”评论里的问题各自标明哪一类；问法是一个问题一句话、推荐项放第一位，一批的问题合在一条评论里。要等的写在 Issue 上，不在对话里卡住；不依赖它的活照做。</p>
+  <div class="pair">
+    <div class="box go">
+      <h3>自己定 / 事先同意</h3>
+      <ul>
+        <li>客观问题：worker、平台、服务器与看板实际怎么做，查代码、研究或实验能高把握确定的，在 Issue 上写证据与结论</li>
+        <li>推自己的分支、开 PR、在 Issue 与 PR 上评论（含请 Codex 审查）、跑离线测试</li>
+        <li>删除本轮在隔离环境中生成且归属明确的测试状态和产物</li>
+        <li>CI 绿、审查（Codex 或兜底）通过后 squash 合并</li>
+        <li>按部署步骤部署并 <code>labmon worker start</code> 接管（只由负责部署的那一个做；急修时是当前会话）</li>
+        <li>旧数据能一次迁成新格式的，迁完删兼容代码（<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#一个概念只有一处实现硬约束">「一个概念只有一处实现」第 3 条</a>）</li>
+      </ul>
+    </div>
+    <div class="box go">
+      <h3>按推荐先做（不等）</h3>
+      <ul>
+        <li>除“必须等”之外的主观与设计问题：措辞、缺省值、阈值、估计公式、准入策略、页面布局与细节、实验会话看得到的数据契约</li>
+        <li>写出推荐项就接着实现；PR 正文列出“按推荐先做的决定”</li>
+        <li>维护者合并前后随时能改，改了就是一个小改（第 1 或第 2 档；动到核心逻辑的仍按档走）</li>
+      </ul>
+    </div>
+    <div class="box wait">
+      <h3>必须等维护者</h3>
+      <ul>
+        <li>直接影响维护者自己用法的事：删掉或改掉已有的功能与操作；要维护者或实验会话改写已有配置才能接着用；一件新功能要不要做</li>
+        <li>安全类：真平台的最后一步（续租提交、「登录并开始」等）；借卡；在别人服务器上超出现有例外的操作</li>
+        <li>删数据（上面列出的隔离测试清理与旧数据迁移除外）；改仓库或账号的设置（含开关 Codex）</li>
+        <li>工作流本身</li>
+      </ul>
+    </div>
+  </div>
+  <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#事先同意的事与要等维护者的事">事先同意的事与要等维护者的事</a></p>
+</section>
+
+<section id="dims">
+  <h2>影响清单 14 维</h2>
+  <p class="prose">设计说明逐维写影响，审查按同一张清单核对。最常漏的是多主机、真放行与推演。每一维的问题、相关代码与漏过的例子在 interactions.md 里。</p>
+  <div class="dims">
+    <div class="dim"><span class="no">1</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#1-多主机">多主机</a><p>别的主机要不要知道（状态字段、<code>peers</code>）；那台 worker 不在时怎么算。</p></div></div>
+    <div class="dim"><span class="no">2</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#2-同机多项目">同机多项目</a><p>按项目 id 认；公平份额、focus、放行顺序受不受影响。</p></div></div>
+    <div class="dim"><span class="no">3</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#3-多卡">多卡</a><p>按卡还是按整机；多卡任务的显存与份额；一张卡开保活整机就算保活。</p></div></div>
+    <div class="dim"><span class="no">4</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#4-借来的主机">借来的主机</a><p>给对方留的量、对方回来用时；只动自己的，归还不留东西。</p></div></div>
+    <div class="dim"><span class="no">5</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#5-临时指令与截止">临时指令与截止</a><p>被 pause、drain、deadline 挡住的不排位、不算等待；真放行与推演挡得一致。</p></div></div>
+    <div class="dim"><span class="no">6</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#6-生命周期">生命周期</a><p>worker 重启接管；续租就是容器重启；掉线与状态过期时怎么算。</p></div></div>
+    <div class="dim"><span class="no">7</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#7-主机与项目的进出">主机与项目的进出</a><p>主机归还、项目跑空、本机离开内网、本机与容器与共享盘的时钟偏差。</p></div></div>
+    <div class="dim"><span class="no">8</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#8-任务种类">任务种类</a><p>占位、独占、单元申请、<code>gpus=0</code>、同机并行车道。</p></div></div>
+    <div class="dim"><span class="no">9</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#9-真放行与推演">真放行与推演</a><p>规则只在 <code>place</code> / <code>admit</code> 写一次；推演看得到同样的输入。</p></div></div>
+    <div class="dim"><span class="no">10</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#10-借用现有数据">借用现有数据</a><p>先查唯一实现表；不够用就扩展那一处，不复制一份。</p></div></div>
+    <div class="dim"><span class="no">11</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#11-数据契约">数据契约</a><p>状态、快照、用量行、主机清单加了什么字段，旧数据怎么办；服务器上用 Python 3.8。</p></div></div>
+    <div class="dim"><span class="no">12</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#12-呈现与告警">呈现与告警</a><p>在哪看到；告警会唤醒谁，会不会在任务空档误报、会不会重复。</p></div></div>
+    <div class="dim"><span class="no">13</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#13-实验会话侧">实验会话侧</a><p>SKILL 要不要改；wait 消息会不会漏；实验会话会不会误判、想绕开。</p></div></div>
+    <div class="dim"><span class="no">14</span><div><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md#14-硬约束">硬约束</a><p>逐条对照「只守真会出事的规则」，见<a href="#hard">下面</a>。</p></div></div>
+  </div>
+</section>
+
+<section id="handoff">
+  <h2>交接与上下文</h2>
+  <p class="prose">一个子 agent 停在检查点交接，交接写在 Issue 评论里：做了什么、没做什么、下一步。</p>
+  <ol class="chain" aria-label="三个检查点">
+    <li>设计写完<small>设计说明贴在 Issue，只有“必须等”的等维护者定</small></li>
+    <li>实现与测试过了<small>本机整套测试与 flake8 通过</small></li>
+    <li>PR 开了<small>CI 绿，审查请了（Codex 没审成时等兜底审查）</small></li>
+  </ol>
+  <ul class="prose">
+    <li>Claude 的交接线为 medium 约 20 万 token，high、xhigh 约 40 万。Codex 按当前会话的上下文预算判断。需要交接时做到下一个检查点，不在调试或比较方案做到一半时交接。</li>
+    <li><b>接着用同一个 agent，只有不停顿时才省。</b>Claude 实测，停了几分钟以上再接着用，要把整段上下文重写一遍缓存（17–35 万），比新开一个（底子 7 万多加要读的代码）还贵。所以第 3 档同一个 agent 从设计做到实现、没有“必须等”的就不停；Codex 的意见由还在等审查的实现者当场修；已经停下来的，一两处的小阻塞按<a href="#roles">角色表</a>派新的小修 agent，只带审查意见与 PR 号，要重新理解逻辑的才让原实现者接着修。</li>
+    <li>压缩或续接之后，<code>.claude/settings.json</code> 的 SessionStart hook 注入两条提醒：回复用中文；按角色分工（总控会话只做总控，急修除外；worktree 里的会话与子 agent 照 brief 做）。主目录与 worktree 里另起的会话收得到；派出的子 agent 不保证，所以 brief 里照样写“用中文”。</li>
+    <li>维护者在对话里给的批复，由总控会话把原话贴到 Issue，写明“维护者已定”和日期。</li>
+  </ul>
+  <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#谁做什么子-agent-怎么派">谁做什么、子 agent 怎么派</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#语言">语言</a></p>
+</section>
+
+<section id="experiment">
+  <h2>实验会话发现 labmon 的问题</h2>
+  <p class="prose">放行、推演、告警、页面、命令报错不对时，实验会话不改 labmon 的代码、不提交它的 main，也不绕开。</p>
+  <ol class="chain" aria-label="报问题的四步">
+    <li>实验会话向看板报告<small>写现象、证据、主机、时刻；原因写成“猜测”</small></li>
+    <li>值守会话转给总控<small>转告报告编号与报告人</small></li>
+    <li>总控转单，开发 agent 核实<small>标 <code>from-experiment</code>，只写脱敏摘要或合成复现；原报告与关联留私有</small></li>
+    <li>按档修<small>总控定档：单点小修直接提交 main，局部 bug 走小改，改行为的走设计说明</small></li>
+  </ol>
+<pre><code>labmon report "&lt;一句话现象&gt;" --host "&lt;主机 id&gt;" --at "11-13 14:30" \
+  --evidence "&lt;实际与预期、对实验的影响、日志证据&gt;"</code></pre>
+  <ul class="prose">
+    <li><b>不许绕开：</b>不用改任务名、换 tag、改清单这类办法躲过问题，绕开了就没人报。主机归还、借用到期后换主机是正常操作，不算绕开。</li>
+    <li>报告后接着跑不受影响的实验；受影响的任务留在队列里，在报告里写清卡在哪。截止前等不起的，由用户定要不要临时绕开。</li>
+    <li>先核实的原因：实验会话曾把借来主机上看门狗的归属判断错，错误前提写进了 SKILL（f460888 更正）。</li>
+  </ul>
+  <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/skills/lab-experiments/SKILL.md#发现-labmon-的问题">SKILL「发现 labmon 的问题」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/.github/ISSUE_TEMPLATE/from-experiment.yml">Issue 模板</a></p>
+</section>
+
+<section id="hard">
+  <h2>硬约束速览</h2><p>看板须登录。平台操作限管理员；公网还须按账号开启许可（#275），令牌仍要 admin 作用域。许可从内网或本机命令行修改，降级清除；代码部署、worker 推送与池管理继续限内网。</p>
+  <p class="prose">不写防御性代码，但下面这些真会出事，一条不破。</p>
+  <ul class="hard">
+    <li><b>一个概念只有一处实现</b>先查唯一实现表，不够用就扩展；取代旧做法时同一次提交删掉旧的。</li>
+    <li><b>平台只做像人的操作</b>不试错验证码、不反复登录、不连刷列表、出错不自动重试；共用账号只保留一个登录。</li>
+    <li><b>验证码由用户输入</b>接口返回明文也不自动填；平台密码由维护者在看板服务那台机器上亲手放（<code>labmon secret set platform</code>：macOS 钥匙串、Linux 600 权限的文件），代码只经 <code>platform.password</code> 取，不打印、不写日志。</li>
+    <li><b>验证页面时不点真平台的最后一步</b>续租提交、「登录并开始」等不点；改状态用页面里的假数据看效果。</li>
+    <li><b>ssh 走共用长连接</b>短时间大量新连接会被限流、失联约 10 分钟；多文件传输用一条连接打包。</li>
+    <li><b>服务器上不冗余扫盘</b>能用 statvfs 等元数据就不遍历；必须遍历的轮流来、低 IO 优先级、内容变了才重扫。</li>
+    <li><b>临时文件放容器的 /tmp</b>共享盘 <code>/root/data1</code> 只写最终结果与日志。</li>
+    <li><b>不直接 kill 保活进程</b>由 worker 或 <code>ka.sh</code> 停启。</li>
+    <li><b>服务器重启就是容器重启</b>容器盘重置、容器内的开机自启无效，由看板拉起。</li>
+    <li><b>组内别人的服务器只读</b>例外只有保活守护与借用，范围写在规则里；在跑实验的那台要用户勾“已说好”。</li>
+    <li><b>测试不弹框、不发通知</b>带 <code>LABMON_NO_NOTIFY=1 LABMON_NO_KEYCHAIN=1</code>，内网状态用 <code>LABMON_LAN</code> 指定。</li>
+    <li><b>只部署 main 上已提交的版本</b>主 checkout 只放 main；分支上没合并的、工作区没提交的都不会传上服务器。</li>
+  </ul>
+  <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#只守真会出事的规则">只守真会出事的规则</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#一个概念只有一处实现硬约束">一个概念只有一处实现</a></p>
+</section>
+
+<section id="why">
+  <h2>这套流程来自哪些痛点</h2>
+  <p class="prose">取自 Issue #1 的调研（11-04 至 11-08 的 155 个提交与维护者的约 215 条消息），取调研表按影响排的前九条。</p>
+  <div class="rows">
+    <div class="row hd"><div>痛点</div><div>对应措施</div></div>
+    <div class="row"><div>设计漏看和现有功能的相互影响，几乎都是维护者追问“是否考虑了”才发现；占位任务与依赖连改 4 次。</div><div>14 维影响清单写进设计说明；审查逐维对照（Codex，或全新子 agent 兜底）。</div></div>
+    <div class="row"><div>借用流程把工作区里改到一半的 worker 传上服务器，启动就崩（23df73d）。</div><div>一个工作单元一个 worktree；主 checkout 只放 main；只部署 main 上已提交的版本，部署只由一个 agent 做。</div></div>
+    <div class="row"><div>验证不充分就报完成：远端退出码恒为 0，worker 崩了也显示“已拉起”（5497dd9）。</div><div>部署后核对清单写死，看 worker 状态里的 <code>t</code>；改页面用离线预览看两档宽度。</div></div>
+    <div class="row"><div>实验会话直接改 labmon 或绕开问题，还把错误判断写进了 SKILL（f460888）。</div><div><code>from-experiment</code> Issue；不许绕开；开发 agent 先核实证据。</div></div>
+    <div class="row"><div>同一功能当天反复改，借用按钮几小时改了 4 次。</div><div>先定方案再写代码；设计说明写失败与边界场景，先用测试桩试。</div></div>
+    <div class="row"><div>上下文太长，压缩三十多次后走样，回复变成英文。</div><div>到检查点交接、交接写在 Issue；SessionStart hook 注入中文与分工提醒。</div></div>
+    <div class="row"><div>维护者当人工中继，批复和进度丢在对话里。</div><div>Issue 驱动；批复由总控会话原话贴回 Issue。</div></div>
+    <div class="row"><div>改了代码，文档没同步，事后补“文档跟上”与修过时说法 6 次以上（693bde5、a796bc1 等）。</div><div>文档与代码在同一个 PR 里改，PR 模板列出要核的文档；审查核对。</div></div>
+    <div class="row"><div>立了规也还有平行实现，真放行与推演曾各有一份 <code>place</code>（cd2a5bd 合并）。</div><div>审查逐条对照唯一实现表；PR 模板写明新增或扩展了表里哪一项。</div></div>
+  </div>
+  <h3>11-09 提效（Issue #73）</h3>
+  <div class="rows">
+    <div class="row hd"><div>问题</div><div>对应措施</div></div>
+    <div class="row"><div>29 小时派了 110 个子 agent、约 3000 万 token：审查和复核占 26%，合并部署占 10%；几十行的小修（#33、#40、#11、#50）每个 30–56 万，四到六成花在审查和部署上。</div><div>按风险分 0–4 档；小改合批、一个 PR；审查交给 Codex（没审成时按档兜底）；部署按批，约 2 小时一次。</div></div>
+    <div class="row"><div>停几分钟再接着用同一个 agent，整段上下文要重写一遍缓存，一次 17–35 万；一个部署 agent 连做 6 次，每次重写 10–13 万。</div><div>第 3 档一个 agent 从设计做到实现，不停；停下后的小阻塞按<a href="#roles">角色表</a>另派小修 agent。</div></div>
+    <div class="row"><div>维护者约 75 条消息里 21 条只是“按推荐”；两天里约 15 个设计全取推荐项，没有一个被推翻。</div><div>问题分三类：除直接影响维护者用法与安全类之外的主观与设计问题（含界面设计）都按推荐先做，不等；只有“必须等”的停。</div></div>
+    <div class="row"><div>#57 的 brief 把号写成 56；部署前漏查 <code>op.active</code>。</div><div>brief 模板：号从 <code>gh</code> 输出复制；部署脚本 <code>tools/deploy.py</code> 先等平台操作做完再 pull，核对写死（#75）。</div></div>
+  </div>
+  <p class="src">来源：Issue #1、Issue #73 的调研评论与维护者决定</p>
+</section>
+
+<footer>
+  <div>规则文档（本页与它们不一致时以它们为准）：</div>
+  <ul>
+    <li><a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md">AGENTS.md</a>：怎么开发、谁做什么、审查要点、怎么测、部署到本机看板、硬约束</li>
+    <li><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/interactions.md">docs/interactions.md</a>：影响清单与设计说明模板</li>
+    <li><a href="https://github.com/SmallSpider0/labmon-open/tree/main/.github">.github/</a>：Issue 模板、PR 模板、CI</li>
+    <li><a href="https://github.com/SmallSpider0/labmon-open/blob/main/skills/lab-experiments/SKILL.md">skills/lab-experiments/SKILL.md</a>：实验会话的做法</li>
+    <li><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/intro.html">docs/intro.html</a>：给人看的项目介绍页，随功能改动更新，维护规则见 <a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#项目介绍页">AGENTS.md「项目介绍页」</a></li>
+  </ul>
+  <div>本页源文件 <a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/workflow.html">docs/workflow.html</a>。改工作流的提交（PR 或直接提交 main）同步改它，由把改动落到 main 的 agent 核对该 HTML 与同一版本源码、文档一致。</div>
+</footer>
+</div>

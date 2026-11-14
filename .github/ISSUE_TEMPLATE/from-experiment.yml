@@ -1,0 +1,35 @@
+name: 实验会话发现的问题
+description: 跑实验时遇到 labmon 的问题（实验会话开，不直接改 main；见 skills/lab-experiments/SKILL.md「发现 labmon 的问题」）
+labels: [from-experiment]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        此仓库公开。请只提供合成复现或脱敏摘要，用示例人物、主机、地址与项目名。
+        不上传生产日志、原始截图、配置、身份、私有报告编号与关联或秘密；原始证据留在受权看板或私有维护记录。
+  - type: input
+    id: where
+    attributes:
+      label: 合成复现的场景
+      description: 例：node-a，demo，启动 5 分钟后
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象
+      description: 看到了什么，本该怎样；对实验的影响（卡住、白跑、误报）。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 证据
+      description: 脱敏后的告警含义、最小合成清单、示例状态与预期结果；不要粘贴原始输出或上传生产附件。
+    validations:
+      required: true
+  - type: textarea
+    id: guess
+    attributes:
+      label: 猜测的原因
+      description: 可不写。只当线索，labmon 那边会先核实；不要改任务名、换 tag、改清单绕开（见 SKILL「发现 labmon 的问题」）。

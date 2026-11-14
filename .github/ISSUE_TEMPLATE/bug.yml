@@ -1,0 +1,28 @@
+name: bug
+description: labmon 做错了：放行、推演、保活、借用、平台操作、页面或告警不对（改行为的修复先在评论里写设计说明，见 AGENTS.md「怎么开发」）
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        此仓库公开。请只提供合成复现或脱敏摘要，用示例人物、主机、地址与项目名。
+        不上传生产日志、原始截图、配置、身份、私有报告编号与关联或秘密；原始证据留在受权看板或私有维护记录。
+  - type: textarea
+    id: what
+    attributes:
+      label: 现象
+      description: 看到了什么，本该怎样。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 证据
+      description: 合成状态/事件中的相关字段及预期结果；时刻可用相对时间，主机、项目与任务名使用虚构示例。
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: 怎么复现
+      description: 可不写。提供最小合成清单、临时指令和示例主机关系，不复制生产清单。

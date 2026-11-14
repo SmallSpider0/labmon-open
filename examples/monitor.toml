@@ -1,0 +1,95 @@
+# labmon 配置示例：逐项说明。相对路径相对本文件所在目录。只有标了“必填”的项必须写。
+# 写好后 labmon check -c monitor.toml 校验，labmon project push -c monitor.toml 登记到看板上（之后看板上那份为准，这份是工作副本，
+# labmon wait 每轮同步；见 docs/workbench.md「项目登记与配置」）。
+
+title = "我的实验监控"          # 页面标题
+id = "myexp"                   # 项目 id：看板地址 /p/<id>/，也是 worker add --project 与 pause/focus 用的名字；各项目不同；字母、数字与 _ . -，登记后改不了
+                               # 输出目录固定在看板的登记目录里（~/.local/state/labmon/projects/<id>/out/），out_dir 不再生效
+interval = 120                 # 看板服务（serve）的采集间隔（秒）
+refresh = 60                   # 页面自刷新间隔（秒）
+history_hours = 24             # 历史记录保留时长
+# hide_done_hours = 24         # 不是这里写明的车道（只在登记里有的、自动发现的）跑完这么久没动就收起；[[queues]] 里单条写的优先
+
+# ---- 主机：每台一个 [[hosts]]。不写 ssh 即本机（直接用本机 Python 跑探针）----
+# 多个项目共用的主机建议写进用户级主机清单 ~/.config/labmon/hosts.toml（见 examples/hosts.toml），
+# 这里只写 id 和本项目特有的 checks，或干脆不写、在队列里 host = "…" 直接引用。
+[[hosts]]
+id = "gpu1"                    # 必填，唯一
+label = "gpu1（A100×4）"
+ssh = "user@192.0.2.1"          # 经 ssh 运行探针；用 ControlMaster 复用连接，每次采集只建一条
+port = 22
+python = "/usr/bin/python3"    # 服务器上的 Python（≥ 3.8，只用标准库）
+mounts = [                     # 要看余量的挂载点；min_gb（GiB）/ max_used_pct 触发 disk_low 告警
+  { path = "/data", label = "数据盘", min_gb = 20 },
+  { path = "/tmp", label = "/tmp", max_used_pct = 90 },
+]
+
+# 共享盘各目录用量由该主机上的 labmon worker 轮流统计（低优先级、一次一个），不在这里配置。
+
+[[hosts.checks]]               # 自定义检查：cmd 退出码 0 显示“是”，否则“否”；if 不成立显示“不适用”
+id = "keepalive"
+label = "保活在跑"
+if = "test -x /data/bin/keepalive.sh"
+cmd = "/data/bin/keepalive.sh status"
+detail = ["tail -n 1 /data/keepalive.log"]     # 每条取输出最后一行，显示在检查下面
+when_idle = "队列与保活都没在跑：机器可能因空闲被回收"   # 可选：检查不通过且该主机没有车道在跑时告警
+timeout = 20
+
+# ---- 队列（可选）：项目页的车道按 labmon worker add --project <id> 的登记生成，登记在哪台车道就在哪台，新接入的不用写 ----
+# 想给某条清单起用途名（label）、留住已不登记的清单的历史，或用通配符自动发现旧清单时才写 [[queues]]；
+# 同一条清单（root + jobs）登记过的以登记为准：host 只在哪台都没登记时用。
+# 车道是一台主机上的一个并行位，不绑定实验：页面上按主机、照这里的顺序叫“车道 1”“车道 2”（只在登记里有的排在后面），
+# 车道里跑了哪些实验由任务名归的计划项自动得出。车道名不用写。
+[[queues]]
+id = "main"                    # 必填，唯一；命令与记录里用它，页面只在悬停时显示
+# label = "训练方"             # 可选的用途：只写实验之外的角色，最多 4 个字，显示成“车道 1 训练方”；不写实验名、主机名
+host = "gpu1"                  # 缺省取第一台主机；这条清单登记在别的主机上时以登记为准
+type = "gpu_queue"             # 目前支持 gpu_queue（文件标记式队列，见 docs/worker.md「清单与状态」）
+root = "/data/me/proj"         # 必填：队列的工作目录
+jobs = "jobs/main.txt"         # 必填：任务清单（相对 root）；同名 .env 可给出 QUEUE_STATE / QUEUE_LOGS
+# state = "results/_queue"     # .env 里没写时的状态目录（相对 root）
+# logs = "results/_logs"       # .env 里没写时的日志目录
+# est_re = 'est_min=(\d+(?:\.\d+)?)'     # 清单行内估时的正则（只影响看板怎么读；worker 认资源提示的规则写死，见 docs/worker.md「资源提示」）
+# progress_re = 'PROGRESS (\d+)/(\d+)'   # 日志进度行的正则
+# lock_match = "gpu_queue"               # 判断 lock 里的 PID 仍是队列进程：命令行须含此串
+
+# 自动发现：root 或 jobs 含通配符时，每个匹配到的清单一条车道（id 为 <队列 id>:<清单名>）。
+# 从没启动过的、跑完且久无活动的清单都不显示（与只在登记里有的车道同一条规则）；与上面显式写的、worker 登记过的清单重复的跳过。
+[[queues]]
+id = "auto"
+host = "gpu1"
+root = "/data/me/proj_*"       # 每轮实验一个目录也能跟上；匹配到多个目录时清单名前加目录名
+jobs = "jobs/*.txt"             # 自动发现的车道排在显式登记的后面编号，悬停显示清单名
+# hide_done_hours = 24         # 没有在跑与排队的任务、队列进程不在且这么久没有活动（日志、锁、完成标记）就不再显示；不写取顶层的
+
+# 占位任务：名字匹配此正则的任务视为“等条件放行”的占位任务（不计入计划项与 实际/估时 比值，页面画成暂停块）。
+# 缺省与 worker 的 is_hold 同一条规则：hold 或 pause 在名字开头、结尾，或被 _ . - 或数字隔开（hold_x、pause-1 算，threshold、unpaused 不算）。
+# 写在文件顶层；单条队列可在 [[queues]] 里写 hold_match 覆盖。占位任务一律不要卡、不独占，清单里写不写 gpus=0 都一样。
+# hold_match = '(?i)(?:^|[_.\-\d])(?:hold|pause)(?:$|[_.\-\d])'
+
+# ---- 计划项：把任务按名字归组（prefix 或 match 正则二选一），页面按组着色、汇总 ----
+# 不属于任何计划项的任务按名字前缀（第一个 _ 或 - 之前，如 x5_）自动归组，标签为“x5_*”；
+# 想要好看的名称或 done_when 时，再在这里补写。auto_groups = false 可关掉（写在文件顶层）。
+[[groups]]
+id = "E1"
+label = "E1 主实验"
+prefix = "e1_"
+# color = "#7F77DD"            # 缺省按顺序取调色板
+# done_when = { file = "tasks.md", pattern = '^- \[x\] E1 ' }   # 文件里匹配到即记“完成”；否则按队列状态。文件随 push 与 wait 的同步传到看板，看板读那份
+
+[[groups]]
+id = "abl"
+label = "消融"
+match = "^abl_"
+
+# ---- 里程碑（可选）：画在时间线上；顶部“全部完成”显示离下一个里程碑的余量 ----
+[[markers]]
+date = "2026-11-17"            # 只写日期时取当天结束（23:59:59）；也可写 "2026-11-17 12:00"
+label = "截稿"
+
+# ---- 告警阈值 ----
+[alerts]
+gpu_idle_util = 5              # GPU 利用率低于此值（%）……
+gpu_idle_min = 15              # ……持续这么多分钟，且还有未完成任务，则告警
+stale_min = 5                  # 页面数据超过这么多分钟未更新即标“过期”
+log_silent_min = 0             # >0 时：运行中任务的日志这么久没更新就告警

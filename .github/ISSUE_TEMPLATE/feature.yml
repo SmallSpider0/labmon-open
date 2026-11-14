@@ -1,0 +1,30 @@
+name: 功能 / 改行为
+description: 新功能，或改现有行为（调度、保活、借用、平台操作、数据契约、页面）
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        此仓库公开。请只提供合成复现或脱敏摘要，用示例人物、主机、地址与项目名。
+        不上传生产日志、原始截图、配置、身份、私有报告编号与关联或秘密；原始证据留在受权看板或私有维护记录。
+  - type: markdown
+    attributes:
+      value: |
+        流程见 AGENTS.md「怎么开发」：这里写目标，设计说明按 docs/interactions.md 逐维度写在评论里，只有“必须等”的等维护者定，其余按推荐先做。
+  - type: textarea
+    id: goal
+    attributes:
+      label: 目标
+      description: 要解决什么；现在的做法哪里不够。
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: 证据或例子
+      description: 用合成主机/项目、示例状态字段或离线预览说明需求，不引用生产日志、配置或原始截图。
+  - type: textarea
+    id: idea
+    attributes:
+      label: 初步想法
+      description: 可不写。想到的做法、参考（Slurm、HTCondor 等）。

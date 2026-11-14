@@ -1,0 +1,30 @@
+# TX 上的看门狗（#165）：由 labmon-watch.timer 每 5 分钟拉起一次，探一回就退出。装法见 docs/deploy.md「TX：公网入口与看门狗」。
+# 占位：LABMON_PORT 换成隧道在 TX 上听的端口（与 dashboard-host 公网入口同一个；不是 8765，#168）。
+[Unit]
+Description=labmon 看门狗：探 dashboard-host 看板服务的 /healthz，异常持续 15 分钟推到手机
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 -I /opt/labmon-watch/labmon-watch.py --url http://127.0.0.1:LABMON_PORT/healthz --name "DASHBOARD-HOST 看板"
+# 推送配置：与 dashboard-host 上 ~/.config/labmon/notify.toml 同一种写法；放在 /etc/labmon-watch/notify.toml（root、600），由 systemd 交给它（$CREDENTIALS_DIRECTORY）
+LoadCredential=notify.toml:/etc/labmon-watch/notify.toml
+# 状态：/var/lib/labmon-watch/state.json（$STATE_DIRECTORY）
+StateDirectory=labmon-watch
+DynamicUser=yes
+TimeoutStartSec=60
+# 加固：只出网（到 127.0.0.1 的隧道与推送服务），别的都不碰
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=

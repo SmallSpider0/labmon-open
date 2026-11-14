@@ -1,0 +1,1074 @@
+"""组内服务器：组里别人在用的服务器。平时只读探测（不进调度、不起 worker），看实际利用率，供分配参考；
+在上面动手的只有两件：保活守护开、停 labmon 自己开的那一个保活（fleet_guard.sh，状态记在容器的 /tmp/labmon-guard.state），
+以及用户说好后借来用（borrow.py：拉起 worker、临时指令写在共享盘的 worker 目录，还时清掉）。
+
+主机清单（~/.config/labmon/hosts.toml）的 [fleet] 段：
+
+    [fleet]
+    interval = 600                  # 每台多久探一次（秒）。看板每分钟最多连一台，轮流来
+    lease_days = 7                  # 平台作业每期天数：从容器启动时间算到期，到期前 24、6 小时提醒（相近到期的合成一条）
+    private_pools = ["pool-private"]   # 组里专用的资源池
+    private_max = 4                 # 专用池一共几台
+    public_max = 2                  # 公用池全组最多开几台（多开会被警告甚至强制关机）
+    keepalive = ["keep_alive"]      # GPU 进程自己的命令行含这些字样就算保活（只看它自己，不看父进程：有人用 keepalive_guard.sh 包着真实验）
+    keepalive_cmd = "KA_CALLER=labmon-fleet bash /root/data1/alice/keepalive-demo/bin/ka.sh"   # 开、停保活的命令（后接 start / stop / running）
+    guard_idle_min = 60             # 保活守护：GPU 连着空闲（没有实验也没有保活）这么久就开保活，免得服务器被平台收回
+    guard_watch_min = 5             # 开了保活后在服务器上盯这么久：有实验上来 20 秒内让出；之后靠探测发现、再停掉
+    share = {vram = 0.3, util = 30, cpu = 0.3, mem = 0.3}   # 除保活外的实际占用都低于这些：算“可共享”（还能给别人并行用）
+
+    [[fleet.servers]]               # 每台一条；id 跟着这台走（续租、换人都不变），holder 是现在的使用人
+    id = "29-15158"
+    holder = "CAROL"
+    # job = "CAROL-2"                 # 平台作业名，缺省同 holder（看板换人时同名作业已在跑才加后缀并写这一行）
+    ssh = "root@198.51.100.29"
+    port = 15158
+    pool = "pool-private"
+    # guard = true                  # 保活守护开不开；不写的公用池开、专用池关（页面上「保活守护」里改）
+
+    [[fleet.rules]]                 # 只写例外（可以一条都没有）：正则匹配 GPU 进程与各级父进程的命令行、工作目录
+    match = "/root/demo_eval/"
+    kind = "job"                    # job：给它起个好认的名字；keepalive：把它认作保活
+    label = "demo_eval 评测"
+
+归类：GPU 进程自己的命令行含 keepalive 里的字样就是保活，其余一律算实验（有人在用），名字取命令简称；规则只管例外。
+页面上可以把一组负载点成“这是保活”，它的脚本就加进 keepalive。每组实验按路径归人（disk.whose，与「共享盘」同一张归属表），
+对不上的算这台的使用人。“未识别”只剩一种：显卡报出的进程在容器里找不到（同一宿主机上别的容器在用这张卡）。
+
+借用（borrow.py）：说好后把一台借来给自己的项目跑，块里写 borrow_since 等；借用中它也是调度主机，照样探测，保活守护不管它。
+
+保活守护（guard_state、guard_act）：开了守护的服务器，GPU 连着空闲满 guard_idle_min 分钟，探完就开保活（ka_start，经 fleet_guard.sh：
+开前当场再查一遍，开了以后在服务器上盯 guard_watch_min 分钟，有实验上来就让出）；盯的时间过了，探测发现 labmon 开的保活旁边又有了
+别的负载，就停掉它（ka_stop）。只开、停 labmon 自己开的那一个保活，别的进程一概不碰。看板上手动「开保活」与续租后开保活也走 ka_start。
+
+主机清单里写了 platform_job 的自用主机（worker 在管的）也列进来，状态取 worker 的 GPU 进程归属，算配额、不另外探；
+使用记录（hours）每轮采集按 worker 状态记一次，口径与探针相同（from_worker）。
+
+每台每次一条 ssh（复用连接，accept-new 记在状态目录的 known_hosts）跑 fleet_probe.sh：GPU 各卡与 5 秒利用率、
+GPU 进程（宿主机 PID 经 /proc/<pid>/sched 对回容器 PID）与其父进程链、工作目录、容器的内存与 CPU。
+状态目录 overview/fleet/：
+    state.json         各台：上次探测、连通、容器启动时间、已发的租期提醒、当前小时的累计、最近一次的样本
+    series/<id>.jsonl  每次探测一行（留 7 天；借用中的带 bw，算给对方的预留时不取）；自用主机每 interval 一行（record_mine）
+    hours/<id>.jsonl   每小时一行（留 1 年）：各状态次数、可共享次数、实际用量之和、当时的使用人；借用中的那部分另记在 bw[借的人]
+                       （同样的计数，算进行的总数）。自用主机也有一份（record_mine，样本取 worker 状态：from_worker）
+    mine.json          自用主机当前小时的累计与上次写 series 的时刻（与 state.json 分开：_tick 会删掉不在 [[fleet.servers]] 里的键）
+掉线、恢复、换容器（续租或重启）、新出现的未识别进程、租期提醒、保活守护开保活与让出记进看板的记录（records.log_events）。
+掉线、换容器、租期提醒的判定与看板主机共用（health.link_step、container_step、lease_due）。
+    known_hosts        这些服务器的 ssh 主机密钥（续租、开机换了容器后删掉旧的）
+这里只管探测、归类、保活守护与状态文件；给页面算的数据在 fleetview.py，平台操作在 fleetops.py，自用主机当成一台在 fleetboot.mine。
+"""
+from __future__ import annotations
+
+import fcntl
+import os
+import re
+import shlex
+import subprocess
+import threading
+import time
+from pathlib import Path
+
+from . import lan as L
+from . import lease as LS
+from .platform import NAME_RE as PERSON_RE
+from .config import GIB, ConfigError, _read_toml, all_hosts, fmt_time, hosts_file, set_fleet_keys
+from .health import container_step, lease_due, link_step
+from .health import lease_end as _lease_end
+from .records import log_events
+from .state import append_row, load_json, save_json, snapshot, state_dir as _state_dir
+
+HERE = Path(__file__).resolve().parent
+PROBE = HERE / "fleet_probe.sh"
+GUARD = HERE / "fleet_guard.sh"
+GUARD_RETRY_S = 1800            # 保活守护没开成：隔这么久再试
+TICK = 60                       # 看板每轮间隔；连不上的服务器隔这么久再试一次（掉线判定与看板主机同一规则：health.link_step）
+MERGE_S = 2 * 3600              # 租期提醒：相差这么久以内到期的合成一条
+SERIES_KEEP = 7 * 86400
+HOURS_KEEP = 366 * 86400
+# 本地盘开机以来的新写入（续租、关机、换人会清空，#149）：组内服务器、自用主机与借来的同一个口径（local_writes）
+LOCAL_ACK = 1.0                 # GiB：labmon 之外的新写入（加容器私有的 /dev/shm）到这么多，续租、关机、换人要勾「已确认」（fleetops._risk）
+WROTE_DRIFT = 64 * 2 ** 20      # 字节：组内服务器根盘已用比上次扫路径时变了这么多才再扫（同 worker 的 LOCAL_DRIFT）
+SCAN_S = 60                     # 探针扫路径最多跑这么久，超时这次算没扫完
+SCAN_GAP = 3600                 # 两次扫路径至少隔这么久；没扫完的间隔翻倍，最长一天
+SCAN_TOP = 8                    # 存下的目录取前这么多个，其余合成一项（同 worker 的 LOCAL_TOP）
+STATES = ("job", "unknown", "keepalive", "idle", "down")     # 同一小时里取占多数的；一样多时按这个顺序
+NAMES = {"job": "实验", "unknown": "未识别", "keepalive": "只有保活", "idle": "空闲", "down": "掉线", "off": "已关机"}
+SHELLS = {"sh", "bash", "zsh", "dash", "fish", "tmux", "screen", "nohup", "setsid", "timeout", "sudo", "su", "login",
+          "sshd:", "sshd", "sleep", "tini", "dumb-init", "env", "stdbuf", "nice", "ionice", "xargs", "parallel"}
+
+
+def state_dir() -> Path:
+    return _state_dir() / "fleet"
+
+
+def state_file(name: str) -> Path:
+    """组内服务器状态目录里的文件：boot.json（开机参数）、op.json（当前操作）、people.json、pools.json 等。"""
+    return state_dir() / name
+
+
+_EDIT_LOCK = threading.Lock()
+
+
+def edit_state(name: str, fn):
+    """读改写状态目录里的一个 JSON 文件（op.json、boot.json、people.json 等；平台操作线程、HTTP 线程都会改）：
+    fn(字典) 原地改，返回值原样返回。进程内用 _EDIT_LOCK，本机命令行登记人员与看板并行时也用文件锁。"""
+    path = state_file(name)
+    with _EDIT_LOCK:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with open(path.with_suffix(".lock"), "w") as lk:
+            fcntl.flock(lk, fcntl.LOCK_EX)
+            d = load_json(path, {})
+            out = fn(d)
+            save_json(path, d)
+            return out
+
+
+# ---------- 配置 ----------
+def conf(path: Path | None = None) -> dict | None:
+    """读主机清单的 [fleet]；没有就返回 None。"""
+    hf = path or hosts_file()
+    if not hf.exists():
+        return None
+    f = _read_toml(hf).get("fleet")
+    if not f:
+        return None
+    c = {"interval": 600, "lease_days": 7, "private_pools": [], "private_max": None, "public_max": None,
+         "keepalive": ["keep_alive"], "keepalive_cmd": None, "guard_idle_min": 60, "guard_watch_min": 5, **{k: v for k, v in f.items() if k not in ("servers", "rules", "share")}}
+    c["share"] = {"vram": 0.3, "util": 30, "cpu": 0.3, "mem": 0.3, **(f.get("share") or {})}
+    c["servers"] = []
+    for s in f.get("servers", []):
+        miss = [k for k in ("id", "holder", "ssh", "port", "pool") if not s.get(k)]
+        if miss:
+            raise ConfigError(f"{hf} 的 [[fleet.servers]] 缺 {'、'.join(miss)}：{s}")
+        s = {**s, "id": str(s["id"]), "holder": str(s["holder"])}
+        s["job"] = str(s.get("job") or s["holder"])          # 平台作业名：缺省就是名字，同名作业已在跑时加了后缀
+        s.setdefault("label", s["holder"])
+        c["servers"].append(s)
+    if len({s["id"] for s in c["servers"]}) != len(c["servers"]):
+        raise ConfigError(f"{hf} 的 [[fleet.servers]] id 重复")
+    c["rules"] = []
+    for r in f.get("rules", []):
+        if not r.get("match") or r.get("kind") not in ("job", "keepalive"):
+            raise ConfigError(f"{hf} 的 [[fleet.rules]] 需要 match（正则）与 kind = \"job\" 或 \"keepalive\"：{r}")
+        try:
+            c["rules"].append({**r, "re": re.compile(r["match"])})
+        except re.error as e:
+            raise ConfigError(f"[[fleet.rules]] 的正则写错了：{r['match']}（{e}）") from None
+    return c
+
+
+def borrowed(s: dict) -> bool:
+    """这一台组内服务器正借着（[[fleet.servers]] 写了 borrow_since、还没写 borrow_returned）。借用、保活守护、平台操作、曲线都按它认。"""
+    return bool(s.get("borrow_since")) and not s.get("borrow_returned")
+
+
+def borrower(s: dict, cfg: dict | None) -> str | None:
+    """这一台（这次或上一次）借给了谁。只有 #70 上线前的借用没有 borrow_by。"""
+    return (s.get("borrow_by") or legacy_person(cfg)) if s.get("borrow_since") else None
+
+
+def legacy_person(cfg: dict | None) -> str | None:
+    """旧清单中没有归属字段的主机和借用沿用原人名。旧清单补齐后可删。"""
+    if (cfg or {}).get("me"):
+        return str(cfg["me"])
+    job = next((h["platform_job"] for h in all_hosts() if h.get("platform_job") and not h.get("platform_holder")), None)
+    return re.sub(r"-\d+$", "", str(job)) if job else None
+
+
+def host_holder(host: dict, cfg: dict | None) -> str | None:
+    """自用主机的组内人员归属。"""
+    return host.get("platform_holder") or legacy_person(cfg)
+
+
+def registered_people() -> dict:
+    """读取已登记的组内人员名册。"""
+    return load_json(state_file("people.json"), {})
+
+
+def known_people(cfg: dict) -> set[str]:
+    """组内名单及当前主机归属中的人员名。"""
+    servers = cfg.get("servers") or []
+    names = set(registered_people())
+    names.update(s["holder"] for s in servers)
+    names.update(borrower(s, cfg) for s in servers)
+    names.update(host_holder(h, cfg) for h in all_hosts() if h.get("platform_job"))
+    return {name for name in names if name}
+
+
+def account_people(cfg: dict, accounts, bindings=None, *, names: set[str] | None = None) -> dict[str, tuple[str | None, str | None]]:
+    """统一核对账号库显式绑定、旧配置和同名。空绑定表示明确暂不关联。"""
+    names = known_people(cfg) if names is None else names
+    by_name = {}
+    for name in sorted(n for n in names if n):
+        by_name.setdefault(name.casefold(), []).append(name)
+    historic = {}
+    for row in (snapshot().get("fleet") or {}).get("holders", []):
+        name = row["holder"]
+        historic.setdefault(name.casefold(), []).append(name)
+
+    mapping = cfg.get("account_people", {})
+    if not isinstance(mapping, dict):
+        return {a: (None, "主机清单的 [fleet.account_people] 要写成账号到人员名的表") for a in accounts}
+    explicit = {}
+    for key, name in mapping.items():
+        explicit.setdefault(key.casefold(), []).append(name)
+    stored = {key.casefold(): name for key, name in (bindings or {}).items()}
+    for key, name in stored.items():
+        explicit[key] = [name]
+
+    # 即使账号暂未创建，显式条目也占用所写的人员名。两个账号指向一人时都不选。
+    owners = {}
+    for key, values in explicit.items():
+        for name in values:
+            if isinstance(name, str) and PERSON_RE.fullmatch(name):
+                owners.setdefault(name.casefold(), set()).add(key)
+
+    out = {}
+    for account in accounts:
+        key = account.casefold()
+        choices = explicit.get(key, [])
+        if len(choices) > 1:
+            out[account] = (None, f"账号 {account} 在 [fleet.account_people] 中有多条对应")
+            continue
+        name = choices[0] if choices else account
+        if choices and name is None and key in stored:
+            out[account] = (None, None)
+            continue
+        if not isinstance(name, str) or not PERSON_RE.fullmatch(name):
+            out[account] = (None, f"账号 {account} 对应的人员名不能作平台作业名，请核对 [fleet.account_people]")
+            continue
+        same = by_name.get(name.casefold()) or historic.get(name.casefold(), [])
+        if choices and name in names:
+            person = name
+        elif len(same) > 1:
+            out[account] = (None, f"账号 {account} 对应多个人员名，请在 [fleet.account_people] 指定准确的拼写")
+            continue
+        else:
+            person = same[0] if same else name
+        owners.setdefault(person.casefold(), set()).add(key)
+        out[account] = (person, None)
+    for account, (person, _) in out.items():
+        if person and len(owners[person.casefold()]) > 1:
+            out[account] = (None, f"人员 {person} 对应多个账号，请核对 [fleet.account_people]")
+    return out
+
+
+def account_person(cfg: dict | None, account: str | None) -> tuple[str | None, str | None]:
+    """认证账号对应的人员名与无法识别时的说明。已有同名人员保留原有拼写。"""
+    if account is None:
+        return legacy_person(cfg), None
+    from .users import account_identity
+    accounts, bindings = account_identity()
+    return account_people(cfg or {}, {*accounts, account}, bindings)[account]
+
+
+def account_choices(cfg: dict, links: dict, bindings=None) -> list[str]:
+    """可在账号表单选择的人，实际保存时仍按同一映射规则查重。"""
+    reserved = {name.casefold() for name, _ in links.values() if name}
+    mapping = cfg.get("account_people", {})
+    if not isinstance(mapping, dict):
+        return []
+    stored = {key.casefold() for key in (bindings or {})}
+    reserved.update(name.casefold() for key, name in mapping.items()
+                    if key.casefold() not in stored and isinstance(name, str))
+    return sorted((name for name in registered_people()
+                   if PERSON_RE.fullmatch(name) and name.casefold() not in reserved), key=str.casefold)
+
+
+def check_account_binding(cfg: dict, accounts, bindings: dict, account: str, person: str, *, existing=False) -> None:
+    """核对页面的显式选择及对其他账号的影响。"""
+    if not PERSON_RE.fullmatch(person) or person not in registered_people():
+        raise ConfigError(f"人员 {person} 已不在组内名单，请刷新后重试")
+    before = account_people(cfg, accounts, bindings)
+    old, _ = before.get(account, (None, None))
+    if existing and old and old != person and (account in bindings or old in known_people(cfg)):
+        raise ConfigError(f"{account} 已关联组内人员 {old}")
+    after = account_people(cfg, {*accounts, account}, {**bindings, account: person})
+    resolved, error = after[account]
+    if error or resolved != person:
+        raise ConfigError(error or "人员对应已经变化，请刷新后重试")
+    for name, (old, _) in before.items():
+        if name != account and old and after[name][0] != old:
+            raise ConfigError(after[name][1] or f"人员对应会影响已有账号 {name}")
+
+
+# ---------- 探测 ----------
+def _ssh_cmd(s: dict, *extra: str) -> list[str]:
+    """连这一台的 ssh：复用看板的长连接，第一次连自动接受主机密钥。记在哪份文件只在这里定（#109）：服务器项带 known_hosts
+    （自用主机，fleetboot.mine 给：主机清单写的或 ~/.ssh/known_hosts，与拉起 worker、实验会话裸 ssh 同一份）就记在那里，
+    组内服务器与借来的记在状态目录。续租后等 ssh 的那次连接建起长连接，之后 worker 与看板复用它时不再核对密钥，所以必须记对文件。"""
+    kh = s.get("known_hosts") or state_dir() / "known_hosts"
+    if not s.get("known_hosts"):
+        kh.parent.mkdir(parents=True, exist_ok=True)
+    return L.ssh_argv(s["ssh"], s["port"], *extra, known_hosts=kh)
+
+
+def ssh(s: dict, remote: str, input: str | None = None, timeout: int = 60) -> tuple[int, str, str]:
+    """在这一台上跑一条命令，返回 (退出码, 标准输出, 标准错误)；ssh 本身连不上时退出码是 255。"""
+    try:
+        r = L.ssh_run(_ssh_cmd(s) + [remote], input=input, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return 255, "", "ssh 超时"
+    return r.returncode, r.stdout, r.stderr
+
+
+def forget(s: dict) -> None:
+    """续租、开机换了容器：关掉连旧容器的复用连接，删掉记下的旧主机密钥（新容器的密钥若不同，accept-new 会拒连）。
+    只删这一台 host:port 的条目（22 端口的不带方括号），两份都删：状态目录的 known_hosts（组内服务器探测、等 ssh 用）；
+    自用主机自己那份（s["known_hosts"]，fleetboot.mine 给：主机清单写的或 ~/.ssh/known_hosts）。新密钥由之后等 ssh 的那次连接记回
+    _ssh_cmd 定的那份（#109）。"""
+    subprocess.run(_ssh_cmd(s, "-O", "exit"), capture_output=True, timeout=20)
+    host, port = s["ssh"].rsplit("@", 1)[-1], int(s["port"])
+    for f in dict.fromkeys([str(state_dir() / "known_hosts"), *([str(s["known_hosts"])] if s.get("known_hosts") else [])]):
+        subprocess.run(["ssh-keygen", "-R", f"[{host}]:{port}" if port != 22 else host, "-f", f], capture_output=True, timeout=20)
+
+
+def fetch(s: dict, scan: float | None = None, timeout: int = 60) -> tuple[str | None, str | None]:
+    """一条 ssh 跑探针，返回 (原文, 错误)。认作保活的字样（[fleet] keepalive）随命令传过去：探针只读这些保活进程树的 smaps。
+    scan：顺带扫根盘这个时刻（开机）以后新写的路径（scan_due 定），探针最多多跑 SCAN_S 秒。"""
+    env = f"LABMON_SCAN={int(scan)} LABMON_SCAN_S={SCAN_S} " if scan else ""
+    try:
+        rc, out, err = ssh(s, env + "bash -s -- " + shlex.join((conf() or {}).get("keepalive", [])), PROBE.read_text(), timeout + (SCAN_S + 15 if scan else 0))
+    except UnicodeDecodeError as e:
+        # 不替换探针中的路径、进程命令等结构字段；整份拒收，沿原失败记录推进轮询。
+        return None, f"探针输出不是有效 UTF-8（字节位置 {e.start}–{e.end}），本次未采纳"
+    if "@@ info" not in out:
+        if "IDENTIFICATION HAS CHANGED" in err or "Host key verification failed" in err:
+            return None, "主机密钥变了（多半在网页上续租或重启过）：详情页点「开保活」会先清掉旧密钥再连"
+        return None, (err.strip().splitlines() or [f"ssh 失败（退出码 {rc}）"])[-1]
+    return out, None
+
+
+def _secs(s: str) -> int:
+    """ps 的 time 列：[DD-]HH:MM:SS → 秒。"""
+    d, _, hms = s.rpartition("-")
+    parts = [int(x) for x in hms.split(":")]
+    while len(parts) < 3:
+        parts.insert(0, 0)
+    return (int(d) if d else 0) * 86400 + parts[0] * 3600 + parts[1] * 60 + parts[2]
+
+
+def _num(s, default=None):
+    try:
+        return float(s)
+    except (TypeError, ValueError):
+        return default
+
+
+def parse(raw: str) -> dict:
+    """探针输出 → 样本：info、各卡、利用率采样、CPU、GPU 进程、PID 对照、进程表。"""
+    sec, cur = {}, None
+    for line in raw.splitlines():
+        if line.startswith("@@ "):
+            cur = sec.setdefault(line[3:].strip(), [])
+        elif cur is not None and line.strip():
+            cur.append(line)
+    info = dict((l.split(None, 1) + [""])[:2] for l in sec.get("info", []))
+    smp = {"clock": _num(info.get("clock")), "nproc": _num(info.get("nproc"))}
+    bt, tck, p1 = _num(info.get("btime")), _num(info.get("tck")), _num(info.get("p1"))
+    smp["started"] = round(bt + p1 / tck) if bt and tck and p1 is not None else None
+    lim, use, ina, act = (_num(info.get(k)) for k in ("memlim", "memuse", "inact", "actf"))
+    # 收不回的内存 = 用量 − 文件页：与 worker 的 mem_unevictable 同一口径（两份：探针在没有 Python 的镜像里跑，worker 不 import 本包）
+    smp["mem"] = {"limit": lim / GIB, "used": (use - (ina or 0)) / GIB,
+                  "anon": max(0, use - ina - act) / GIB if ina is not None and act is not None else None} \
+        if lim and use and lim < 2 ** 60 else None
+    q = (info.get("cpuq") or "").split() or (info.get("cpumax") or "").split()
+    smp["cpu_quota"] = round(int(q[0]) / int(q[1]), 2) if len(q) == 2 and q[0].isdigit() and q[1].isdigit() and int(q[0]) > 0 else None
+    rt, rf, sh = ((info.get(k) or "").split() for k in ("root", "rootfs", "shm"))
+    smp["root"] = {"total": int(rt[0]) * 1024 / GIB, "used": int(rt[1]) * 1024 / GIB} if len(rt) == 2 and rt[0].isdigit() and rt[1].isdigit() else None
+    if smp["root"]:
+        # 根盘是 overlay、比宿主机的盘（/etc/hosts 所在的）小一成以上（有配额）：已用就是开机以来写的；否则测不准（同 worker 的 rootfs_info）
+        host = int(rf[1]) * 1024 / GIB if len(rf) == 2 and rf[1].isdigit() else None
+        smp["root"].update(fs=rf[0] if rf else None, ok=bool(rf and rf[0] == "overlay" and host and smp["root"]["total"] < 0.9 * host))
+        if len(sh) == 2 and sh[0] == "shm" and sh[1].isdigit():   # 容器私有的 /dev/shm（与宿主共用的 tmpfs 不算这台的）
+            smp["root"]["shm"] = int(sh[1]) * 1024 / GIB
+    smp["scan"] = _scan(sec["scan"]) if "scan" in sec else None
+    cpu = (sec.get("cpu") or [""])[0].split()
+    smp["cpu"] = round((int(cpu[2]) - int(cpu[0])) / (int(cpu[3]) - int(cpu[1])), 2) \
+        if len(cpu) == 4 and all(x.isdigit() for x in cpu) and int(cpu[3]) > int(cpu[1]) else None
+    samples = {}
+    for l in sec.get("util", []):
+        p = [x.strip() for x in l.split(",")]
+        if len(p) == 2 and p[0].isdigit() and _num(p[1]) is not None:
+            samples.setdefault(int(p[0]), []).append(_num(p[1]))
+    smp["gpus"] = []
+    for l in sec.get("gpu", []):
+        p = [x.strip() for x in l.split(",")]
+        if len(p) == 6 and p[0].isdigit():
+            ss = samples.get(int(p[0])) or []
+            smp["gpus"].append({"i": int(p[0]), "uuid": p[1], "name": p[2], "used": _num(p[3], 0), "total": _num(p[4], 0),
+                                "util": round(sum(ss) / len(ss), 1) if ss else _num(p[5]), "samples": ss})
+    smp["apps"] = []
+    for l in sec.get("apps", []):
+        p = [x.strip() for x in l.split(",")]
+        if len(p) >= 2 and p[0].isdigit():
+            smp["apps"].append({"hpid": int(p[0]), "mb": _num(p[1], 0), "uuid": p[2] if len(p) > 2 else None})
+    smp["map"] = {}
+    for l in sec.get("map", []):
+        p = l.split(None, 2)
+        if len(p) >= 2 and p[0].isdigit() and p[1].isdigit():
+            smp["map"][int(p[1])] = (int(p[0]), p[2] if len(p) > 2 else None)
+    smp["ps"] = {}
+    for l in sec.get("ps", []):
+        p = l.split(None, 6)
+        if len(p) == 7 and p[0].isdigit() and p[1].isdigit():
+            try:
+                smp["ps"][int(p[0])] = {"ppid": int(p[1]), "etime": int(p[2]), "cpu_s": _secs(p[3]), "pcpu": _num(p[4], 0),
+                                        "rss": int(p[5]) * 1024, "args": p[6]}
+            except ValueError:
+                continue
+    smp["pss"] = {int(p[0]): int(p[1]) * 1024 for p in (l.split() for l in sec.get("pss", [])) if len(p) == 2 and p[0].isdigit() and p[1].isdigit()}
+    smp["guard"] = None                                  # labmon 开的保活（fleet_guard.sh 记的）
+    for l in sec.get("guard", []):
+        p = l.split()
+        if p[0] == "start" and len(p) >= 4 and all(x.isdigit() for x in p[1:4]):
+            smp["guard"] = {"t": int(p[1]), "pgid": int(p[2]), "until": int(p[3]), "by": " ".join(p[4:]) or None}
+        elif smp["guard"] and p[0] in ("yield", "stop") and len(p) >= 2 and p[1].isdigit():
+            smp["guard"]["end"] = {"t": int(p[1]), "how": p[0], "why": " ".join(p[2:]) or None}
+    return smp
+
+
+def _scan(lines: list[str]) -> dict:
+    """探针 scan 段 → {b, n, keys, top [[路径, 字节, 最近写入]], partial, err}（字节；没有 GNU find 的 err 为 nofind）。"""
+    out = {"b": 0, "n": 0, "keys": 0, "top": [], "partial": False, "err": None}
+    for l in lines:
+        p = l.split(None, 3)
+        if p[0] == "nofind":
+            out["err"] = "nofind"
+        elif p[0] == "total" and len(p) == 4 and all(x.isdigit() for x in p[1:]):
+            out.update(b=int(p[1]) * 1024, n=int(p[2]), keys=int(p[3]))
+        elif p[0] == "rc":
+            out["partial"] = p[1:] == ["124"]
+        elif len(p) == 4 and p[0].isdigit() and p[1].isdigit() and p[2].isdigit():
+            out["top"].append([p[3], int(p[0]) * 1024, int(p[2]) or None])
+    return out
+
+
+def local_writes(root: dict | None, scan: dict | None, own: float | None = None) -> dict | None:
+    """本地盘开机以来的新写入（续租、关机、换人会清空，#149）：组内服务器（探针的 root 与扫出的 wrote）、自用主机与借来的（worker 的 info.rootfs
+    与 storage）同一个口径，页面、平台操作的确认、提醒都取它。root：{used, total, fs, ok, shm}（GiB）；scan：扫出的路径（字节：worker 的
+    storage.wrote 或组内服务器的 wrote）；own：labmon 目录的占用（字节，组内服务器没有）。
+    返回（GiB）：used 根盘已用（ok 时就是开机以来写的）、total、own、user = used − own（labmon 之外的）、shm、ok（测得准）、
+    risk（测得准且 user + shm 到 LOCAL_ACK：续租、关机、换人要勾「已确认」）、scan（since 起算的时刻、b、n、top [[路径, GiB, 最近写入]]、
+    more [其余几处, GiB]、t 扫的时刻、partial 没扫完、pending 还没扫的单位数、err）。没有根盘的量为 None。"""
+    if not root or root.get("used") is None:
+        return None
+    own_g = (own or 0) / GIB
+    user, shm, ok = max(0.0, root["used"] - own_g), root.get("shm") or 0.0, bool(root.get("ok"))
+    out = {"used": round(root["used"], 3), "total": root.get("total") and round(root["total"], 1), "own": round(own_g, 3) if own is not None else None,
+           "user": round(user, 3), "shm": round(shm, 3) or None, "ok": ok, "risk": ok and user + shm >= LOCAL_ACK, "scan": None}
+    if scan:
+        g = lambda b: round((b or 0) / GIB, 3)  # noqa: E731
+        out["scan"] = {"since": scan.get("since"), "t": scan.get("t"), "b": g(scan.get("b")), "n": scan.get("n"),
+                       "top": [[x[0], g(x[1]), x[2] if len(x) > 2 else None] for x in scan.get("top") or []],
+                       "more": [(scan.get("more") or [0, 0])[0], g((scan.get("more") or [0, 0])[1])],
+                       "partial": bool(scan.get("partial")), "pending": scan.get("pending") or 0, "err": scan.get("err")}
+    return out
+
+
+def lw_text(lw: dict | None, verb: str = "续租") -> str:
+    """local_writes 过了门槛（risk）时的一句话：写了多少、大头在哪、verb（续租、关机、换人）会清空。平台操作的确认（fleetops._risk）与
+    预备续租的提醒（renew.check）共用；页面上是 lwText（overview.html）。没过门槛为空串。"""
+    if not lw or not lw.get("risk"):
+        return ""
+    top = "、".join((p[:-2] or "/") + "（本层）" if p.endswith("/.") else p for p, *_ in ((lw.get("scan") or {}).get("top") or [])[:3])
+    return (f"本地盘开机以来 labmon 之外写了 {lw['user'] + (lw.get('shm') or 0):.1f} GiB" + (f"（{top}）" if top else "")
+            + f"，{verb}会清空，要留的先挪到共享盘")
+
+
+def server_lw(st: dict) -> dict | None:
+    """组内服务器的 local_writes：总量取最近一次探测的，路径取扫出的（换了容器的旧结果不要）。组内页（fleetview）与平台操作的确认（fleetops._probe）共用。"""
+    a, w = st.get("sample") or {}, st.get("wrote")
+    return local_writes(a.get("root"), w if w and w.get("started") == a.get("started") else None) if a else None
+
+
+def scan_due(s: dict, st: dict, t: float, off: bool = False) -> float | None:
+    """这一次探测要不要顺带扫路径（维护者 11-10 允许扫别人的，#149），要就返回开机时刻（探针只数它以后新写的）。
+    只扫根盘测得准（overlay + 配额）、知道开机时刻、没在借用（扫出来的混着我们的）、没关机的；对方在跑实验照样扫（维护者 11-10 定，#155：开销实测不到 1 秒）；
+    这个容器还没扫过（已用不到 WROTE_DRIFT 的不扫），或根盘已用比上次扫时变了 WROTE_DRIFT；两次至少隔 SCAN_GAP，没扫完的间隔翻倍、最长一天；
+    扫不了的（没有 GNU find）这个容器不再扫。"""
+    a = st.get("sample") or {}
+    r, started = a.get("root") or {}, a.get("started")
+    if off or borrowed(s) or not r.get("ok") or not started:
+        return None
+    w, used = st.get("wrote") or {}, r["used"] * GIB
+    if w.get("started") != started:
+        return started if used >= WROTE_DRIFT else None
+    if w.get("err") or t - w["t"] < min(86400, SCAN_GAP * 2 ** (w.get("fails") or 0)):
+        return None
+    return started if w.get("partial") or abs(used - w["used"]) > WROTE_DRIFT else None
+
+
+def _wrote(sc: dict, a: dict, old: dict | None, t: float) -> dict:
+    """探针扫出的路径存进这台的状态（wrote，字节）：前 SCAN_TOP 个目录，其余合成 more；没扫完的记 partial、fails 加一（scan_due 的间隔翻倍）。"""
+    top = sc["top"][:SCAN_TOP]
+    old = old if old and old.get("started") == a["started"] else {}
+    return {"t": round(t), "started": a["started"], "since": a["started"], "used": round(a["root"]["used"] * GIB), "b": sc["b"], "n": sc["n"], "top": top,
+            "more": [max(0, sc["keys"] - len(top)), max(0, sc["b"] - sum(x[1] for x in top))], "partial": sc["partial"], "err": sc["err"],
+            "fails": (old.get("fails") or 0) + 1 if sc["partial"] else 0}
+
+
+# ---------- 归类 ----------
+def _exe(args: str) -> str:
+    return os.path.basename((args.split() or [""])[0]).lstrip("-")
+
+
+def _shell(args: str) -> bool:
+    return _exe(args) in SHELLS or ".vscode-server" in args or args.startswith("sshd:")
+
+
+def _spawn(args: str) -> bool:
+    return "multiprocessing" in args and " -c " in f" {args} "
+
+
+def _script(args: str) -> tuple[str | None, list[str]]:
+    """命令行跑的是什么（照命令行里的写法）与其后的参数：python 取模块或脚本，shell 取脚本，别的取程序本身。
+    python -c、光一个 python 或 shell 返回 None。"""
+    t = args.split()
+    exe, rest = _exe(args), t[1:]
+    if re.fullmatch(r"python[\d.]*", exe):
+        i = 0
+        while i < len(rest) and rest[i].startswith("-") and rest[i] not in ("-m", "-c"):
+            i += 1
+        if i < len(rest) and rest[i] == "-m" and i + 1 < len(rest):
+            return rest[i + 1], rest[i + 2:]
+        return (rest[i], rest[i + 1:]) if i < len(rest) and rest[i] != "-c" else (None, [])
+    if exe in SHELLS:
+        return (rest[0], rest[1:]) if rest and not rest[0].startswith("-") else (None, [])
+    return (t[0], rest) if t else (None, [])
+
+
+def brief(args: str) -> str:
+    """命令行的简称：python 取模块或脚本名，再带上 --config 的文件名。"""
+    if not args.split():
+        return ""
+    tok, more = _script(args)
+    if not tok:
+        exe = _exe(args)
+        return "python -c …" if re.fullmatch(r"python[\d.]*", exe) and " -c " in f" {args} " else exe
+    name = os.path.basename(tok).lstrip("-")
+    cfg = next((os.path.basename(more[k + 1]) for k in range(len(more) - 1) if more[k] in ("--config", "--cfg", "--config-file")), None)
+    return (name + (f" · {cfg}" if cfg else ""))[:90]
+
+
+def _chain(ps: dict, pid: int | None) -> list[int]:
+    out = []
+    while pid in ps and pid not in out and pid > 1:
+        out.append(pid)
+        pid = ps[pid]["ppid"]
+    return out
+
+
+def _desc(ps: dict, tops: set[int]) -> set[int]:
+    kids = {}
+    for p, x in ps.items():
+        kids.setdefault(x["ppid"], []).append(p)
+    out, todo = set(), list(tops)
+    while todo:
+        p = todo.pop()
+        if p not in out:
+            out.add(p)
+            todo += kids.get(p, [])
+    return out
+
+
+def classify(own: str, text: str, cfg: dict) -> tuple[str, str | None, str | None]:
+    """(类别, 规则给的名字, 命中的规则)。own 是 GPU 进程自己的命令行，text 再加上父进程链与目录。
+    顺序：规则命中自己的命令行 → 自己的命令行含保活字样 → 规则命中父进程链或目录 → 其余都算实验（有人在用）。
+    保活字样排在“规则按父进程命中”之前：实验守护脚本（如 demo_eval 的 keepalive_guard.sh）拉起的保活，父进程带着项目路径，
+    按父进程算会把纯保活误判成实验。"""
+    for r in cfg["rules"]:
+        if r["re"].search(own):
+            return r["kind"], r.get("label"), r["match"]
+    if any(k in own for k in cfg["keepalive"]):
+        return "keepalive", None, None
+    for r in cfg["rules"]:
+        if r["re"].search(text):
+            return r["kind"], r.get("label"), r["match"]
+    return "job", None, None
+
+
+def mark_keepalive(sid: str, pid: int) -> str:
+    """页面上把这台的一组负载认作保活：它的 GPU 进程跑的脚本（照命令行里的写法）加进主机清单的 [fleet] keepalive，
+    再立刻探一次才生效。返回加进去的字样。"""
+    w = next((w for w in ((_load_state().get(sid) or {}).get("sample") or {}).get("work", []) if w.get("pid") == pid), None)
+    if not w or not w.get("chain"):
+        raise ConfigError(f"{sid} 上已经没有这组负载，刷新再看")
+    word = _script(w["chain"][-1])[0]
+    if not word:
+        raise ConfigError("认不出它跑的脚本，请在主机清单里加一条 [[fleet.rules]]（match 写正则，kind = \"keepalive\"）")
+    cfg = conf()
+    if word not in cfg["keepalive"]:
+        who = " ".join(filter(None, [next((x["holder"] for x in cfg["servers"] if x["id"] == sid), None), sid]))
+        set_fleet_keys({"keepalive": [*cfg["keepalive"], word]}, f"把 {who} 上的 {word} 认作保活")
+    return word
+
+
+def analyze(smp: dict, cfg: dict) -> dict:
+    """把 GPU 进程按“最上层的非 shell 父进程”归成一组组负载并归类，算出这台的状态与除保活外的实际用量。"""
+    ps, groups, ka_gpu = smp["ps"], {}, set()
+    for a in smp["apps"]:
+        pid, cwd = smp["map"].get(a["hpid"], (None, None))
+        if pid is None and a["hpid"] in ps:              # 新内核在容器里直接给容器 PID
+            pid = a["hpid"]
+        ch = _chain(ps, pid)
+        if not ch:
+            g = groups.setdefault(("h", a["hpid"]), {"kind": "unknown", "label": f"宿主机 PID {a['hpid']}（容器里找不到）",
+                                                     "rule": None, "top": None, "mb": 0, "n": 0, "names": [], "cwd": None, "chain": []})
+            g["mb"] += a["mb"]
+            g["n"] += 1
+            continue
+        top = next((p for p in reversed(ch) if not _shell(ps[p]["args"])), ch[0])
+        name = next((p for p in ch if not _spawn(ps[p]["args"])), ch[0])
+        kind, label, rule = classify(ps[pid]["args"], "\n".join(ps[p]["args"] for p in ch) + "\n" + (cwd or ""), cfg)
+        if kind == "keepalive":
+            ka_gpu.add(pid)
+        g = groups.setdefault(top, {"kind": kind, "label": label, "rule": rule, "top": top, "mb": 0, "n": 0, "names": [], "cwd": cwd,
+                                    "chain": [ps[p]["args"][:300] for p in reversed(ch)]})
+        g["kind"] = min(g["kind"], kind, key=STATES.index)       # 一组里有实验就算实验
+        g["mb"] += a["mb"]
+        g["n"] += 1
+        nm = brief(ps[name]["args"])
+        if nm not in g["names"]:
+            g["names"].append(nm)
+    work = []
+    for g in groups.values():
+        t = ps.get(g["top"]) if g["top"] else None
+        work.append({**g, "label": g["label"] or (brief(t["args"]) if t else g["label"]), "args": t["args"] if t else None,
+                     "etime": t["etime"] if t else None, "cpu_s": t["cpu_s"] if t else None, "pid": g["top"] if t else None,
+                     "mb": round(g["mb"])})
+    work.sort(key=lambda w: (STATES.index(w["kind"]), -w["mb"]))
+    g = smp.get("guard")
+    if g:                                                # labmon 开的那个保活还在不在（进程组长就是保活进程）
+        g = {**g, "running": any(k in (ps.get(g["pgid"]) or {}).get("args", "") for k in cfg["keepalive"])}
+        for w in work:
+            w["ours"] = g["running"] and w["kind"] == "keepalive" and w["pid"] == g["pgid"]
+    kinds = {w["kind"] for w in work}
+    st = next((k for k in STATES if k in kinds), "idle")
+    # 保活：GPU 上认作保活的进程整棵进程树（同 worker 的 proc_tree）。内存扣各进程 PSS（探针的 pss 段；按规则认作保活、探针没读的按 RSS），
+    # 同 worker 扣保活的口径（#29：RSS 会把父子共享的页重复相加，扣多了）；CPU 扣 ps 的 %CPU（进程整个生命期的平均，worker 算的是这一段）
+    ka = {p for p in _desc(ps, ka_gpu) if p in ps}
+    ka_cpu = sum(ps[p]["pcpu"] for p in ka) / 100
+    ka_mem = sum(smp.get("pss", {}).get(p, ps[p]["rss"]) for p in ka) / GIB
+    vt = sum(g["total"] for g in smp["gpus"]) or None
+    vr = sum(w["mb"] for w in work if w["kind"] != "keepalive")
+    util = round(sum(g["util"] or 0 for g in smp["gpus"]) / len(smp["gpus"]), 1) if smp["gpus"] else None
+    ur = util if vr else 0
+    cr = max(0.0, smp["cpu"] - ka_cpu) if smp["cpu"] is not None else None
+    m = smp["mem"]
+    mr = max(0.0, m["used"] - ka_mem) if m else None
+    ma = max(0.0, m["anon"] - ka_mem) if m and m["anon"] is not None else None     # 不算页缓存的：给对方留多少按它算（borrow.reserve_for）
+    # 可共享的内存也按不算页缓存的（活跃页缓存收得回，读过大文件不算在用；与借用的预留同口径，11-10 急修）；探针没送 anon 时退回含页缓存的
+    share = shareable(vr, vt, ur, cr, smp["cpu_quota"], mr if ma is None else ma, m["limit"] if m else None, cfg)
+    vscode = any(".vscode-server" in x["args"] for x in ps.values())
+    terms = sum(1 for x in ps.values() if re.match(r"sshd: \S+@pts/", x["args"]))
+    return {"state": st, "work": work, "util": util, "util_real": ur, "vram": sum(g["used"] for g in smp["gpus"]), "vram_total": vt,
+            "vram_real": vr, "vram_ka": sum(w["mb"] for w in work if w["kind"] == "keepalive"), "cpu": smp["cpu"], "cpu_real": cr,
+            "cpu_quota": smp["cpu_quota"], "nproc": smp["nproc"], "mem": m, "mem_real": mr, "mem_anon": ma, "share": bool(share),
+            "gpus": [{k: g[k] for k in ("i", "uuid", "name", "used", "total", "util")} for g in smp["gpus"]],
+            "started": smp["started"], "root": smp["root"], "vscode": vscode, "terms": terms, "guard": g, "mem_ka": ka_mem if m else None,
+            "scan": smp.get("scan")}
+
+
+def shareable(vr, vt, ur, cr, cq, mr, ml, cfg: dict) -> bool:
+    """可共享（还能给别人并行用）：除保活外的显存、利用率、CPU、内存都低于 [fleet] share 的阈值。探针（analyze）与自用主机（from_worker）共用。
+    mr 是收不回的内存（不算页缓存：探针传 mem_anon，自用主机传 worker 的 mem.anon，即 mem_unevictable；没有时退回含页缓存的）。"""
+    s = cfg["share"]
+    return bool(vt and vr / vt < s["vram"] and (ur or 0) < s["util"]
+                and (cr is None or not cq or cr / cq < s["cpu"])
+                and (mr is None or not ml or mr / ml < s["mem"]))
+
+
+def from_worker(st: dict, cfg: dict | None, holder: str | None = None) -> dict:
+    """自用主机的 worker 状态换成与 analyze 同形的样本（使用记录与组内页的抽屉用），口径与探针一致：状态只看 GPU 进程，按 STATES 的先后取；
+    labmon 的任务与容器里找得到的 labmon 之外的 GPU 进程都算实验（探针：找得到、不是保活的一律算实验），对不回容器的（pid 为空）算未识别，
+    命令行含 keep_alive 的算保活（worker 认的字样，同 [fleet] keepalive 的缺省；worker 不 import 本包，另加的字样与规则它不认）。
+    只有 CPU 的任务、占位任务不占 GPU，不算实验。CPU 与内存取整个容器的（worker 状态里没有保活进程树单独的量：mem_ka 为 None），只用来判可共享。
+    work：GPU 进程归成一组组负载（worker 的任务按任务名一组，保活一组，labmon 之外的每个进程一组），不带 pid（页面上不出「这是保活」：
+    worker 认保活不看 [fleet] keepalive）。root：worker 量的容器根盘（info.rootfs：已用、总量、测不测得准、容器私有的 /dev/shm，与探针同形）。
+    fleetboot.mine 给平台操作用的 state（有任务在跑就算 job、labmon 之外的一律未识别）是另一回事，不用这个。"""
+    info, gp = st.get("info") or {}, st.get("gpu_procs") or []
+    kind = lambda p: "keepalive" if p.get("owner") == "keepalive" else "job" if p.get("owner") == "job" or p.get("pid") is not None else "unknown"  # noqa: E731
+    kinds = {kind(p) for p in gp}
+    gs = info.get("gpus") or []
+    vt = sum(g.get("total") or 0 for g in gs) or None
+    vr = sum(p.get("mb") or 0 for p in gp if p.get("owner") != "keepalive")
+    util = round(sum(g.get("util") or 0 for g in gs) / len(gs), 1) if gs else None
+    ur = util if vr else 0
+    m = info.get("mem") or {}
+    cr, mr = info.get("cpu_used"), m.get("used")
+    mu = m.get("anon") if m.get("anon") is not None else mr      # 可共享按不算页缓存的（同 analyze，11-10 急修）
+    runs, groups = {j.get("name"): j for j in st.get("running") or []}, {}
+    for p in gp:
+        k = kind(p)
+        key, label = (("job", p.get("job")), p.get("job")) if p.get("owner") == "job" else (("ka",), "保活") if k == "keepalive" \
+            else (("p", p.get("hpid")), f"labmon 之外：{p.get('comm') or '进程'}") if k == "job" else (("p", p.get("hpid")), f"宿主机 PID {p.get('hpid')}（容器里找不到）")
+        j = runs.get(p.get("job")) if p.get("owner") == "job" else None
+        g = groups.setdefault(key, {"kind": k, "label": label, "mb": 0, "n": 0, "names": [], "cwd": j and j.get("root"),
+                                    "etime": round(st["t"] - j["t0"]) if j and j.get("t0") and st.get("t") else None, **({"owner": holder} if k == "job" else {})})
+        g["mb"] += p.get("mb") or 0
+        g["n"] += 1
+    work = sorted(({**g, "mb": round(g["mb"])} for g in groups.values()), key=lambda w: (STATES.index(w["kind"]), -w["mb"]))
+    return {"state": next((k for k in STATES if k in kinds), "idle"), "work": work, "util": util, "util_real": ur, "vram": sum(g.get("used") or 0 for g in gs),
+            "vram_total": vt, "vram_real": vr, "vram_ka": sum(p.get("mb") or 0 for p in gp if p.get("owner") == "keepalive"),
+            "cpu": cr, "cpu_real": cr, "cpu_quota": info.get("cpu_quota"), "nproc": info.get("nproc"), "mem": m or None, "mem_real": mr, "mem_ka": None,
+            "share": bool(cfg) and shareable(vr, vt, ur, cr, info.get("cpu_quota"), mu, m.get("limit"), cfg),
+            "gpus": [{k: g.get(k) for k in ("i", "uuid", "name", "used", "total", "util")} for g in gs],
+            "root": info.get("rootfs"), "started": info.get("started")}
+
+
+# ---------- 记录 ----------
+def _event(kind: str, sid: str, msg: str, t: float, who: str | None = None, **extra) -> None:
+    log_events([{"kind": kind, "host": sid, "who": who, "msg": msg, **extra}], t)
+
+
+HOUR_NUMS = ("n", "sh", "uj", "vj", "cr", "mr", "nr")     # 小时行（与 bw 里每人一份）的计数；c 是各状态次数
+
+
+def _add(acc: dict, a: dict | None) -> None:
+    for k in HOUR_NUMS:
+        acc.setdefault(k, 0)
+    k = a["state"] if a else "down"
+    acc["n"] += 1
+    c = acc.setdefault("c", {})
+    c[k] = c.get(k, 0) + 1
+    if a:
+        acc["sh"] += a["share"]
+        if k == "job":
+            acc["uj"] += a["util_real"] or 0
+            acc["vj"] += a["vram_real"] or 0
+        if a["cpu_real"] is not None and a["mem_real"] is not None:
+            acc["cr"] += a["cpu_real"]
+            acc["mr"] += a["mem_real"]
+            acc["nr"] += 1
+
+
+def _hour(st: dict, s: dict, a: dict | None, t: float, by: str | None = None) -> None:
+    """计入当前小时；进了新的一小时就把上一小时写进 hours/<id>.jsonl。a 为 None 是掉线。
+    by：借用中，这次样本另计进 acc["bw"][by]（行的总数照旧是整台的；按人统计时这部分算给借的人，见 fleetview._parts）。"""
+    h = int(t // 3600 * 3600)
+    acc = st.get("acc")
+    if acc and acc["h"] != h:
+        append_row(state_dir() / "hours" / f"{s['id']}.jsonl", acc, HOURS_KEEP, t)
+        acc = None
+    if not acc:
+        acc = {"h": h, "holder": s["holder"], "c": {}}
+    acc["holder"] = s["holder"]
+    _add(acc, a)
+    if by:
+        _add(acc.setdefault("bw", {}).setdefault(by, {}), a)
+    st["acc"] = acc
+
+
+def record_mine(xs: list[dict], t: float, cfg: dict) -> None:
+    """自用主机记进使用记录（每轮全局采集后调）：xs 是 fleetboot.mine 给了快照的各行。掉线记掉线；没有新鲜样本的（本机不在内网、
+    worker 状态过期或停了）不记，等同探针的“没探到”。当前小时的累计在 mine.json（_tick 会删掉 state.json 里不在 [[fleet.servers]] 的键）。
+    逐次样本 series/<id>.jsonl 与探针同形（_series_row），每台每 interval 最多一行（与探针同样的密度；上次写的时刻记在 series_t），
+    组内页抽屉的曲线读它；小时行照旧每轮记。"""
+    xs = [x for x in xs if x.get("sample") or x.get("state") == "down"]
+    if not xs:
+        return
+    state_dir().mkdir(parents=True, exist_ok=True)
+    with open(state_dir() / "lock", "w") as lk:
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        sts = load_json(state_file("mine.json"), {})
+        for x in xs:
+            st, a = sts.setdefault(x["id"], {}), None if x.get("state") == "down" else x["sample"]
+            _hour(st, x, a, t)
+            if t - st.get("series_t", 0) >= cfg["interval"]:
+                append_row(state_dir() / "series" / f"{x['id']}.jsonl", _series_row(a, t), SERIES_KEEP, t)
+                st["series_t"] = round(t)
+        save_json(state_file("mine.json"), sts)
+
+
+def accs() -> dict:
+    """各台当前小时还没写进 hours 的累计：{id: acc}（组内服务器在 state.json，自用主机在 mine.json）。"""
+    return {k: v["acc"] for d in (load_json(state_file("mine.json"), {}), _load_state()) for k, v in d.items() if v.get("acc")}
+
+
+def _brief_work(a: dict, but_ours: bool = False) -> str:
+    """GPU 上在跑什么（给记录、提示看）：缺省不算保活；but_ours 时只去掉 labmon 开的那个保活（这人自己的保活也算）。"""
+    w = [x for x in a.get("work", []) if (not x.get("ours") if but_ours else x["kind"] != "keepalive")]
+    return "、".join(f"{x['label']}" for x in w[:2]) + (f" 等 {len(w)} 组" if len(w) > 2 else "")
+
+
+def record(s: dict, raw: str | None, err: str | None, cfg: dict, st: dict, t: float) -> list[str]:
+    """一次探测的结果：更新这台的状态、写曲线与小时累计、记事件。返回要弹通知的消息（只有掉线与恢复）。"""
+    out, prev = [], st.get("last")
+    st["last"] = t
+    a = None
+    if raw is not None:
+        try:
+            a = analyze(parse(raw), cfg)
+        except Exception as x:  # noqa: BLE001 — 解析出错当作这次没探到，不影响别的服务器
+            err = f"探针输出解析不了：{x}"
+    sc = a.pop("scan", None) if a else None
+    if sc and a["started"] and a.get("root"):      # 顺带扫了路径（scan_due）：存下，不进样本
+        st["wrote"] = _wrote(sc, a, st.get("wrote"), t)
+    label = f"{s['holder']}（{s['id']}）"
+    if a is None:
+        st["error"] = err
+        st["idle_since"] = None
+        if link_step(st, False, t) == "down" and not s.get("off"):     # 关机的服务器连不上是应该的
+            end = lease_end(st, cfg)
+            why = "租期到了，需在平台续租" if end and t >= end - 3600 else f"连不上（{err}）"
+            st["down"] = why
+            msg = f"组内服务器 {label} 掉线（{fmt_time(st['since'], date=False)} 起）：{why}"
+            _event("fleet_down", s["id"], msg, t, s["holder"])
+            out.append(msg)
+    else:
+        if link_step(st, True, t) == "up":
+            msg = f"组内服务器 {label} 恢复连接（离线 {round((t - st['since']) / 60)} 分钟）"
+            _event("fleet_up", s["id"], msg, t, s["holder"])
+            out.append(msg)
+        ev = container_step(st, a["started"], label)
+        if ev:
+            log_events([{"host": s["id"], "who": s["holder"], **ev}], t)
+        st.update(error=None, since=None)
+        seen = st.setdefault("seen", [])
+        for w in a["work"]:
+            if w["kind"] == "unknown" and w["label"] not in seen:     # 未识别的只记事件，不弹通知
+                seen.append(w["label"])
+                _event("fleet_unknown", s["id"], f"{label} 有未识别的 GPU 进程：{w['label']}（{w['mb'] / 1024:.1f} GiB）", t, s["holder"])
+        st["seen"] = seen[-50:]
+        if a["state"] == "job":
+            st["last_job"] = t
+        # 连着空闲从哪次探测起（保活守护按它计时）；两次探测隔得太久（看板停过、离开内网）就从这次重新算
+        keep = a["state"] == "idle" and prev and t - prev <= 2.5 * cfg["interval"]
+        st["idle_since"] = (st.get("idle_since") if keep else None) or round(t) if a["state"] == "idle" else None
+        g = a.get("guard") or {}
+        if (g.get("end") or {}).get("how") == "yield" and st.get("guard_logged") != g["end"]["t"]:     # 服务器上盯着的那段时间里让出的
+            st["guard_logged"] = g["end"]["t"]
+            _event("guard_yield", s["id"], f"{label} 上有了 {_brief_work(a, True) or '别的 GPU 进程'}，{g.get('by') or '看板'}开的保活已让出", t, s["holder"])
+        st["sample"] = {**a, "t": round(t)}
+    if a is not None or st.get("down"):              # 连不上但还没判掉线的那次不计，免得网络抖一下就记成掉线
+        _hour(st, s, a, t, borrower(s, cfg) if borrowed(s) else None)
+        append_row(state_dir() / "series" / f"{s['id']}.jsonl", _series_row(a, t, borrowed(s)), SERIES_KEEP, t)
+    return out
+
+
+def _series_row(a: dict | None, t: float, bw: bool = False) -> dict:
+    """series/<id>.jsonl 的一行（探针与自用主机共用）：a 为 None 是掉线。bw：借用中，用量里有我们的（算给对方的预留时不取）。"""
+    row = {"t": round(t), "st": a["state"] if a else "down", **({"bw": 1} if bw else {})}
+    if a:
+        r2 = lambda v: round(v, 2) if v is not None else None  # noqa: E731
+        m = a.get("mem")
+        row.update(u=a["util"], ur=a["util_real"], v=a["vram"], vr=a["vram_real"], vt=a["vram_total"], c=a["cpu"], cr=a["cpu_real"],
+                   cq=a["cpu_quota"], m=r2(m["used"]) if m else None, ml=r2(m["limit"]) if m else None, mr=r2(a["mem_real"]),
+                   ma=r2(a.get("mem_anon")), sh=a["share"], mk=r2(a.get("mem_ka")))
+    return row
+
+
+# ---------- 保活守护 ----------
+def guard_on(s: dict, cfg: dict) -> bool:
+    """这一台开没开保活守护：清单里写了 guard 就照它，没写的公用池开、专用池关。"""
+    return bool(s["guard"]) if "guard" in s else s["pool"] not in cfg["private_pools"]
+
+
+def guard_state(s: dict, st: dict, cfg: dict, t: float, busy: bool = False) -> dict:
+    """保活守护的判定（唯一一处）：这一台现在怎样、要不要动手。页面的状态与 guard_act 都取它。
+    status：ours（labmon 开的保活在跑）、wait（GPU 连着空闲，计时中）、fail（上次没开成，隔一阵再试）、
+    busy（有人在用，或在做平台操作）、off（没开守护）、down（掉线、关机、上次没探到）、borrowed（借来在用：保活由 worker 停启，守护不管）、
+    worker（自用主机，fleetboot.mine 的行：保活一直由 worker 停启，守护从来不管它；#58 以前它的行没有 guard，页面当作没探到）。
+    since：GPU 连着空闲从几点起（没开守护的也给，页面写现状）。
+    act：start（空闲满 guard_idle_min 分钟）；yield（labmon 开的保活还在跑，服务器上盯的时间已过，GPU 上又有了别的负载）。
+    关掉守护只是不再自动开，已开的保活照样让路。"""
+    if s.get("mine"):
+        return {"on": False, "status": "worker"}
+    a, on = st.get("sample") or {}, guard_on(s, cfg)
+    g = a.get("guard") or {}
+    if borrowed(s):
+        return {"on": on, "status": "borrowed"}
+    if s.get("off") or st.get("down") or st.get("error") or not a:
+        return {"on": on, "status": "down"}
+    work = a.get("work") or []
+    if g.get("running"):
+        if any(w.get("ours") for w in work):
+            out = {"on": on, "status": "ours", "t": g["t"], "by": g.get("by"), "until": g["until"]}
+            if t >= g["until"] and not busy and any(not w.get("ours") for w in work):
+                out.update(act="yield", what=_brief_work(a, True))
+            return out
+        if work and t >= g["until"] and not busy:  # 进程仍在、没占 GPU；有别的负载时，仍要防止它随后抢卡
+            return {"on": on, "status": "busy", "act": "yield", "what": _brief_work(a, True)}
+    since, fail = st.get("idle_since"), st.get("guard_fail")
+    if not on:
+        return {"on": on, "status": "off", "since": since}
+    if busy or a.get("state") != "idle" or not since:
+        return {"on": on, "status": "busy", "why": "在做平台操作" if busy else None}
+    out = {"on": on, "since": since, "at": since + cfg["guard_idle_min"] * 60}
+    if fail and t - fail["t"] < GUARD_RETRY_S:
+        return {**out, "status": "fail", "fail": fail, "at": fail["t"] + GUARD_RETRY_S}
+    return {**out, "status": "wait", **({"act": "start"} if t >= out["at"] else {})}
+
+
+def ka_cmd(s: dict, cfg: dict) -> str | None:
+    """这一台开、停保活的命令（唯一一处）：服务器自己写的优先，否则 [fleet] 段的；都没写是 None。"""
+    return s.get("keepalive_cmd") or cfg.get("keepalive_cmd")
+
+
+def _guard_run(s: dict, cfg: dict, args: list, ssh_fn=None) -> tuple[str, str]:
+    """在这一台上跑 fleet_guard.sh（一条 ssh，脚本经标准输入送去）。返回 (ok | busy | fail | ssh, 说明)，ssh 是连不上。"""
+    cmd = ka_cmd(s, cfg)
+    if not cmd:
+        return "fail", "[fleet] 没写 keepalive_cmd"
+    rc, out, err = (ssh_fn or ssh)(s, "bash -s -- " + shlex.join([args[0], cmd, *map(str, args[1:])]), input=GUARD.read_text(), timeout=120)
+    res, note = ((out.strip().splitlines() or [""])[-1].split(None, 1) + ["", ""])[:2]
+    if res in ("ok", "busy", "fail"):
+        return res, note
+    tail = (err or out).strip().splitlines()
+    return ("ssh" if rc == 255 else "fail"), tail[-1] if tail else f"退出码 {rc}"
+
+
+def ka_start(s: dict, cfg: dict, by: str, ssh_fn=None) -> tuple[str, str]:
+    """在这一台上开保活（守护、手动、续租后都走这里）：已在跑不重开（ok already）、GPU 上还有进程不开（busy N）、
+    开了（ok start 进程组）以后在服务器上盯 guard_watch_min 分钟，有实验上来就让出。by：谁开的，记在服务器上。"""
+    return _guard_run(s, cfg, ["start", int(cfg["guard_watch_min"] * 60), by], ssh_fn)
+
+
+def ka_stop(s: dict, cfg: dict, why: str, ssh_fn=None) -> tuple[str, str]:
+    """停掉 labmon 在这一台上开的那个保活（进程组对得上才停）：ok stopped / ok gone（已经不在）/ ok notours（不是我们开的）。"""
+    return _guard_run(s, cfg, ["stop", why], ssh_fn)
+
+
+def guard_act(s: dict, st: dict, cfg: dict, t: float, busy: bool, ssh_fn=None) -> tuple[str | None, list[str]]:
+    """探完一台后按 guard_state 动手：开保活或让出，记进记录。返回 (做了什么, 要弹的通知：只有没开成，连着失败只弹一次)。"""
+    from . import pool_supply
+
+    g = guard_state(s, st, cfg, t, busy)
+    label = f"{s['holder']}（{s['id']}）"
+    if g.get("act") == "start" and not pool_supply.held(s["id"]):
+        res, note = ka_start(s, cfg, "守护", ssh_fn)
+        if res == "ok":
+            st.pop("guard_fail", None)
+            if note.startswith("start"):
+                _event("guard_start", s["id"], f"{label} 的 GPU 连着空了 {round((t - g['since']) / 60)} 分钟，守护开了保活"
+                       f"（盯 {cfg['guard_watch_min']} 分钟，有实验上来就让出）", t, s["holder"])
+                return "start", []
+            return "already", []                        # 探完才出现的保活也要刷新样本，不另记一条启动
+        if res == "busy":                                # 开前一刻有了进程：下次探测再看
+            return None, []
+        first = "guard_fail" not in st
+        st["guard_fail"] = {"t": round(t), "msg": note}
+        msg = f"保活守护没能给 {label} 开保活：{note}"
+        _event("guard_fail", s["id"], msg + f"（{GUARD_RETRY_S // 60} 分钟后再试）", t, s["holder"])
+        return "fail", [msg] if first else []
+    if g.get("act") == "yield":
+        res, note = ka_stop(s, cfg, g["what"], ssh_fn)
+        if res == "ok" and note == "stopped":
+            _event("guard_yield", s["id"], f"{label} 上有了 {g['what']}，停掉了{g.get('by') or '看板'}开的保活", t, s["holder"])
+            return "yield", []
+        if res != "ok":
+            _event("guard_fail", s["id"], f"{label} 上有了 {g['what']}，没能停掉{g.get('by') or '看板'}开的保活：{note}", t, s["holder"])
+    return None, []
+
+
+def guard_conf(cfg: dict | None) -> dict:
+    """页面上「保活守护」要的设置：空闲多久开、开后盯多久（每台开没开在各台的 guard_state 里）。"""
+    if not cfg:
+        return {}
+    return {"idle_min": cfg["guard_idle_min"], "watch_min": cfg["guard_watch_min"]}
+
+
+def set_guard(sid: str | None = None, on: bool | None = None, idle_min=None, watch_min=None) -> None:
+    """页面上改保活守护：某一台开或关（写进它的 [[fleet.servers]] 块），或空闲多久开、开后盯多久（写进 [fleet]）。改动进记录。"""
+    cfg = conf() or {}
+    if sid is not None:
+        s = next((x for x in cfg.get("servers", []) if x["id"] == sid), None)
+        if not s:
+            raise ConfigError(f"组内服务器里没有 {sid}")
+        set_fleet_keys({"guard": bool(on)}, f"{'打开' if on else '关掉'} {s['holder']}（{sid}）的保活守护", sid=sid)
+        return
+    keys = {}
+    for k, v, lo, hi, name in (("guard_idle_min", idle_min, cfg.get("interval", 600) // 60, 24 * 60, "空闲多久开"),
+                               ("guard_watch_min", watch_min, 0, 60, "开后盯多久")):
+        if v is None:
+            continue
+        try:
+            v = int(v)
+        except (TypeError, ValueError):
+            raise ConfigError(f"{name}要写整数分钟") from None
+        if not lo <= v <= hi:
+            raise ConfigError(f"{name}要在 {lo}–{hi} 分钟之间")
+        keys[k] = v
+    if keys:
+        set_fleet_keys(keys, "改保活守护的时间")
+
+
+def lease_end(st: dict, cfg: dict) -> float | None:
+    return _lease_end(st.get("started"), cfg.get("lease_days"))
+
+
+def lease_notices(cfg: dict, sts: dict, t: float, off=()) -> list[str]:
+    """组内服务器的租期提醒（判定在 health.lease_due，与看板主机共用：到期前 24、6 小时各一次，已进 6 小时内的不再报 24；
+    同一轮里相近到期（MERGE_S 内）的合成一条）。关机的服务器不提醒。"""
+    srv = [s for s in cfg["servers"] if s["id"] not in off]
+    ends = [(sts.get(s["id"]) or {}, lease_end(sts.get(s["id"]) or {}, cfg)) for s in srv]
+    out = []
+    for grp in lease_due(ends, t, MERGE_S):
+        msg = "组内服务器租期将到：" + "、".join(f"{srv[i]['holder']} 约剩 {(ends[i][1] - t) / 3600:.0f} 小时（{fmt_time(ends[i][1])}）" for i in grp)
+        for i in grp:
+            _event("lease", srv[i]["id"], msg, t, srv[i]["holder"])
+        out.append(msg)
+    return out
+
+
+def _load_state() -> dict:
+    return load_json(state_dir() / "state.json", {})
+
+
+def _save_state(sts: dict) -> None:
+    state_dir().mkdir(parents=True, exist_ok=True)
+    save_json(state_dir() / "state.json", sts)
+
+
+def tick(t: float | None = None, fetch_fn=None, cfg: dict | None = None, force: str | None = None, ssh_fn=None, busy=()) -> list[str]:
+    """看板每分钟调一次：最多探一台（到期最久的；刚连不上的隔一分钟再试，确认掉线后回到正常间隔），探完按保活守护开保活或让出，
+    再看租期提醒。返回要弹的通知。
+    force：立即探这一台（页面上点的）。busy：正在做平台操作的服务器（fleetops.busy()，调用方给）：不探（停机那几分钟不算掉线），
+    守护也不动它。fetch_fn、ssh_fn：测试替换用（只换了 fetch_fn 时不动手）。
+    这台看板服务是备用（服务租约，#163）时什么都不做：看板线程、命令行 labmon fleet probe、平台操作后的探测都经这里。"""
+    if not LS.primary():
+        return []
+    cfg = cfg if cfg is not None else conf()
+    if not cfg or not cfg["servers"]:
+        return []
+    probe = fetch_fn is not None or L.check(t)["ok"]     # 本机不在内网：不探（不记连不上、不报掉线），租期照常提醒
+    state_dir().mkdir(parents=True, exist_ok=True)
+    with open(state_dir() / "lock", "w") as lk:      # 看板线程与命令行 labmon fleet probe 不同时改状态
+        fcntl.flock(lk, fcntl.LOCK_EX)
+        return _tick(time.time() if t is None else t, fetch_fn or fetch, cfg, force, probe, fetch_fn is None,
+                     ssh_fn or (ssh if fetch_fn is None else None), busy)
+
+
+def off_servers() -> dict:
+    """在看板上关了机的服务器：{id: {"t", "holder"}}（记在 boot.json，开机时去掉）。"""
+    return {k: e["off"] for k, e in load_json(state_file("boot.json"), {}).items() if e.get("off")}
+
+
+def _tick(t: float, fetch_fn, cfg: dict, force: str | None, probe: bool = True, lan: bool = False, ssh_fn=None, busy=()) -> list[str]:
+    sts = _load_state()
+    for k in [k for k in sts if k not in {s["id"] for s in cfg["servers"]}]:
+        sts.pop(k)                                   # 清单里删掉的服务器
+    out = []
+
+    def due(s):
+        st = sts.get(s["id"]) or {}
+        gap = TICK if st.get("fails") and not st.get("down") else cfg["interval"]
+        return t - st.get("last", 0) - gap
+    off = off_servers()                              # 关了机的服务器不探
+    pick = next((s for s in cfg["servers"] if s["id"] == force), None) if force else \
+        max((s for s in cfg["servers"] if s["id"] not in busy and s["id"] not in off and due(s) >= -1), key=due, default=None)
+    if pick and probe:
+        scan = None if force else scan_due(pick, sts.get(pick["id"]) or {}, t, pick["id"] in off)   # 点的、平台操作要的立即探测不顺带扫（要快）
+        raw, err = fetch_fn(pick, scan) if scan else fetch_fn(pick)
+        if raw is not None or not lan or L.check(t)["ok"]:        # 连不上时先看是不是刚离开内网：是就不记
+            st = sts.setdefault(pick["id"], {})
+            out += record({**pick, "off": pick["id"] in off}, raw, err, cfg, st, t)
+            if ssh_fn and raw is not None:
+                act, more = guard_act(pick, st, cfg, t, pick["id"] in busy, ssh_fn)
+                out += more
+                if act in ("start", "already"):      # 已确认保活占 GPU：再探一次，页面马上看到
+                    raw, err = fetch_fn(pick)
+                    out += record(pick, raw, err, cfg, st, t + 1)
+    out += lease_notices(cfg, sts, t, off)
+    _save_state(sts)
+    return out

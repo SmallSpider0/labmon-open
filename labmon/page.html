@@ -1,0 +1,941 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>labmon</title>
+<link rel="icon" id="favicon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23378ADD'/%3E%3Crect x='7' y='15' width='4.5' height='10' rx='1.5' fill='%23fff'/%3E%3Crect x='13.75' y='10' width='4.5' height='15' rx='1.5' fill='%23fff'/%3E%3Crect x='20.5' y='18' width='4.5' height='7' rx='1.5' fill='%23fff' opacity='.55'/%3E%3Ccircle cx='22.75' cy='10' r='2.6' fill='%235DCAA5'/%3E%3C/svg%3E">
+<style>
+:root {
+  --bg: #f4f5f7; --card: #ffffff; --fg: #1d2330; --muted: #6b7280; --faint: #9aa1ab; --line: #e4e7ec; --soft: #eef0f3;
+  --ok: #1a7f4b; --warn: #a86400; --bad: #c62828; --accent: #2f6fdd;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #121519; --card: #1b1f26; --fg: #e6e8ec; --muted: #9aa3ae; --faint: #6b7380; --line: #2b3139; --soft: #242a32;
+          --ok: #4cc38a; --warn: #f0a640; --bad: #ff6b6b; --accent: #6ea0ff; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 14px 20px 30px; background: var(--bg); color: var(--fg);
+       font: 13px/1.45 -apple-system, "PingFang SC", "Helvetica Neue", "Microsoft YaHei", sans-serif; }
+.mono { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; }
+.mut { color: var(--muted); }
+.sm { font-size: 11.5px; }
+.nw { white-space: nowrap; }
+.ell { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.num { font-variant-numeric: tabular-nums; }
+.row { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.sp { flex: 1; }
+.dot { display: inline-block; width: 8px; height: 8px; border-radius: 2px; flex: none; }
+.cdot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; flex: none; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; min-width: 0; }
+.hd { font-size: 12px; font-weight: 600; color: var(--muted); }
+.top { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; margin-bottom: 10px; }
+.top:has(.project-title) { display: grid; grid-template-columns: minmax(0, 1fr) auto; }
+.project-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.project-title > a { flex: none; }
+.project-title h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.project-actions { display: flex; gap: 6px; white-space: nowrap; }
+.project-meta, .project-feedback { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.top h1 { font-size: 17px; font-weight: 650; margin: 0; }
+.alerts { margin: -2px 0 10px; border: 1px solid color-mix(in srgb, var(--bad) 40%, transparent); border-radius: 8px;
+          background: color-mix(in srgb, var(--bad) 9%, var(--card)); padding: 6px 12px; }
+.alerts div { padding: 2px 0; }
+.kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 8px; }
+.kpi { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 8px 11px 9px; min-width: 0; }
+.kpi .k { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi .v { font-size: 20px; font-weight: 650; line-height: 1.25; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.kpi .v small { font-size: 12px; font-weight: 400; color: var(--muted); }
+.kpi .s { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.meter { height: 6px; background: var(--soft); border-radius: 3px; position: relative; margin: 5px 0 4px; display: flex; gap: 2px; }
+.meter > i { display: block; height: 100%; border-radius: 3px; }
+.segs { display: flex; gap: 3px; margin: 5px 0 4px; }
+.segs .sg { height: 6px; background: var(--soft); border-radius: 3px; overflow: hidden; min-width: 0; }
+.segs .sg i { display: block; height: 100%; }
+.meter > i.ovr { background-image: repeating-linear-gradient(45deg, rgba(255,255,255,.4) 0 4px, transparent 4px 8px); }
+.meter > b { position: absolute; top: -3px; width: 2px; height: 12px; background: var(--bad); border-radius: 1px; }
+.cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 10px; margin-top: 10px; }
+.minis { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 8px; margin-top: 6px; }
+.mini { background: var(--soft); border-radius: 8px; padding: 6px 9px 4px; min-width: 0; }
+.grow { display: grid; grid-template-columns: minmax(80px, 10em) minmax(0, 1fr) 46px 74px; gap: 8px; align-items: center; padding: 4px 0; }
+.job { padding: 6px 0; border-top: 1px solid var(--line); }
+.sqs { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 3px; margin-left: 8px; vertical-align: middle; max-width: 100%; }
+.gsq { display: inline-block; width: 12px; height: 12px; border-radius: 3px; flex: none; cursor: pointer; transition: transform .1s, box-shadow .1s; }
+.gsq:hover { transform: scale(1.3); box-shadow: 0 0 0 1.5px var(--card), 0 0 0 3px var(--fg); position: relative; z-index: 1; }
+.gdl > .grow { opacity: .55; border-radius: 4px; transition: opacity .3s, background .3s; }
+.gdl > .grow.hl { opacity: 1; background: color-mix(in srgb, var(--accent) 16%, transparent); }
+details.rgrp { border-top: 1px solid var(--line); padding: 3px 0; }
+details.rgrp:first-of-type { border-top: 0; }
+details.rgrp > summary { cursor: pointer; display: flex; align-items: center; gap: 6px; padding: 3px 0; min-width: 0; }
+details.rgrp > summary::-webkit-details-marker { display: none; }
+details.rgrp > summary::before { content: "▸"; color: var(--faint); font-size: 10px; width: 8px; flex: none; }
+details.rgrp[open] > summary::before { content: "▾"; }
+.jr { display: grid; grid-template-columns: minmax(70px, 1fr) minmax(0, 7em) 64px 140px; gap: 8px; align-items: center; padding: 2px 0 2px 14px; min-height: 22px; }
+.job:first-of-type { border-top: 0; }
+.chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.hgrp { margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--line); }
+.card > .row + .hgrp { border-top: 0; padding-top: 0; }
+.hhd { flex-wrap: wrap; gap: 6px 12px; }
+.hgrp .minis { margin-top: 6px; }
+.chip { background: var(--soft); border-radius: 6px; padding: 2px 8px; font-size: 11.5px; white-space: nowrap; }
+.seg { display: inline-flex; border: 1px solid var(--line); border-radius: 7px; overflow: hidden; flex: none; }
+.seg button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11.5px; padding: 2px 9px; cursor: pointer; }
+.seg button.on { background: var(--soft); color: var(--fg); font-weight: 600; }
+.btn { border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit; font-size: 11.5px; padding: 1px 9px; border-radius: 7px; cursor: pointer; }
+.btn:disabled { color: var(--muted); cursor: default; }
+svg { display: block; overflow: visible; }
+svg text { font-size: 11px; fill: var(--muted); }
+svg .lab { fill: var(--fg); font-size: 12px; }
+svg rect.j { cursor: pointer; }
+#tlbox { touch-action: pan-y; cursor: grab; user-select: none; -webkit-user-select: none; }
+#tlbox.drag, #tlbox.drag * { cursor: grabbing; }
+.ch { width: 100%; cursor: crosshair; }
+#tip { position: fixed; z-index: 9; pointer-events: none; background: var(--fg); color: var(--bg); border-radius: 6px; padding: 5px 8px;
+       font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-width: min(520px, calc(100vw - 32px)); display: none; }
+.tlkey { margin-top: 6px; }
+.tlkey-l { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; font-size: 11.5px; color: var(--muted); }
+.tlkey-l > span { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+.tlkey-l svg { flex: none; overflow: visible; }
+.tlkey-l > .ops { white-space: normal; }
+.tlkey-b { display: none; }
+.badge { display: inline-block; padding: 0 6px; border-radius: 8px; font-size: 11.5px; font-weight: 500; line-height: 18px; white-space: nowrap; }
+.b-ok { background: color-mix(in srgb, var(--ok) 16%, transparent); color: var(--ok); }
+.b-warn { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
+.b-bad { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
+.b-mute { background: color-mix(in srgb, var(--muted) 16%, transparent); color: var(--muted); }
+details.jobs, details.res { margin-top: 10px; }
+details.jobs > summary, details.res > summary { cursor: pointer; color: var(--muted); font-weight: 600; font-size: 12px; padding: 4px 0; }
+details.lane { margin-top: 8px; }
+details.lane > summary { cursor: pointer; padding: 2px 0; }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 4px 7px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { color: var(--muted); font-weight: 500; font-size: 11.5px; white-space: nowrap; }
+td.r, th.r { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+tr.hl td { background: color-mix(in srgb, var(--accent) 14%, transparent); }
+tr.run td { background: color-mix(in srgb, var(--warn) 7%, transparent); }
+.more { color: var(--accent); cursor: pointer; }
+.scroll { overflow-x: auto; }
+@media (max-width: 760px) {
+  body { padding: 10px 10px 24px; }
+  .cols { grid-template-columns: minmax(0, 1fr); }
+  .hide-sm { display: none; }
+  .jr { grid-template-columns: minmax(50px, 1fr) 48px 132px; padding-left: 8px; }
+  .tlkey-b { display: inline-block; }
+  .tlkey:not(.open) .tlkey-l { display: none; }
+  .tlkey.open .tlkey-l { margin-top: 6px; }
+}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<div id="tip"></div>
+<script>
+let ME = /*__ME__*/null;        // 看板账号（#160）：看板服务发页面时填，见 common.js 的 canOps
+let D = /*__DATA__*/null;
+/*__COMMON__*/
+// 本机存的设置（common.js 的 mkStore），键名按项目标题分开：SS 只存这一次浏览（滚动位置、展开了什么），LS 长期存（筛选、时间线视图）
+const KEY = "labmon:" + (D && D.title || "");
+const SS = mkStore(KEY, sessionStorage), LS = mkStore(KEY);
+const f1 = (x, d = 1) => x == null || isNaN(x) ? "—" : Number(x).toFixed(d);
+let NOW = D ? D.generated : 0;
+const avg = a => { const v = (a || []).filter(x => x != null); return v.length ? v.reduce((s, x) => s + x, 0) / v.length : null; };
+const sum = a => (a || []).reduce((s, x) => s + (x || 0), 0);
+const ST = {done: ["完成", "b-ok"], failed: ["失败", "b-bad"], running: ["运行中", "b-warn"], queued: ["排队", "b-mute"]};
+// 任务的显示状态：暂停任务（清单里等条件放行的占位任务）与被信号终止的失败单独标出
+const stOf = j => j.suspended && j.status === "running" ? ["已挂起", "b-warn"] : j.hold ? ({running: ["暂停中", "b-warn"], queued: ["暂停（排队）", "b-mute"], done: ["已放行", "b-mute"], failed: ["暂停出错", "b-bad"]})[j.status]
+  : j.status === "failed" && j.killed ? ["被终止", "b-warn"] : ST[j.status];
+const retShown = h => D.lanes.some(l => l.host === h.id && l.unfinished);     // 已归还的主机还单列：它上面还有任务没跑完
+// 车道此刻的状态类别：判断顺序只在这一处，laneState 的整句与紧凑视图“没在跑”那一行的计数都按它（#86）
+const laneKind = l => l.returned ? "returned" : l.paused ? "paused" : l.holding ? "holding" : l.alive ? "alive" : l.waiting ? "waiting"
+  : l.started === false ? "unstarted" : l.unfinished ? (l.managed ? "managed" : "gone") : "done";
+const laneState = l => ({
+  returned: () => `主机已归还（${ts(l.returned)}）` + (l.read_via ? `，经 ${l.read_via} 读共享盘` : l.frozen_at ? `，显示归还前 ${ts(l.frozen_at)} 的状态` : "") + (l.unfinished ? `，还有 ${l.unfinished} 个任务没跑完` : ""),
+  paused: () => "已暂停：" + l.paused,
+  holding: () => D.jobs.some(j => j.lane === l.id && j.suspended) ? "任务被挂起（SIGSTOP，kill -CONT 恢复）" : "暂停中（等条件放行）",
+  alive: () => "队列在跑（PID " + l.pid + "）",
+  waiting: () => "等待中：" + l.waiting + (l.stuck ? "；推演不出何时轮到：" + l.stuck : ""),
+  unstarted: () => "未启动",
+  managed: () => "排队中（worker 在管）" + (l.stuck ? "；推演不出何时跑完：" + l.stuck : ""),
+  gone: () => "队列进程不在，排队任务没有预计时间",
+  done: () => "已跑完"})[laneKind(l)]();
+let GROUPS = Object.fromEntries((D?.groups || []).map(g => [g.id, g]));
+const gcolor = id => GROUPS[id]?.color || "#888780";
+const badge = (t, c) => `<span class="badge ${c}">${esc(t)}</span>`;
+const jobsOf = lane => D.jobs.filter(j => j.lane === lane);
+// 车道跑的计划项（按开始先后）：车道不绑定实验，跑什么从任务得出；gshort 是计划项的简称（自动分组去掉结尾的 _）
+const holdGuess = js => js.some(j => j.hold && !j.deps && (j.status === "running" || j.status === "queued"));   // 有没写 after= 的占位任务：时长按估时猜
+const laneGroups = js => [...new Set(js.filter(j => j.group && !j.hold).sort((a, b) => (jobT0(a) ?? Infinity) - (jobT0(b) ?? Infinity)).map(j => j.group))];
+const gshort = id => id.replace(/[_-]+$/, "");
+// 时间线条上写的任务名：自动分组的去掉计划项前缀（id 就是前缀；颜色与标题旁已表明计划项），占位任务去掉开头的 hold_ / pause_（条上写了“暂停”）；悬停里是全名
+const barName = j => {
+  const g = GROUPS[j.group], p = j.hold ? /^(hold|pause)[_-]+/i.exec(j.id)?.[0] : g?.auto ? g.id : null;
+  return p && j.id.length > p.length && j.id.startsWith(p) ? j.id.slice(p.length) : j.id;
+};
+const jobT1 = j => j.status === "done" || j.status === "failed" ? j.end_ts : j.eta_ts;
+const jobT0 = j => j.status === "queued" ? j.plan_start_ts : j.start_ts ?? (j.end_ts && j.est_min ? j.end_ts - j.est_min * 60 : null);
+const jobFrac = j => j.progress ? j.progress[0] / j.progress[1] : j.dur_min ? Math.min(1, j.elapsed_min / j.dur_min) : 0;
+// 时间线上运行中的条写的百分比：现在线在条上的位置（开始 → 预计结束），与填色同一口径。步数进度只是当前这段的（多段任务、开头加载不打进度时与它差得远），写在悬停里。
+// 没有进度行也没有估时的（collect 写的 eta_source “无估时”，预计结束就是现在）不算百分比，条上写“无估时”
+const runFrac = j => { const a = jobT0(j), e = jobT1(j); return a != null && e > a ? Math.max(0, Math.min(1, (NOW - a) / (e - a))) : 0; };
+// 各类任务的 实际/估时（worker 的 duration 给的依据；依据里没写比值的补上）
+const ratioText = x => `${x.cls}：${x.src}${x.src.includes("×") ? "" : `，约 ×${f1(x.k, 2)}`}`;
+const HIST = host => (D.history || []).filter(r => r.host === host && r.ok !== false);
+
+/* ---------- 折线小图：悬停显示十字线与数值 ---------- */
+const CH = {};
+let chN = 0;
+// 单条曲线的面积用渐变：贴着曲线最深、往下淡到透明（数据平稳时不会成一块实心方块）；底部一条淡的基线；mean 画这段的平均虚线
+function chart({series, t0, t1, ymax, ymin = 0, fmt = v => f1(v), H = 46, thr = null, area = true, mean = false}) {
+  const W = 300, id = "ch" + chN++, gap = (D.interval || 120) * 3.5;
+  ymax = Math.max(ymax ?? 0, ...series.flatMap(s => s.pts.map(p => p[1])), thr ?? 0, ymin + 1e-9);
+  const X = t => (t - t0) / (t1 - t0) * W, Y = v => H - 2 - (H - 6) * (v - ymin) / (ymax - ymin);
+  let s = "";
+  for (const se of series) {
+    const pts = se.pts.filter(p => p[0] >= t0 && p[1] != null);
+    if (!pts.length) continue;
+    let d = "", segs = [], cur = [];
+    pts.forEach((p, i) => { if (i && p[0] - pts[i - 1][0] > gap) { segs.push(cur); cur = []; } cur.push(p); });
+    segs.push(cur);
+    for (const sg of segs) {
+      const l = sg.map((p, i) => (i ? "L" : "M") + X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1)).join("");
+      if (area && series.length === 1) s += `<path d="${l}L${X(sg[sg.length - 1][0]).toFixed(1)},${H}L${X(sg[0][0]).toFixed(1)},${H}Z" fill="url(#${id}g)"/>`;
+      d += l;
+    }
+    s += `<path d="${d}" fill="none" stroke="${se.color}" stroke-width="1.5" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
+    if (mean) { const m = avg(pts.map(p => p[1])); s += `<line x1="0" x2="${W}" y1="${Y(m)}" y2="${Y(m)}" stroke="var(--muted)" stroke-opacity=".7" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>`; }
+  }
+  s = `<line x1="0" x2="${W}" y1="${Y(ymin)}" y2="${Y(ymin)}" stroke="var(--faint)" stroke-opacity=".5" vector-effect="non-scaling-stroke"/>` + s;
+  if (area && series.length === 1) s = `<defs><linearGradient id="${id}g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:${series[0].color};stop-opacity:.28"/>`
+    + `<stop offset="1" style="stop-color:${series[0].color};stop-opacity:0"/></linearGradient></defs>` + s;
+  if (thr != null) s += `<line x1="0" x2="${W}" y1="${Y(thr)}" y2="${Y(thr)}" stroke="var(--bad)" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>`;
+  CH[id] = {series, t0, t1, fmt};
+  return `<svg class="ch" id="${id}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="height:${H}px">${s}
+    <line class="xh" x1="0" x2="0" y1="0" y2="${H}" stroke="var(--muted)" vector-effect="non-scaling-stroke" visibility="hidden"/></svg>`;
+}
+function chartHover(svg, e) {
+  const c = CH[svg.id]; if (!c) return null;
+  const r = svg.getBoundingClientRect(), f = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), t = c.t0 + f * (c.t1 - c.t0);
+  const xh = svg.querySelector(".xh"); xh.setAttribute("x1", f * 300); xh.setAttribute("x2", f * 300); xh.setAttribute("visibility", "visible");
+  const lines = c.series.map(se => {
+    let best = null; for (const p of se.pts) if (p[1] != null && (!best || Math.abs(p[0] - t) < Math.abs(best[0] - t))) best = p;
+    return best && Math.abs(best[0] - t) < (c.t1 - c.t0) / 40 ? `${se.name ? se.name + "  " : ""}${c.fmt(best[1])}` : null;
+  }).filter(Boolean);
+  return ts(t) + (lines.length ? "\n" + lines.join("\n") : "\n无数据");
+}
+
+/* ---------- 顶栏与告警 ---------- */
+// 告警按受众分（#142，common.js 的 forUser、alertBox）：给用户的算条数、进红框，只给实验会话的折在下面一行
+function topline() {
+  const al = forUser(D.alerts);
+  const age = Date.now() / 1000 - NOW, stale = age > (D.thresholds?.stale_s ?? 420);   // 与 labmon wait 的 collector_stale 同一门槛（config.stale_limit，缺省配置是 7 分钟）
+  const gone = D.hosts.filter(h => h.returned && !retShown(h));
+  const hosts = D.hosts.filter(h => !gone.includes(h)).map(h => h.returned ? `<span class="nw mut" ${tip(`已归还（${ts(h.returned)}），不再连接；还有任务没跑完`)}><span class="cdot" style="background:var(--faint)"></span> ${esc(h.label)} · 已归还</span>`
+    : `<span class="nw" ${tip(h.ok ? "探针正常" : h.error || "失败")}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}"></span> ${esc(h.label)}</span>${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}`).join(" ")
+    + (gone.length ? ` <span class="nw mut" ${tip(gone.map(h => `${h.label}：${ts(h.returned)} 归还`).join("\n") + "\n它们的车道照常显示结果")}>已还 ${gone.length} 台</span>` : "");
+  // 嵌在看板里：标题、更新时间、立即采集与连不上的提示都在看板顶栏上（看板经 embedState 取），这里只留主机与告警
+  const title = `<div class="project-title">${LIVE ? '<a class="sm" href="../../" style="color:var(--accent);text-decoration:none">← 全局调度</a>' : ""}<h1 ${tip(D.title)}>${esc(D.title)}</h1></div>`;
+  const actions = LIVE ? `<div class="project-actions">${canWrite(D.id) ? `<button class="btn" data-now ${BUSY ? "disabled" : ""}>立即采集</button>` : ""}
+    <a class="btn" href="../../#/p/${encodeURIComponent(D.id)}/manage" style="text-decoration:none" ${tip("到工作台打开这个项目的「管理」抽屉：主机与队列、调度、项目配置")}>管理</a></div>` : "";
+  const update = `<span class="mut sm" style="${stale ? "color:var(--bad);font-weight:600" : ""}">${tsNear(NOW)} 更新${stale ? `（${Math.round(age / 60)} 分钟未更新）` : ""}</span>`;
+  const alerts = al.length ? `<span class="sm" style="color:var(--bad);font-weight:600">⚠ ${al.length} 条告警</span>` : '<span class="sm" style="color:var(--ok)">✓ 无告警</span>';
+  const meta = `<span class="sm">${hosts}</span> ${noWorkBadge(D.no_work_since)} ${alerts}`;
+  const feedback = offBadge(OFFLINE, `，显示的是 ${tsNear(NOW)} 的数据`) || (BUSY ? '<span class="sm mut">采集中…</span>' : "");
+  const s = `<div class="top">${EMBED ? meta : `${title}${actions}<div class="project-meta">${update} ${meta}</div>
+    <div class="project-feedback" role="status">${feedback}</div>`}</div>`;
+  return s + alertBox(D.alerts, SS.get("agal", false));
+}
+
+/* ---------- 指标块 ---------- */
+function kpis() {
+  const out = [], since = NOW - 6 * 3600;
+  // 全部完成与里程碑余量
+  const next = (D.markers || []).filter(m => m.ts > NOW).sort((a, b) => a.ts - b.ts)[0];
+  const end = D.pool?.active ? null : D.all_done_ts;
+  let meter = "", sub = end ? `剩余约 ${dur(end - NOW)}` : D.no_work_since ? `<span ${tip(noWorkTip(D.no_work_since))}>${NO_WORK}</span>` : "没有未完成的任务";
+  if (D.pool?.active) sub = "算力池仍有待位或在途任务，尚无可靠完成预测";
+  if (next && end) {
+    const f = (end - NOW) / (next.ts - NOW), late = f > 1;
+    meter = `<div class="meter" ${tip(`现在 → 全部完成 ${ts(end)} → ${next.label} ${ts(next.ts)}`)}><i style="width:${Math.min(100, f * 100)}%;background:${late ? "var(--bad)" : "var(--accent)"}"></i></div>`;
+    sub = late ? `<span style="color:var(--bad)">晚于${esc(next.label)} ${dur(end - next.ts)}</span>` : `距${esc(next.label)}余 ${dur(next.ts - end)}`;
+  }
+  const busy = D.lanes.filter(l => l.unfinished && l.eta_ts).sort((a, b) => b.eta_ts - a.eta_ts);
+  const lt = busy.map(l => `${ts(l.eta_ts)}  ${laneName(l, D.hosts)}${l.started === false ? "（未启动，按现在开跑估）" : l.has_hold ? "（含暂停）" : ""}${l.overrun ? "（当前任务已超估时，会更晚）" : ""}`).join("\n");
+  const paused = D.lanes.filter(l => l.paused), holding = D.lanes.some(l => l.has_hold && l.unfinished);
+  const over = busy.filter(l => l.overrun);
+  if (over.length) sub += ` · <span style="color:var(--warn)">有任务超估时</span>`;
+  if (paused.length) sub += ` · <span style="color:var(--warn)">${paused.length} 条车道暂停，未计入</span>`;
+  else if (holding) sub += " · 含暂停";
+  out.push(`<div class="kpi" ${lt ? tip("各车道预计完成：\n" + lt + (paused.length ? "\n已暂停（不计入）：" + paused.map(l => laneName(l, D.hosts)).join("、") : "") + (holding ? "\n含暂停任务，" + (holdGuess(D.jobs) ? "没写 after= 的时长按估时猜" : "按它等的任务预计结束算") : "")) : ""}><div class="k">全部完成${busy.length > 1 ? ` · 最晚 ${esc(laneName(busy[0], D.hosts))}` : ""}</div>
+    <div class="v">${end ? ts(end) : "—"}${rebalMark(D.rebalance)}</div>${meter}<div class="s">${sub}</div></div>`);
+  // GPU 与显存：逐卡显示（多主机时用主机 id 区分），两张卡片的颜色一一对应
+  const gl = D.hosts.flatMap(h => h.ok ? (h.gpus || []).map(g => ({...g, host: h})) : []);
+  if (gl.length) {
+    const CC = ["var(--accent)", "#1D9E75", "#D85A30", "#7F77DD", "#D4537E", "#BA7517", "#639922", "#888780"];
+    const multi = D.hosts.filter(h => (h.gpus || []).length).length > 1;
+    const gname = g => multi ? hostShort(g.host) + ((g.host.gpus || []).length > 1 ? "·" + g.index : "") : "GPU" + g.index;
+    const dot = (k, txt) => `<span class="nw"><span class="cdot" style="background:${CC[k % CC.length]}"></span> ${txt}</span>`;
+    const series = gl.map((g, k) => ({name: gl.length > 1 ? gname(g) : "", color: CC[k % CC.length],
+      pts: HIST(g.host.id).filter(r => r.util && r.util[g.index] != null).map(r => [r.t, r.util[g.index]])}));
+    // 卡与显存是整台主机的（含同机别的项目与 labmon 之外的进程）：本项目没任务在跑时写明，免得看成自己的
+    const whole = "整台主机的数字，含同机别的项目与 labmon 之外的进程；本项目在跑 " + D.jobs.filter(j => j.status === "running" && !j.hold).length + " 个任务\n";
+    const notMine = !D.jobs.some(j => j.status === "running" && !j.hold) && avg(gl.map(g => g.util)) > 5;
+    out.push(`<div class="kpi" ${tip(whole + gl.map(g => `${g.host.label} GPU${g.index} ${g.name}\n  利用率 ${f1(g.util, 0)}% · ${f1(g.temp, 0)}°C · ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n"))}>
+      <div class="k">GPU 利用率 · ${gl.length} 卡 · 整机</div><div class="v">${f1(avg(gl.map(g => g.util)), 0)}<small>%${gl.length > 1 ? " 平均" : ""}</small></div>
+      ${chart({series, t0: since, t1: NOW, ymax: 100, H: 22, area: gl.length === 1, fmt: v => f1(v, 0) + "%"})}
+      ${gl.length > 1 ? `<div class="s">${gl.map((g, k) => dot(k, `${esc(gname(g))} ${f1(g.util, 0)}%`)).join(" · ")}</div>` : notMine ? `<div class="s">本项目没有任务在跑：是别的项目或进程在用</div>` : ""}</div>`);
+    const used = sum(gl.map(g => g.mem_used)) / 1024, tot = sum(gl.map(g => g.mem_total)) / 1024;     // 显存探针给的是 MiB
+    const procs = D.hosts.flatMap(h => (h.gpu_procs || []).map(p => ({...p, host: h})));
+    // 每张卡一段，段宽按该卡总显存，段内填色为已用；一眼看出哪张卡还有余量
+    const segs = gl.map((g, k) => {
+      const f = g.mem_used / g.mem_total, c = f > 0.9 ? "var(--bad)" : CC[k % CC.length];
+      return `<span class="sg" style="flex:${g.mem_total}"><i style="width:${f * 100}%;background:${c}"></i></span>`;
+    }).join("");
+    out.push(`<div class="kpi" ${tip(whole + gl.map(g => `${g.host.label} GPU${g.index}：已用 ${f1(g.mem_used / 1024)} / ${f1(g.mem_total / 1024, 0)} GiB，余 ${f1((g.mem_total - g.mem_used) / 1024)} GiB`).join("\n")
+      + "\n" + (procs.map(p => `${multi ? hostShort(p.host) + " " : ""}PID ${p.pid}  ${f1(p.mem / 1024)} GiB  ${(p.cmd || "").slice(0, 60)}`).join("\n") || "无 GPU 进程"))}>
+      <div class="k">显存${gl.length > 1 ? " · 逐卡" : ""} · 整机</div><div class="v">${f1(used, 0)}<small> / ${f1(tot, 0)} GiB</small></div>
+      <div class="segs">${segs}</div>
+      <div class="s">${gl.length > 1 ? gl.map((g, k) => dot(k, `${esc(gname(g))} 余 ${f1((g.mem_total - g.mem_used) / 1024, 0)}`)).join(" · ") + " GiB"
+        : `${procs.length} 个进程 · 余 ${f1(tot - used, 0)} GiB`}</div></div>`);
+  }
+  // 任务
+  const real = D.jobs.filter(j => !j.hold);
+  const n = s => real.filter(j => j.status === s).length, total = real.length;
+  if (total) {
+    const seg = (k, c) => n(k) ? `<i style="width:${n(k) / total * 100}%;background:${c}"></i>` : "";
+    const lt2 = D.lanes.map(l => `${laneName(l, D.hosts)}：完成 ${l.done ?? 0}/${l.total ?? 0} · ${laneState(l)}`).join("\n");
+    out.push(`<div class="kpi" ${tip(lt2)}><div class="k">任务 · ${D.lanes.length} 条车道</div><div class="v">${n("done")}<small> / ${total} 完成</small></div>
+      <div class="meter">${seg("done", "var(--ok)")}${seg("running", "var(--accent)")}${seg("failed", "var(--bad)")}</div>
+      <div class="s">运行 ${n("running")} · 排队 ${n("queued")}${n("failed") ? ` · <span style="color:var(--bad)">失败 ${n("failed")}</span>` : ""}</div></div>`);
+  }
+  // 磁盘余量：各主机的挂载点（采集给的是 GB，换成 GiB，与主机页同一口径）加上组里共用的共享盘（看板的共享盘统计，经 serve 打开时才有），显示离告警线最近的一块，悬停列出全部
+  const ms = D.hosts.flatMap(h => (h.mounts || []).map(m => ({label: m.label, avail: m.avail_gb, total: m.total_gb, used_pct: m.used_pct, min: m.min_gb != null ? m.min_gb : null, host: h}))), sd = EV.storage || {};
+  if (sd.total) ms.push({label: "共享盘", avail: sd.free / GIB, total: sd.total / GIB, used_pct: 100 * (1 - sd.free / sd.total), min: sd.warn_gb ?? null, host: null});
+  if (ms.length) {
+    const m = ms.sort((a, b) => (a.avail - (a.min || 0)) - (b.avail - (b.min || 0)))[0];
+    const low = m.min != null && m.avail < m.min;
+    out.push(`<div class="kpi" ${tip(ms.map(x => `${x.host ? x.host.label + " " : ""}${x.label}：剩 ${f1(x.avail)} / ${f1(x.total, 0)} GiB`).join("\n"))}>
+      <div class="k">磁盘余量</div><div class="v" style="${low ? "color:var(--bad)" : ""}">${f1(m.avail)}<small> GiB</small></div>
+      <div class="meter"><i style="width:${m.used_pct}%;background:${low ? "var(--bad)" : "var(--muted)"}"></i>${m.min != null ? `<b style="left:${(1 - m.min / m.total) * 100}%"></b>` : ""}</div>
+      <div class="s">${D.hosts.length > 1 && m.host ? esc(hostShort(m.host)) + " " : ""}${esc(m.label)}${m.min != null ? ` · 线 ${f1(m.min, 0)} GiB` : ""}</div></div>`);
+  }
+  return `<div class="kpis">${out.join("")}</div>`;
+}
+
+/* ---------- 时间线（GPU 利用率、主机事件带、车道；可拖动、缩放） ---------- */
+const GAP_S = 600;
+let EV = {events: {}, storage: {}, occ: {}, colors: {}};   // 经 serve 打开时取 events.json：主机 30 天事件、同机别的项目的占用与配色、本项目存储（共享盘目录 dirs/at/free，各主机本地盘 local）
+const evs = h => EV.events?.[h] || [];
+const poolIntervals = () => Object.values(D.pool?.occupancy || {}).flat();
+function poolCovers(lane, name, start) {
+  return !!start && poolIntervals().some(x => x.root === lane.root && x.queue === lane.queue
+    && x.n === name && Math.abs(x.t0 - start) < 2);
+}
+tlInit({get: (k, d) => LS.get(k, d), set: (k, v) => LS.set(k, v), now: () => NOW, draw: () => drawTimeline(),
+  all: () => tlSpan([...D.jobs.map(jobT0).filter(Boolean), ...(D.attempts || []).map(x => x.t0), ...poolIntervals().map(x => x.t0)],
+    [...D.jobs.map(jobT1).filter(Boolean), ...poolIntervals().map(x => x.t1)]),
+  near: () => D.jobs.map(j => [jobT0(j), jobT1(j), j.status === "running" || j.status === "queued"])});
+
+// 临时指令事件 → {act, okind, target, until, at, glob}：worker 记事件时就带这些字段；glob 是项目级的（所有主机，serve.proj_events 标的），
+// 与这台单独下的同种指令各自配对增撤
+const GLOB_KEY = "|所有主机";
+function ovrOf(e) {
+  return e.act ? {act: e.act, okind: e.okind, target: e.target || null, until: e.until, at: e.at, glob: !!e.glob} : null;
+}
+// 一台主机的事件带：区间（掉线、drain、暂停、续租截止、没在采集）与时刻（换容器、续租）；worker 启动对用户没意义，不画（记录页里有）
+function hostBands(hid) {
+  const iv = [], ticks = [], E = evs(hid);
+  let down = null;
+  for (const e of E) {
+    if (e.kind === "host_down" && !down) down = e;
+    else if (e.kind === "host_up" && down) { iv.push({k: "down", t0: down.t, t1: e.t, p: 0, short: "掉线", text: `${ts(down.t)} → ${ts(e.t)} 连不上：${down.msg}`}); down = null; }
+    else if (e.kind === "container_new" && e.started)           // 本机发现时才记，按事件带的容器启动时刻 started 放；没有这个字段的旧事件不画
+      ticks.push({k: "restart", t: e.started, p: 2, short: "重启", text: `${ts(e.started)} ${e.msg}`});
+    else if (e.kind === "renew" || e.kind === "relaunch" || e.kind === "interrupt" || e.kind === "void" || e.kind === "squeeze")
+      ticks.push({k: "renew", t: e.t, p: 3, short: {interrupt: "中断重跑", void: "作废重排", squeeze: "被挤重排"}[e.kind] || "续租", text: `${ts(e.t)} ${e.msg}`});
+  }
+  if (down) iv.push({k: "down", t0: down.t, t1: NOW, p: 0, short: "掉线", text: `${ts(down.t)} 起连不上：${down.msg}`});
+  const open = {};
+  const close = (key, t) => { const a = open[key], t1 = Math.min(t, a.until || t); if (t1 > a.t0) iv.push({...a, t1}); delete open[key]; };
+  for (const e of E.filter(e => e.kind === "override" || e.kind === "borrow_return")) {
+    // 归还时 finish 直接删掉这台的临时指令文件，不记撤销：这台的指令到这里；项目级的（所有主机）不在那个文件里，照旧开着
+    if (e.kind === "borrow_return") { Object.keys(open).filter(k => !k.endsWith(GLOB_KEY)).forEach(k => close(k, e.t)); continue; }
+    const o = ovrOf(e); if (!o || o.okind === "focus" || o.okind === "guest") continue;     // 借来的主机只限项目，不挡放行
+    const key = o.okind + "|" + (o.target || "") + (o.glob ? GLOB_KEY : "");
+    if (open[key]) close(key, e.t);             // 同一指令被撤销、到期或被新的同类指令替换：区间到这里
+    const borrow = o.okind === "deadline" && o.target === "borrow";      // 约定归还：到点以后才挡新任务（之前只挡跑不完的）
+    if (o.act === "add") open[key] = {k: o.okind, t0: borrow && o.at ? Math.max(e.t, o.at) : e.t, until: o.until, p: 4,
+      short: borrow ? "约定归还" : {drain: "drain", pause: "暂停 " + (o.target || ""), deadline: "续租截止"}[o.okind] || o.okind, text: `${ts(e.t)} ${e.msg}`};
+  }
+  for (const a of Object.values(open)) { const t1 = Math.min(NOW, a.until || NOW); if (t1 > a.t0) iv.push({...a, t1, open: true}); }
+  // 借来的主机上点「跑完就还」下的 drain：单独画，还没还的画到正在跑的预计跑完（那时自动归还）
+  // 要还的事件带 act、now（borrow.request_return）
+  const hb = D.hosts.find(h => h.id === hid)?.borrow;
+  for (const x of iv) {
+    const ask = x.k === "drain" && E.find(e => e.kind === "borrow" && e.act === "return" && e.t >= x.t0 - 5 && e.t <= x.t0 + 120);
+    if (!ask) continue;
+    const now = !!ask.now, end = x.open && hb?.returning ? Math.max(NOW, ...D.lanes.filter(l => l.host === hid).flatMap(l => jobsOf(l.id))
+      .filter(j => j.status === "running" && j.eta_ts).map(j => j.eta_ts)) : null;
+    Object.assign(x, {k: "ret", t1: end ?? x.t1, short: now ? "停下就还" : "跑完就还",
+      text: `${ts(x.t0)} 点了${now ? "现在停" : "跑完就还"}：不再放新任务，正在跑的${now ? "停下" : "跑完"}就还给 ${hb?.holder || "对方"}`
+        + (end && end > NOW ? `\n预计 ${ts(end)} 跑完归还（画到那时）` : x.open ? "" : `\n${ts(x.t1)} ${E.some(e => e.kind === "borrow_return" && e.t === x.t1) ? "还掉了" : "结束"}`)});
+  }
+  const sp = D.spans || [];
+  for (let i = 1; i < sp.length; i++) if (sp[i][0] - sp[i - 1][1] > GAP_S)
+    iv.push({k: "nospan", t0: sp[i - 1][1], t1: sp[i][0], p: 1, short: "未采集", text: `${ts(sp[i - 1][1])} → ${ts(sp[i][0])} labmon 没在采集（本机看板没开），这段的主机状态不清楚`});
+  for (const x of iv) if (x.k !== "ret") x.text = x.text.replace(/^(\S+ \S+)( 临时指令)/, (s, a, b) => `${a} → ${ts(x.t1)}${b}`);
+  return {iv, ticks};
+}
+// 车道上相邻两次运行之间超过 10 分钟的空档，找能解释它的事件
+function gapWhy(l, a, b, hb) {
+  const out = [], mine = e => e.root && e.root === l.root && e.queue === l.queue;
+  for (const x of hb.iv) if (x.t0 < b && x.t1 > a) out.push(x);
+  for (const x of hb.ticks) if (x.short && x.t >= a - 60 && x.t <= b) out.push(x);
+  for (const e of evs(l.host)) {
+    if (!mine(e) || e.t < a - 120 || e.t > b) continue;
+    if (e.kind === "qend") out.push({p: 6, short: "队列空", text: `${ts(e.t)} 队列跑完，清单里没有待办（之后新加的任务才接着跑）`});
+    else if (e.kind === "wait") out.push({p: 5, short: "等待：" + e.why, text: `${ts(e.t)} 等待${e.name ? " " + e.name : ""}：${e.why}`});
+  }
+  const fa = (D.attempts || []).filter(x => x.lane === l.id && x.t1 > a && x.t0 < b);
+  if (fa.length) out.push({p: 5.5, short: `${fa.length} 次失败`, text: `${fa.length} 次失败尝试：` + [...new Set(fa.map(x => x.name))].slice(0, 4).join("、") + (fa.length > 4 ? " 等" : "")});
+  const seen = new Set();
+  return out.sort((x, y) => x.p - y.p).filter(x => !seen.has(x.text) && seen.add(x.text));
+}
+function laneGaps(l, js, hb) {
+  const run = [...js.filter(j => j.status !== "queued" && j.start_ts).map(j => [j.start_ts, j.status === "running" ? NOW : j.end_ts || NOW]),
+    ...(D.attempts || []).filter(x => x.lane === l.id).map(x => [x.t0, x.t1])].sort((x, y) => x[0] - y[0]);
+  const gaps = [];
+  let end = null;
+  for (const [a, b] of run) {
+    if (end != null && a - end > GAP_S) gaps.push([end, a]);
+    end = Math.max(end ?? b, b);
+  }
+  // 还有排队任务、却没有在跑的：从上一个结束到现在也是空档（多半正在等）
+  if (end != null && l.unfinished && !js.some(j => j.status === "running") && NOW - end > GAP_S) gaps.push([end, NOW, true]);
+  const out = gaps.map(([a, b, now]) => ({a, b, now, why: gapWhy(l, a, b, hb)}));
+  // 往后的空档：worker 推演里排队任务要等别的任务跑完才轮到（after），从前一个预计结束（或现在）到它的预计开始
+  let prev = Math.max(NOW, ...js.filter(j => j.status === "running" && j.eta_ts).map(j => j.eta_ts));
+  for (const j of js.filter(j => j.status === "queued" && j.plan_start_ts).sort((a, b) => a.plan_start_ts - b.plan_start_ts)) {
+    if (j.plan_start_ts - prev > GAP_S) out.push({a: prev, b: j.plan_start_ts, future: true, why: [{p: 5, short: j.after ? afterShort(j.after) : "等资源",
+      text: `${ts(j.plan_start_ts)} 才轮到 ${j.id}：` + (j.after ? `要等 ${afterText(j.after, D.id)} 跑完` : "要等同机腾出资源") + "（worker 按同一套放行规则推演）"}]});
+    prev = Math.max(prev, j.eta_ts || j.plan_start_ts);
+  }
+  return out;
+}
+// worker 推演里“等谁跑完才轮到”（[[项目, 任务]]）：本项目的写任务名，别的项目写“项目 的 任务”；空档上的短标签别的项目写“让位 项目”
+const afterShort = af => { const o = [...new Set(af.filter(([p]) => p !== D.id).map(([p]) => p))]; return o.length ? "让位 " + o.join("、") : "等 " + af.map(x => x[1]).join("、"); };
+const bandRect = (k, x, y, w, h, a = "") => `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="2" ${k === "down" ? `fill="var(--bad)" fill-opacity=".8"` : k === "nospan" ? `fill="var(--faint)" fill-opacity=".45"`
+  : k === "ret" ? `fill="var(--accent)" fill-opacity=".12" stroke="var(--accent)" stroke-dasharray="3 2"` : `fill="url(#hatchw)" stroke="var(--warn)" stroke-opacity=".7"`} ${a}/>`;
+const tickLine = (x, y, h) => `<line x1="${x}" x2="${x}" y1="${y}" y2="${y + h}" stroke="var(--warn)" stroke-width="2"/>`;
+// 失败的尝试：常常只跑几秒，长度看不出来，所以底边细红条之外再画一个红色圆标（挨在一起的几次合成一个，写次数）
+const attemptMark = (x, y, n, a = "") => `<g ${a}><circle cx="${x}" cy="${y}" r="6" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5"/>`
+  + `<text x="${x}" y="${y + 3.5}" text-anchor="middle" style="font-size:${n > 9 ? 8 : 9.5}px;font-weight:700;fill:#fff;pointer-events:none">${n > 1 ? n : "!"}</text></g>`;
+// 时间线下方图例的条目（tlShow 只列图上出现了的；样例用图上第一个组的颜色）
+function tlItems(c) {
+  const sw = tlSw;
+  return [
+    ["done", "完成", sw(jobBar("done", false, 0, 1, 22, 10, c))],
+    ["running", "运行中（填色到现在）", sw(jobBar("running", false, 0, 1, 22, 10, c, .45))],
+    ["queued", "排队（worker 推演的预计时间，同机各项目一起排）", sw(jobBar("queued", false, 0, 1, 22, 10, c))],
+    ["hold", "暂停占位", sw(jobBar("done", true, 0, 1, 22, 10, c))],
+    ["failed", "失败", sw(jobBar("failed", false, 0, 1, 22, 10, "var(--bad)"))],
+    ["killed", "被停下", sw(jobBar("failed", false, 0, 1, 22, 10, "var(--warn)"))],
+    ["attempt", "失败的尝试（数字是挨在一起的次数）", sw(`<rect x="0" y="8" width="22" height="3" rx="1" fill="var(--bad)"/>` + attemptMark(11, 6, 1), 22)],
+    ["dep", "依赖（after=）：从等的任务结束连到它开始", sw(`<path d="M1 3C9 3 13 9 20 9" fill="none" stroke="var(--fg)" stroke-opacity=".45"/><circle cx="20" cy="9" r="2" fill="var(--fg)" fill-opacity=".6"/>`)],
+    ["gap", "空档（标原因；往后的写推演里在等谁）", sw(`<line x1="0" x2="22" y1="6" y2="6" stroke="var(--faint)" stroke-dasharray="2 3"/>`)],
+    ...occItems("var(--faint)", "同机别的项目："),
+    ["util", "整机 GPU 利用率（主机行的浅底）", sw(`<path d="M0 11L5 4L10 6L15 2L22 7L22 12L0 12Z" fill="var(--accent)" fill-opacity=".13"/><path d="M0 11L5 4L10 6L15 2L22 7" fill="none" stroke="var(--accent)" stroke-opacity=".7"/>`)],
+    ["down", "连不上", sw(bandRect("down", 0, 2, 22, 8))],
+    ["warn", "drain、暂停、续租截止", sw(bandRect("warn", 0, 2, 22, 8))],
+    ["ret", "跑完就还（画到预计归还）", sw(bandRect("ret", 0, 2, 22, 8))],
+    ["nospan", "labmon 没在采集", sw(bandRect("nospan", 0, 2, 22, 8))],
+    ["restart", "换容器、续租、作废重排", sw(tickLine(6, 0, 12), 12)]];
+}
+function timelineCard() {
+  return `<div class="card" style="margin-top:10px"><div class="row" style="flex-wrap:wrap"><span class="hd">时间线</span><span class="sm mut" id="tllegend"></span><span class="sp"></span>
+    <span id="tlbar" class="row" style="gap:6px"></span></div>
+    <div id="tlbox" style="margin-top:6px"></div><div id="tlkey" class="tlkey${TL.key ? " open" : ""}"></div></div>`;
+}
+function drawTimeline() {
+  const box = document.getElementById("tlbox"); if (!box?.clientWidth) return;     // 嵌在看板里又被隐藏了：再显示时看板会调它重画
+  tlBind(box);
+  const {t0, t1} = tlRange(), win = (a, b) => a != null && b != null && b > t0 && a < t1;
+  const showAll = LS.get("tlall", false), rows = [], used = new Set();
+  let hidden = 0;
+  const shown = D.hosts.map(h => {
+    const lanes = D.lanes.filter(l => l.host === h.id && !l.missing);
+    const vis = lanes.filter(l => showAll || l.unfinished || jobsOf(l.id).some(j => win(jobT0(j), jobT1(j)))
+      || (D.attempts || []).some(x => x.lane === l.id && win(x.t0, x.t1)));
+    hidden += lanes.length - vis.length;
+    return [h, vis];
+  }).filter(([, vis]) => vis.length);
+  // 车道名右边用计划项配色的圆点标出这段时间里它跑的计划项：图上不止一个计划项时才画（只有一个时标题旁已列出）
+  const gsOf = l => laneGroups(jobsOf(l.id).filter(j => win(jobT0(j), jobT1(j))));
+  const multi = new Set(shown.flatMap(([, vis]) => vis.flatMap(gsOf))).size > 1;
+  // 每台主机一组：表头一行（主机名、利用率、事件），同机别的项目占了卡时一行，下面是这台的车道
+  for (const [h, vis] of shown) {
+    const hb = hostBands(h.id), oc = (EV.occ?.[h.id] || []).filter(x => win(x.t0, x.t1));
+    const ev = hb.iv.some(x => win(x.t0, x.t1)) || hb.ticks.some(x => x.t >= t0 && x.t <= t1);     // 看的这段有事件：表头底边加一条色带
+    rows.push({h: ev ? 32 : 22, sep: true, draw: (y, hh, c) => hostRow(h, hb, ev, y, hh, c)});
+    if (oc.length) rows.push({h: Math.min(44, 8 + 10 * tlPack(oc)), draw: (y, hh, c) => othersRow(h, oc, y, hh, c)});
+    vis.forEach(l => rows.push({h: 24, draw: (y, hh, c) => laneRow(l, hb, multi ? gsOf(l) : [], y, hh, c, used)}));
+  }
+  for (const [hid, items] of Object.entries(D.pool?.occupancy || {})) {
+    const intervals = items.filter(x => win(x.t0, x.t1));
+    if (!intervals.length) continue;
+    rows.push({h: 22, sep: true, draw: y => `<text class="lab" x="0" y="${y + 15}">${esc(hid)} · 算力池</text>`});
+    rows.push({h: Math.max(24, 10 + 12 * tlPack(intervals)), draw: (y, h, c) => occBars(intervals, y, h, c, {
+      color: () => "var(--accent)", label: x => x.n, text: x => `${x.n} · ${POOL_QUEUE_STATE[x.phase]?.[0] || x.phase}\n${ts(x.t0)} → ${ts(x.t1)}\n${x.end_kind === "finished" ? "训练结束" : x.end_kind === "cleaned" ? "确认清理完成的时刻" : "最后观测时刻，非预计结束"}\nGPU ${x.g.join(", ")}`})});
+  }
+  const more = hidden || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? "收起这段时间没有任务的车道" : `另有 ${hidden} 条车道这段时间没有任务，显示`}</span></div>` : "";
+  tlShow(box, rows, {markers: D.markers, more, over: depLines, items: () => tlItems(gcolor([...used][0]))});
+  const lg = document.getElementById("tllegend");
+  if (lg) lg.innerHTML = D.groups.filter(g => used.has(g.id)).map(g => `<span class="nw"><span class="dot" style="background:${g.color}"></span> ${esc(g.label)}</span>`).join(" &nbsp;");   // 只列这段时间图上有的
+}
+// 依赖连线：任务写了 after= / afterany=（worker 推演的 deps）、等的是本项目图上画出来的任务时，从它结束连一条细线到这个任务开始，
+// 末端一个小圆点；等别的项目的、等的不在图上的只写在悬停里。条的位置是 laneRow 记进 c.pos 的。
+// 早于依赖结束就开始的不连（改成依赖之前起的占位任务，自己在等）
+function depLines(c) {
+  let s = "";
+  for (const j of D.jobs) for (const [p, n] of j.deps || []) {
+    const a = p === D.id && c.pos?.[n], b = c.pos?.[j.id];
+    if (!a || !b || b.x0 < a.x1 - 1) continue;
+    const dx = Math.max(6, Math.abs(b.x0 - a.x1) / 2);
+    c.seen.add("dep");
+    s += `<path class="dl" d="M${a.x1},${a.y}C${a.x1 + dx},${a.y} ${b.x0 - dx},${b.y} ${b.x0},${b.y}" fill="none" stroke="var(--fg)" stroke-opacity=".45"/>`
+      + `<circle cx="${b.x0}" cy="${b.y}" r="2" fill="var(--fg)" fill-opacity=".6"/>`;
+  }
+  return s && `<g clip-path="url(#tlclip)" style="pointer-events:none">${s}</g>`;
+}
+// 主机表头一行（上面有分隔线，这台的车道缩进挂在下面）：主机短名；整机 GPU 利用率画成浅底；ev 时底边一条事件色带
+// （连不上、drain、暂停、续租截止、没在采集），竖线是换容器、续租与作废重排
+function hostRow(host, hb, ev, y, h, c) {
+  // 逐次采样只留 24 小时：更早的、或看的区间超过一天半时用每小时平均（保留 30 天）
+  const hs = HIST(host.id).filter(p => p.util), first = hs.length ? hs[0].t : Infinity, long = c.t1 - c.t0 > 36 * 3600;
+  const hr = (D.util_hourly?.[host.id] || []).filter(p => long || p[0] + 3600 <= first).map(p => [p[0] + 1800, p[1], 5400]);
+  const pts = [...hr, ...(long ? [] : hs.map(p => [p.t, avg(p.util), (D.interval || 120) * 3.5]))].filter(p => p[0] >= c.t0 - 3600 && p[0] <= c.t1 + 3600 && p[1] != null);
+  const ub = y + (ev ? h - 11 : h - 2), Y = v => ub - (ub - y - 3) * v / 100;     // 利用率的底边与高度
+  let s = `<text class="lab" x="0" y="${y + (ub - y) / 2 + 5}" style="font-weight:600" ${tip(`${host.label}\n浅蓝底：整机 GPU 平均利用率（含同机别的项目${long ? "，每小时平均" : ""}）`
+    + (ev ? "\n底边色带：连不上、drain、暂停、续租截止、labmon 没在采集；竖线是换容器、续租与作废重排" : ""))}>${esc(fit(hostShort(host), c.L - 6))}</text>`;
+  let segs = [], cur = [];
+  pts.forEach((p, i) => { if (i && p[0] - pts[i - 1][0] > Math.max(p[2], pts[i - 1][2])) { segs.push(cur); cur = []; } cur.push(p); }); segs.push(cur);
+  s += `<g clip-path="url(#tlclip)">`;
+  for (const sg of segs.filter(x => x.length > 1)) {
+    const l = sg.map((p, i) => (i ? "L" : "M") + c.X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1)).join("");
+    c.seen.add("util");
+    s += `<path d="${l}L${c.X(sg[sg.length - 1][0])},${ub}L${c.X(sg[0][0])},${ub}Z" fill="var(--accent)" fill-opacity=".13"/><path d="${l}" fill="none" stroke="var(--accent)" stroke-width="1" stroke-opacity=".7"/>`;
+  }
+  s += `</g>`;
+  for (const x of hb.iv) {
+    if (!ev || !c.win(x.t0, x.t1)) continue;
+    const xa = c.cl(x.t0), w = Math.max(2, c.cl(x.t1) - xa);
+    c.seen.add(["down", "nospan", "ret"].includes(x.k) ? x.k : "warn");
+    s += bandRect(x.k, xa, y + h - 9, w, 8, tip(x.text));
+    if (w > 40) s += `<text x="${xa + 4}" y="${y + h - 2}" style="font-size:9.5px;pointer-events:none;fill:${x.k === "down" ? "#fff" : "var(--fg)"}">${esc(fit(x.short, w - 8))}</text>`;
+  }
+  for (const x of hb.ticks) {
+    if (x.t < c.t0 || x.t > c.t1) continue;
+    c.seen.add("restart");
+    s += tickLine(c.X(x.t), y, h) + `<rect x="${c.X(x.t) - 4}" y="${y}" width="8" height="${h}" fill="transparent" ${tip(x.text)}/>`;
+  }
+  return s;
+}
+// 同机别的项目占卡的情况（工作台 occupancy：已跑的、在跑的、worker 推演的排队），重叠的分道；本项目的车道空着时看这一行就知道卡被谁占着
+function othersRow(host, oc, y, h, c) {
+  const who = [...new Set(oc.map(x => x.p))];
+  let s = `<text x="10" y="${y + h / 2 + 4}" style="font-size:10.5px" ${tip(`${host.label} 上别的项目占卡的情况：${who.join("、")}\n实色已跑，描边在跑，淡色是 worker 按同一套放行规则推演的排队；本项目车道上的“让位”就是在等它们`)}>${esc(fit("别的项目", c.L - 16))}</text>`;
+  s += `<rect x="${c.L}" y="${y + h / 2 - .5}" width="${c.PW}" height="1" fill="var(--line)"/>`;
+  return s + occBars(oc, y, h, c, {color: p => EV.colors?.[p] || "var(--faint)", label: x => x.n, pre: x => x.p + " ",
+    text: x => `${x.p}${x.lane ? " " + x.lane : ""} · ${x.n}\n${occState(x)} · ${ts(x.t0)} → ${ts(x.t1)}（${dur(x.t1 - x.t0)}）· 卡 ${x.g.join(",")}`
+      + (x.after ? `\n等 ${afterText(x.after, D.id)} 跑完才轮到` : "")});
+}
+// 一条车道：任务条、空档（标原因）、失败的尝试。gs 是车道名右边画圆点的计划项 id（图上只有一个计划项时为空）
+function laneRow(l, hb, gs, y, h, c, used) {
+  let s = "";
+  const js = jobsOf(l.id);
+  const lt = `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n计划项：${laneGroups(js).map(g => GROUPS[g]?.label || g).join("、") || "—"}\n完成 ${l.done}/${l.total} · 排队 ${js.filter(j => j.status === "queued").length}${l.failed ? " · 失败 " + l.failed : ""}\n${laneState(l)}${l.eta_ts ? "\n本车道完成 " + ts(l.eta_ts) + (l.has_hold ? holdGuess(js) ? "（含暂停，时长是猜的）" : "（含暂停，按它等的任务算）" : "") + (l.overrun ? "（当前任务已超估时，会更晚）" : "") : ""}${l.fs_skew ? `\n共享盘时钟${l.fs_skew > 0 ? "快" : "慢"} ${f1(Math.abs(l.fs_skew) / 60)} 分（已校正）` : ""}`;
+  const dc = l.returned ? "var(--faint)" : l.paused || l.holding || l.waiting ? "var(--warn)" : l.alive || l.managed && l.unfinished ? "var(--ok)" : l.unfinished && l.started !== false ? "var(--bad)" : "var(--faint)";
+  // 车道名缩进挂在主机表头下面，一行；跑的计划项是标签栏右端的小圆点（各车道对齐，最多 4 个），名字见悬停
+  const ly = y + h / 2 + 4, ds = gs.slice(0, 4);
+  s += `<g ${tip(lt)}><circle cx="10" cy="${ly - 4}" r="3.5" fill="${dc}"/>
+    <text class="lab" x="18" y="${ly}">${esc(fit(l.label + (l.returned ? "（已归还）" : ""), c.L - 24 - 7 * ds.length))}</text>
+    ${ds.map((g, k) => `<circle cx="${c.L - 8 - 7 * (ds.length - 1 - k)}" cy="${ly - 4}" r="2.5" fill="${gcolor(g)}"/>`).join("")}</g>`;
+  // 空档：中线虚线＋原因（最可能的一条），悬停列出全部
+  for (const g of laneGaps(l, js, hb)) {
+    if (!c.win(g.a, g.b)) continue;
+    const xa = c.cl(g.a), xb = c.cl(g.b), gw = xb - xa, top1 = g.why[0];
+    c.seen.add("gap");
+    const lab = top1 ? top1.short : "原因未记录";
+    s += `<line x1="${xa}" x2="${xb}" y1="${y + h / 2}" y2="${y + h / 2}" stroke="var(--faint)" stroke-dasharray="2 3"/>`;
+    if (gw > 34) {
+      const t = fit(lab, Math.min(gw - 10, 220)), tw = Math.min(gw - 6, [...t].reduce((a, ch) => a + (ch.charCodeAt(0) > 0x2e80 ? 10.5 : 5.8), 0) + 8);
+      s += `<rect x="${(xa + xb) / 2 - tw / 2}" y="${y + h / 2 - 7}" width="${tw}" height="14" rx="3" fill="var(--card)"/>
+        <text x="${(xa + xb) / 2}" y="${y + h / 2 + 3.5}" text-anchor="middle" style="font-size:10.5px;pointer-events:none;fill:${top1 ? "var(--muted)" : "var(--faint)"}">${esc(t)}</text>`;
+    }
+    s += `<rect x="${xa}" y="${y + 4}" width="${Math.max(4, gw)}" height="${h - 8}" fill="transparent" ${tip(`${g.future ? "预计空档" : "空档"} ${ts(g.a)} → ${g.now ? "现在" : ts(g.b)}（${dur(g.b - g.a)}）\n` + (g.why.length ? g.why.slice(0, 8).map(x => x.text).join("\n") : "原因未记录：这段时间没有掉线、重启、drain 或等待记录（较早的事件 labmon 还没开始存）"))}/>`;
+  }
+  let beyond = null;
+  for (const j of js.filter(j => !poolCovers(l, j.id, j.start_ts))) {
+    const a0 = jobT0(j), e0 = jobT1(j);
+    if (a0 == null || e0 == null) continue;
+    if (e0 > c.t1 && j.status !== "done") beyond = Math.max(beyond || 0, e0);
+    if (e0 < c.t0 || a0 > c.t1) continue;
+    used.add(j.group);
+    const xa = c.X(Math.max(a0, c.t0)), xe = c.X(Math.min(e0, c.t1)), w = Math.max(1.5, xe - xa - 1.5);
+    const col = j.status === "failed" ? (j.killed ? "var(--warn)" : "var(--bad)") : gcolor(j.group);
+    const tt = `${j.id}\n${stOf(j)[0]} · ${ts(a0)} → ${ts(e0)}` + (j.hold && j.status !== "done" ? `（${j.deps ? j.dur_src : "时长按估时猜"}）` : "")
+      + (j.deps && !j.hold ? `\n${j.status === "queued" ? `等 ${afterText(j.deps, D.id)} 跑完才开始` : "依赖 " + afterText(j.deps, D.id)}` : "") + (j.progress ? `\n进度 ${j.progress[0]}/${j.progress[1]}` : "")
+      + (j.dur_min ? `\n预计 ${dur(j.dur_min * 60)}` : "") + (j.overrun_min ? ` · 已超 ${dur(j.overrun_min * 60)}` : "") + (j.actual_min != null ? ` · 实际 ${dur(j.actual_min * 60)}` : "")
+      + (j.status === "running" && !j.hold && j.eta_source ? `\n预计结束依据：${j.eta_source}` : "") + (j.last_line ? "\n" + j.last_line.slice(0, 90) : "");
+    const yy = y + 3, hh = h - 6;
+    (c.pos ||= {})[j.id] = {x0: c.X(a0), x1: c.X(e0), y: yy + hh / 2};     // 依赖连线（depLines）从这里取
+    c.seen.add(j.hold ? "hold" : j.status === "failed" ? (j.killed ? "killed" : "failed") : j.status);
+    // 运行中的填色到“现在”：条从开始画到预计结束，条上的百分比也是现在线在条上的位置（runFrac）；按步数比例会因启动、加载那段没有步数、多段任务只报当前这段而对不上（Issue #33），步数进度写在悬停里
+    s += jobBar(j.status, j.hold, xa, yy, w, hh, col, j.status === "running" ? (c.cl(NOW) - xa) / w : 0, `class="j" data-id="${esc(j.id)}" ${tip(tt)}`);
+    if (w > 56) {
+      // 占位任务的斜纹已表明暂停，只加 ⏸；挂起的是在跑的任务被 SIGSTOP，写明
+      const lab = barName(j) + (j.status !== "running" || j.hold || j.suspended ? "" : j.overrun_min ? " · 超估时" : j.eta_source === "无估时" ? " · 无估时" : ` · ${Math.round(runFrac(j) * 100)}%`);
+      s += `<text x="${xa + 5}" y="${yy + hh / 2 + 4}" style="pointer-events:none;fill:${j.status === "done" && !j.hold ? "#fff" : "var(--fg)"}">${esc(fit(lab, w - 10, j.hold ? "⏸ " : j.suspended ? "⏸ 挂起 · " : true))}</text>`;
+    }
+  }
+  // 失败的尝试（后来重跑成功的也留着）：车道底部细红条＋圆标，横向相距不到 14px 的合成一个标
+  const fa = (D.attempts || []).filter(x => x.lane === l.id && !poolCovers(l, x.name, x.t0) && c.win(x.t0, x.t1)).sort((a, b) => a.t0 - b.t0), cs = [];
+  for (const x of fa) {
+    const xa = c.cl(x.t0);
+    s += `<rect x="${xa}" y="${y + h - 4}" width="${Math.max(2.5, c.cl(x.t1) - xa)}" height="3" rx="1" fill="var(--bad)"/>`;
+    const m = cs[cs.length - 1];
+    if (m && xa - m.x1 < 14) { m.xs.push(x); m.x1 = Math.max(m.x1, c.cl(x.t1)); } else cs.push({x0: xa, x1: c.cl(x.t1), xs: [x]});
+  }
+  for (const m of cs) {
+    c.seen.add("attempt");
+    const n = m.xs.length, list = m.xs.slice(0, 8).map(x => `${ts(x.t0)} ${x.name}（${dur(x.min * 60)}）`).join("\n");
+    s += attemptMark((m.x0 + m.x1) / 2, y + h - 6, n, `style="cursor:default" ${tip(`失败的尝试${n > 1 ? ` ${n} 次` : ""}（后来重跑成功的也留着）\n${list}${n > 8 ? `\n… 另 ${n - 8} 次` : ""}`)}`);
+  }
+  if (l.paused && c.R > 20) s += `<text x="${c.W - c.R + 6}" y="${y + h / 2 + 4}" style="fill:var(--warn)">⏸ 已暂停</text>`;
+  else if (beyond && c.R > 20) s += `<text x="${c.W - c.R + 6}" y="${y + h / 2 + 4}" style="fill:var(--fg)">→ ${ts(beyond)}</text>`;
+  return s;
+}
+/* ---------- 计划项 ---------- */
+// 大量小规模并行时的紧凑视图（Issue #69）：计划项多于 groups 个时完成的全收进一行；在跑的多于 run 个时运行中卡按计划项分组、一个任务一行
+// sq：收起行最多画几个小方块（#115）
+const COMPACT = {groups: 8, run: 6, sq: 48};
+// 点收起行的小方块（#115）：展开列表、滚到那一项那一行并闪一下。触屏没有悬停：第一次点只显示这一格的悬停（common.js 的 flashTip），3 秒内再点同一格才定位
+const GSQ = {id: null, t: 0};
+function gsqClick(id) {
+  if (matchMedia("(hover: none)").matches && (GSQ.id !== id || Date.now() - GSQ.t > 3000)) { GSQ.id = id; GSQ.t = Date.now(); return false; }
+  GSQ.id = null;
+  const d = document.querySelector("details.gdone"); if (!d) return false;
+  d.open = true; SS.set("gdone", true);
+  const row = d.querySelector(`[data-gid="${CSS.escape(id)}"]`); if (!row) return false;
+  row.classList.add("hl"); row.scrollIntoView({block: "center"}); setTimeout(() => row.classList.remove("hl"), 2500);
+  return true;
+}
+function groupsCard() {
+  if (!D.groups.length) return "";
+  const order = {"运行中": 0, "排队中": 1, "有失败": 2, "跑完待汇总": 3, "未排队": 4, "完成": 5};   // 未完成的在上，完成的沉到下面
+  const fin = g => Math.max(0, ...D.jobs.filter(j => j.group === g.id).map(j => j.end_ts || 0));
+  const many = D.groups.length > COMPACT.groups;
+  const old = g => g.status === "完成" && (many || fin(g) < NOW - 86400);
+  const row = g => {
+    const seg = (n, op, c) => n ? `<i style="width:${n / g.total * 100}%;background:${c || g.color};opacity:${op}"></i>` : "";
+    const st = g.status === "有失败" ? badge("有失败", "b-bad") : g.status === "跑完待汇总" ? badge("待汇总", "b-warn") : g.status === "完成" ? badge("完成", "b-ok")
+      : g.status === "未排队" ? `<span class="mut sm">未排队</span>` : `<span class="sm num">${tsNear(g.eta_ts)}</span>`;
+    return `<div class="grow" data-gid="${esc(g.id)}" ${tip(`${g.label}\n完成 ${g.done} · 运行 ${g.running} · 排队 ${g.queued} · 失败 ${g.failed}` + (g.eta_ts ? `\n预计完成 ${ts(g.eta_ts)}` : "") + (g.ratios.length ? "\n实际 / 估时：\n" + g.ratios.map(ratioText).join("\n") : "")
+      + (g.status === "跑完待汇总" && g.done_when ? `\n任务都跑完了；汇总完在 ${g.done_when.file} 里勾上这一项（有一行匹配 ${g.done_when.pattern}）就记完成` : ""))}>
+      <span class="row" style="gap:6px"><span class="dot" style="background:${g.color}"></span><span class="ell">${esc(g.label)}</span></span>
+      <div class="meter" style="margin:0;height:8px">${seg(g.done, 1)}${seg(g.running, .5)}${seg(g.failed, 1, "var(--bad)")}${seg(g.queued, .16)}</div>
+      <span class="mono num" style="text-align:right">${g.done}/${g.total}</span><span style="text-align:right">${st}</span></div>`;
+  };
+  const gs = [...D.groups].sort((a, b) => (order[a.status] ?? 4) - (order[b.status] ?? 4)), done = gs.filter(old).sort((a, b) => fin(a) - fin(b));
+  // 收起的那一行（#115）：每项一个配色小方块，按跑完时刻从早到晚、与展开的列表同序；每格自己的悬停，点一格定位到列表里那一行（gsqClick）
+  // 多于 COMPACT.sq 项时只画最近跑完的那些，最前面一个“…”
+  const hov = !matchMedia("(hover: none)").matches, cut = Math.max(0, done.length - COMPACT.sq);
+  const sq = (cut ? `<span class="mut" ${tip(`更早跑完的还有 ${cut} 项，点开看`)}>…</span>` : "")
+    + done.slice(cut).map(g => `<span class="gsq" data-gsq="${esc(g.id)}" style="background:${g.color}" ${tip(`${g.label}\n完成 ${g.done}/${g.total}${fin(g) ? ` · ${ts(fin(g))} 跑完` : ""}\n${hov ? "点一下" : "再点一下"}定位到下面那一行`)}></span>`).join("");
+  const dtip = (many ? `计划项多于 ${COMPACT.groups} 个，完成的都收在这里` : "一天前就跑完的收在这里") + `：${hov ? "移到" : "点"}小方块上看那一项，点这一行展开全部`;
+  const rows = gs.filter(g => !old(g)).map(row).join("") + (done.length ? `<details class="gdone" ${SS.get("gdone", false) ? "open" : ""}>
+    <summary class="sm mut" style="cursor:pointer;padding:4px 0" ${tip(dtip)}>已完成 ${done.length} 项 · ${sum(done.map(g => g.total))} 个任务${many ? "" : "（一天前就跑完的）"}<span class="sqs">${sq}</span></summary><div class="gdl">${done.map(row).join("")}</div></details>` : "");
+  const ks = g => (g.ratios.some(x => x.open) ? g.ratios.filter(x => x.open) : g.ratios).map(x => x.k);   // 范围只算还有任务没跑完的类
+  const span = g => Math.min(...ks(g)) === Math.max(...ks(g)) ? f1(ks(g)[0], 2) : `${f1(Math.min(...ks(g)), 2)}–${f1(Math.max(...ks(g)), 2)}`;
+  const withR = D.groups.filter(g => g.ratios.length && !old(g));
+  const cal = withR.map(g => `${esc(g.label)} ×${span(g)}`).join(" · ");
+  const calTip = "各类任务（去掉种子编号的名字）实际耗时 / 清单估时；排队任务的预计时长已按此折算。同类还没跑完过的按本项目的比值（按时长加权）\n"
+    + withR.map(g => g.label + "\n" + g.ratios.map(x => "  " + ratioText(x) + (x.open ? "" : "（都跑完了）")).join("\n")).join("\n");
+  return `<div class="card"><div class="row"><span class="hd">计划项</span><span class="sp"></span><span class="sm mut">完成数 · 预计完成</span></div>${rows}
+    ${cal ? `<div class="sm mut" style="margin-top:4px" ${tip(calTip)}>实际 / 估时：${cal}</div>` : ""}</div>`;
+}
+
+/* ---------- 运行中 ---------- */
+function runningCard() {
+  const items = D.lanes.map(l => {
+    const j = D.jobs.find(x => x.lane === l.id && x.status === "running");
+    if (!j) return l.unfinished ? `<div class="job sm" style="color:${l.paused ? "var(--warn)" : l.alive || l.managed || l.started === false ? "var(--muted)" : "var(--bad)"}">${esc(laneName(l, D.hosts))}：${l.paused ? "⏸ " + esc(laneState(l)) : l.alive ? "等待下一个任务" : esc(laneState(l))}</div>` : "";
+    if (j.suspended) return `<div class="job" ${tip(`${j.id}（${laneName(l, D.hosts)}）\n进程被 SIGSTOP 挂起，kill -CONT 恢复\n日志最后更新 ${ts(j.log_mtime)}` + (j.last_line ? "\n" + j.last_line : ""))}>
+      <div class="row"><span class="sm" style="color:var(--warn);font-weight:600">⏸ 已挂起</span><span class="mono ell">${esc(j.id)}</span><span class="sm mut ell hide-sm">${esc(laneName(l, D.hosts))}</span><span class="sp"></span>
+        <span class="sm nw">${j.progress ? j.progress[0] + "/" + j.progress[1] : ""} · 停在 ${tsNear(j.log_mtime)}</span></div>
+      <div class="meter" style="margin:4px 0 0"><i style="width:${jobFrac(j) * 100}%;background:var(--muted)"></i></div></div>`;
+    if (j.hold) return `<div class="job" ${tip(`${j.id}（${laneName(l, D.hosts)}）\n开始 ${ts(j.start_ts)} · 已等 ${dur(j.elapsed_min * 60)}${holdLine(j)}` + (j.last_line ? "\n" + j.last_line : ""))}>
+      <div class="row"><span class="sm" style="color:var(--warn);font-weight:600">⏸ 暂停中</span><span class="mono ell">${esc(j.id)}</span><span class="sm mut ell hide-sm">${esc(laneName(l, D.hosts))}</span><span class="sp"></span>
+        <span class="sm nw">已等 <b>${dur(j.elapsed_min * 60)}</b>${j.deps ? ` · 预计 ${tsNear(j.eta_ts)} 放行` : ""}</span></div>
+      <div class="sm mut ell" style="margin-top:3px">${esc(j.last_line || "等条件放行")}</div></div>`;
+    const f = jobFrac(j), sp = (j.speed || []).filter(p => p[0] >= NOW - 6 * 3600);
+    return `<div class="job" ${tip(`${j.id}（${laneName(l, D.hosts)}）\n开始 ${ts(j.start_ts)} · 已用 ${dur(j.elapsed_min * 60)}\n预计结束依据：${j.eta_source}` + (j.last_line ? "\n" + j.last_line : ""))}>
+      <div class="row"><span class="dot" style="background:${gcolor(j.group)}"></span><span class="mono ell">${esc(j.id)}</span><span class="sm mut ell hide-sm">${esc(laneName(l, D.hosts))}</span><span class="sp"></span>
+        <span class="sm nw">${j.overrun_min ? `<span style="color:var(--warn)">超估时 <b>+${dur(j.overrun_min * 60)}</b></span> · 估 ${dur(j.dur_min * 60)}` : `剩 <b>${dur(j.remaining_min * 60)}</b> · ${tsNear(j.eta_ts)}`}</span></div>
+      <div class="row" style="margin-top:4px"><div class="meter" style="flex:1;margin:0"><i class="${j.overrun_min ? "ovr" : ""}" style="width:${f * 100}%;background-color:${gcolor(j.group)}"></i></div>
+        <span class="sm num nw" style="width:92px;text-align:right">${j.progress ? `${j.progress[0]}/${j.progress[1]}` : j.overrun_min ? "超估时" : Math.round(f * 100) + "% 估"}</span></div>
+      ${sp.length >= 2 ? speedTile(j, sp)
+        : `<div class="sm mut" style="margin-top:2px">${j.progress ? "速度曲线需要两次以上进度采样" : j.overrun_min ? "日志没有进度行，已超出估时，完成时间未知" : "日志没有进度行，按估时推算"}</div>`}</div>`;
+  }).join("");
+  const run = D.jobs.filter(j => j.status === "running"), many = run.length > COMPACT.run, compact = many && LS.get("runview", "compact") === "compact";
+  const sw = many ? `<div class="seg">${[["compact", "紧凑"], ["full", "详细"]].map(([k, v]) => `<button data-rv="${k}" class="${(compact ? "compact" : "full") === k ? "on" : ""}">${v}</button>`).join("")}</div>` : "";
+  return `<div class="card"><div class="row"><span class="hd">运行中</span>${many ? `<span class="sm mut">${run.length} 个</span>` : ""}<span class="sp"></span>${sw || `<span class="sm mut">进度 · 速度</span>`}</div>
+    ${compact ? runCompact(run) : items || `<div class="sm mut">没有正在运行的任务</div>`}</div>`;
+}
+// 运行中占位任务悬停里放行的那一句（详细视图与紧凑行共用）：写了依赖的是推演的放行时刻，没写的给估时
+const holdLine = j => j.deps ? `\n预计 ${ts(j.eta_ts)} 放行（${j.dur_src}；放不放仍看它自己的条件）` : j.est_min ? "\n估时 " + dur(j.est_min * 60) + "（等条件放行，实际可长可短）" : "";
+// 紧凑视图：按计划项分组（组按最早结束排，没分组的归「未分组」），组头一行汇总、可收起；组内一个任务一行，速度与依据放悬停；没在跑的车道合成一行
+function runCompact(run) {
+  const by = new Map();
+  for (const j of [...run].sort((a, b) => (a.eta_ts ?? Infinity) - (b.eta_ts ?? Infinity))) {
+    const k = j.group || "";
+    if (!by.has(k)) by.set(k, []);
+    by.get(k).push(j);
+  }
+  const closed = SS.get("rclosed", []), lane = j => D.lanes.find(l => l.id === j.lane) || {id: j.lane, label: j.lane, host: ""};
+  const row = j => {
+    const l = lane(j), ln = laneName(l, D.hosts), f = jobFrac(j), c = gcolor(j.group);
+    const sp = (j.speed || []).filter(p => p[0] >= NOW - 6 * 3600);
+    const tt = `${j.id}（${ln}）\n开始 ${ts(j.start_ts)} · 已用 ${dur(j.elapsed_min * 60)}` + (j.progress ? `\n进度 ${j.progress[0]}/${j.progress[1]}` : "")
+      + (sp.length >= 2 ? `\n速度 现在 ${f1(j.rate_per_min, 1)} · 近 ${dur(NOW - sp[0][0])} 均 ${f1(avg(sp.map(p => p[1])), 1)} 步/分` : "")
+      + (j.hold ? holdLine(j) || "\n等条件放行" : j.suspended ? "\n进程被 SIGSTOP 挂起，kill -CONT 恢复" : j.eta_source ? `\n预计结束 ${ts(j.eta_ts)}（依据：${j.eta_source}）` : "")
+      + (j.last_line ? "\n" + j.last_line : "");
+    const right = j.hold ? `<span style="color:var(--warn)">⏸ 已等 ${dur(j.elapsed_min * 60)}</span>` : j.suspended ? `<span style="color:var(--warn)">⏸ 挂起 · 停在 ${tsNear(j.log_mtime)}</span>`
+      : j.overrun_min ? `<span style="color:var(--warn)">超估时 +${dur(j.overrun_min * 60)}</span>` : `剩 <b>${dur(j.remaining_min * 60)}</b> · ${tsNear(j.eta_ts)}`;
+    return `<div class="jr" ${tip(tt)}><span class="mono ell">${esc(barName(j))}</span><span class="sm mut ell hide-sm">${esc(ln)}</span>
+      <div class="meter" style="margin:0"><i class="${j.overrun_min ? "ovr" : ""}" style="width:${(j.hold ? 0 : f) * 100}%;background-color:${j.suspended ? "var(--muted)" : c}"></i></div>
+      <span class="sm num ell" style="text-align:right">${right}</span></div>`;
+  };
+  let s = "";
+  for (const [k, js] of by) {
+    const g = GROUPS[k], ends = js.filter(j => !j.hold).map(j => j.eta_ts).filter(Boolean), first = ends.length ? Math.min(...ends) : null;   // 占位任务的放行不算“结束”
+    const gt = `${g ? g.label : "未分组（占位任务与没归到计划项的）"}：${js.length} 个在跑` + (ends.length ? `\n最早 ${ts(first)}、最晚 ${ts(Math.max(...ends))} 结束` : "")
+      + "\n车道：" + [...new Set(js.map(lane).map(l => laneName(l, D.hosts)))].join("、");
+    s += `<details class="rgrp" data-rg="${esc(k)}" ${closed.includes(k) ? "" : "open"}><summary ${tip(gt)}><span class="dot" style="background:${g ? g.color : "var(--faint)"}"></span>
+      <b class="ell">${esc(g ? g.label : "未分组")}</b><span class="sm mut nw">${js.length} 个在跑${first ? ` · 最早 ${tsNear(first)} 结束` : ""}</span></summary>${js.map(row).join("")}</details>`;
+  }
+  const idle = D.lanes.filter(l => l.unfinished && !run.some(j => j.lane === l.id));
+  if (idle.length) {
+    const KN = {returned: "已归还", paused: "暂停", holding: "暂停中", alive: "排队", waiting: "等待", unstarted: "未启动", managed: "排队", gone: "队列进程不在", done: "已跑完"};
+    const cnt = {}; for (const l of idle) cnt[KN[laneKind(l)]] = (cnt[KN[laneKind(l)]] || 0) + 1;
+    const bad = idle.some(l => laneKind(l) === "gone");
+    s += `<div class="sm" style="margin-top:6px;color:${bad ? "var(--bad)" : "var(--muted)"}" ${tip(idle.map(l => `${laneName(l, D.hosts)}：${laneState(l)}`).join("\n"))}>另有 ${idle.length} 条车道没在跑：${Object.entries(cnt).map(([k, n]) => `${k} ${n}`).join(" · ")}</div>`;
+  }
+  return s;
+}
+
+// 运行中任务的速度小图：浅底、计划项颜色的面积，标题写明是什么、看的哪段时间，右边是现在与这段的平均
+function speedTile(j, sp) {
+  const t0 = sp[0][0], mean = avg(sp.map(p => p[1]));
+  return `<div class="mini" style="margin-top:5px;padding:4px 9px 3px" ${tip(`进度速度（每分钟走几步，按日志里的 PROGRESS 行算）\n近 ${dur(NOW - t0)}：平均 ${f1(mean, 1)}、最低 ${f1(Math.min(...sp.map(p => p[1])), 1)}、最高 ${f1(Math.max(...sp.map(p => p[1])), 1)} 步/分\n虚线是平均，底线是 0；悬停曲线看各时刻的值`)}>
+    <div class="row sm"><span class="mut nw">速度 · 近 ${dur(NOW - t0)}</span><span class="sp"></span>
+      <span class="num nw">现在 <b>${f1(j.rate_per_min, 1)}</b> <span class="mut">· 均 ${f1(mean, 1)} 步/分</span></span></div>
+    ${chart({series: [{name: "", color: gcolor(j.group), pts: sp}], t0, t1: NOW, H: 26, mean: true, fmt: v => f1(v, 1) + " 步/分"})}</div>`;
+}
+
+/* ---------- 资源小图 ---------- */
+function resourcesCard() {
+  const hrs = LS.get("rw", 6), t0 = NOW - hrs * 3600;
+  const tile = (label, val, ch, tt) => `<div class="mini" ${tt ? tip(tt) : ""}><div class="row sm"><span class="mut ell">${label}</span><span class="sp"></span><b class="num nw">${val}</b></div>${ch}</div>`;
+  const line = (pts, ymax, fmt, o = {}) => chart({series: [{name: "", color: o.color || "var(--accent)", pts}], t0, t1: NOW, ymax, fmt, thr: o.thr});
+  const block = (head, chips, tiles) => `<div class="hgrp"><div class="row hhd"><b class="nw">${head}</b><span class="chips">${chips.join("")}</span></div><div class="minis">${tiles.join("")}</div></div>`;
+  const out = [];
+  // 每台主机一组：组头放状态与小标签（温度功耗、检查、本项目存储），组内小图不再重复主机名
+  for (const h of D.hosts) {
+    if (h.returned) {
+      if (!retShown(h)) continue;                      // 已还、任务都跑完了：顶栏收成「已还 N 台」
+      const ls = D.lanes.filter(l => l.host === h.id), via = ls.find(l => l.read_via)?.read_via;
+      out.push(`<div class="hgrp"><div class="row hhd mut"><b class="nw"><span class="cdot" style="background:var(--faint)"></span> ${esc(h.label)}</b>
+        <span class="sm">已归还（${ts(h.returned)}），不再连接${ls.length ? (via ? `；它的车道经 ${esc(via)} 读共享盘` : "；它的车道显示归还前的状态") : ""}</span></div></div>`);
+      continue;
+    }
+    const H = HIST(h.id), cg = h.cgroup || {}, gp = h.gpus || [], tiles = [], chips = [];
+    if (gp.length) {
+      const cols = ["var(--accent)", "#1D9E75", "#D85A30", "#7F77DD", "#D4537E", "#BA7517", "#639922", "#888780"];
+      const series = gp.map((g, k) => ({name: gp.length > 1 ? "GPU" + g.index : "", color: cols[k % cols.length], pts: H.filter(r => r.util).map(r => [r.t, r.util[k]])}));
+      tiles.push(tile(`GPU 利用率${gp.length > 1 ? " · " + gp.length + " 卡" : ""}`, f1(avg(gp.map(g => g.util)), 0) + "%", chart({series, t0, t1: NOW, ymax: 100, fmt: v => f1(v, 0) + "%"}),
+        gp.map(g => `GPU${g.index} ${g.name}  ${f1(g.temp, 0)}°C  ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n")));
+      const tot = sum(gp.map(g => g.mem_total)) / 1024;     // 显存探针给的是 MiB
+      tiles.push(tile(`显存 · ${f1(tot, 0)} GiB`, f1(sum(gp.map(g => g.mem_used)) / 1024, 1) + " GiB",
+        line(H.filter(r => r.mem).map(r => [r.t, sum(r.mem) / 1024]), tot, v => f1(v) + " GiB"),
+        (h.gpu_procs || []).map(p => `PID ${p.pid}  ${f1(p.mem / 1024)} GiB  ${(p.cmd || "").slice(0, 60)}`).join("\n") || "无 GPU 进程"));
+      for (const g of gp) chips.push(`<span class="chip">${gp.length > 1 ? "GPU" + g.index + " " : ""}${f1(g.temp, 0)}°C · ${f1(g.power, 0)} W</span>`);
+    }
+    if (cg.cpu_quota) tiles.push(tile(`CPU · ${f1(cg.cpu_quota, 0)} 核`, f1(h.cpu_pct, 0) + "%",
+      line(H.filter(r => r.cpu_pct != null).map(r => [r.t, r.cpu_pct]), 100, v => f1(v, 0) + "%"), `负载 ${(h.loadavg || []).map(v => f1(v)).join(" / ")}`));
+    if (cg.mem_rss || cg.mem_used) tiles.push(tile(`内存${cg.mem_limit ? " · " + f1(cg.mem_limit / GIB, 0) + " GiB" : ""}`, f1((cg.mem_rss || 0) / GIB, 1) + " GiB",
+      line(H.filter(r => r.ram).map(r => [r.t, r.ram / GIB]), 0, v => f1(v) + " GiB"), `进程 ${f1((cg.mem_rss || 0) / GIB)} GiB · 含缓存 ${f1((cg.mem_used || 0) / GIB)} GiB`));
+    for (const m of h.mounts || []) {     // 采集给的是 GB（历史曲线也是），换成 GiB
+      const low = m.min_gb != null && m.avail_gb < m.min_gb;
+      tiles.push(tile(esc(m.label), `<span style="${low ? "color:var(--bad)" : ""}">余 ${f1(m.avail_gb)} GiB</span>`,
+        line(H.filter(r => r.disk && r.disk[m.path] != null).map(r => [r.t, r.disk[m.path]]), 0, v => "余 " + f1(v) + " GiB", {color: low ? "var(--bad)" : "var(--muted)", thr: m.min_gb != null ? m.min_gb : null}),
+        `${m.path}\n总 ${f1(m.total_gb, 0)} GiB · 已用 ${f1(m.used_pct, 1)}%${m.min_gb != null ? " · 告警线 " + f1(m.min_gb, 0) + " GiB（红虚线）" : ""}`));
+    }
+    for (const c of h.checks || []) {
+      const col = c.state === "ok" ? "var(--ok)" : c.state === "fail" ? "var(--faint)" : "var(--line)";
+      chips.push(`<span class="chip" ${tip([c.out, ...(c.detail || [])].filter(Boolean).join("\n") || "无输出")}><span class="cdot" style="background:${col}"></span> ${esc(c.label)}：${c.state === "ok" ? "是" : c.state === "fail" ? "否" : "不适用"}</span>`);
+    }
+    // 共享盘各服务器挂的是同一块，只在第一台主机上写一次；本地盘按主机
+    const sg = EV.storage || {}, sh = h === D.hosts[0] ? Object.entries(sg.dirs || {}) : [], loc = sg.local?.[h.id], lb = loc ? (loc.cache || 0) + (loc.scratch || 0) : 0;
+    if (sh.length || loc) {
+      chips.push(`<span class="chip" ${tip([...(sh.length ? ["本项目在共享盘上的目录（看板的共享盘统计，限速轮流扫）", ...sh.map(([d, b]) => `${d}  ${f1(b / GIB, 2)} GiB（统计于 ${ts(sg.at?.[d])}）`),
+        sg.free != null ? `共享盘剩 ${f1(sg.free / GIB, 0)} GiB；按人看在组内服务器的「共享盘」` : ""] : []),
+        loc ? `这台的本地盘：缓存 ${f1((loc.cache || 0) / GIB, 2)} GiB · 单格临时目录 ${f1((loc.scratch || 0) / GIB, 2)} GiB` : ""].filter(Boolean).join("\n"))}>${sh.length ? `本项目占用 ${f1(sum(sh.map(x => x[1])) / GIB, 1)} GiB${lb >= GIB ? ` · 本地 ${f1(lb / GIB, 1)} GiB` : ""}` : `本项目本地 ${f1(lb / GIB, 1)} GiB`}</span>`);
+    }
+    const head = `<span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}" ${tip(h.ok ? "探针正常" : h.error || "失败")}></span> ${esc(h.label)}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}${h.stale ? ` <span class="sm" style="color:var(--bad)">（显示 ${ts(h.last_ok)} 的数据）</span>` : ""}`;
+    out.push(block(head, chips, tiles.length ? tiles : [`<div class="sm mut">没有数据</div>`]));
+  }
+  const card = `<div class="card" style="margin-top:10px"><div class="row"><span class="hd">资源</span><span class="sm mut hide-sm">整台主机的数字，含同机别的项目与 labmon 之外的进程</span><span class="sp"></span>
+    <div class="seg">${[6, 24].map(v => `<button data-rw="${v}" class="${v === hrs ? "on" : ""}">${v} 小时</button>`).join("")}</div></div>
+    ${out.join("")}</div>`;
+  // 嵌在工作台里时主机资源与主机页重复，默认收起
+  return EMBED ? `<details class="res" ${SS.get("resOpen", false) ? "open" : ""}><summary>资源（主机按任务的明细见工作台的主机页）</summary>${card}</details>` : card;
+}
+
+/* ---------- 任务明细（默认折叠） ---------- */
+function jobDetails() {
+  if (!D.jobs.length) return "";
+  const filt = LS.get("filter", "open"), gf = LS.get("gfilter", ""), opened = SS.get("open", null), more = SS.get("more", {});
+  let s = `<div class="row" style="flex-wrap:wrap;gap:8px;margin-top:6px"><div class="seg">${[["open", "未完成"], ["all", "全部"], ["failed", "失败"]].map(([k, v]) =>
+    `<button data-f="${k}" class="${k === filt ? "on" : ""}">${v}</button>`).join("")}</div>
+    ${D.groups.length ? `<div class="seg"><button data-g="" class="${gf ? "" : "on"}">全部计划项</button>${D.groups.map(g => `<button data-g="${esc(g.id)}" class="${gf === g.id ? "on" : ""}"><span class="dot" style="background:${g.color}"></span> ${esc(g.label)}</button>`).join("")}</div>` : ""}</div>`;
+  const order = {running: 0, failed: 1, queued: 2, done: 3};
+  for (const l of D.lanes) {
+    let js = jobsOf(l.id).filter(j => (!gf || j.group === gf) && (filt === "all" || (filt === "failed" ? j.status === "failed" : j.status !== "done")));
+    js.sort((a, b) => order[a.status] - order[b.status] || (a.status === "done" ? (b.end_ts || 0) - (a.end_ts || 0) : 0));
+    const lim = more[l.id] ? 1e9 : 12, hidden = Math.max(0, js.length - lim);
+    s += `<details class="lane" data-lane="${esc(l.id)}" ${opened ? (opened.includes(l.id) ? "open" : "") : "open"}><summary><b>${esc(laneName(l, D.hosts))}</b> <span class="sm mut">${esc(laneGroups(jobsOf(l.id)).map(gshort).map(g => g + " · ").join(""))}完成 ${l.done ?? 0}/${l.total ?? 0}</span></summary>
+      <div class="scroll"><table><tr><th>任务</th><th>状态</th><th class="r">预计时长</th><th class="r">已用 / 实际</th><th class="r hide-sm">开始</th><th class="r">结束 / 预计</th><th class="hide-sm">最近输出</th></tr>
+      ${js.slice(0, lim).map(j => {
+        const est = j.dur_min == null ? "—" : j.est_min == null || Math.abs(j.dur_min - j.est_min) > .5
+          ? `<span style="border-bottom:1px dotted var(--muted)" ${tip((j.est_min != null ? "清单估时 " + dur(j.est_min * 60) + "，" : "清单没写估时，") + "预计按" + j.dur_src)}>${dur(j.dur_min * 60)}</span>` : dur(j.est_min * 60);
+        return `<tr id="job-${esc(j.id)}" class="${j.status === "running" ? "run" : ""}"><td class="mono"><span class="dot" style="background:${gcolor(j.group)}"></span> ${esc(j.id)}</td>
+        <td>${badge(...stOf(j))}</td><td class="r">${est}</td><td class="r">${j.actual_min != null ? dur(j.actual_min * 60) : j.elapsed_min != null ? dur(j.elapsed_min * 60) : "—"}</td>
+        <td class="r hide-sm">${tsNear(jobT0(j))}</td><td class="r">${tsNear(jobT1(j))}</td><td class="mono mut ell hide-sm" style="max-width:340px" ${j.last_line ? tip(j.last_line) : ""}>${esc(j.last_line || "")}</td></tr>`; }).join("")}
+      ${hidden ? `<tr><td colspan="7"><span class="more" data-more="${esc(l.id)}">还有 ${hidden} 个，全部显示</span></td></tr>` : ""}
+      ${!js.length ? `<tr><td colspan="7" class="mut">没有符合条件的任务</td></tr>` : ""}</table></div></details>`;
+  }
+  return `<details class="jobs" ${SS.get("jobsOpen", false) ? "open" : ""}><summary>任务明细（${D.jobs.length}）</summary>${s}</details>`;
+}
+
+const EMBED = (() => { try { return window.top !== window.self; } catch (e) { return true; } })();
+function render() {
+  const app = document.getElementById("app");
+  if (!D) { app.textContent = "没有数据"; return; }
+  chN = 0;
+  let h = topline() + kpis();
+  if (D.lanes.length || D.pool?.attempts?.length) h += timelineCard();
+  if (D.groups.length || D.lanes.length) h += `<div class="cols">${groupsCard()}${D.lanes.length ? runningCard() : ""}</div>`;
+  h += resourcesCard() + jobDetails();
+  if (D.pool?.queues?.length) h += `<div class="card"><div class="row wrap"><b>算力池实验</b><a class="btn" target="_top" href="../../#/p/${encodeURIComponent(D.id)}/manage">查看任务记录</a></div><p class="sm mut">${D.pool.active ? "仍有待位或在途任务" : "本轮提交已结束"} · 真实运行与历史见上方时间线</p></div>`;
+  h += `<p class="sm mut" style="margin-top:14px">${LIVE ? "每 15 秒取新数据" : `每 ${D.refresh} 秒刷新`} · 采集间隔 ${D.interval} 秒 · labmon</p>`;
+  app.innerHTML = h;
+  tipCheck();
+  drawTimeline();
+}
+
+/* ---------- 交互 ---------- */
+// 悬停提示的外壳在 common.js（tipBind）；这里只管曲线的十字线。嵌在看板里时看板会调本页的 hideTip
+const xhHide = () => document.querySelectorAll("svg.ch .xh").forEach(x => x.setAttribute("visibility", "hidden"));
+tipBind({
+  hover(e) {
+    try { if (parent !== window) parent.hideTip?.(); } catch (err) {}   // 嵌在看板里：看板上留下的提示过时了
+    const svg = e.target.closest?.("svg.ch");
+    document.querySelectorAll("svg.ch .xh").forEach(x => { if (!svg || !svg.contains(x)) x.setAttribute("visibility", "hidden"); });
+    if (svg) { const t = chartHover(svg, e); if (t) return [t, svg]; }
+  },
+  hide: xhHide,
+});
+function saveView() {
+  SS.set("scroll", window.scrollY);
+  const j = document.querySelector("details.jobs"); if (j) SS.set("jobsOpen", j.open);
+  const r = document.querySelector("details.res"); if (r) SS.set("resOpen", r.open);
+  const gd = document.querySelector("details.gdone"); if (gd) SS.set("gdone", gd.open);
+  const ag = document.querySelector("details.agal"); if (ag) SS.set("agal", ag.open);
+  const ls = document.querySelectorAll("details.lane"); if (ls.length) SS.set("open", [...ls].filter(d => d.open).map(d => d.dataset.lane));
+  const rg = document.querySelectorAll("details.rgrp"); if (rg.length) SS.set("rclosed", [...rg].filter(d => !d.open).map(d => d.dataset.rg));
+}
+function rerender() { const y = window.scrollY; saveView(); render(); window.scrollTo(0, y); }
+// 新数据来了的重画：正在操作（选着日志、曲线上的字）就先不画，选区一取消再补
+let PENDING = false;
+function redraw() {
+  if (editing("app")) { PENDING = true; return; }
+  PENDING = false; rerender(); lastDraw = Date.now();
+}
+document.addEventListener("selectionchange", () => { if (PENDING) redraw(); });
+document.addEventListener("focusout", () => setTimeout(() => { if (PENDING) redraw(); }));
+document.addEventListener("click", e => {
+  const t = e.target.closest("[data-tl],[data-tz],[data-tlall],[data-rw],[data-rv],[data-f],[data-g],[data-more],[data-now],[data-tlkey],[data-gsq],rect.j");
+  if (!t) return;
+  if (t.matches("[data-gsq]")) { e.preventDefault(); gsqClick(t.dataset.gsq); }      // 不让外面的 <details> 自己开合
+  else if (t.matches("[data-now]")) collectNow();
+  else if (t.matches("[data-tl],[data-tz],[data-tlkey]")) tlClick(t);
+  else if (t.dataset.tlall) { LS.set("tlall", !LS.get("tlall", false)); drawTimeline(); }
+  else if (t.dataset.rw) { LS.set("rw", +t.dataset.rw); rerender(); }
+  else if (t.dataset.rv) { LS.set("runview", t.dataset.rv); rerender(); }
+  else if (t.dataset.f) { LS.set("filter", t.dataset.f); rerender(); }
+  else if (t.matches("[data-g]")) { LS.set("gfilter", t.dataset.g); rerender(); }
+  else if (t.dataset.more) { const m = SS.get("more", {}); m[t.dataset.more] = 1; SS.set("more", m); rerender(); }
+  else if (t.matches("rect.j")) {
+    const id = t.dataset.id, j = D.jobs.find(x => x.id === id); if (!j) return;
+    if (j.status === "done" && LS.get("filter", "open") !== "all") LS.set("filter", "all");
+    LS.set("gfilter", "");
+    const m = SS.get("more", {}); m[j.lane] = 1; SS.set("more", m);
+    const o = new Set(SS.get("open", D.lanes.map(l => l.id))); o.add(j.lane); SS.set("open", [...o]);
+    SS.set("jobsOpen", true); render();
+    const row = document.getElementById("job-" + id);
+    if (row) { row.classList.add("hl"); row.scrollIntoView({block: "center"}); setTimeout(() => row.classList.remove("hl"), 2500); }
+  }
+});
+document.addEventListener("toggle", e => { if (e.target.matches?.("details")) saveView(); }, true);
+window.addEventListener("beforeunload", saveView);
+let rt; window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(drawTimeline, 150); });
+function setData(d) { D = d; NOW = d.generated; GROUPS = Object.fromEntries((d.groups || []).map(g => [g.id, g])); }
+let lastDraw = Date.now();
+// 不自动重试：打开页面时首次渲染等着它，连不上就先用页面里的快照画；没取到（EVOK 为假）由下一轮定时取数补（#177）
+let EVOK = false;
+async function loadEvents() {
+  try { const r = await api("events.json", {cache: "no-store"}); if (r.ok) { EV = await r.json(); EVOK = true; } else EVOK = false; } catch (e) { EVOK = false; /* 取不到就不标空档原因 */ }
+}
+async function poll() {
+  const was = OFFLINE, gen = NOW;
+  try {
+    const r = await api("snapshot.json", {cache: "no-store"});
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    setData(await r.json()); OFFLINE = pollNet(null);
+  } catch (e) { OFFLINE = pollNet(e, poll); }
+  const evMiss = !EVOK && !OFFLINE;                  // 上次事件没取到、这次连上了：补取
+  if (NOW !== gen || evMiss) await loadEvents();
+  if (NOW !== gen || OFFLINE !== was) tellTop();
+  if (TL.d) return;                                 // 正在拖时间线：等松手后的下一轮再重画
+  // 有新数据（含补到的事件）、连通状态变了、上一次被挡住没画（选区放久了也照画，见 editing），或过了一分钟（刷新“几分钟未更新”的提示）才重画
+  if (NOW !== gen || (evMiss && EVOK) || OFFLINE !== was || PENDING || Date.now() - lastDraw > 60000) redraw();
+}
+async function collectNow() {
+  BUSY = true; rerender(); tellTop();
+  try {
+    const r = await postJSON("collect", {}, {retry: true, onWait: () => { OFFLINE = netText("poll"); rerender(); tellTop(); }});     // 做两遍也没事：连不上自动重试
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    const j = await r.json();
+    setData(j); OFFLINE = null;
+    await loadEvents();
+  } catch (e) { OFFLINE = "立即采集失败：" + (e.message || e); }
+  BUSY = false; rerender(); lastDraw = Date.now(); tellTop();
+}
+// 嵌在看板里：看板顶栏显示这里的更新时间、采集中与连不上的提示（经 embedState 取），立即采集也由看板调 collectNow
+function embedState() { return {now: NOW, offline: OFFLINE, busy: BUSY}; }
+function tellTop() { if (EMBED) try { parent.frameChanged?.(); } catch (e) {} }
+function first() { render(); window.scrollTo(0, SS.get("scroll", 0)); tellTop(); }
+if (LIVE) { setInterval(poll, 15000); loadEvents().then(first); }      // 共享盘余量在 events.json 里：取到再画，磁盘余量才不会先显示别的盘再跳
+else { first(); setTimeout(() => { saveView(); location.reload(); }, (D?.refresh || 60) * 1000); }
+</script>
+</body>
+</html>

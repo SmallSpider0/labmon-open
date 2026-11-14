@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "compact|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '提醒（labmon 仓库，上下文压缩或会话续接之后）：回复、汇报、小结都用中文，不跟着英文摘要走，见 AGENTS.md「语言」。角色照旧：仓库主目录里和维护者对话的总控会话只做总控（派子 agent、转达决定、看报告；维护者在场明说当场修的第 0 档急修除外）；worktree 里的会话与子 agent 照自己 brief 的分工做完，不因这条提醒改做总控。分工见 AGENTS.md「谁做什么、子 agent 怎么派」。 回读 AGENTS.md「沟通与主动推进」及当前 Issue 最新批复：说人话，核根因与连带影响，沿现有 skill 分工持续做到验收；子 agent 按 brief 和交接继续。'"
+          }
+        ]
+      }
+    ]
+  }
+}
