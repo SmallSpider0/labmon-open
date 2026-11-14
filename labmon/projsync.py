@@ -129,7 +129,15 @@ def push(cfg_path: str | Path, admin: bool = False) -> str:
         raise ConfigError(f"找不到配置文件 {p}")
     cfg = _load(p, text)
     pid = cfg["id"]
-    r = _put(pid, text, _local(cfg), base_of(p, pid), admin=admin)
+    base = base_of(p, pid)
+    files = _local(cfg)
+    try:
+        r = _put(pid, text, files, base, admin=admin)
+    except PJ.Refused as e:
+        if e.code != 412 or e.ver is not None or base is None:
+            raise
+        # 明确执行的 push 可以重新登记；同步线程仍会带着旧版本条件。
+        r = _put(pid, text, files, None, admin=admin)
     mark(p, pid, r["ver"])
     if r["created"]:
         if r["archived"]:

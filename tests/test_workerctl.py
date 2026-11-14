@@ -106,15 +106,17 @@ class OverrideCliTest(unittest.TestCase):
         import io
         from fixtures import board
         from labmon import __main__ as M
-        from labmon import config as K
+        from labmon import config as K, projects
         with tempfile.TemporaryDirectory() as td:
             d = Path(td).resolve()
             (d / "hosts.toml").write_text('[[hosts]]\nid = "a"\n\n[[hosts]]\nid = "b"\n')
             env = {"LABMON_HOSTS": str(d / "hosts.toml"), "LABMON_STATE": str(d / "state")}
             calls = []
             fake = lambda *a, **kw: calls.append((a, kw)) or [{"host": h, "rc": 0, "out": "生效中：…"} for h in a[3]]   # noqa: E731
-            with mock.patch.dict(os.environ, env), mock.patch.object(workerctl, "override_each", fake), mock.patch("labmon.projects.project_ids", lambda: []), \
+            with mock.patch.dict(os.environ, env), mock.patch.object(workerctl, "override_each", fake), \
                     contextlib.redirect_stdout(io.StringIO()) as out:
+                for pid in ("a1", "demo-b"):
+                    projects.put_config(pid, f'id = "{pid}"\n')
                 board(self)
                 self.assertEqual(M.main(["pause", "demo-b"]), 0)
                 self.assertEqual((K.sched().get("pause"), calls), ({"demo-b": None}, []))

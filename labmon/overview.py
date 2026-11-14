@@ -38,14 +38,15 @@ from . import rebalance as RB
 from . import renew as R
 from . import pool_supply as PS
 from . import pool_dispatch as PD
-from .projects import archived
+from .projects import archived_rows
+from .labmon_worker import qslug
 from .collect import write_page
 from .config import STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, parse_time, pick_color, sched, user_hosts
 from .health import container_step, lease_due, lease_end, link_step
 from .records import EVENT_CATS, EVENT_KINDS, log_events, told
 from .state import append_row, load_json, load_rows, parse_rows, save_json, snapshot, state_dir, usage_file, write_atomic
 from .service import log
-from .workerctl import run_out, worker_env
+from .workerctl import run_out, ssh, worker_env
 
 KEEP_S = 7 * 86400
 SHOW_S = 24 * 3600
@@ -120,7 +121,7 @@ def _reg_cmd(h: dict) -> str:
 REG_KEYS = ("root", "jobs", "project", "stop", "gpus", "pool")     # 登记的全局视图里一条登记带的字段（状态里的 queues 与登记文件共有的）
 
 
-def _parse_regs(text: str) -> dict:
+def _parse_regs(text: str, *, strict: bool = False) -> dict:
     """_reg_cmd 读回的那一段 → {主机: [登记]}（登记文件里的 REG_KEYS、added，key 是登记键：文件名去掉 .json）。读坏了的文件跳过（worker 那边记事件）。"""
     out: dict = {}
     for chunk in re.split("^" + re.escape(REG) + " ", text, flags=re.M)[1:]:
@@ -132,7 +133,11 @@ def _parse_regs(text: str) -> dict:
         try:
             reg = json.loads(body)
         except ValueError:
+            if strict:
+                raise
             continue
+        if strict and not (isinstance(reg, dict) and isinstance(reg.get("project"), str)):
+            raise ValueError("登记归属未核实")
         if isinstance(reg, dict):
             regs.append({**{k: reg.get(k) for k in REG_KEYS}, "added": reg.get("added"), "key": f[:-5] if f.endswith(".json") else f})
     return out
@@ -181,6 +186,101 @@ def _regs(hosts: list[dict], by: dict, got: dict, old: dict, t: float, fleet_cfg
              if hid not in act | seen and x.get("home") not in read and x.get("queues") is not None]
     rest.sort(key=lambda x: (x["state"] != "returned", -(x.get("returned") or 0), x["host"]))
     return out + rest
+
+
+def _project_worker_state(host: dict, markers: list[str]) -> tuple[str | None, str | None]:
+    """即使有 status.json，也读实际的登记文件。只读这份 worker 目录，留着的归还或旧主机目录一并核对。"""
+    home = shlex.quote(host["worker_home"].rstrip("/"))
+    remote = (f"set -e; if [ -e {home}/hosts ]; then [ -d {home}/hosts ] && [ -r {home}/hosts ] && [ -x {home}/hosts ] || exit 1; fi; "
+              f"{_reg_cmd({**host, 'regs': []})}echo {SEP}; "
+              f'for f in {home}/hosts/*/status.json {home}/hosts/*/overrides.json; do '
+              '[ -f "$f" ] || continue; printf "%s\\n" "$f"; cat "$f"; echo; ' + f'echo {SEP}; done')
+    if markers:
+        paths = shlex.join([host["worker_home"].rstrip("/") + "/hosts/" + marker for marker in markers])
+        remote += (f'; for f in {paths}; do [ ! -e "$f" ] && [ ! -L "$f" ] || exit 9; done')
+    try:
+        rc, out = ssh(host, remote, timeout=20)
+    except (OSError, subprocess.TimeoutExpired):
+        return None, "读不到 worker 目录"
+    if rc == 9:
+        return None, "算力池清单仍有通道标记，请先解除登记"
+    return (out, None) if rc == 0 else (None, "读不到 worker 目录")
+
+
+def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict, pool_rows: list[dict]) -> None:
+    """只核对与本项目相关的 worker 目录；快照提供线索，删除以本次读到的文件为准。"""
+    known = {h["id"]: h for h in all_hosts()}
+    configured = {h["id"]: h for h in cfg.get("hosts", [])}
+    active = [h for h in [*known.values(), *configured.values()] if not h.get("returned")]
+    associated = set(configured)
+    associated.update(h["id"] for h in local.get("hosts", []))
+    associated.update(r["host"] for r in entry.get("regs", []))
+    associated.update(r.get("host", r.get("reader")) for r in local.get("lanes", []))
+    states = ("running", "waiting", "external")
+    associated.update(h["id"] for h in glob.get("hosts", [])
+                      if any(j.get("project") == pid for key in (*states, "queues") for j in (h.get("status") or {}).get(key) or []))
+    reg_homes = {r["host"]: r.get("home") for r in glob.get("regs", [])}
+    related_homes = {h["worker_home"].rstrip("/") for h in configured.values()}
+    for reg in glob.get("regs", []):
+        if any(q.get("project") == pid for q in reg.get("queues") or []):
+            associated.add(reg["host"])
+            if reg.get("home"):
+                related_homes.add(reg["home"].rstrip("/"))
+    markers = {}
+    for row in pool_rows:
+        associated.add(row["host"])
+        marker = "pool-" + qslug(row["root"], row["jobs"]) + ".json"
+        markers.setdefault(row["host"], []).extend([marker, marker + ".route"])
+    active_ids = {h["id"] for h in active}
+    markers_by_home = {}
+    for hid in associated - {None, ""}:
+        h = known.get(hid) or configured.get(hid)
+        home = (h or {}).get("worker_home") or reg_homes.get(hid)
+        if not home:
+            raise ConfigError(f"主机 {hid} 的 worker 目录未知，暂时无法确认任务和登记已收尾")
+        home = home.rstrip("/")
+        related_homes.add(home)
+        markers_by_home.setdefault(home, set()).update(markers.get(hid, []))
+    targets = {}
+    for home in sorted(related_homes):
+        h = home_host(home, active)
+        if h is None:
+            raise ConfigError(f"worker 目录 {home} 没有在用主机代读，暂时无法确认任务和登记已收尾")
+        targets[home] = (h, sorted(markers_by_home.get(home, ())))
+    _, readings = L.gather(targets, lambda args: _project_worker_state(*args), lambda key: bool(targets[key][0].get("ssh")))
+    for home, (raw, error) in readings.items():
+        if error and error.startswith("算力池"):
+            raise ConfigError(error)
+        try:
+            if error or not raw:
+                raise ValueError("读不到状态")
+            registrations, *files = raw.split(SEP + "\n")
+            if not files or files[-1].strip():
+                raise ValueError("未收到完整的 worker 状态")
+            regs = _parse_regs(registrations, strict=True)
+            if any(q["project"] == pid for qs in regs.values() for q in qs):
+                raise ConfigError("项目仍有队列登记，请先移除登记")
+            for part in files[:-1]:
+                path, _, body = part.partition("\n")
+                hid, name = Path(path).parts[-2:]
+                row = json.loads(body)
+                if name == "overrides.json" and isinstance(row, list):
+                    if any(o.get("target") == pid and o.get("kind") in {"pause", "focus"} and
+                           (not o.get("until") or o["until"] > time.time()) for o in row):
+                        raise ConfigError("项目仍有主机上的暂停或优先设置，请先撤销")
+                elif name == "status.json" and isinstance(row, dict):
+                    # 归还主机的等待表和旧字段不再参与调度；若仍记着项目进程，则保留阻断。
+                    if hid in active_ids and not all(isinstance(row.get(key), list) for key in states):
+                        raise ValueError("在用 worker 的任务列表不完整")
+                    keys = states if hid in active_ids else ("running", "external")
+                    if any(j.get("project") == pid for key in keys for j in row.get(key, [])):
+                        raise ConfigError("worker 仍有本项目在跑或等待的任务，请先确认已收尾")
+                else:
+                    raise ValueError("无法识别的 worker 状态")
+        except ConfigError:
+            raise
+        except (AttributeError, KeyError, TypeError, ValueError) as e:
+            raise ConfigError(f"未能核实 worker 目录 {home} 的任务和登记，请恢复连接或检查状态后重试") from e
 
 
 _SENT: dict = {}                     # (主机, 文件名) → 上次写给 worker 的内容（变了才写）
@@ -386,7 +486,7 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
             "regs": _regs(hosts, {k: v for k, v in by.items() if k in hcfg}, got, old, t, fleet_cfg),   # 登记的全局视图：项目「管理」抽屉的主机与队列
             # 各项目的摘要：页面要的字段只在 serve.Overview.proj_info 一处定，这里照带；running 只给 _to_worker 写 eta.json，不进快照（#139）
             "projects": [{k: v for k, v in p.items() if k != "running"} for p in projects],
-            "archived": sorted(archived().values(), key=lambda e: -(e.get("t") or 0)),     # 已归档的项目（projects.json，新的在前）：侧栏「已归档」与它的抽屉
+            "archived": archived_rows(),     # 已归档的项目（projects.json，新的在前）：侧栏「已归档」与它的抽屉
             "hostcheck": HC.view(t),                  # 看板服务所在机的体检（#166）：总览的「看板服务」小卡；不是 WSL 时 None
             "server": LS.view(t)}                     # 服务租约（#163）：这台是主还是备用；备用时不写快照，看板服务发页面时现填
     save_json(sd / "snapshot.json", snap)

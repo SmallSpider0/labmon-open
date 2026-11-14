@@ -396,6 +396,21 @@ def active_reason(project, data=None):
     return None
 
 
+def delete_block(project, data):
+    """归档项目永久删除前仍需确认池通道已释放。保留已撤回的清单和尝试历史。"""
+    if reason := active_reason(project, data):
+        return reason
+    if any(row["state"] != "withdrawn" and row.get("route_protocol") for row in project_rows(project, data)):
+        return "算力池清单仍有登记，请先解除登记"
+    return None
+
+
+def unbind_project(project):
+    """项目登记锁内移除空闲工作区绑定，共享目录及池账本历史继续保留。"""
+    if project in read().get("workspaces", {}):
+        fleet.edit_state(FILE, lambda data: data.get("workspaces", {}).pop(project, None))
+
+
 def release_project(project):
     """已持项目锁并通过归档检查后，沿撤回路径清理完成清单，保留历史。"""
     released, withdrawn = set(), set()

@@ -43,14 +43,14 @@ def _wakes(pid: str, hosts: set | None, overview: Path | None = None) -> dict:
             if (w.get("projects") is None or pid in w["projects"]) and (not w.get("host") or w["host"] in (hosts or ()))}
 
 
-def check_told(cfg: dict, sf: Path, overview: Path | None = None) -> list[str]:
+def check_told(cfg: dict, sf: Path, overview: Path | None = None, *, remember: bool = True) -> list[str]:
     """labmon check 末尾列的：项目已归档的那句，与 wait 还没报过的页面上的改动（wake 里 page: 开头的，records.tell 写的，#121）。
     列出的记进 wait 的已报列表（只加不删，别的告警的记账不动），之后 wait 不重报。"""
     gone = PJ.archived_msg(cfg["id"])
     st = load_json(sf, {})
     seen = set(st.get("reported", []))
     new = {k: m for k, m in _wakes(cfg["id"], None, overview).items() if k.startswith("page:") and k not in seen}
-    if new:
+    if new and remember:
         save_json(sf, {**st, "reported": sorted(seen | set(new)), "t": time.time()})
     return ([gone] if gone else []) + list(new.values())
 
@@ -315,7 +315,15 @@ def wait(pid: str, names: list[str] | None = None, watch: dict | None = None, ho
 
 
 def _wait(pid: str, names: list[str], watch: dict | None, hold: float, extra: dict, overview: Path | None) -> dict:
-    cfg, out = PJ.load_cfg(pid), PJ.out_dir(pid)
+    def require_config():
+        if not PJ.cfg_file(pid).is_file():
+            raise PJ.Refused(404, f"看板上没有项目 {pid}：在项目目录里 labmon project push 登记")
+
+    with PJ._reg_locked():
+        require_config()
+        cfg = PJ.load_cfg(pid)
+        registration = PJ.meta(pid)
+    out = PJ.out_dir(pid)
     sf = out / ".labmon" / "wait_state.json"
     w = JobWatch(cfg, out, names, overview).restore(watch) if names else None
     end, sig, last, nap = time.time() + hold, None, 0.0, threading.Event()
@@ -325,7 +333,11 @@ def _wait(pid: str, names: list[str], watch: dict | None, hold: float, extra: di
         if s != sig or now - last >= POLL_S or now >= end:
             sig, last = s, now
             st = w.check() if w else {}
-            new = wait_check(cfg, out, sf, overview, {**(w.stale if w else {}), **extra})
+            with PJ._reg_locked():
+                require_config()
+                if PJ.meta(pid) != registration:
+                    raise PJ.Refused(409, f"项目 {pid} 的登记已变化，请重新运行 labmon wait")
+                new = wait_check(cfg, out, sf, overview, {**(w.stale if w else {}), **extra})
             if w:
                 new = {k: m for k, m in new.items() if k not in w.void_keys}     # 等的任务的 void: 只在任务那段写
             done = bool(st) and all(x["final"] for x in st.values())

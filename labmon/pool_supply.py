@@ -34,6 +34,14 @@ def held(host):
     return bool(row.get("attempt") or (not row.get("revoked") and row["until"] > time.time()))
 
 
+def project_hold(project):
+    """项目仍有关联的单次供给或试点任务时，须先走供给的收回和核对流程。"""
+    for row in load_json(fleet.state_file(FILE), {}).values():
+        if project in (row.get("project"), row.get("run_project")) and held(row["host"]):
+            return "项目仍有算力池试点供给或尝试，请先撤回并确认收尾"
+    return None
+
+
 def account_project(project, name):
     account = users.account(name) if isinstance(name, str) else None
     if not account or not isinstance(project, str) or not projects.ID_RE.fullmatch(project):

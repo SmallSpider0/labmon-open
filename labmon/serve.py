@@ -70,6 +70,7 @@
                             所有主机生效，同不带 --host 的 labmon focus / pause；暂停、恢复给那个项目的实验会话一条消息 records.tell）。成功回 {"msg"}；失败回 409 {"error"}
     POST /project/<动作>    项目的归档与恢复（project 作用域，见 projects.py）：archive {"project"}（要求暂时没实验；移除登记、撤权重与指令、停止采集）、
                             restore {"project"}（加回采集，登记不恢复；告诉那个项目的实验会话）、
+                            delete {"project", "revision"}（管理员，永久删除已确认的归档项目与看板缓存）、
                             config {"project", "set": {…}}（改项目的 monitor.toml 里页面能改的那几项，config.set_project；记一条配置改动、告诉实验会话，#122）。
                             成功回 {"msg"}；不能做、没做完、校验不过回 409 {"error"}
     POST /reg/<动作>        队列登记（project 作用域，#95，#121 按主机成批）：move {"to", "items": [{"host", "root", "jobs", "project", "stop"}]}（逐条在 to 上 worker add：
@@ -126,7 +127,7 @@ from . import client as CL
 from .config import CLIENT_HEADER, server as server_conf
 from . import dist as DI
 from . import service as S
-from .config import ALERT_KEYS, ConfigError, active_hosts, cfg_spec, check_future, host_pair, host_users, hosts_file, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
+from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, cfg_spec, check_future, host_pair, host_users, hosts_file, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
     stale_limit, user_hosts, STALE_PAD_S, STALE_RUNS
 from .records import cat_of, log_events, records, report, report_headers, schedule_project, tell
 from .service import log, notify, rotate_log
@@ -491,6 +492,24 @@ class Server(ThreadingHTTPServer):
             for m in msgs:
                 log(m)
             return msgs
+
+    def delete_project(self, pid: str, revision: str, who: str) -> str:
+        """同 sync 互斥；已经摘下的线程也要等它退出，避免最后一轮重建目录。"""
+        def check_collector():
+            if pid in self.projects:
+                raise ConfigError("项目采集正在停止，请稍后重试")
+            if old := self.leaving.get(pid):
+                with old.cond:
+                    if old.alive:
+                        raise ConfigError("项目最后一轮采集正在收尾，请稍后重试")
+
+        with self.lock:
+            msg = PJ.delete(pid, revision, who, check_collector)
+            self.held.discard(pid)
+            self.leaving.pop(pid, None)
+            self.bad.pop(pid, None)
+        self.overview.wake.set()
+        return msg
 
     def handle_error(self, request, client_address):
         """浏览器关页面、刷新时断开连接不算出错，不往日志里写 traceback；TLS 入口上用 http 打来的、握手失败与超时的同样不写（#165）；别的照常写。"""
@@ -863,7 +882,12 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/", "/index.html"):
             if who.role == "admin" and LS.primary():
                 f = state_dir() / "index.html"
-                html = f.read_bytes() if f.exists() else None
+                snap = snapshot()
+                archived = PJ.archived_rows()
+                if snap and snap.get("archived", []) != archived:
+                    html = C.render_page("overview.html", {**snap, "archived": archived})
+                else:
+                    html = f.read_bytes() if f.exists() else None
             else:                                      # 磁盘上的 index.html 带全量数据：普通用户现渲染去掉组内部分的；备用时现渲染带上此刻的主备（#163）
                 snap = live_snapshot()
                 html = C.render_page("overview.html", U.view(who, snap)) if snap else None
@@ -884,8 +908,6 @@ class Handler(BaseHTTPRequestHandler):
             f = state_dir() / "snapshot.json"
             if not f.exists():
                 return self._send(503, "{}", "application/json")
-            if who.role == "admin" and LS.primary():
-                return self._send(200, f.read_bytes(), "application/json")
             return self._json(200, U.view(who, live_snapshot()))
         if path == "/fleet/op.json":
             return self._json(200, FO.view())
@@ -1334,17 +1356,21 @@ class Handler(BaseHTTPRequestHandler):
         if not pid:
             return self._json(400, {"error": "没说是哪个项目"})
         try:
-            if act == "weight":
-                msg = set_weight(pid, body.get("weight"))
-            elif act in SCHED_ACTS:
-                kind, on = SCHED_ACTS[act]
-                until = _number(body, "until") if on else None
-                msg = set_sched_ovr(kind, pid, on, until)
-                if kind == "pause" and "本来就没有" not in msg:   # 暂停、恢复会让会话以为卡住或要接着加任务：告诉它（权重、优先只改排序，不叫醒）
-                    tell(pid, act, f"{sched_ovr_text(kind, pid, until)}（所有主机）：不再放行它的新任务，正在跑的跑完，排着的等恢复" if on
-                         else f"恢复 {pid}（所有主机）：照常放行它的任务")
-            else:
-                return self._json(404, {"error": f"不认识的动作 {act}"})
+            with HOSTS_LOCK:
+                adding = act in ("pause", "focus") or (act == "weight" and body.get("weight") not in (None, 1))
+                if adding and (reason := A.unknown_project(pid, require=True)):
+                    raise ConfigError(reason)
+                if act == "weight":
+                    msg = set_weight(pid, body.get("weight"))
+                elif act in SCHED_ACTS:
+                    kind, on = SCHED_ACTS[act]
+                    until = _number(body, "until") if on else None
+                    msg = set_sched_ovr(kind, pid, on, until)
+                    if kind == "pause" and "本来就没有" not in msg:   # 暂停、恢复会让会话以为卡住或要接着加任务：告诉它（权重、优先只改排序，不叫醒）
+                        tell(pid, act, f"{sched_ovr_text(kind, pid, until)}（所有主机）：不再放行它的新任务，正在跑的跑完，排着的等恢复" if on
+                             else f"恢复 {pid}（所有主机）：照常放行它的任务")
+                else:
+                    return self._json(404, {"error": f"不认识的动作 {act}"})
         except U.Denied as x:
             return self._json(x.code, {"error": x.msg})
         except ConfigError as x:
@@ -1393,13 +1419,18 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(404, {"error": f"没有账号 {o}"})
                 msg = PJ.set_owner(pid, a["name"] if a else None, who.name)
                 self.board.overview.wake.set()
+            elif act == "delete":
+                revision = body.get("revision")
+                if not isinstance(revision, str) or not revision:
+                    return self._json(400, {"error": "请刷新归档列表并确认永久删除"})
+                msg = self.board.delete_project(pid, revision, who.name)
             elif act == "restore":
                 msg = PJ.restore(pid, check_owner=lambda: U.need_project(who, pid))
                 if who.via == "session":
                     tell(pid, "restore", f"恢复了项目 {pid}：看板接着采集它；登记没恢复，要跑先 labmon worker add <主机> ROOT JOBS --project {pid}")
             else:
                 return self._json(404, {"error": f"不认识的动作 {act}"})
-        except U.Denied as x:
+        except (U.Denied, PJ.Refused) as x:
             return self._json(x.code, {"error": x.msg})
         except ConfigError as x:
             return self._json(409, {"error": str(x), **({"field": x.field} if x.field else {})})   # 改配置出错的那一项：页面标到那一行
@@ -1530,7 +1561,10 @@ def reg_move(to: str, items: list, own: bool = False) -> str:
             root, jobs, pid, frm = str(it.get("root") or ""), str(it.get("jobs") or ""), str(it.get("project") or ""), str(it.get("host") or "")
             if not (root and jobs and pid):
                 raise ConfigError("登记缺目录、清单或项目")
-            rc, out = W.run_out("add", to, [root, jobs], project=pid, stop=it.get("stop") or None, **({"expect_project": pid} if own else {}))
+            with PJ._reg_locked():
+                if reason := A.unknown_project(pid, require=True):
+                    raise ConfigError(reason)
+                rc, out = W.run_out("add", to, [root, jobs], project=pid, stop=it.get("stop") or None, **({"expect_project": pid} if own else {}))
             text = " ".join(out.strip().splitlines()[-2:])
             if rc != 0:
                 raise ConfigError(f"{_qname(root, jobs)} 没搬到 {to}：{text}" + (f"（已搬 {len(done)} 条）" if done else ""))
@@ -1618,9 +1652,11 @@ def health(t: float | None = None) -> dict:
 
 def live_snapshot() -> dict:
     """全局快照，备用时把 server 换成此刻的主备（lease.view）：备用不采集、快照停在当主时的那一轮，横幅要按此刻的说。
-    不回写快照文件：/healthz 的 last_collect 是它的修改时刻（#163）。"""
+    主服务现填归档列表；不回写快照文件：/healthz 的 last_collect 是它的修改时刻（#163）。"""
     snap = snapshot()
-    if snap and not LS.primary():
+    if snap and LS.primary():
+        snap["archived"] = PJ.archived_rows()
+    elif snap:
         snap["server"] = LS.view()
     return snap
 
@@ -1694,7 +1730,7 @@ ROUTES = [
     _R("GET", r"/fleet/.*", "read", admin=True),                       # 组内服务器的数据只给管理员（维护者 2026-11-10 定）
     _R("POST", r"/(fleet/op|fleet/probe|renew)/.*", "admin", admin=True, ops=True),
     _R("POST", r"/sched/weight", "project", admin=True),               # 调度权重只给管理员（#157 E 节的表）
-    _R("POST", r"/project/owner", "admin", admin=True),                # 换项目主人（#167）：只给管理员
+    _R("POST", r"/project/(owner|delete)", "admin", admin=True),                # 换项目主人（#167）：只给管理员
     _R("POST", r"/(sched|project)/[^/]+", "project", own="body"),
     _R("POST", r"/reg/(move|rm)", "project", own="reg"),
     _R("POST", r"/p/[^/]+/collect", "project", own="path"),

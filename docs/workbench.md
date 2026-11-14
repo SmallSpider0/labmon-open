@@ -12,7 +12,7 @@ labmon service status                                     # 状态、登记的�
 labmon user person <人员名>，再 labmon user add <账号> --person <人员名> --admin                            # 看板账号：建第一个管理员、忘了口令时 reset、给脚本建令牌（docs/api.md）
 labmon service restart                                    # 升级 labmon 代码后重启服务；labmon service stop 停掉整个服务
 labmon project push|pull [-c monitor.toml]                # 项目目录里的 monitor.toml 与看板上那份同步；第一次 push 就是登记（见“项目登记与配置”）
-labmon project archive|restore <项目 id>                   # 归档 / 恢复一个项目，同页面上的「归档」「恢复」（见“项目的归档与恢复”）
+labmon project archive|restore <项目 id>                   # 归档 / 恢复一个项目，同页面上的「归档」「恢复」（见“项目的归档、恢复与永久删除”）
 labmon wait -c monitor.toml                               # 每轮先同步配置，再问看板等告警（长轮询，docs/api.md「命令行」）：出现新告警或采集停了即退出（退出码 1）；项目已归档时直接退出并说明
 labmon wait -c monitor.toml --job 任务 [--job 项目/任务]   # 同时等这些任务跑完（见下“等任务跑完”）：都有结果时退出，全成功 0、其余 4；告警照常退出 1
 ```
@@ -206,7 +206,7 @@ Issue #95（#71 的单元 3），#121 改成按主机：维护者只管哪个项
 
 项目页的车道按这些登记生成（#94，见下面「车道从哪来」）。
 
-### 项目的归档与恢复
+### 项目的归档、恢复与永久删除
 
 项目做完了在看板上收起，要时再加回（Issue #97，#71 的单元 5；`labmon/projects.py`，命令行 `labmon project archive|restore <id>` 与页面同一处）。
 
@@ -225,6 +225,7 @@ Issue #95（#71 的单元 3），#121 改成按主机：维护者只管哪个项
 - **恢复**：侧栏「项目」段末尾在有归档的项目时多一行「已归档 N 个」（窄屏在「更多」里），打开抽屉 `#/archived`：每个项目写归档时刻、归档时移除的登记（折起）与没动的，带「恢复」。
   恢复只把它从 `projects.json` 去掉，看板接着采集；登记不自动恢复，要跑由实验会话再 `labmon worker add`。看板上没有它的配置、读不了时拒绝：
   没有的先在项目目录里 `labmon project push`（已归档、看板上又没有配置的照样能推进来），再恢复。
+- **永久删除** 管理员可在「已归档」中选择「永久删除」并确认。看板确认最后一轮采集已退出、相关主机与算力池没有本项目的待处理登记、任务或调度指令后，清除看板登记目录、项目缓存、归档条目及闲置池工作区绑定。共享实验文件、用量、审计和已结束的池尝试会保留。删完无法从「已归档」恢复；要重新接入，可从实验目录再执行 `labmon project push`。
 
 ### 人员管理（`#/fleet/people`）与我的账号（`#/me`）
 

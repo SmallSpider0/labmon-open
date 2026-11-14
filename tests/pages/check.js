@@ -1197,6 +1197,24 @@ t("archive", "侧栏「已归档 N 个」与已归档的抽屉：路由、列出
   const S = ovCtx(OVS, RR); page(S, "#/"); ok(!el(S, "side").innerHTML.includes("已归档"), "没有归档的项目时不该有这一行");
   has(drw(S, "#/archived"), "没有归档的项目");
 });
+ta("archive", "永久删除要求管理员和当前归档批次的确认", async () => {
+  const A = ovCtx(OV, RR, "#/archived"), U = ovCtx(OV, RR, "#/archived");
+  run(U, 'ME = {...ME, admin: false, scopes: ["project", "read"], own: ["proj-old"]}');
+  has(drw(U, "#/archived"), 'data-pj="r" data-p="proj-old"');
+  ok(!drw(U, "#/archived").includes("永久删除"), "普通用户的归档抽屉不应有删除入口");
+  has(drw(A, "#/archived"), 'data-pj="d" data-p="proj-old"');
+  run(A, 'poll = async () => {}; fetch = async (path, opts) => { globalThis.RESULT = [path, JSON.parse(opts.body)]; return {ok: true, json: async () => ({msg: "已删除"})}; }');
+  await run(A, 'pjAct("dgo", "proj-old")');
+  ok(!A.RESULT, "未打开浮窗不能提交");
+  await run(A, 'pjAct("d", "proj-old")');
+  const h = drw(A, "#/archived");
+  has(h, "<b>永久删除 Gamma 旧实验</b>");
+  has(h, "共享实验文件、用量和审计记录会保留");
+  await run(A, 'pjAct("dgo", "proj-old")');
+  ok(A.RESULT[0] === "project/delete" && A.RESULT[1].revision === "demo-archive-100");
+  const rest = drw(A, "#/archived");
+  has(rest, "proj-older"); has(rest, "已删除"); ok(!rest.includes("Gamma 旧实验"));
+});
 t("archive", "恶意快照：已归档的抽屉、归档节、侧栏都转义", () => {
   const E = ovCtx(OVE, RRE), h = drw(E, "#/archived");
   clean(h, "已归档的抽屉"); has(h, "档" + BADESC); has(h, "没" + BADESC); has(h, "/r/" + BADESC);
