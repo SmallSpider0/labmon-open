@@ -501,7 +501,8 @@ def delete(pid: str, revision: str, by: str, check_collector) -> str:
         schedule = sched()
         if any(pid in schedule.get(kind, {}) for kind in ("weight", "pause", "focus")):
             raise ConfigError("项目仍有调度权重、暂停或优先设置，请先撤销")
-        if reason := poolqueues.delete_block(pid) or pool_supply.project_hold(pid):
+        pool_data = poolqueues.read()
+        if reason := poolqueues.delete_block(pid, pool_data) or pool_supply.project_hold(pid):
             raise ConfigError(reason)
 
         project = cfg_file(pid).parent
@@ -515,7 +516,9 @@ def delete(pid: str, revision: str, by: str, check_collector) -> str:
             raise ConfigError("项目配置或输出目录经符号链接，请先核对路径")
         cfg = load_cfg(pid) if config.is_file() else {}
         local = load_json(out_dir(pid) / "snapshot.json", {})
-        overview.check_project_idle(pid, entry, cfg, local, snapshot())
+        # 已完成的旧账本未必记过通道交接，直接核对实际标记。
+        legacy = [row for row in poolqueues.project_rows(pid, pool_data) if row["state"] == "completed"]
+        overview.check_project_idle(pid, entry, cfg, local, snapshot(), legacy)
 
         try:
             if project.exists():

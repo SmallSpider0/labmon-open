@@ -39,6 +39,7 @@ from . import renew as R
 from . import pool_supply as PS
 from . import pool_dispatch as PD
 from .projects import archived_rows
+from .labmon_worker import qslug
 from .collect import write_page
 from .config import STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, parse_time, pick_color, sched, user_hosts
 from .health import container_step, lease_due, lease_end, link_step
@@ -187,21 +188,26 @@ def _regs(hosts: list[dict], by: dict, got: dict, old: dict, t: float, fleet_cfg
     return out + rest
 
 
-def _project_worker_state(host: dict) -> tuple[str | None, str | None]:
+def _project_worker_state(host: dict, markers: list[str]) -> tuple[str | None, str | None]:
     """即使有 status.json，也读实际的登记文件。只读这份 worker 目录，留着的归还或旧主机目录一并核对。"""
     home = shlex.quote(host["worker_home"].rstrip("/"))
     remote = (f"set -e; if [ -e {home}/hosts ]; then [ -d {home}/hosts ] && [ -r {home}/hosts ] && [ -x {home}/hosts ] || exit 1; fi; "
               f"{_reg_cmd({**host, 'regs': []})}echo {SEP}; "
               f'for f in {home}/hosts/*/status.json {home}/hosts/*/overrides.json; do '
               '[ -f "$f" ] || continue; printf "%s\\n" "$f"; cat "$f"; echo; ' + f'echo {SEP}; done')
+    if markers:
+        paths = shlex.join([host["worker_home"].rstrip("/") + "/hosts/" + marker for marker in markers])
+        remote += (f'; for f in {paths}; do [ ! -e "$f" ] && [ ! -L "$f" ] || exit 9; done')
     try:
         rc, out = ssh(host, remote, timeout=20)
     except (OSError, subprocess.TimeoutExpired):
         return None, "读不到 worker 目录"
+    if rc == 9:
+        return None, "算力池清单仍有通道标记，请先解除登记"
     return (out, None) if rc == 0 else (None, "读不到 worker 目录")
 
 
-def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict) -> None:
+def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict, pool_rows: list[dict]) -> None:
     """只核对与本项目相关的 worker 目录；快照提供线索，删除以本次读到的文件为准。"""
     known = {h["id"]: h for h in [*cfg.get("hosts", []), *all_hosts()]}
     active = [h for h in known.values() if not h.get("returned")]
@@ -219,21 +225,30 @@ def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict
             associated.add(reg["host"])
             if reg.get("home"):
                 related_homes.add(reg["home"])
+    markers = {}
+    for row in pool_rows:
+        associated.add(row["host"])
+        marker = "pool-" + qslug(row["root"], row["jobs"]) + ".json"
+        markers.setdefault(row["host"], []).extend([marker, marker + ".route"])
     active_ids = {h["id"] for h in active}
+    markers_by_home = {}
     for hid in associated - {None, ""}:
         h = known.get(hid)
         home = (h or {}).get("worker_home") or reg_homes.get(hid)
         if not home:
             raise ConfigError(f"主机 {hid} 的 worker 目录未知，暂时无法确认任务和登记已收尾")
         related_homes.add(home)
+        markers_by_home.setdefault(home, set()).update(markers.get(hid, []))
     targets = {}
     for home in sorted(related_homes):
         h = home_host(home, active)
         if h is None:
             raise ConfigError(f"worker 目录 {home} 没有在用主机代读，暂时无法确认任务和登记已收尾")
-        targets[home] = h
-    _, readings = L.gather(targets, _project_worker_state, lambda key: bool(targets[key].get("ssh")))
+        targets[home] = (h, sorted(markers_by_home.get(home, ())))
+    _, readings = L.gather(targets, lambda args: _project_worker_state(*args), lambda key: bool(targets[key][0].get("ssh")))
     for home, (raw, error) in readings.items():
+        if error and error.startswith("算力池"):
+            raise ConfigError(error)
         try:
             if error or not raw:
                 raise ValueError("读不到状态")

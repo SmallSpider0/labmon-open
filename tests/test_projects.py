@@ -233,7 +233,9 @@ class ArchiveTest(unittest.TestCase):
         shared.write_text("实验文件")
         PJ.put_config("p2", 'id = "p2"\n')
         PJ._save({"p1": {"id": "p1", "t": 10, "regs": [{"host": "c"}]}, "p2": {"id": "p2", "t": 20}})
-        history = {s: {"project": "p1", "state": s, "dispatch": {"phase": "done"}} for s in ("completed", "withdrawn")}
+        from labmon.labmon_worker import qslug
+        history = {s: {"project": "p1", "state": s, "host": "c", "root": str(self.d), "jobs": "jobs.txt",
+                       "dispatch": {"phase": "done"}} for s in ("completed", "withdrawn")}
         save_json(poolqueues.state_file(), {"workspaces": {"p1": {"root": str(self.d)}, "p2": {}}, "queues": history})
         usage_file("a").parent.mkdir(parents=True)
         usage_file("a").write_text("用量历史")
@@ -254,6 +256,11 @@ class ArchiveTest(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "在跑或等待"):
             delete()
         save_json(status, fake_status())
+        route = self.wh / "hosts" / ("pool-" + qslug(str(self.d), "jobs.txt") + ".json.route")
+        route.write_text("old-route")
+        with self.assertRaisesRegex(ConfigError, "通道标记"):
+            delete()
+        route.unlink()
         overrides = status.with_name("overrides.json")
         save_json(overrides, [{"kind": "pause", "target": "p1"}])
         with self.assertRaisesRegex(ConfigError, "暂停或优先"):

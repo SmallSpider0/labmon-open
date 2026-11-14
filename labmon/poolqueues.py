@@ -396,9 +396,8 @@ def active_reason(project, data=None):
     return None
 
 
-def delete_block(project):
+def delete_block(project, data):
     """归档项目永久删除前仍需确认池通道已释放。保留已撤回的清单和尝试历史。"""
-    data = read()
     if reason := active_reason(project, data):
         return reason
     if any(row["state"] != "withdrawn" and row.get("route_protocol") for row in project_rows(project, data)):
