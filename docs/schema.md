@@ -163,8 +163,8 @@
   `spec` 是能改的项的说法与范围（`config.cfg_spec`）：`{键: {name, unit, lo, hi, int, dft 缺省}}`，另有 `title.max`、`label: {name, max}`（计划项与里程碑名字的最多字数）。
   `POST /project/config` 出错时回 409 `{error, field}`，`field` 是出错的那一项（顶层键、告警键、`groups`、`markers`，说不出的不带）。
   `archive_block` 是能不能归档（`projects.archive_block`）：null 能，否则一句原因（管理抽屉照它置灰、写原因）。
-- 顶层 `archived[]` 是已归档的项目（状态目录 `overview/projects.json`，新的在前，[workbench.md「项目的归档与恢复」](workbench.md#项目的归档与恢复)）：
-  `{id, title, t 归档时刻（epoch 秒）, by 谁做的（「看板页面上」「用命令行」，#121 之前归档的没有）, regs 归档时移除的登记 [{host, root, jobs}], skipped 没动的说明（没有能代办的在用主机、登记没读到）}`。
+- 顶层 `archived[]` 是已归档的项目（状态目录 `overview/projects.json`，新的在前，[workbench.md「项目的归档、恢复与永久删除」](workbench.md#项目的归档恢复与永久删除)）：
+  `{id, title, t 归档时刻（epoch 秒）, revision 本次归档标识（旧条目没有）, by 谁做的（「看板页面上」「用命令行」，#121 之前归档的没有）, regs 归档时移除的登记 [{host, root, jobs}], skipped 没动的说明（没有能代办的在用主机、登记没读到）}`。
   `fleet.holders[]` 是按人的近 30 天统计（`frac`、`h` 里主人借给别人的时段是 `lent`；`borrowed [{id, from, h}]`、`lent [{id, to, h}]`），`fleet.mine[]` 与 `servers[]` 字段同名（`strip`、`s7`、`s30`、`last`、`error`、`down`、`since`、`started`、`public`、`guard`（`status: "worker"`），`sample` 与探针的同形，见 `fleet.from_worker`；另有平台操作口径的 `state`、`work`；
   `lw` 同主机项的：组内服务器取探针的根盘 `sample.root` 与扫出的路径（`fleet.server_lw`），自用主机取主机项的，关机的为 null，[fleet.md「本地盘」](fleet.md#本地盘)），`servers[].borrow.by` 是借的人（[fleet.md「使用记录」](fleet.md#使用记录)）。
 - 顶层 `hostcheck` 是看板服务所在机的体检（`hostcheck.view`，#166，[workbench.md「看板服务所在机的体检」](workbench.md#看板服务所在机的体检)），不是 WSL 时为 null：
@@ -180,6 +180,7 @@
 - `POST /collect` 与 `POST /p/<id>/collect`：先读 JSON 对象（也可发空请求体），格式不对回 400。立即采集返回新快照；离上一轮不到 10 秒的不采，返回现有快照并带 `"cached": true`。
 - `POST /project/archive|restore`（`project` 作用域）：`{"project"}`；归档、恢复一个项目（`projects.archive`、`restore`），做完当场对齐看板服务里的项目；成功 `{"msg"}`，不能做、没做完 409 `{"error"}`，归档的项目不在服务里 404。
   恢复给那个项目的实验会话一条消息（`records.tell`）。
+- `POST /project/delete`（管理员、`admin` 作用域）：`{"project", "revision"}`。确认值取自当前归档条目，旧条目用 `t` 的字符串。成功返回 `{"msg"}`，有活动依赖或归档批次变化返回 409。
 - `POST /project/config`（`project` 作用域，#122）：`{"project", "set": {title?, interval?, refresh?, hide_done_hours?, auto_groups?, alerts?: {gpu_idle_util?, gpu_idle_min?, stale_min?, log_silent_min?}, groups?: [{id, label, color?, auto?}]（整组、按新顺序，写明的 id 要正好是现有的；带 `auto: true` 与 `color` 的是自动归出的组，写成新的 `[[groups]]`：`id`、`prefix` 都是它的前缀，#150）, markers?: [{date, label}]（整组换掉）}}`。
   `projects.set_config` 写回看板上的 monitor.toml（登记目录里那份，与推在同一把锁里；`config.set_project` 只动相关行，按 `config.load` 校验后原子写入），当场重读这个项目的配置；改了的记一条 `config` 记录（带 `project`）、给实验会话一条消息（`records.tell` 的 `config`）。
   成功 `{"msg"}`（什么都没变是“没有改动”，不写不发），取值不对、校验不过 409 `{"error"}`，项目不在服务里 404，没给 `set` 400。
@@ -199,7 +200,7 @@
 | `overview/health.json` | 各主机的连通状态，只留 `fails`、`down`、`since`、`warned`、`started`、`miss` 这几个键（`HEALTH_KEYS`），别的键不再写 |
 | `overview/events.jsonl` | 记录（一年）：`{t, kind, msg, host?, hosts?, who?, project?, target?, detail?}`；`relaunch`（自动拉起 worker）事件的 `detail` 是命令输出；`container_new`（换了新容器）带 `started`（容器启动时刻，epoch 秒），项目页的重启标记只画带它的 |
 | `overview/hostlog/<主机>.jsonl` | worker 事件续存（30 天，任务起止的不存） |
-| `overview/projects.json` | 已归档的项目 `{"archived": {id: {id, title, t, by, regs, skipped}}}`（`projects.archive` 写、`restore` 删；#161 之前归档的条目还带着 `config` 配置文件路径，不再读）；看板服务按它跳过与摘下项目，全局快照的 `archived[]` 取它 |
+| `overview/projects.json` | 已归档的项目 `{"archived": {id: {id, title, t, revision, by, regs, skipped}}}`（`projects.archive` 写、`restore` 和 `delete` 删；#161 之前归档的条目还带着 `config` 配置文件路径，不再读）；看板服务按它跳过与摘下项目，全局快照的 `archived[]` 取它 |
 | `overview/hostcheck.json` | 看板服务所在机的体检状态（`hostcheck.tick` 写，#166）：上一轮读到的 `win`、`wsl`，`since`（各项从何时起）、`upd`（待装更新与各条第一次看到的 `seen`）、`oom`（计数与近 24 小时的增量）、`warn`、`sent`（各 key 推过的本地日期）、`err` |
 | `overview/maint.json` | 计划维护（`labmon server maint`，#165）：`{until 到何时（epoch 秒；提前结束写 null）, by 谁开的, t 何时开的}`，到期自然失效；`/healthz` 的 `maint_until`、体检与全局快照的 `hostcheck.maint` 经 `maint.until` 读它 |
 | `overview/tell.jsonl` | 页面上的改动给实验会话的消息（7 天，`records.tell` 写）：`{t, what（move、rm、restore、pause、resume、config；看板升级时的 upgrade）, project, msg}`；`records.told` 每轮并进全局快照的 `wake`（#121） |
