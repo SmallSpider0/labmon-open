@@ -209,9 +209,10 @@ def _project_worker_state(host: dict, markers: list[str]) -> tuple[str | None, s
 
 def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict, pool_rows: list[dict]) -> None:
     """只核对与本项目相关的 worker 目录；快照提供线索，删除以本次读到的文件为准。"""
-    known = {h["id"]: h for h in [*cfg.get("hosts", []), *all_hosts()]}
-    active = [h for h in known.values() if not h.get("returned")]
-    associated = {h["id"] for h in cfg.get("hosts", [])}
+    known = {h["id"]: h for h in all_hosts()}
+    configured = {h["id"]: h for h in cfg.get("hosts", [])}
+    active = [h for h in [*known.values(), *configured.values()] if not h.get("returned")]
+    associated = set(configured)
     associated.update(h["id"] for h in local.get("hosts", []))
     associated.update(r["host"] for r in entry.get("regs", []))
     associated.update(r.get("host", r.get("reader")) for r in local.get("lanes", []))
@@ -219,12 +220,12 @@ def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict
     associated.update(h["id"] for h in glob.get("hosts", [])
                       if any(j.get("project") == pid for key in (*states, "queues") for j in (h.get("status") or {}).get(key) or []))
     reg_homes = {r["host"]: r.get("home") for r in glob.get("regs", [])}
-    related_homes = set()
+    related_homes = {h["worker_home"].rstrip("/") for h in configured.values()}
     for reg in glob.get("regs", []):
         if any(q.get("project") == pid for q in reg.get("queues") or []):
             associated.add(reg["host"])
             if reg.get("home"):
-                related_homes.add(reg["home"])
+                related_homes.add(reg["home"].rstrip("/"))
     markers = {}
     for row in pool_rows:
         associated.add(row["host"])
@@ -233,10 +234,11 @@ def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict
     active_ids = {h["id"] for h in active}
     markers_by_home = {}
     for hid in associated - {None, ""}:
-        h = known.get(hid)
+        h = known.get(hid) or configured.get(hid)
         home = (h or {}).get("worker_home") or reg_homes.get(hid)
         if not home:
             raise ConfigError(f"主机 {hid} 的 worker 目录未知，暂时无法确认任务和登记已收尾")
+        home = home.rstrip("/")
         related_homes.add(home)
         markers_by_home.setdefault(home, set()).update(markers.get(hid, []))
     targets = {}

@@ -416,7 +416,11 @@ class ServeTest(unittest.TestCase):
 
     def test_sched_weight_and_view(self):
         # 页面上改权重：只动 [sched.weight] 里这一行，写 1 删掉；调度卡汇总各主机的占卡、排队、在等、近 1 天平均等多久与优先
+        from labmon import projects
         base, hf = self.start(), Path(self.tmp.name) / "hosts.toml"
+        for pid in ("a1", "demo-b"):
+            if not projects.cfg_file(pid).is_file():
+                projects.put_config(pid, f'id = "{pid}"\n')
         hf.write_text('[[hosts]]\nid = "here"\n')
         os.environ["LABMON_HOSTS"] = str(hf)
         try:
@@ -1471,7 +1475,8 @@ class RegsTest(unittest.TestCase):
         # #95：页面上搬 = 在目标主机上 worker add（把别的主机上同一条清单的登记删掉）：带 project、stop，不带原主机的 --gpus；
         # 已归还主机上的登记经 worker_home 相同的在用主机代办移除（命令照样 --host 那台，不连它）；每条记一条配置改动。
         # #121：按主机成批（rm 带 items），做成的按项目告诉实验会话一次（records.tell → wake 的 page:）
-        from labmon import serve as S
+        from labmon import projects, serve as S
+        projects.put_config("p1", 'id = "p1"\n')
         root = self._worker_home()
         self.reg("gone", "q", root=root, jobs="jobs/q.txt", project="p1", stop="term", gpus=[1], added="2026-11-01 09:00:00")
         rq = lambda: {h.name: [json.loads(f.read_text()) for f in (h / "queues").glob("*.json")] for h in self.home.iterdir() if (h / "queues").is_dir()}   # noqa: E731
@@ -1480,7 +1485,7 @@ class RegsTest(unittest.TestCase):
         regs = rq()
         self.assertEqual(regs.get("gone"), [])                                       # 原主机那份由 worker add 删掉
         self.assertEqual([(r["project"], r["stop"], r.get("gpus")) for r in regs["a"]], [("p1", "term", None)])
-        self.assertEqual([(e["kind"], e["hosts"], e["project"]) for e in records(cat="config")], [("config", ["a", "gone"], "p1")])
+        self.assertEqual([(e["kind"], e["hosts"], e["project"]) for e in [e for e in records(cat="config") if e.get("kind") == "config"]], [("config", ["a", "gone"], "p1")])
         w = told()
         self.assertEqual([(x["key"].split(":")[:3], x["projects"]) for x in w], [(["page", "move", "p1"], ["p1"])])
         self.assertIn("把 p1 在 gone 上的 1 条清单登记搬到 a（jobs/q.txt）", w[0]["msg"])
@@ -1517,7 +1522,7 @@ class RegsTest(unittest.TestCase):
         with self.assertRaises(K.ConfigError) as e:
             S.reg_move("b", [{"host": "a", "root": root, "jobs": "jobs/none.txt", "project": "p1"}])
         self.assertIn("没搬到 b：清单不存在", str(e.exception))
-        self.assertEqual((len(records(cat="config")), len(told())), (2, 2))
+        self.assertEqual((len([e for e in records(cat="config") if e.get("kind") == "config"]), len(told())), (2, 2))
 
     def test_prev_host_and_home_host(self):
         # 在用主机那项带 pool 与上一台 prev：同一个池里最近归还的自用主机（fleetboot.last_mine，给自己开回来沿用端口的那台，接上卡排第一）；

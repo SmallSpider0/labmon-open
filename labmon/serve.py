@@ -1357,8 +1357,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(400, {"error": "没说是哪个项目"})
         try:
             with HOSTS_LOCK:
-                if pid in PJ.archived() and (act in ("pause", "focus") or (act == "weight" and body.get("weight") not in (None, 1))):
-                    raise ConfigError("项目已归档，只能撤销残留的调度设置")
+                adding = act in ("pause", "focus") or (act == "weight" and body.get("weight") not in (None, 1))
+                if adding and (reason := A.unknown_project(pid, require=True)):
+                    raise ConfigError(reason)
                 if act == "weight":
                     msg = set_weight(pid, body.get("weight"))
                 elif act in SCHED_ACTS:
@@ -1561,8 +1562,8 @@ def reg_move(to: str, items: list, own: bool = False) -> str:
             if not (root and jobs and pid):
                 raise ConfigError("登记缺目录、清单或项目")
             with PJ._reg_locked():
-                if pid in PJ.archived():
-                    raise ConfigError("项目已归档，不能搬移登记")
+                if reason := A.unknown_project(pid, require=True):
+                    raise ConfigError(reason)
                 rc, out = W.run_out("add", to, [root, jobs], project=pid, stop=it.get("stop") or None, **({"expect_project": pid} if own else {}))
             text = " ".join(out.strip().splitlines()[-2:])
             if rc != 0:

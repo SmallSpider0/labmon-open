@@ -291,6 +291,22 @@ class ArchiveTest(unittest.TestCase):
         self.assertEqual(ex.exception.code, 412)
         self.assertTrue(PJ.put_config("p1", self.cfg.read_text())["created"])
 
+    def test_delete_checks_project_worker_home_override(self):
+        from labmon.state import save_json
+        self.hosts_toml(sched="")
+        custom = self.d / "custom-worker"
+        status = custom / "hosts" / "a" / "status.json"
+        save_json(status, fake_status(running=[running_job("t1", "p1")]))
+        current = PJ.get_config("p1")
+        text = f'id = "p1"\n[[hosts]]\nid = "a"\nworker_home = "{custom}"\n'
+        PJ.put_config("p1", text, base=current["ver"])
+        PJ._save({"p1": {"id": "p1", "t": 10}})
+        with self.assertRaisesRegex(ConfigError, "在跑或等待"):
+            PJ.delete("p1", "10", "admin", lambda: None)
+        save_json(status, fake_status())
+        PJ.delete("p1", "10", "admin", lambda: None)
+        self.assertFalse(PJ.cfg_file("p1").exists())
+
     def test_permanent_delete_rejects_symlink(self):
         self.hosts_toml(sched="")
         PJ._save({"p1": {"id": "p1", "t": 10}})
@@ -510,6 +526,20 @@ class ServeSyncTest(unittest.TestCase):
             self.assertEqual(response.status, 200)
         with bearer_opener(boss).open(f"{base}/overview.json") as response:
             self.assertEqual([e["id"] for e in json.load(response)["archived"]], ["owner"])
+
+    def test_stale_move_and_worker_add_after_last_project_deleted(self):
+        from labmon import api, serve as SV
+        PJ._save({"p1": {"id": "p1", "t": 10}})
+        PJ.delete("p1", "10", "admin", lambda: None)
+        old = [{"root": str(self.d), "jobs": "q.txt", "project": "p1"}]
+        with mock.patch.object(SV.W, "run_out", return_value=(0, "已登记")) as worker:
+            with self.assertRaisesRegex(ConfigError, "没有项目 p1"):
+                SV.reg_move("a", old)
+            self.assertNotEqual(api.worker("add", "a", [str(self.d), "q.txt"], project="p1")["rc"], 0)
+        worker.assert_not_called()
+        with mock.patch.object(SV.W, "override_each") as override:
+            self.assertNotEqual(api.override("pause", "p1", ["a"], None, False)["rc"], 0)
+            override.assert_not_called()
 
     def test_routes(self):
         # POST /project/archive：项目不在服务里 404；还有实验 409（原因同 archive_block）；不认识的动作 404；proj_info 带上 archive_block

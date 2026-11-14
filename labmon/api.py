@@ -43,12 +43,15 @@ def usage(msg: str) -> dict:
     return {"rc": 2, "out": "", "err": "", "usage": msg}
 
 
-def unknown_project(pid: str) -> str | None:
-    """项目 id 不是看板上的（worker 按字符串比，写错了指令静默不生效）：返回说明；看板服务没加项目时不查。"""
+def unknown_project(pid: str, *, require: bool = False) -> str | None:
+    """项目 id 不是看板上的（worker 按字符串比，写错了指令静默不生效）：返回说明；旧的调度命令在看板没项目时也能用，登记要求目标存在。"""
     if pid in PJ.archived():
         return f"项目 {pid} 已归档：先 labmon project restore {pid}"
     ids = PJ.project_ids()
-    return f"看板上没有项目 {pid}（有：{'、'.join(ids)}）：用 monitor.toml 里的 id" if ids and pid not in ids else None
+    if pid not in ids and (require or ids):
+        known = f"（有：{'、'.join(ids)}）" if ids else ""
+        return f"看板上没有项目 {pid}{known}：用 monitor.toml 里的 id"
+    return None
 
 
 def hosts() -> dict:
@@ -119,7 +122,7 @@ def override(verb: str, target: str, host_ids: list[str] | None, until: float | 
                 hs, tgt = [target], None
             else:
                 hs, tgt = host_ids or [h["id"] for h in active_hosts()], target
-                if (bad := unknown_project(tgt)) and (action == "add" or tgt not in PJ.archived()):
+                if action == "add" and (bad := unknown_project(tgt, require=True)):
                     o.err(f"[labmon] {bad}")
                     return o.done(3)
             if kind != "drain" and not host_ids:      # 项目级设置随 sched.json 发给各主机
@@ -145,7 +148,7 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
         return usage(f"不认识的 worker 动作 {sub}")
     try:
         with PJ._reg_locked() if sub == "add" else nullcontext():
-            if project and sub != "rm" and (reason := unknown_project(project)):
+            if project and sub != "rm" and (reason := unknown_project(project, require=sub == "add")):
                 return usage(reason)
             rc, out = W.run_out(sub, hid, rest, gpus, project=project if sub != "rm" else None, stop=stop,
                                 **({"expect_project": project} if own and sub in ("add", "rm") else {}))

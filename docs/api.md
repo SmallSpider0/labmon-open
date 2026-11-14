@@ -105,7 +105,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `GET /api/admin/backup`（冷备，回 `.tar.gz`） | `backup`，只给管理员 |
 | `POST /api/admin/deploy`、`/api/worker/start` | `deploy`，只给管理员，只在内网入口 |
 | `GET /api/hosts`、`GET /api/client/install.sh`、`GET /api/client/wheel` | `read` |
-| `POST /project/owner` | `admin`，只给管理员 |
+| `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
 | `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit)`、`/api/override/(pause\|resume\|focus\|unfocus)`（[命令行](#命令行162)） | `project` |
 | `POST /api/worker/(stop\|limit)`、`/api/override/(drain\|undrain)` | `admin`，只给管理员 |
 | `POST /api/borrow`、`/api/host/(return\|restore)` | `admin`，只给管理员；公网须开启账号许可 |
