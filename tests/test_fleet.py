@@ -4,8 +4,10 @@
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -726,6 +728,16 @@ class GuardTest(unittest.TestCase):
         self.c["servers"] = [self.c["servers"][1]]
         self.raw, self.reply, self.calls, self.remote = IDLE, "ok start 9", [], []
 
+        if not shutil.which("flock"):
+            # macOS 自带的命令里没有 flock，测试仍在脚本继承的 fd 上拿真实文件锁。
+            lock = Path(self.tmp.name) / "flock"
+            lock.write_text(f"#!{sys.executable}\nimport fcntl, sys\nfcntl.flock(int(sys.argv[-1]), fcntl.LOCK_EX)\n")
+            lock.chmod(0o755)
+
+    def shell_env(self, d):
+        return {**os.environ, "PATH": f"{d / 'bin'}:{d}:{os.environ['PATH']}", "GUARD_STATE": str(d / "guard.state"),
+                "GUARD_PROC": str(d / "proc"), "GUARD_READY_S": "0"}
+
     def tearDown(self):
         self.tmp.cleanup()
 
@@ -821,6 +833,74 @@ class GuardTest(unittest.TestCase):
         self.tick(T0 + 4800)
         self.assertEqual(self.guard(T0 + 4800)["status"], "ours")
 
+    def stalled(self, *, util=(0, 0), started=T0 - 86400, birth=100100, marker=True, job=False, second=None):
+        """自己开的保活占住少量显存；登记来自手动开、续租和守护时同形。"""
+        ps = [(1, 0, "/bin/bash"), KA_PS]
+        apps, maps = [(500, 384)], [(9, 500, "/x/ka")]
+        if job:
+            ps.append((40, 1, "/x/python train.py"))
+            apps.append((700, 200))
+            maps.append((40, 700, "/x/train"))
+        raw = probe_out(apps=apps, maps=maps, ps=ps, used=384, util=util, started=started)
+        if second is not None:
+            raw = raw.replace("@@ util", "1, GPU-y, GPU, 0, 49140, 0\n@@ util")
+            raw = raw.replace("@@ cpu", "".join(f"1, {v}\n" for v in second) + "@@ cpu")
+        if marker:
+            raw += f"@@ guard\nstart {T0 - 1000} 9 {T0 - 700} 看板\nproc 9 {birth}\n"
+        return raw
+
+    def test_stalled_keepalive_restarts_and_refreshes(self):
+        self.raw = self.stalled(second=(0, 0))
+        self.tick(T0)
+        F.tick(T0 + 1, self.fetch, self.c, force="b", ssh_fn=self.ssh)  # 紧接的手动探测不满足时长
+        self.assertEqual(self.remote, [])
+        self.tick(T0 + 601)
+        self.assertEqual(self.remote, [f"bash -s -- repair 'bash /x/ka.sh' 300 '守护' 100000 {T0 - 1000} 9 100100 2"])
+        self.assertEqual(self.calls[-2:], ["b", "b"])
+        self.assertEqual(records(cat="keepalive")[0]["kind"], "guard_restart")
+        self.assertEqual(self.guard(T0 + 602)["status"], "ours")
+        self.assertNotIn("guard_zero", F._load_state()["b"])
+
+    def test_breaks_in_stall_evidence(self):
+        for raw in (self.stalled(marker=False), self.stalled(util=(0, "N/A", 0)), self.stalled(job=True),
+                    self.stalled(second=(1, 0)), self.stalled(second=()), self.stalled(birth=100500),
+                    self.stalled(started=T0 - 72000), self.stalled(birth=10_000_000)):
+            with self.subTest(raw=raw[-85:]):
+                st = {}
+                s = self.c["servers"][0]
+                F.record(s, self.stalled(), None, self.c, st, T0)
+                F.record(s, raw, None, self.c, st, T0 + 600)
+                self.assertNotEqual(F.guard_state(s, st, self.c, T0 + 600).get("act"), "repair")
+        st = {}
+        s = self.c["servers"][0]
+        F.record(s, self.stalled(), None, self.c, st, T0)
+        F.record(s, None, "未连通", self.c, st, T0 + 600)
+        F.record(s, self.stalled(), None, self.c, st, T0 + 1200)
+        self.assertNotEqual(F.guard_state(s, st, self.c, T0 + 1200).get("act"), "repair")
+
+    def test_stalled_recovery_backoff_and_new_attempt(self):
+        self.raw, self.reply = self.stalled(), "fail 未看到 GPU 进程"
+        self.tick(T0)
+        self.assertTrue(self.tick(T0 + 600))
+        self.assertEqual(self.guard(T0 + 600)["status"], "fail")
+        self.tick(T0 + 1200)
+        self.tick(T0 + 1800)
+        self.assertEqual(len(self.remote), 1)
+        self.assertEqual(self.tick(T0 + 2400), [])
+        self.assertEqual(len(self.remote), 2)
+
+    def test_start_delay_records_a_reason_without_repeating(self):
+        self.reply = "busy 1"
+        for k in range(8):
+            self.tick(T0 + k * 600)
+        self.assertEqual(len(self.remote), 2)
+        rows = records(cat="keepalive")
+        self.assertEqual([row["kind"] for row in rows], ["guard_delay"])
+        self.assertIn("启动前复查时 GPU 上又有了进程", rows[0]["msg"])
+        self.reply = "ok start 9"
+        self.tick(T0 + 4800)
+        self.assertEqual([row["kind"] for row in records(cat="keepalive")], ["guard_start", "guard_delay"])
+
     def test_yield(self):
         self.raw = guarded(KA, T0, T0 + 300)
         self.tick(T0)
@@ -874,8 +954,7 @@ class GuardTest(unittest.TestCase):
         }.items():
             (d / name).write_text("#!/bin/bash\n" + body + "\n")
             (d / name).chmod(0o755)
-        env = {**os.environ, "PATH": f"{d}:{os.environ['PATH']}", "NV": str(d / "nv"), "PID": str(d / "pid"),
-               "GUARD_STATE": str(d / "guard.state"), "GUARD_PROC": str(d / "proc"), "GUARD_READY_S": "0"}
+        env = {**self.shell_env(d), "NV": str(d / "nv"), "PID": str(d / "pid")}
 
         def start():
             r = subprocess.run(["bash", "-s", "--", "start", f"bash {d / 'ka.sh'}", "0"], input=F.GUARD.read_text(),
@@ -912,8 +991,7 @@ class GuardTest(unittest.TestCase):
         (d / "ka.sh").write_text('P=$KA_PIDF\nup() { [ -s "$P" ] && kill -0 "$(cat "$P")" 2>/dev/null; }\n'
                                  'case $1 in\n running) up && cat "$P" ;;\n start) up || { sleep 60 & echo $! > "$P"; }; printf "11 (python) S 1 %s 0 0\\n" "$(cat "$P")" > "$GUARD_PROC/11/stat"; echo 5000 > "$NV" ;;\n'
                                  ' stop) up && kill "$(cat "$P")"; rm -f "$P" ;;\nesac\n')
-        env = {**os.environ, "PATH": f"{d / 'bin'}:{os.environ['PATH']}", "NV": str(d / "nv"), "KA_PIDF": str(d / "ka.pid"),
-               "GUARD_STATE": str(d / "guard.state"), "GUARD_POLL": "0.2", "GUARD_PROC": str(d / "proc")}
+        env = {**self.shell_env(d), "NV": str(d / "nv"), "KA_PIDF": str(d / "ka.pid"), "GUARD_POLL": "0.2"}
         ka = f"bash {d / 'ka.sh'}"
 
         def gpu(*hp):                                    # GPU 上的进程（宿主机 PID，同一进程占两张卡就出现两次）
@@ -955,11 +1033,73 @@ class GuardTest(unittest.TestCase):
             run("start", ka, "0", "看板")                                                       # 盯 0 秒：不留后台
             self.assertEqual(run("stop", ka, "train.py"), "ok stopped")
             self.assertIn("\nstop ", (d / "guard.state").read_text())
+            gpu()
+            run("start", ka, "3", "守护")
+            marker = (d / "guard.state").read_text().split()
+            marker[1] = str(int(marker[1]) + 1)                         # PID 不变，旧看门狗看到的是另一份登记
+            (d / "guard.state").write_text(" ".join(marker) + "\n")
+            gpu(5000, 5002)
+            threading.Event().wait(0.7)
+            self.assertTrue((d / "ka.pid").exists())
+            self.assertNotIn("yield", (d / "guard.state").read_text())
+            self.assertEqual(run("stop", ka, "测试结束"), "ok stopped")
             subprocess.run(["bash", str(d / "ka.sh"), "start"], env=env)                         # 别人开的保活：不停
             (d / "guard.state").write_text(f"start {T0} {os.getpid()} {T0} 守护\n")
             self.assertEqual(run("stop", ka, "x"), "ok notours")
         finally:
             subprocess.run(["bash", str(d / "ka.sh"), "stop"], env=env)
+
+    def test_repair_script_checks_live_identity_all_cards_and_processes(self):
+        d = Path(self.tmp.name)
+        pid = os.getpid()  # 只用于脚本里的 kill -0；所有真实开停都由假 ka.sh 写入文件
+        for p, birth in ((1, 2000), (pid, 2345), (11, 2400)):
+            proc = d / "proc" / str(p)
+            proc.mkdir(parents=True, exist_ok=True)
+            (proc / "stat").write_text(" ".join([f"{p} (python (x)) S 1 {pid}", *["0"] * 16, str(birth)]) + "\n")
+        (d / "proc" / "11" / "sched").write_text("python (x) (5011, #threads: 1)\n")
+        for cmd, body in {
+            "timeout": 'shift 3; exec "$@"',
+            "nvidia-smi": 'case "$*" in *query-gpu*) cat "$NV_UTIL";; *) cat "$NV_APPS";; esac',
+            "ka.sh": ('case "$1" in running) cat "$PID";; stop) echo stop >> "$ACTIONS"; : > "$PID"; : > "$NV_APPS";; '
+                      'start) echo start >> "$ACTIONS"; echo "$PID_VALUE" > "$PID"; echo 5011 > "$NV_APPS";; esac'),
+        }.items():
+            (d / cmd).write_text("#!/bin/bash\n" + body + "\n")
+            (d / cmd).chmod(0o755)
+        env = {**self.shell_env(d), "PID_VALUE": str(pid), **{k: str(d / k) for k in ("PID", "ACTIONS", "NV_UTIL", "NV_APPS")}}
+
+        def run(p1=2000, marked=T0, birth=2345):
+            args = ["repair", f"bash {d / 'ka.sh'}", "0", "守护", str(p1), str(marked), str(pid), str(birth), "2"]
+            return subprocess.run(["bash", "-s", "--", *args], input=F.GUARD.read_text(), env=env,
+                                  capture_output=True, text=True, check=True, timeout=20).stdout.strip()
+
+        (d / "guard.state").write_text(f"start {T0} {pid} {T0} 看板\n")
+        (d / "PID").write_text(f"{pid}\n")
+        (d / "NV_APPS").write_text("5011\n")
+        for invalid in ("0,0\n0,0\n", "0,0\n1,0\n0,0\n1,N/A\n", "0,0\n1,0\n0,0\n1,30\n"):
+            (d / "NV_UTIL").write_text(invalid)
+            self.assertTrue(run().startswith("busy "))
+        (d / "NV_UTIL").write_text("0,0\n1,0\n0,0\n1,0\n")
+        self.assertIn("容器已变", run(p1=2001))
+        self.assertIn("容器已变", run(marked=T0 + 1))
+        self.assertIn("容器已变", run(birth=2346))
+        (d / "NV_APPS").write_text("5011\n99999\n")
+        self.assertIn("别的进程", run())
+        self.assertFalse((d / "ACTIONS").exists())
+        (d / "NV_APPS").write_text("5011\n")
+        # 模拟另一项保活操作占锁；重开不能越过它。锁释放后一次完整的停、开。
+        args = ["repair", f"bash {d / 'ka.sh'}", "0", "守护", "2000", str(T0), str(pid), "2345", "2"]
+        with (d / "guard.state.lock").open("a") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            with subprocess.Popen(["bash", "-s", "--", *args], env=env, stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True) as racing:
+                racing.stdin.write(F.GUARD.read_text())
+                racing.stdin.close()
+                threading.Event().wait(0.2)
+                self.assertIsNone(racing.poll())
+                self.assertFalse((d / "ACTIONS").exists())
+                fcntl.flock(held, fcntl.LOCK_UN)
+                self.assertEqual(racing.wait(timeout=10), 0)
+                self.assertEqual(racing.stdout.read().strip(), f"ok start {pid}")
+        self.assertEqual((d / "ACTIONS").read_text(), "stop\nstart\n")
 
     def test_set_guard(self):
         hf = Path(self.tmp.name) / "hosts.toml"

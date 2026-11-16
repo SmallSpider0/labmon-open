@@ -950,7 +950,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
   <!-- 保活 -->
   <div class="algo" id="a-ka">
     <h3>保活与保活守护<span class="tag">keepalive · fleet_guard.sh</span></h3>
-    <p class="prose">GPU 长时间空着的服务器会被平台释放，所以空着时要跑一个占卡的保活进程。自用主机与借来的主机由 worker 管：要卡时停、空闲时开、有了别的 GPU 进程就让路。组里别人的服务器由看板的保活守护管：开着守护的那台 GPU 连着空闲满 60 分钟，替这人开一个，确认保活进程组已经占用 GPU，有人用就让出。</p>
+    <p class="prose">GPU 长时间空着的服务器会被平台释放，所以空着时要跑一个占卡的保活进程。自用主机与借来的主机由 worker 管：要卡时停、空闲时开、有了别的 GPU 进程就让路。组里别人的服务器由看板的保活守护管：开着守护的那台 GPU 连着空闲满 60 分钟，替这人开一个，确认保活进程组已经占用 GPU，有人用就让出。看板自己开的保活持续没有 GPU 活动时，守护会复查后尝试重开，并记录结果。</p>
     <figure>
       <div class="frame">
         <svg viewBox="0 0 760 250" role="img" aria-label="上排 worker：有 GPU 任务或会放行的请求就停保活；都没有、约 30 秒看一次、连续两次 GPU 上没进程才开；开着时 GPU 上有了别的进程就让路。下排保活守护：GPU 连着空闲满 60 分钟就开保活并记下进程组，盯 5 分钟，有别的进程就让出，之后靠每次探测">
