@@ -4843,7 +4843,11 @@ const selecting = () => editing("main", "drw");          // 正在操作：输�
 function render(how) {
   // how：true 是换了页（滚回顶上），"keep" 是只开关了抽屉，false 是定时刷新。
   // 定时刷新时：用户正选着文字就先不重画，选区一取消再补；内容没变就不动页面
-  if (!how && selecting()) { PENDING = true; return; }
+  if (!how && selecting()) {
+    PENDING = true;
+    if (popIs("guard-edit", "")) gdSyncSave();
+    return;
+  }
   PENDING = false;
   srvMoved();
   const r = route(), view = document.getElementById("view"), frames = document.getElementById("frames");
@@ -4924,15 +4928,32 @@ function drawNav(r = route()) {
 // 保活守护（#/fleet/guard）：规则与两个时间、每台的开关、最近的记录。时间写进 [fleet]，开关写进那一台的块（fleet.set_guard）
 let GDERR = null, GDPEND = {};           // GDPEND：拨了还没存好的开关（id → 开或关），先照它画并置灰
 const gdVal = k => popIs("guard-edit", "") ? POP.draft[k] : fops().guard?.[k];
-const gdDirty = () => ["idle_min", "watch_min"].some(k => String(gdVal(k)) !== String(fops().guard?.[k]));
+// 与 fleet.set_guard 的范围一致；探测间隔不是整分钟时，服务端向下取整。
+const gdLimits = () => ({idle_min: [Math.floor(D.fleet.interval / 60), 1440], watch_min: [0, 60]});
+function gdPayload() {
+  if (!popIs("guard-edit", "") || POP.busy || !canOps()) return null;
+  const payload = {}, current = fops().guard;
+  let changed = false;
+  for (const [k, [lo, hi]] of Object.entries(gdLimits())) {
+    const raw = gdVal(k), value = Number(raw);
+    if (raw == null || String(raw).trim() === "" || !Number.isInteger(value) || value < lo || value > hi) return null;
+    payload[k] = value;
+    changed ||= value !== Number(current?.[k]);
+  }
+  return changed ? payload : null;
+}
+const gdSyncSave = () => document.querySelector("[data-gdsave]")?.toggleAttribute("disabled", !gdPayload());
 function guardDrawer() {
   const F = D.fleet, dis = canOps() ? "" : "disabled", iv = Math.round(F.interval / 60);
-  const open = popIs("guard-edit", "");
-  const num = (id, name, k, lo, hi) => `<label>${name}<input id="${id}" class="cap-in gd-in" type="number" inputmode="numeric" min="${lo}" max="${hi}" step="1" value="${esc(gdVal(k) ?? "")}"></label>`;
+  const open = popIs("guard-edit", ""), limits = gdLimits();
+  const num = (id, name, k) => {
+    const [lo, hi] = limits[k];
+    return `<label>${name}<input id="${id}" class="cap-in gd-in" type="number" inputmode="numeric" min="${lo}" max="${hi}" step="1" value="${esc(gdVal(k) ?? "")}"${POP.busy ? " disabled" : ""}></label>`;
+  };
   const edit = canOps() ? popConfirm(`<button class="btn" id="open-guard-edit" data-fop="guard-edit" aria-expanded="${open}" aria-haspopup="dialog">修改守护时间</button>`,
-    open, open ? `<div class="aform">${num("gdidle", "空闲多久开（分钟）", "idle_min", iv, 1440)}${num("gdwatch", "开后盯多久（分钟）", "watch_min", 0, 60)}</div>
+    open, open ? `<div class="aform">${num("gdidle", "空闲多久开（分钟）", "idle_min")}${num("gdwatch", "开后盯多久（分钟）", "watch_min")}</div>
       ${POP.err ? `<div class="rn-err">${esc(POP.err)}</div>` : ""}` : "",
-    `<button class="btn pri" data-gdsave ${!gdDirty() || POP?.busy ? "disabled" : ""}>保存</button>`, true) : opsNote();
+    `<button class="btn pri" data-gdsave ${!gdPayload() ? "disabled" : ""}>保存</button>`, true) : opsNote();
   const flow = `<ol class="gd-flow">
       <li><b>GPU 连着空 ${esc(fops().guard?.idle_min ?? "—")} 分钟</b><span class="sm mut">没有实验也没有保活才算空。约 ${iv} 分钟探一次，有一次没探到就重新计时</span></li>
       <li><b>开保活</b><span class="sm mut">开之前再看一眼 GPU，有别的进程就不开。正在做平台操作的那台不碰</span></li>
@@ -4961,17 +4982,12 @@ async function gdSet(body) {
   if (body.id && document.activeElement === document.body) document.querySelector(`[data-gd="${CSS.escape(body.id)}"]`)?.focus({preventScroll: true});   // 重画后光标回到这个开关
 }
 async function gdSave() {
-  const pop = POP;
-  if (!popIs("guard-edit", "") || !gdDirty() || pop.busy) return;
+  const pop = POP, body = gdPayload();
+  if (!body) return;
   document.activeElement?.blur();
-  const iv = Math.round(D.fleet.interval / 60), {idle_min, watch_min} = pop.draft;
-  const valid = (v, lo, hi) => v !== "" && v != null && Number.isInteger(+v) && +v >= lo && +v <= hi;
-  if (!valid(idle_min, iv, 1440) || !valid(watch_min, 0, 60)) {
-    pop.err = `空闲时间填 ${iv} 到 1440 分钟，盯守时间填 0 到 60 分钟。`; return render(false);
-  }
   pop.busy = true; pop.err = null; render(false);
   try {
-    OPS = await fleetPost("guard", {idle_min, watch_min});
+    OPS = await fleetPost("guard", body);
     await collectNow(true);
     if (POP === pop) { FFOCUS = pop.trigger; popClose(); }
   } catch (e) { if (POP === pop) pop.err = e.message || String(e); }
@@ -5051,7 +5067,7 @@ document.addEventListener("input", e => {               // 输入框的值先记
   if (id === "fcapin" && FCAP) FCAP.input = e.target.value;
   if (id === "lgq") { LGQ = e.target.value; clearTimeout(LGT); LGT = setTimeout(() => logSet({q: LGQ.trim()}), 300); }    // 边打边筛：停手 0.3 秒再取
   if (o) o[f[1]] = e.target.value;
-  if (f?.[0] === "G") document.querySelector("[data-gdsave]")?.toggleAttribute("disabled", !gdDirty() || POP?.busy);
+  if (f?.[0] === "G") gdSyncSave();
   if (e.target.classList?.contains("when-in")) whenInput(e.target);
   if (e.target.dataset?.cf && e.target.type !== "checkbox") cfgInput(e.target, "input");
   if (e.target.dataset?.popField && POP?.draft) POP.draft[e.target.dataset.popField] = e.target.value;
@@ -5090,7 +5106,7 @@ document.addEventListener("keydown", e => {
     e.preventDefault(); return document.querySelector("[data-side]")?.click();
   }
   if (e.key === "Enter" && e.target.id === "fcapin" && FCAP) { e.preventDefault(); return fopAct("go"); }
-  if (e.key === "Enter" && FIN[e.target.id]?.[0] === "G") { e.preventDefault(); return gdSave(); }
+  if (e.key === "Enter" && !e.isComposing && FIN[e.target.id]?.[0] === "G") { e.preventDefault(); return gdSave(); }
   if (e.key === "Enter" && ["schu", "schp"].includes(e.target.id) && POP) { e.preventDefault(); return schedAct({schu: "fgo", schp: "pgo"}[e.target.id], POP.id); }
   if (e.key === "Enter" && e.target.id === "dklim") { e.preventDefault(); return fopAct("dklim"); }
   if (e.key === "Escape" && document.querySelector(".pop")) { e.preventDefault(); closePop(); return; }     // 先关弹窗（有输入的也关），不连带关抽屉

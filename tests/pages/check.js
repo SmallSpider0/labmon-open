@@ -1028,6 +1028,33 @@ t("manage", "项目配置（#133）：当场校验改了的项（说法与范围
   has(fh, "在项目目录的 monitor.toml 里改，labmon wait 或 labmon project push 推上来后下一轮自动重读"); ok(!fh.includes("保存到 monitor.toml"));
   run(F, `cfgAct("set:interval:300", "proj-a"); cfgInput({dataset: {cf: "title", p: "proj-a"}, value: "x"}, "input")`); ok(!Object.keys(run(F, "CFE")).length, "离线页记了草稿");
 });
+ta("overview", "保活守护时间：草稿有效且有变化才可点保存或按回车", async () => {
+  const C = accCtx(OV, ADMIN_ME, "#/fleet/guard");
+  run(C, `D.fleet.interval = 635; render(true); fopAct("guard-edit");
+    POSTS = []; fleetPost = async (kind, body) => { POSTS.push([kind, body]); throw new Error("测试保存失败"); };
+    SAVE = {disabled: true, toggleAttribute(k, on) { if (k === "disabled") this.disabled = on; }};
+    oldQuery = document.querySelector.bind(document);
+    document.querySelector = q => q === "[data-gdsave]" ? SAVE : oldQuery(q);`);
+  const enter = (isComposing = false) => fire(C, "keydown", {id: "gdidle"}, {key: "Enter", isComposing});
+  const input = (id, value, disabled) => {
+    fire(C, "input", {id, value});
+    ok(run(C, "SAVE.disabled") === disabled, id + " 输入 " + value + " 的保存状态不符");
+  };
+  for (const v of ["", "3", "30.5", "1441", "060"]) { input("gdidle", v, true); enter(); }
+  ok(run(C, "POSTS.length") === 0, "无效或等价草稿被回车提交");
+  has(run(C, "guardDrawer()"), 'min="10" max="1440"');
+  input("gdidle", "30", false); input("gdwatch", "61", true); input("gdwatch", "5", false);
+  focusText(C, 'id: "gdidle",');
+  run(C, "fops().guard.idle_min = 30; render(false)");
+  ok(run(C, "SAVE.disabled && BL === 0"), "刷新后保存状态未更新或打断了输入");
+  input("gdwatch", "0", false); enter(true);
+  ok(run(C, "POSTS.length") === 0, "输入法选词触发了保存");
+  enter();
+  ok(run(C, "POSTS.length === 1 && POP.busy && POSTS[0][0] === 'guard' && POSTS[0][1].idle_min === 30 && POSTS[0][1].watch_min === 0"), "有效草稿没有按整数提交");
+  enter(); await Promise.resolve();
+  ok(run(C, "POSTS.length === 1 && !POP.busy && POP.err === '测试保存失败'"), "重复提交或丢了失败提示");
+  has(run(C, "guardDrawer()"), 'value="0"', "保存失败后丢草稿");
+});
 t("overview", "Safari 点按钮、勾选框不挪焦点：common.js 的点击处理先让输入框失焦，点完当场重画（#129、#131）", () => {
   // 项目配置：焦点在表单的输入框里点下移、保存，抽屉不经整页渲染就重画
   const C = ovCtx(OV, RR, "#/p/proj-a/manage"); let f;
