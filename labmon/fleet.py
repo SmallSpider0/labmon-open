@@ -79,7 +79,8 @@ from .state import append_row, load_json, save_json, snapshot, state_dir as _sta
 HERE = Path(__file__).resolve().parent
 PROBE = HERE / "fleet_probe.sh"
 GUARD = HERE / "fleet_guard.sh"
-GUARD_RETRY_S = 1800            # 保活守护没开成：隔这么久再试
+GUARD_RETRY_S = 1800            # 保活守护没开成或尝试过重开：隔这么久再试
+GUARD_ZERO_S = 600              # 至少两次有效探测、跨这么久一直无 GPU 活动才重开
 TICK = 60                       # 看板每轮间隔；连不上的服务器隔这么久再试一次（掉线判定与看板主机同一规则：health.link_step）
 MERGE_S = 2 * 3600              # 租期提醒：相差这么久以内到期的合成一条
 SERIES_KEEP = 7 * 86400
@@ -385,18 +386,23 @@ def parse(raw: str) -> dict:
     cpu = (sec.get("cpu") or [""])[0].split()
     smp["cpu"] = round((int(cpu[2]) - int(cpu[0])) / (int(cpu[3]) - int(cpu[1])), 2) \
         if len(cpu) == 4 and all(x.isdigit() for x in cpu) and int(cpu[3]) > int(cpu[1]) else None
-    samples = {}
+    samples, invalid_util = {}, set()
     for l in sec.get("util", []):
         p = [x.strip() for x in l.split(",")]
-        if len(p) == 2 and p[0].isdigit() and _num(p[1]) is not None:
-            samples.setdefault(int(p[0]), []).append(_num(p[1]))
+        if len(p) == 2 and p[0].isdigit():
+            util = _num(p[1])
+            if util is None:
+                invalid_util.add(int(p[0]))
+            else:
+                samples.setdefault(int(p[0]), []).append(util)
     smp["gpus"] = []
     for l in sec.get("gpu", []):
         p = [x.strip() for x in l.split(",")]
         if len(p) == 6 and p[0].isdigit():
             ss = samples.get(int(p[0])) or []
             smp["gpus"].append({"i": int(p[0]), "uuid": p[1], "name": p[2], "used": _num(p[3], 0), "total": _num(p[4], 0),
-                                "util": round(sum(ss) / len(ss), 1) if ss else _num(p[5]), "samples": ss})
+                                "util": round(sum(ss) / len(ss), 1) if ss else _num(p[5]), "samples": ss,
+                                "zero": int(p[0]) not in invalid_util and len(ss) >= 2 and all(x == 0 for x in ss)})
     smp["apps"] = []
     for l in sec.get("apps", []):
         p = [x.strip() for x in l.split(",")]
@@ -424,6 +430,12 @@ def parse(raw: str) -> dict:
             smp["guard"] = {"t": int(p[1]), "pgid": int(p[2]), "until": int(p[3]), "by": " ".join(p[4:]) or None}
         elif smp["guard"] and p[0] in ("yield", "stop") and len(p) >= 2 and p[1].isdigit():
             smp["guard"]["end"] = {"t": int(p[1]), "how": p[0], "why": " ".join(p[2:]) or None}
+        elif smp["guard"] and p[0] == "proc" and len(p) == 3 and all(x.isdigit() for x in p[1:]):
+            g = smp["guard"]
+            pid, birth = map(int, p[1:])
+            # 旧登记没有进程启动时钟，探针补读。登记早于进程出生时，可能是旧 PID 已被复用。
+            if pid == g["pgid"] and bt and tck and p1 is not None and p1 <= birth and int(bt + birth / tck) <= g["t"]:
+                g["identity"] = [int(p1), g["t"], pid, birth]
     return smp
 
 
@@ -639,9 +651,14 @@ def analyze(smp: dict, cfg: dict) -> dict:
     work.sort(key=lambda w: (STATES.index(w["kind"]), -w["mb"]))
     g = smp.get("guard")
     if g:                                                # labmon 开的那个保活还在不在（进程组长就是保活进程）
-        g = {**g, "running": any(k in (ps.get(g["pgid"]) or {}).get("args", "") for k in cfg["keepalive"])}
+        g = {**g, "running": not g.get("end") and any(k in (ps.get(g["pgid"]) or {}).get("args", "") for k in cfg["keepalive"])}
         for w in work:
             w["ours"] = g["running"] and w["kind"] == "keepalive" and w["pid"] == g["pgid"]
+        # 不能用页面上的平均利用率：未知值与非零的小数可能也显示为 0。
+        gs = smp["gpus"]
+        if (g["running"] and g.get("identity") and all(w.get("ours") for w in work) and gs
+                and all(card.get("zero") for card in gs)):
+            g["zero_cards"] = len(gs)
     kinds = {w["kind"] for w in work}
     st = next((k for k in STATES if k in kinds), "idle")
     # 保活：GPU 上认作保活的进程整棵进程树（同 worker 的 proc_tree）。内存扣各进程 PSS（探针的 pss 段；按规则认作保活、探针没读的按 RSS），
@@ -820,6 +837,8 @@ def record(s: dict, raw: str | None, err: str | None, cfg: dict, st: dict, t: fl
             msg = f"组内服务器 {label} 恢复连接（离线 {round((t - st['since']) / 60)} 分钟）"
             _event("fleet_up", s["id"], msg, t, s["holder"])
             out.append(msg)
+        if a["started"] and st.get("started") != a["started"]:
+            st.pop("guard_repair_at", None)
         ev = container_step(st, a["started"], label)
         if ev:
             log_events([{"host": s["id"], "who": s["holder"], **ev}], t)
@@ -840,6 +859,7 @@ def record(s: dict, raw: str | None, err: str | None, cfg: dict, st: dict, t: fl
             st["guard_logged"] = g["end"]["t"]
             _event("guard_yield", s["id"], f"{label} 上有了 {_brief_work(a, True) or '别的 GPU 进程'}，{g.get('by') or '看板'}开的保活已让出", t, s["holder"])
         st["sample"] = {**a, "t": round(t)}
+    _guard_track(s, st, cfg, t, a, prev)
     if a is not None or st.get("down"):              # 连不上但还没判掉线的那次不计，免得网络抖一下就记成掉线
         _hour(st, s, a, t, borrower(s, cfg) if borrowed(s) else None)
         append_row(state_dir() / "series" / f"{s['id']}.jsonl", _series_row(a, t, borrowed(s)), SERIES_KEEP, t)
@@ -864,13 +884,38 @@ def guard_on(s: dict, cfg: dict) -> bool:
     return bool(s["guard"]) if "guard" in s else s["pool"] not in cfg["private_pools"]
 
 
+def _guard_track(s: dict, st: dict, cfg: dict, t: float, a: dict | None, prev: float | None) -> None:
+    """保存这一轮连续零利用率的起点。新容器、进程、卡数、缺样或任何活动都打断旧证据。"""
+    g = (a or {}).get("guard") or {}
+    if not g.get("zero_cards") or s.get("off") or borrowed(s) or not guard_on(s, cfg):
+        st.pop("guard_zero", None)
+        return
+    identity = [*g["identity"], g["zero_cards"]]
+    z = st.get("guard_zero") or {}
+    if z.get("identity") != identity or z.get("container") != a["started"] or prev is None or not 0 <= t - prev <= 2.5 * cfg["interval"]:
+        st["guard_zero"] = {"identity": identity, "container": a["started"], "since": t}
+
+
+def _guard_repair(st: dict, g: dict, t: float) -> dict:
+    """只对同一保活的连续有效样本作决定；失败或重开以后留出退避时间。"""
+    z = st.get("guard_zero")
+    # 旧版看门狗进入最后一轮后仍可能睡 20 秒才醒，等过一个探测周期的最小刻度再重开。
+    if not z or not g.get("zero_cards") or t < g["until"] + TICK or t - z["since"] < GUARD_ZERO_S:
+        return {}
+    at = st.get("guard_repair_at", t - GUARD_RETRY_S) + GUARD_RETRY_S
+    if t < at:
+        fail = st.get("guard_fail")
+        return {"status": "fail", "fail": fail, "at": at} if fail else {}
+    return {"act": "repair", "since": z["since"], "identity": z["identity"]}
+
+
 def guard_state(s: dict, st: dict, cfg: dict, t: float, busy: bool = False) -> dict:
     """保活守护的判定（唯一一处）：这一台现在怎样、要不要动手。页面的状态与 guard_act 都取它。
     status：ours（labmon 开的保活在跑）、wait（GPU 连着空闲，计时中）、fail（上次没开成，隔一阵再试）、
     busy（有人在用，或在做平台操作）、off（没开守护）、down（掉线、关机、上次没探到）、borrowed（借来在用：保活由 worker 停启，守护不管）、
     worker（自用主机，fleetboot.mine 的行：保活一直由 worker 停启，守护从来不管它；#58 以前它的行没有 guard，页面当作没探到）。
     since：GPU 连着空闲从几点起（没开守护的也给，页面写现状）。
-    act：start（空闲满 guard_idle_min 分钟）；yield（labmon 开的保活还在跑，服务器上盯的时间已过，GPU 上又有了别的负载）。
+    act：start（空闲满 guard_idle_min 分钟）；repair（自己开的保活持续空转）；yield（服务器上盯的时间已过，有了别的负载）。
     关掉守护只是不再自动开，已开的保活照样让路。"""
     if s.get("mine"):
         return {"on": False, "status": "worker"}
@@ -882,13 +927,21 @@ def guard_state(s: dict, st: dict, cfg: dict, t: float, busy: bool = False) -> d
         return {"on": on, "status": "down"}
     work = a.get("work") or []
     if g.get("running"):
+        out = {"on": on, "status": "ours", "t": g["t"], "by": g.get("by"), "until": g["until"]}
         if any(w.get("ours") for w in work):
-            out = {"on": on, "status": "ours", "t": g["t"], "by": g.get("by"), "until": g["until"]}
             if t >= g["until"] and not busy and any(not w.get("ours") for w in work):
                 out.update(act="yield", what=_brief_work(a, True))
+            elif on and not busy:
+                out.update(_guard_repair(st, g, t))
             return out
         if work and t >= g["until"] and not busy:  # 进程仍在、没占 GPU；有别的负载时，仍要防止它随后抢卡
             return {"on": on, "status": "busy", "act": "yield", "what": _brief_work(a, True)}
+        if not work and on and not busy and g.get("zero_cards"):
+            repair = _guard_repair(st, g, t)
+            if repair:
+                return {**out, **repair}
+            if st.get("guard_zero"):               # 已知是自己的保活；等齐样本后恢复，避免普通 start 反复收到“已经在跑”
+                return {"on": on, "status": "busy", "why": "保活进程尚未占用 GPU"}
     since, fail = st.get("idle_since"), st.get("guard_fail")
     if not on:
         return {"on": on, "status": "off", "since": since}
@@ -930,25 +983,49 @@ def ka_stop(s: dict, cfg: dict, why: str, ssh_fn=None) -> tuple[str, str]:
 
 
 def guard_act(s: dict, st: dict, cfg: dict, t: float, busy: bool, ssh_fn=None) -> tuple[str | None, list[str]]:
-    """探完一台后按 guard_state 动手：开保活或让出，记进记录。返回 (做了什么, 要弹的通知：只有没开成，连着失败只弹一次)。"""
+    """探完一台后按 guard_state 开、重开或让出。返回 (动作, 要弹的通知：只有没开成，连着失败只弹一次)。"""
     from . import pool_supply
 
     g = guard_state(s, st, cfg, t, busy)
     label = f"{s['holder']}（{s['id']}）"
-    if g.get("act") == "start" and not pool_supply.held(s["id"]):
-        res, note = ka_start(s, cfg, "守护", ssh_fn)
+    act = g.get("act")
+    if act in ("start", "repair"):
+        repair = act == "repair"
+
+        def delay(why):
+            key = [act, g["since"]]
+            deferred = st.get("guard_delay") or {}
+            if deferred.get("key") != key:
+                deferred = st["guard_delay"] = {"key": key, "reasons": []}
+            if why not in deferred["reasons"]:
+                deferred["reasons"].append(why)
+                _event("guard_delay", s["id"], f"{label} 延后{'重开' if repair else '开'}保活：{why}，下次探测再看", t, s["holder"])
+            return None, []
+
+        if pool_supply.held(s["id"]):
+            return delay("算力池正在占用或已获供给")
+        if repair:
+            res, note = _guard_run(s, cfg, ["repair", int(cfg["guard_watch_min"] * 60), "守护", *g["identity"]], ssh_fn)
+            if res != "busy":
+                st["guard_repair_at"] = round(t)
+        else:
+            res, note = ka_start(s, cfg, "守护", ssh_fn)
+        if res == "busy":
+            return delay(note if repair and not note.isdecimal() else "启动前复查时 GPU 上又有了进程")
+        st.pop("guard_delay", None)
         if res == "ok":
             st.pop("guard_fail", None)
             if note.startswith("start"):
-                _event("guard_start", s["id"], f"{label} 的 GPU 连着空了 {round((t - g['since']) / 60)} 分钟，守护开了保活"
-                       f"（盯 {cfg['guard_watch_min']} 分钟，有实验上来就让出）", t, s["holder"])
+                minutes = round((t - g["since"]) / 60)
+                msg = (f"{label} 连着 {minutes} 分钟没测到 GPU 活动，守护重开了空转的保活" if repair
+                       else f"{label} 的 GPU 连着空了 {minutes} 分钟，守护开了保活")
+                _event("guard_restart" if repair else "guard_start", s["id"],
+                       f"{msg}（盯 {cfg['guard_watch_min']} 分钟，有实验上来就让出）", t, s["holder"])
                 return "start", []
-            return "already", []                        # 探完才出现的保活也要刷新样本，不另记一条启动
-        if res == "busy":                                # 开前一刻有了进程：下次探测再看
-            return None, []
+            return "already", []                   # 探完才出现的保活也要刷新样本，不另记一条启动
         first = "guard_fail" not in st
         st["guard_fail"] = {"t": round(t), "msg": note}
-        msg = f"保活守护没能给 {label} 开保活：{note}"
+        msg = f"保活守护没能给 {label} {'重开' if repair else '开'}保活：{note}"
         _event("guard_fail", s["id"], msg + f"（{GUARD_RETRY_S // 60} 分钟后再试）", t, s["holder"])
         return "fail", [msg] if first else []
     if g.get("act") == "yield":

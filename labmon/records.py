@@ -28,6 +28,7 @@ EVENT_KINDS = {
     "borrow": ("借用", "warn", "borrow"), "borrow_due": ("约定时间", "warn", "borrow"), "borrow_back": ("对方在用", "warn", "borrow"),
     "borrow_return": ("归还", "ok", "borrow"), "borrow_hit": ("挤到对方", "bad", "borrow"), "guest": ("对方超出预留", "warn", "borrow"),
     "owner_oom": ("挤到对方", "bad", "borrow"),
+    "guard_restart": ("重开保活", "ok", "keepalive"), "guard_delay": ("延后保活", "mute", "keepalive"),
     "guard_start": ("开保活", "ok", "keepalive"), "guard_yield": ("让出", "mute", "keepalive"), "guard_fail": ("没开成", "bad", "keepalive"),
     "ka_fight": ("保活被拉起", "warn", "keepalive"), "watchdog": ("看门狗", "warn", "keepalive"),
     "start": ("开始", "mute", "queue"), "grant": ("放行", "mute", "queue"), "done": ("完成", "ok", "queue"), "end": ("结束", "mute", "queue"),

@@ -63,7 +63,15 @@ for p in $(echo "$PS" | awk -v r="$KA" 'BEGIN {n = split(r, a, " "); for (i = 1;
   awk -v p="$p" '/^Pss:/ {s += $2; n = 1} END {if (n) print p, s}' "$f" 2>/dev/null
 done
 echo "@@ guard"                  # labmon 开的保活（fleet_guard.sh 记的）：开的时刻、进程组、盯到几点、谁开的，之后的让出与停止
-cat /tmp/labmon-guard.state 2>/dev/null
+GUARD=$(cat /tmp/labmon-guard.state 2>/dev/null)
+echo "$GUARD"
+read -r gk gt gg rest <<< "$GUARD"
+if [ "$gk" = start ] && [[ "$gg" =~ ^[1-9][0-9]*$ ]]; then
+  { read -r gs < "/proc/$gg/stat"; } 2>/dev/null && {
+    gs=${gs##*) }; set -- $gs
+    [ "${3:-}" = "$gg" ] && echo "proc $gg ${20:-}"
+  }
+fi
 if [ -n "$LABMON_SCAN" ]; then
   # 根盘开机以来新写的文件（同 worker 的 LocalDisk：两份，探针在未必有 Python 的镜像里跑）：ctime 不晚于开机的目录整棵不进
   # （overlay 上开机后写过东西的目录都已复制到上层、ctime 晚于开机），不跨文件系统，/proc /sys /dev /run 不进；只数 ctime 晚于开机的文件。
