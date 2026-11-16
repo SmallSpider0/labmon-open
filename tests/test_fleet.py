@@ -878,6 +878,14 @@ class GuardTest(unittest.TestCase):
         F.record(s, self.stalled(), None, self.c, st, T0 + 1200)
         self.assertNotEqual(F.guard_state(s, st, self.c, T0 + 1200).get("act"), "repair")
 
+    def test_stalled_recovery_waits_for_pre_upgrade_watcher_to_expire(self):
+        self.raw = self.stalled().replace(f"9 {T0 - 700} 看板", f"9 {T0 + 590} 看板")
+        self.tick(T0)
+        self.tick(T0 + 600)
+        self.assertEqual(self.remote, [])
+        F.tick(T0 + 650, self.fetch, self.c, force="b", ssh_fn=self.ssh)
+        self.assertEqual(len(self.remote), 1)
+
     def test_stalled_recovery_backoff_and_new_attempt(self):
         self.raw, self.reply = self.stalled(), "fail 未看到 GPU 进程"
         self.tick(T0)

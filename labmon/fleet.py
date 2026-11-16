@@ -899,7 +899,8 @@ def _guard_track(s: dict, st: dict, cfg: dict, t: float, a: dict | None, prev: f
 def _guard_repair(st: dict, g: dict, t: float) -> dict:
     """只对同一保活的连续有效样本作决定；失败或重开以后留出退避时间。"""
     z = st.get("guard_zero")
-    if not z or not g.get("zero_cards") or t < g["until"] or t - z["since"] < GUARD_ZERO_S:
+    # 旧版看门狗进入最后一轮后仍可能睡 20 秒才醒，等过一个探测周期的最小刻度再重开。
+    if not z or not g.get("zero_cards") or t < g["until"] + TICK or t - z["since"] < GUARD_ZERO_S:
         return {}
     at = st.get("guard_repair_at", t - GUARD_RETRY_S) + GUARD_RETRY_S
     if t < at:
@@ -1010,7 +1011,7 @@ def guard_act(s: dict, st: dict, cfg: dict, t: float, busy: bool, ssh_fn=None) -
         else:
             res, note = ka_start(s, cfg, "守护", ssh_fn)
         if res == "busy":
-            return delay(note if repair else "启动前复查时 GPU 上又有了进程")
+            return delay(note if repair and not note.isdecimal() else "启动前复查时 GPU 上又有了进程")
         st.pop("guard_delay", None)
         if res == "ok":
             st.pop("guard_fail", None)

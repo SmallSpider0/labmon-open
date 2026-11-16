@@ -63,6 +63,7 @@ watch() {   # $1 盯到几点（epoch）$2 保活进程组 $3 ka 命令 $4 登�
   local gpu
   while [ "$(date +%s)" -lt "$1" ]; do
     sleep "${GUARD_POLL:-20}"
+    [ "$(date +%s)" -lt "$1" ] || exit 0
     kill -0 "$2" 2>/dev/null || exit 0
     gpu=$(gpu_procs "$2") || continue    # 查 GPU 失败时没有证据说有别的进程
     if [ "${gpu#* }" -gt 0 ]; then
