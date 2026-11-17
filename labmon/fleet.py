@@ -38,7 +38,7 @@
 
 保活守护（guard_state、guard_act）：开了守护的服务器，GPU 连着空闲满 guard_idle_min 分钟，探完就开保活（ka_start，经 fleet_guard.sh：
 开前当场再查一遍，开了以后在服务器上盯 guard_watch_min 分钟，有实验上来就让出）；盯的时间过了，探测发现 labmon 开的保活旁边又有了
-别的负载，就停掉它（ka_stop）。只开、停 labmon 自己开的那一个保活，别的进程一概不碰。看板上手动「开保活」与续租后开保活也走 ka_start。
+别的负载，就停掉它（ka_stop）。发现自行开启的保活持续空转时，只有配置脚本能明确核实归属才接管。看板上手动「开保活」与续租后开保活也走 ka_start。
 
 主机清单里写了 platform_job 的自用主机（worker 在管的）也列进来，状态取 worker 的 GPU 进程归属，算配额、不另外探；
 使用记录（hours）每轮采集按 worker 状态记一次，口径与探针相同（from_worker）。
@@ -423,6 +423,9 @@ def parse(raw: str) -> dict:
             except ValueError:
                 continue
     smp["pss"] = {int(p[0]): int(p[1]) * 1024 for p in (l.split() for l in sec.get("pss", [])) if len(p) == 2 and p[0].isdigit() and p[1].isdigit()}
+    smp["ka_groups"] = {int(p[0]): [int(p[1]), int(p[2])] for p in (l.split() for l in sec.get("ka_groups", []))
+                        if len(p) == 3 and all(x.isdigit() for x in p)}
+    smp["p1"] = int(p1) if smp["started"] is not None else None
     smp["guard"] = None                                  # labmon 开的保活（fleet_guard.sh 记的）
     for l in sec.get("guard", []):
         p = l.split()
@@ -649,16 +652,26 @@ def analyze(smp: dict, cfg: dict) -> dict:
                      "etime": t["etime"] if t else None, "cpu_s": t["cpu_s"] if t else None, "pid": g["top"] if t else None,
                      "mb": round(g["mb"])})
     work.sort(key=lambda w: (STATES.index(w["kind"]), -w["mb"]))
+    # 平均值可能四舍五入到零。每张卡都要有至少两条明确的零样本。
+    gs = smp["gpus"]
+    zero_cards = len(gs) if all(card.get("zero") for card in gs) else 0
     g = smp.get("guard")
     if g:                                                # labmon 开的那个保活还在不在（进程组长就是保活进程）
         g = {**g, "running": not g.get("end") and any(k in (ps.get(g["pgid"]) or {}).get("args", "") for k in cfg["keepalive"])}
         for w in work:
             w["ours"] = g["running"] and w["kind"] == "keepalive" and w["pid"] == g["pgid"]
-        # 不能用页面上的平均利用率：未知值与非零的小数可能也显示为 0。
-        gs = smp["gpus"]
-        if (g["running"] and g.get("identity") and all(w.get("ours") for w in work) and gs
-                and all(card.get("zero") for card in gs)):
-            g["zero_cards"] = len(gs)
+        if g["running"] and g.get("identity") and all(w.get("ours") for w in work) and zero_cards:
+            g["zero_cards"] = zero_cards
+    manual_guard = None
+    if not (g or {}).get("running") and zero_cards and work and all(w["kind"] == "keepalive" for w in work):
+        p1 = smp.get("p1")
+        by_pid = smp.get("ka_groups") or {}
+        groups = [by_pid.get(pid) for pid in sorted(ka_gpu)]
+        target = None
+        if p1 is not None and groups and all(group and group == groups[0] and group[0] > 1 and group[1] >= p1 for group in groups):
+            target = [p1, "manual", *groups[0], zero_cards]
+        signature = target or ["manual", p1, zero_cards, [[pid, by_pid.get(pid)] for pid in sorted(ka_gpu)]]
+        manual_guard = {"identity": signature, "target": target}
     kinds = {w["kind"] for w in work}
     st = next((k for k in STATES if k in kinds), "idle")
     # 保活：GPU 上认作保活的进程整棵进程树（同 worker 的 proc_tree）。内存扣各进程 PSS（探针的 pss 段；按规则认作保活、探针没读的按 RSS），
@@ -682,7 +695,7 @@ def analyze(smp: dict, cfg: dict) -> dict:
             "vram_real": vr, "vram_ka": sum(w["mb"] for w in work if w["kind"] == "keepalive"), "cpu": smp["cpu"], "cpu_real": cr,
             "cpu_quota": smp["cpu_quota"], "nproc": smp["nproc"], "mem": m, "mem_real": mr, "mem_anon": ma, "share": bool(share),
             "gpus": [{k: g[k] for k in ("i", "uuid", "name", "used", "total", "util")} for g in smp["gpus"]],
-            "started": smp["started"], "root": smp["root"], "vscode": vscode, "terms": terms, "guard": g, "mem_ka": ka_mem if m else None,
+            "started": smp["started"], "root": smp["root"], "vscode": vscode, "terms": terms, "guard": g, "manual_guard": manual_guard, "mem_ka": ka_mem if m else None,
             "scan": smp.get("scan")}
 
 
@@ -884,29 +897,44 @@ def guard_on(s: dict, cfg: dict) -> bool:
     return bool(s["guard"]) if "guard" in s else s["pool"] not in cfg["private_pools"]
 
 
+def _guard_stall(a: dict) -> dict | None:
+    """同一份空转身份供采样计时和决策使用。"""
+    g = a.get("guard") or {}
+    if g.get("zero_cards"):
+        identity = [*g["identity"], g["zero_cards"]]
+        # 升级前的远端看门狗最后一轮可能在截止后才醒，留出退出时间。
+        return {"identity": identity, "target": identity, "at": g["until"] + TICK}
+    return a.get("manual_guard")
+
+
 def _guard_track(s: dict, st: dict, cfg: dict, t: float, a: dict | None, prev: float | None) -> None:
     """保存这一轮连续零利用率的起点。新容器、进程、卡数、缺样或任何活动都打断旧证据。"""
-    g = (a or {}).get("guard") or {}
-    if not g.get("zero_cards") or s.get("off") or borrowed(s) or not guard_on(s, cfg):
+    stall = _guard_stall(a or {})
+    if not stall or s.get("off") or borrowed(s) or not guard_on(s, cfg):
         st.pop("guard_zero", None)
         return
-    identity = [*g["identity"], g["zero_cards"]]
     z = st.get("guard_zero") or {}
+    identity = stall["identity"]
     if z.get("identity") != identity or z.get("container") != a["started"] or prev is None or not 0 <= t - prev <= 2.5 * cfg["interval"]:
         st["guard_zero"] = {"identity": identity, "container": a["started"], "since": t}
 
 
-def _guard_repair(st: dict, g: dict, t: float) -> dict:
+def _guard_repair(st: dict, stall: dict | None, t: float, managed: bool = True) -> dict:
     """只对同一保活的连续有效样本作决定；失败或重开以后留出退避时间。"""
     z = st.get("guard_zero")
-    # 旧版看门狗进入最后一轮后仍可能睡 20 秒才醒，等过一个探测周期的最小刻度再重开。
-    if not z or not g.get("zero_cards") or t < g["until"] + TICK or t - z["since"] < GUARD_ZERO_S:
+    if not z or not stall or z.get("identity") != stall["identity"] or t < stall.get("at", 0) or t - z["since"] < GUARD_ZERO_S:
         return {}
+    target, warning = stall["target"], z.get("warning")
+    if not target or not managed:
+        why = "未配置这台的保活脚本" if not managed else "无法确认唯一的保活进程组"
+        return {"status": "fail", "fail": warning} if warning else {"act": "warn", "why": why}
     at = st.get("guard_repair_at", t - GUARD_RETRY_S) + GUARD_RETRY_S
     if t < at:
+        if warning:
+            return {"status": "fail", "fail": warning}
         fail = st.get("guard_fail")
         return {"status": "fail", "fail": fail, "at": at} if fail else {}
-    return {"act": "repair", "since": z["since"], "identity": z["identity"]}
+    return {"act": "repair", "since": z["since"], "identity": target, **({"status": "fail", "fail": warning} if warning else {})}
 
 
 def guard_state(s: dict, st: dict, cfg: dict, t: float, busy: bool = False) -> dict:
@@ -915,7 +943,7 @@ def guard_state(s: dict, st: dict, cfg: dict, t: float, busy: bool = False) -> d
     busy（有人在用，或在做平台操作）、off（没开守护）、down（掉线、关机、上次没探到）、borrowed（借来在用：保活由 worker 停启，守护不管）、
     worker（自用主机，fleetboot.mine 的行：保活一直由 worker 停启，守护从来不管它；#58 以前它的行没有 guard，页面当作没探到）。
     since：GPU 连着空闲从几点起（没开守护的也给，页面写现状）。
-    act：start（空闲满 guard_idle_min 分钟）；repair（自己开的保活持续空转）；yield（服务器上盯的时间已过，有了别的负载）。
+    act：start（空闲满 guard_idle_min 分钟）；repair（已识别的保活持续空转）、warn（自行开启的保活空转但无法核实）；yield（服务器上盯的时间已过，有了别的负载）。
     关掉守护只是不再自动开，已开的保活照样让路。"""
     if s.get("mine"):
         return {"on": False, "status": "worker"}
@@ -926,18 +954,19 @@ def guard_state(s: dict, st: dict, cfg: dict, t: float, busy: bool = False) -> d
     if s.get("off") or st.get("down") or st.get("error") or not a:
         return {"on": on, "status": "down"}
     work = a.get("work") or []
+    stall = _guard_stall(a)
     if g.get("running"):
         out = {"on": on, "status": "ours", "t": g["t"], "by": g.get("by"), "until": g["until"]}
         if any(w.get("ours") for w in work):
             if t >= g["until"] and not busy and any(not w.get("ours") for w in work):
                 out.update(act="yield", what=_brief_work(a, True))
             elif on and not busy:
-                out.update(_guard_repair(st, g, t))
+                out.update(_guard_repair(st, stall, t))
             return out
         if work and t >= g["until"] and not busy:  # 进程仍在、没占 GPU；有别的负载时，仍要防止它随后抢卡
             return {"on": on, "status": "busy", "act": "yield", "what": _brief_work(a, True)}
         if not work and on and not busy and g.get("zero_cards"):
-            repair = _guard_repair(st, g, t)
+            repair = _guard_repair(st, stall, t)
             if repair:
                 return {**out, **repair}
             if st.get("guard_zero"):               # 已知是自己的保活；等齐样本后恢复，避免普通 start 反复收到“已经在跑”
@@ -946,7 +975,10 @@ def guard_state(s: dict, st: dict, cfg: dict, t: float, busy: bool = False) -> d
     if not on:
         return {"on": on, "status": "off", "since": since}
     if busy or a.get("state") != "idle" or not since:
-        return {"on": on, "status": "busy", "why": "在做平台操作" if busy else None}
+        out = {"on": on, "status": "busy", "why": "在做平台操作" if busy else None}
+        if not busy and a.get("manual_guard"):
+            out.update(_guard_repair(st, stall, t, managed=bool(ka_cmd(s, cfg))))
+        return out
     out = {"on": on, "since": since, "at": since + cfg["guard_idle_min"] * 60}
     if fail and t - fail["t"] < GUARD_RETRY_S:
         return {**out, "status": "fail", "fail": fail, "at": fail["t"] + GUARD_RETRY_S}
@@ -959,13 +991,13 @@ def ka_cmd(s: dict, cfg: dict) -> str | None:
 
 
 def _guard_run(s: dict, cfg: dict, args: list, ssh_fn=None) -> tuple[str, str]:
-    """在这一台上跑 fleet_guard.sh（一条 ssh，脚本经标准输入送去）。返回 (ok | busy | fail | ssh, 说明)，ssh 是连不上。"""
+    """在这一台上跑 fleet_guard.sh（一条 ssh，脚本经标准输入送去）。返回 (ok | busy | fail | unmanaged | ssh, 说明)，ssh 是连不上。"""
     cmd = ka_cmd(s, cfg)
     if not cmd:
         return "fail", "[fleet] 没写 keepalive_cmd"
     rc, out, err = (ssh_fn or ssh)(s, "bash -s -- " + shlex.join([args[0], cmd, *map(str, args[1:])]), input=GUARD.read_text(), timeout=120)
     res, note = ((out.strip().splitlines() or [""])[-1].split(None, 1) + ["", ""])[:2]
-    if res in ("ok", "busy", "fail"):
+    if res in ("ok", "busy", "fail", "unmanaged"):
         return res, note
     tail = (err or out).strip().splitlines()
     return ("ssh" if rc == 255 else "fail"), tail[-1] if tail else f"退出码 {rc}"
@@ -989,6 +1021,18 @@ def guard_act(s: dict, st: dict, cfg: dict, t: float, busy: bool, ssh_fn=None) -
     g = guard_state(s, st, cfg, t, busy)
     label = f"{s['holder']}（{s['id']}）"
     act = g.get("act")
+
+    def warn(why):
+        zero = st["guard_zero"]
+        if zero.get("warning"):
+            return None, []
+        msg = f"{label} 自行开启的保活持续空转，{why}，请核对保活脚本"
+        zero["warning"] = {"msg": msg}
+        _event("guard_fail", s["id"], msg, t, s["holder"])
+        return None, [msg]
+
+    if act == "warn":
+        return warn(g["why"])
     if act in ("start", "repair"):
         repair = act == "repair"
 
@@ -1004,12 +1048,15 @@ def guard_act(s: dict, st: dict, cfg: dict, t: float, busy: bool, ssh_fn=None) -
 
         if pool_supply.held(s["id"]):
             return delay("算力池正在占用或已获供给")
+        manual = repair and g["identity"][1] == "manual"
         if repair:
             res, note = _guard_run(s, cfg, ["repair", int(cfg["guard_watch_min"] * 60), "守护", *g["identity"]], ssh_fn)
             if res != "busy":
                 st["guard_repair_at"] = round(t)
         else:
             res, note = ka_start(s, cfg, "守护", ssh_fn)
+        if res == "unmanaged":
+            return warn(note)
         if res == "busy":
             return delay(note if repair and not note.isdecimal() else "启动前复查时 GPU 上又有了进程")
         st.pop("guard_delay", None)
@@ -1017,8 +1064,12 @@ def guard_act(s: dict, st: dict, cfg: dict, t: float, busy: bool, ssh_fn=None) -
             st.pop("guard_fail", None)
             if note.startswith("start"):
                 minutes = round((t - g["since"]) / 60)
-                msg = (f"{label} 连着 {minutes} 分钟没测到 GPU 活动，守护重开了空转的保活" if repair
-                       else f"{label} 的 GPU 连着空了 {minutes} 分钟，守护开了保活")
+                if manual:
+                    msg = f"{label} 连着 {minutes} 分钟没测到 GPU 活动，守护已停掉自行开启的空转保活并开启看板保活"
+                elif repair:
+                    msg = f"{label} 连着 {minutes} 分钟没测到 GPU 活动，守护重开了空转的保活"
+                else:
+                    msg = f"{label} 的 GPU 连着空了 {minutes} 分钟，守护开了保活"
                 _event("guard_restart" if repair else "guard_start", s["id"],
                        f"{msg}（盯 {cfg['guard_watch_min']} 分钟，有实验上来就让出）", t, s["holder"])
                 return "start", []

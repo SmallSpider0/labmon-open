@@ -2852,7 +2852,7 @@ function guardText(x) {
   const g = x.guard || {}, now = D.generated;
   if (g.status === "ours") return `${g.by || "看板"}开的保活在跑（${tsHM(g.t)} 开）` + (now < g.until ? `，盯到 ${tsHM(g.until)}：有实验或这人自己的保活上来就让出` : "：探测见到别的负载就让出");
   if (g.status === "wait") return g.act ? `${gdSit(x)}，下次探测（约 ${tsHM(probeAt(x, now))}）就开保活` : `${gdSit(x)}，约 ${tsHM(probeAt(x, g.at))} 开保活`;
-  if (g.status === "fail") return `没开成：${g.fail.msg}；约 ${tsHM(probeAt(x, g.at))} 再试`;
+  if (g.status === "fail") return g.at ? `没开成：${g.fail.msg}；约 ${tsHM(probeAt(x, g.at))} 再试` : g.fail.msg;
   if (g.status === "busy") return g.why ? `${g.why}，先不动` : x.state === "idle" ? "GPU 刚空下来，开始计时" : `${gdSit(x)}，不用开`;
   if (g.status === "off") return "没开守护";
   if (g.status === "borrowed") return "借来在用：保活由 worker 停启，守护不管；还了以后开保活";
@@ -4969,7 +4969,7 @@ function guardDrawer() {
   const srvs = grp("公用池 · 默认开", list.filter(x => x.public)) + grp("专用池 · 默认关", list.filter(x => !x.public)) + grp("自用", mine, own);
   return dHead(`<span class="fav">${icon("shield")}</span>`, "保活守护", "GPU 连着空闲就自动开保活，免得服务器因为没保活被平台释放")
     + `<div class="db">${dSec("规则", flow, edit)}
-      ${dSec("服务器", srvs, `<span class="sm mut">开着 ${list.filter(x => !x.off && x.guard?.on).length} 台 · 只停看板开的保活，别人开的一概不动</span>`)}
+      ${dSec("服务器", srvs, `<span class="sm mut">开着 ${list.filter(x => !x.off && x.guard?.on).length} 台 · 用户保活持续空转且归属核实后，切换为看板保活</span>`)}
       ${dSec("最近记录", recSlice({cat: "keepalive"}, 10, "还没有开保活或让出的记录。"))}</div>`;
 }
 async function gdSet(body) {

@@ -861,6 +861,64 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(self.guard(T0 + 602)["status"], "ours")
         self.assertNotIn("guard_zero", F._load_state()["b"])
 
+    def manual(self, **kwargs):
+        return self.stalled(marker=False, **kwargs) + "@@ ka_groups\n9 9 100100\n"
+
+    def test_manual_stall_replaced_with_board_keepalive(self):
+        self.raw = self.manual(second=(0, 0))
+        self.tick(T0)
+        self.assertEqual(self.remote, [])
+        self.assertEqual(self.tick(T0 + 600), [])
+        self.assertEqual(self.remote, ["bash -s -- repair 'bash /x/ka.sh' 300 '守护' 100000 manual 9 100100 2"])
+        self.assertEqual(self.guard(T0 + 601)["status"], "ours")
+        ev = records(cat="keepalive")[0]
+        self.assertEqual(ev["kind"], "guard_restart")
+        self.assertIn("停掉自行开启的空转保活并开启看板保活", ev["msg"])
+
+    def test_manual_stall_warning_deduplicates_and_clears(self):
+        self.raw, self.reply = self.manual(), "unmanaged 配置的保活脚本无法确认归属"
+        self.tick(T0)
+        msg, = self.tick(T0 + 600)
+        self.assertIn("自行开启的保活持续空转", msg)
+        self.assertEqual(self.guard(T0 + 600)["fail"]["msg"], msg)
+        for k in range(2, 5):
+            self.assertEqual(self.tick(T0 + k * 600), [])
+        self.assertEqual(len(self.remote), 2)
+        self.assertEqual([r["kind"] for r in records(cat="keepalive")], ["guard_fail"])
+        self.raw = self.manual(util=(0, 30))
+        self.assertEqual(self.tick(T0 + 3000), [])
+        self.assertEqual(self.guard(T0 + 3000)["status"], "busy")
+        self.assertNotIn("guard_zero", F._load_state()["b"])
+
+    def test_manual_zero_without_identity_warns_without_remote_call(self):
+        self.raw = self.stalled(marker=False)
+        self.tick(T0)
+        msg, = self.tick(T0 + 600)
+        self.assertIn("无法确认唯一的保活进程组", msg)
+        self.assertEqual(self.guard(T0 + 600)["status"], "fail")
+        self.assertEqual(self.tick(T0 + 1200), [])
+        self.assertEqual(self.remote, [])
+
+    def test_manual_keepalive_with_activity_extra_load_or_missing_samples_stays_untouched(self):
+        for raw in (self.manual(util=(0, 1)), self.manual(job=True), self.manual(second=(0, "N/A", 0))):
+            with self.subTest(raw=raw):
+                st = {}
+                host = self.c["servers"][0]
+                F.record(host, self.manual(), None, self.c, st, T0)
+                F.record(host, raw, None, self.c, st, T0 + 600)
+                self.assertNotIn("guard_zero", st)
+                self.assertEqual(F.guard_act(host, st, self.c, T0 + 600, False, self.ssh), (None, []))
+        self.assertEqual(self.remote, [])
+
+    def test_manually_running_process_without_gpu_is_reported_when_start_fails(self):
+        self.raw = probe_out(ps=[(1, 0, "/bin/bash"), KA_PS])
+        self.reply = "fail 保活进程已存在，尚未看到它占用 GPU"
+        for k in range(6):
+            self.assertEqual(self.tick(T0 + k * 600), [])
+        msg, = self.tick(T0 + 3600)
+        self.assertIn("尚未看到它占用 GPU", msg)
+        self.assertEqual(self.guard(T0 + 3600)["status"], "fail")
+
     def test_breaks_in_stall_evidence(self):
         for raw in (self.stalled(marker=False), self.stalled(util=(0, "N/A", 0)), self.stalled(job=True),
                     self.stalled(second=(1, 0)), self.stalled(second=()), self.stalled(birth=100500),
@@ -1108,6 +1166,25 @@ class GuardTest(unittest.TestCase):
                 self.assertEqual(racing.wait(timeout=10), 0)
                 self.assertEqual(racing.stdout.read().strip(), f"ok start {pid}")
         self.assertEqual((d / "ACTIONS").read_text(), "stop\nstart\n")
+
+        # 自行启动时不靠看板标记。配置命令若返回另一组、多组或格式不明，不能调用 stop。
+        self.assertIn("看板已登记", run(marked="manual"))
+        (d / "guard.state").unlink()
+        (d / "ACTIONS").unlink()
+        for ids in (str(pid + 1), f"{pid}\n{pid + 1}", f"{pid}\nunknown"):
+            (d / "PID").write_text(ids + "\n")
+            response = run(marked="manual")
+            self.assertTrue(response.startswith("unmanaged "), (ids, response))
+        (d / "PID").write_text(f"{pid}\n")
+        (d / "NV_APPS").write_text("")
+        self.assertIn("已不占用 GPU", run(marked="manual"))
+        (d / "NV_APPS").write_text("5011\n")
+        self.assertIn("容器已变", run(marked="manual", birth=2346))
+        self.assertFalse((d / "ACTIONS").exists())
+        self.assertEqual(run(marked="manual"), f"ok start {pid}")
+        self.assertEqual((d / "ACTIONS").read_text(), "stop\nstart\n")
+        self.assertIn(f" {pid} ", (d / "guard.state").read_text())
+
 
     def test_set_guard(self):
         hf = Path(self.tmp.name) / "hosts.toml"

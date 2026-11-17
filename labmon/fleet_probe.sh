@@ -41,15 +41,26 @@ echo "$APPS"
 # nvidia-smi 给的是宿主机 PID：经 /proc/<pid>/sched 第一行对回容器里的 PID，顺带记工作目录
 HP=" $(echo "$APPS" | cut -d, -f1 | tr -d ' ' | tr '\n' ' ') "
 echo "@@ map"
-KA=""                            # 命令行里有保活字样的 GPU 进程（容器 PID）：下面只取它们整棵进程树的 PSS
+KA=""                            # 命令行里有保活字样的 GPU 进程（容器 PID）
+MAPPED=" "
+ka_pid() {
+  local d=$1 c k
+  shift
+  c=$(tr '\0' ' ' 2>/dev/null < "$d/cmdline") || return
+  for k in "$@"; do case "$c" in *"$k"*) KA="$KA ${d#/proc/}"; return ;; esac; done
+}
 for d in /proc/[0-9]*; do
   { read -r l < "$d/sched"; } 2>/dev/null || continue
   h=${l##*(}; h=${h%%,*}
   case "$HP" in *" $h "*)
     echo "${d#/proc/} $h $(readlink "$d/cwd" 2>/dev/null)"
-    c=$(tr '\0' ' ' < "$d/cmdline" 2>/dev/null)
-    for k in "$@"; do case "$c" in *"$k"*) KA="$KA ${d#/proc/}"; break ;; esac; done ;;
+    MAPPED="$MAPPED$h "
+    ka_pid "$d" "$@" ;;
   esac
+done
+for h in $HP; do
+  [[ "$h" =~ ^[1-9][0-9]*$ ]] || continue
+  case "$MAPPED" in *" $h "*) ;; *) ka_pid "/proc/$h" "$@"; MAPPED="$MAPPED$h " ;; esac
 done
 echo "@@ ps"
 PS=$(ps -eo pid=,ppid=,etimes=,time=,pcpu=,rss=,args= 2>/dev/null | cut -c1-400)
@@ -61,6 +72,16 @@ for p in $(echo "$PS" | awk -v r="$KA" 'BEGIN {n = split(r, a, " "); for (i = 1;
     {par[$1] = $2; ids[NR] = $1} END {do {c = 0; for (i in ids) if (!(ids[i] in k) && (par[ids[i]] in k)) {k[ids[i]] = 1; c = 1}} while (c); for (p in k) if (p in par) print p}'); do
   f=/proc/$p/smaps_rollup; [ -r "$f" ] || f=/proc/$p/smaps
   awk -v p="$p" '/^Pss:/ {s += $2; n = 1} END {if (n) print p, s}' "$f" 2>/dev/null
+done
+echo "@@ ka_groups"
+for p in $KA; do
+  { read -r gs < "/proc/$p/stat"; } 2>/dev/null || continue
+  read -ra fields <<< "${gs##*) }"
+  gg=${fields[2]:-}
+  [[ "$gg" =~ ^[1-9][0-9]*$ ]] || continue
+  { read -r gs < "/proc/$gg/stat"; } 2>/dev/null || continue
+  read -ra fields <<< "${gs##*) }"
+  [ "${fields[2]:-}" = "$gg" ] && echo "$p $gg ${fields[19]:-}"
 done
 echo "@@ guard"                  # labmon 开的保活（fleet_guard.sh 记的）：开的时刻、进程组、盯到几点、谁开的，之后的让出与停止
 GUARD=$(cat /tmp/labmon-guard.state 2>/dev/null)

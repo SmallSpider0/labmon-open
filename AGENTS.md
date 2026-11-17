@@ -208,8 +208,8 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 本地盘的新写入合成一份（GiB：labmon 之外的、私有 `/dev/shm`、测得准、过 `LOCAL_ACK` 要勾确认）与那一句话（写了多少、大头、某操作会清空） | `fleet.local_writes`（组内服务器 `fleet.server_lw`，主机项的 `lw` 在 `overview._annotate`）、`fleet.lw_text`（`_risk`、`renew` 的提醒共用）；页面上 `lwText`（JS 与 Python 各一份，口径相同，`tests/pages/check.js` 与 `test_fleet` 对同一份快照断言同一句）；借来的主机归还时说借用期间写的 `borrow.wrote_note`，页面上 `lwLeft` |
 | 本地盘的画法（总量条：labmon 的缓存与单格临时用项目色，labmon 之外按目录一段段斜纹、过门槛用 `--heat`；资源行按配额画，明细按开机以来写的总量画（`lwBar` 的 `whole`），另有目录表、没扫的原因；关注档的小标与数字与共享盘同一套 `heatTag`、`heatNum`） | 页面上 `lwBar`、`lwSegs`、`lwVal`、`lwBlock`、`lwHeat`、`lwPath`、`hostLw`（overview.html：主机页资源卡与「本地盘」选项卡、组内卡片与服务器抽屉共用） |
 | 共享盘增长的关注档（照近 24 小时、近 7 天里快的速度多少天占满剩余，或这人的 `burst:` 告警；「⇈暴涨」「↑在涨」与紫色 `--heat`：按人列表、人员卡、人员抽屉的小结与各目录共用；本地盘的 `lwHeat` 也经 `heatTag` 出小标） | 页面上 `diskHeat`、`heatTag`、`heatNum`（`HEAT_HI`、`HEAT_MID`；暴涨告警在不在 `burstOf`，overview.html） |
-| 保活守护判定（这一台现在怎样、要不要开或让出；自用主机是 `worker`、借用中是 `borrowed`：保活由 worker 停启；页面文字取它） | `fleet.guard_state`、`fleet.guard_act`；页面上 `guardText`、`gdSit`、`probeAt`、`gdIcon`（overview.html） |
-| 在组内服务器上开、停保活（开前看 GPU、确认进程组已占 GPU 才报成功、开后盯着让路、只停自己开的）；这一台开、停保活的命令（服务器自己写的优先，否则 `[fleet]` 段的） | `fleet.ka_start`、`fleet.ka_stop`（`fleet_guard.sh`）；`fleet.ka_cmd` |
+| 保活守护判定（这一台现在怎样、要不要开、重开或让出；自用主机是 `worker`、借用中是 `borrowed`：保活由 worker 停启；页面文字取它） | `fleet.guard_state`、`fleet.guard_act`；页面上 `guardText`、`gdSit`、`probeAt`、`gdIcon`（overview.html） |
+| 在组内服务器上开、停保活（开前看 GPU、确认进程组已占 GPU 才报成功、开后盯着让路、复查空转后恢复）；这一台开、停保活的命令（服务器自己写的优先，否则 `[fleet]` 段的） | `fleet.ka_start`、`fleet.ka_stop`（`fleet_guard.sh`）；`fleet.ka_cmd` |
 | 组内服务器 GPU 负载归类（只认保活，其余算实验）与按路径归人 | `fleet.classify`、`fleet.mark_keepalive`、`disk.whose`（归属表同 `disk.owner_of`） |
 | 固定配色（项目、计划项、共享盘上的人） | `config.pick_color` |
 | 页面渲染（模板 + common.js + 数据；写盘的原子写入）；往页面里填一块数据（`/*__DATA__*/null`、`/*__ME__*/null`，`<` 写成 `\u003c`） | `collect.render_page`、`collect.write_page`；`collect.fill` |
@@ -238,7 +238,9 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 - **不直接 kill GPU 保活进程**，由 worker 或 `ka.sh` 停启。
 - **服务器重启就是容器重启**，容器盘重置，容器内的开机自启无效，要由看板拉起。
 - **组内别人的服务器只读。** 在跑实验的那台要用户在页面上勾“已说好”才续租或关机。共用账号下停作业前核对作业名、资源池与端口。
-  例外是保活守护（用户定的）：只开、停 labmon 自己开的那一个保活（`fleet_guard.sh` 按进程组核对），别的进程一概不动。
+  例外是保活守护：有实验时只让出看板自己开的保活。维护者 2026-11-17 确认（#10）：开启守护且未借用、未供给算力池、没有平台操作时，
+  若至少两轮有效探测相隔 10 分钟、各 GPU 利用率持续为零，只有在 `fleet_guard.sh` 现场复核容器、进程出生时钟、唯一保活进程组及 GPU 无其他负载后，
+  才可经该主机配置的保活脚本停掉用户自行开启的空转保活，改由看板开启保活。无法核实归属时告警，其他进程保持只读。
   另一个例外是借用（borrow.py）：用户勾“已和这人说好”后才拉起 worker，只许 GPU 空着或只有 ka.sh 的保活时借；还时只停自己的 worker、
   占位任务与 ka.sh 保活，只删 `/tmp/labmon` 与这台的临时指令，`/tmp` 下别的文件不动。只限用户自己的项目，实验会话不自己去借。
   借用中 worker 可以暂停（SIGSTOP）确定的保活看门狗（`watchdogs` 认定），还时恢复（`thaw`，核对 PID 与启动时刻）；可能的只列出来，别的进程一概不动。
