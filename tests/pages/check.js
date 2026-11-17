@@ -686,6 +686,8 @@ t("overview", "自用主机抽屉（#58）：与组内服务器同一套模板�
 t("overview", "fleetAlerts / guardText / gdIcon", () => {
   const al = run(O, "fleetAlerts()"); ok(al.some(a => a.includes("PERSON3")), "srv-d 20 小时内到期该提醒：" + JSON.stringify(al)); ok(!leak(al.join("\n")));
   const g = run(O, "D.fleet.servers.map(guardText)"); has(g[1], `（${run(O, `tsHM(${NOW - H})`)} 开）`); has(g[0], "借来在用"); has(g[2], "没开成：ssh 失败"); has(g[3], "没开守护"); has(run(O, "guardText({...D.fleet.servers[3], guard: null})"), "已关机");
+  const manual = run(O, `guardText({...D.fleet.servers[2], guard: {on: true, status: "fail", fail: {msg: "保活持续空转，请核对脚本"}}})`);
+  ok(manual === "保活持续空转，请核对脚本", manual);
   ok(!leak(g.join("\n")), JSON.stringify(g));
   ok(!leak(run(O, "D.fleet.servers.map(gdIcon).join('')")));
 });

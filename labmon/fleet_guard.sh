@@ -5,13 +5,13 @@
 #       否则 <ka 命令> start，记进 /tmp/labmon-guard.state，再在后台盯这么久：
 #       每 20 秒看一次 GPU，出现不属于这个保活进程组的进程（实验或这人自己开的保活）就 <ka 命令> stop 让出，保活被别人停了也退出。
 #       按进程组认自己：保活本身在 GPU 上占几个进程（多卡）都不算别人。
-#   repair <ka 命令> <盯几秒> <谁开的> <容器出生时钟> <登记时刻> <进程组> <进程出生时钟> <卡数>
-#       在同一次锁定内核对状态、全部 GPU 均未活动且没有别的 GPU 进程，再重开本工具登记的保活。
+#   repair <ka 命令> <盯几秒> <谁开的> <容器出生时钟> <登记时刻或 manual> <进程组> <进程出生时钟> <卡数>
+#       在同一次锁定内核对状态、全部 GPU 均未活动且没有别的 GPU 进程，再重开本工具登记的保活，或停掉配置脚本能确认的用户保活并开启看板保活。
 #   stop <ka 命令> <为什么>
 #       只停 labmon 开的那一个保活（进程组对得上才停）；别人开的、已经不在的不动。
 #
 # ka 命令是主机清单 [fleet] 的 keepalive_cmd（ka.sh：容器内加锁，按脚本的完整路径认保活，不会起两个）。
-# 最后一行是结果：ok … / busy … / fail …；探针（fleet_probe.sh）读 /tmp/labmon-guard.state 看保活是不是 labmon 开的。
+# 最后一行是结果：ok … / busy … / fail … / unmanaged …；探针（fleet_probe.sh）读 /tmp/labmon-guard.state 看保活是不是 labmon 开的。
 ST=${GUARD_STATE:-/tmp/labmon-guard.state}
 PROC=${GUARD_PROC:-/proc}
 
@@ -76,7 +76,11 @@ watch() {   # $1 盯到几点（epoch）$2 保活进程组 $3 ka 命令 $4 登�
 running_groups() {   # ka.sh 每行一个进程组号，空输出或命令失败都不是已运行的证据
   local ids
   ids=$(bash -c "$1 running" 9>&- 2>/dev/null) || return 1
-  printf '%s\n' "$ids" | grep -E '^[1-9][0-9]*$'
+  if [ "${2:-}" = strict ]; then
+    printf '%s\n' "$ids" | awk 'NF && $0 !~ /^[1-9][0-9]*$/ {bad=1} /^[1-9][0-9]*$/ {print; seen=1} END {exit (bad || !seen)}'
+  else
+    printf '%s\n' "$ids" | grep -E '^[1-9][0-9]*$'
+  fi
 }
 
 start() {
@@ -143,20 +147,45 @@ gpu_zero() {
     }'
 }
 
-repair() {  # ka 命令、盯几秒、谁开的、容器出生时钟、登记时刻、进程组、进程出生时钟、卡数
-  local gpu
-  [[ "$4" =~ ^[0-9]+$ && "$5" =~ ^[0-9]+$ && "$6" =~ ^[1-9][0-9]*$ && "$7" =~ ^[0-9]+$ && "$8" =~ ^[1-9][0-9]*$ ]] ||
-    { echo "fail 保活身份无效"; return; }
+repair() {  # ka 命令、盯几秒、谁开的、容器出生时钟、登记时刻或 manual、进程组、进程出生时钟、卡数
+  local gpu groups result k t g rest
+  [[ "$4" =~ ^[0-9]+$ && "$6" =~ ^[1-9][0-9]*$ && "$7" =~ ^[0-9]+$ && "$8" =~ ^[1-9][0-9]*$ ]] &&
+    [[ "$5" = manual || "$5" =~ ^[0-9]+$ ]] || { echo "fail 保活身份无效"; return; }
   gpu_zero "$8" || { echo "busy 无法确认全部 GPU 仍无活动"; return; }
   gpu=$(gpu_procs "$6") || { echo "busy 查不到 GPU 进程"; return; }
   [ "${gpu#* }" = 0 ] || { echo "busy 复查时 GPU 上有了别的进程"; return; }
-  if [ "$(proc_birth 1)" != "$4" ] || [ "$(proc_birth "$6")" != "$7" ] || ! guard_owner "$1" "$6" "$5"; then
+  if [ "$5" = manual ]; then
+    [ "${gpu% *}" -gt 0 ] || { echo "busy 自行开启的保活已不占用 GPU"; return; }
+    if ! groups=$(running_groups "$1" strict) || [ "$groups" != "$6" ]; then
+      echo "unmanaged 配置的保活脚本无法确认归属"
+      return
+    fi
+    if { read -r k t g rest < "$ST"; } 2>/dev/null && [ "$k" = start ] && [ "$g" = "$6" ]; then
+      # 两次探测之间可能有人通过看板启动了同一组，不抢在新登记之后停。
+      if [[ "$t" =~ ^[0-9]+$ ]] && ! grep -Eq '^(stop|yield) ' "$ST"; then
+        echo "busy 看板已登记这一保活"
+        return
+      fi
+    fi
+  elif ! guard_owner "$1" "$6" "$5"; then
+    echo "busy 保活归属或容器已变"
+    return
+  fi
+  if [ "$(proc_birth 1)" != "$4" ] || [ "$(proc_birth "$6")" != "$7" ]; then
     echo "busy 保活归属或容器已变"
     return
   fi
   bash -c "$1 stop" 9>&- >/dev/null 2>&1 || { echo "fail 空转的保活停不下来"; return; }
-  echo "stop $(date +%s) 保活空转" >> "$ST"
-  start "$1" "$2" "$3"
+  if [ "$5" = manual ]; then
+    result=$(start "$1" "$2" "$3")
+    case "$result" in
+      "ok already "*) echo "fail 原保活又被拉起，未开启看板保活" ;;
+      *) printf '%s\n' "$result" ;;
+    esac
+  else
+    echo "stop $(date +%s) 保活空转" >> "$ST"
+    start "$1" "$2" "$3"
+  fi
 }
 
 control() {
