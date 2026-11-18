@@ -750,12 +750,24 @@ def need_host(who: Ident, hid: str) -> None:
         raise Denied(403, f"主机 {hid} 没开给你用：找管理员在「组内服务器 → 人员」里给你开（主机清单这台的 users）")
 
 
-def need_pause(who: Ident, pid: str) -> None:
-    """要加、改或撤项目 pid 的项目级暂停（主机清单 [sched.pause]，#16）：普通用户只能动自己下的；已有别人下的（管理员、没记是谁的）还没到期的暂停时抛 Denied(403)，
-    免得重下一次把管理员的暂停改成自己的再撤。项目是不是他的另由 need_project 核；调用方持 HOSTS_LOCK，判断与写入之间别人改不了。"""
-    if who.role == "admin" or pid not in (sched().get("pause") or {}) or _is(pause_by().get(pid), who.name):
-        return
-    raise Denied(403, f"{pid} 的暂停不是你下的（管理员或之前的主人下的）：恢复、改到期都找管理员")
+def pause_ok(who: Ident, pid: str, host: str | None = None, snap: dict | None = None) -> bool:
+    """能不能加、改或撤项目 pid 的暂停：管理员都能；普通用户只能动自己下的，已有别人下的（管理员、没记是谁的）还没到期的暂停时不能，
+    免得重下一次把管理员的暂停改成自己的再撤（#16）。项目是不是他的另由 need_project 核。
+    host 为空：项目级的（主机清单 [sched.pause]、[sched.pause_by]；调用方持 HOSTS_LOCK，判断与写入之间别人改不了）。
+    host 给了：只在那台单独下的（--host，那台的 overrides.json，#27），按全局快照 snap（缺省现读）里那台 worker 状态的 overrides 认（projects.host_ovr）；
+    快照可能晚一轮、读不到的当没有，所以普通用户写那台时另带 expect_by，worker 在锁里再核一次现状。归档挑撤哪些也只经它。"""
+    if who.role == "admin":
+        return True
+    if host is None:
+        return pid not in (sched().get("pause") or {}) or _is(pause_by().get(pid), who.name)
+    return all(_is(by, who.name) for h, kind, by in PJ.host_ovr(pid, snapshot() if snap is None else snap) if h == host and kind == "pause")
+
+
+def need_pause(who: Ident, pid: str, host: str | None = None, snap: dict | None = None) -> None:
+    """pause_ok 不过就抛 Denied(403)：页面调度卡、命令行 pause / resume（带不带 --host）都经它。"""
+    if not pause_ok(who, pid, host, snap):
+        where = "" if host is None else f"在 {host} 上单独下"
+        raise Denied(403, f"{pid} {where}的暂停不是你下的（管理员或之前的主人下的）：恢复、改到期都找管理员")
 
 
 def _nrm(root: str) -> str:
@@ -818,12 +830,21 @@ VIEW_DISK_ALERTS = ("low", "soon")                     # 整块盘的告警（�
 STANDBY_SAY = "这台看板服务是备用：页面上的数据可能不是最新的，要动东西到主看板做"
 
 
+def _ovr_by(h: dict, own) -> dict:
+    """一台主机项给普通用户：worker 状态里别人项目的临时指令去掉谁下的（by，#27），同调度卡上别人项目的暂停（#16）。"""
+    st = h.get("status") or {}
+    if not any(o.get("by") and o.get("target") not in own for o in st.get("overrides") or []):
+        return h
+    return {**h, "status": {**st, "overrides": [o if o.get("target") in own else {k: v for k, v in o.items() if k != "by"} for o in st["overrides"]]}}
+
+
 def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     """看的人能看到的全局快照。管理员原样。普通用户按白名单取（#17）：VIEW_KEYS 原样；主机只留给他看的（他能用的、他的项目有车道的），
     整项照给（同一台上别人任务的命令行与日志末尾也在里面：一台主机开给谁，谁就看得到这台上的所有任务，docs/api.md「普通用户看到的」）；
     项目、已归档的、挪法建议、配色只留他的，登记只留那些主机上他项目的清单（#167）；共享盘取 VIEW_DISK；主备只给 role 与一句通用的话。
     组内服务器（fleet）、提醒（notices）、给实验会话的消息（wake）、看板服务所在机的体检（hostcheck，#166）给空值，记录的分类去掉组内的那几类。
-    调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上），别人项目的暂停去掉谁下的（by），主人名去掉、只留分组用的 pk（#23）。"""
+    调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上），别人项目的暂停去掉谁下的（by），主人名去掉、只留分组用的 pk（#23）；
+    主机状态里别人项目的临时指令同样去掉 by（_ovr_by，#27）。"""
     if who.role == "admin" or not snap:
         return snap
     acc = acc or access(who, snap)
@@ -831,7 +852,7 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     out.update(fleet=None, notices=[], wake=[], hostcheck=None,
                event_cats=[c for c in snap.get("event_cats") or EVENT_CATS if c[0] not in FLEET_CATS and c[0] != "report"],
                access={"own": sorted(acc.projects), "hosts": sorted(acc.allowed)})
-    out["hosts"] = [h for h in snap.get("hosts") or [] if h.get("id") in acc.hosts]
+    out["hosts"] = [_ovr_by(h, acc.projects) for h in snap.get("hosts") or [] if h.get("id") in acc.hosts]
     out["projects"] = [p for p in snap.get("projects") or [] if p.get("id") in acc.projects]
     out["archived"] = [a for a in snap.get("archived") or [] if a.get("id") in acc.projects]
     out["rebalance"] = {k: v for k, v in (snap.get("rebalance") or {}).items() if k in acc.projects}

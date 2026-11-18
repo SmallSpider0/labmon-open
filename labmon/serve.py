@@ -691,7 +691,7 @@ class Handler(BaseHTTPRequestHandler):
             U.need_project(who, s("project"))
             for j in _strings(body, "jobs"):
                 U.need_project(who, WT.job_key(j, s("project"))[0])
-        elif r.own == "override":                      # 暂停：项目是他的，--host 只许他能用的（项目级的谁下的在写的时候核，users.need_pause）
+        elif r.own == "override":                      # 暂停：项目是他的，--host 只许他能用的（谁下的在写的时候核，users.need_pause，#16、#27）
             U.need_project(who, s("target"))
             hosts = _strings(body, "hosts")
             for h in hosts:
@@ -1163,7 +1163,7 @@ class Handler(BaseHTTPRequestHandler):
                 for hid in allowed:
                     U.need_host(who, hid)
             r, what = A.override(verb, s("target"), hosts or None, num("until"), now, immediate_hosts=allowed,
-                                 by=who.name, check=lambda: U.need_pause(who, s("target"))), f"{verb} {s('target')}"
+                                 by=who.name, check=lambda h: U.need_pause(who, s("target"), h), own=who.role != "admin"), f"{verb} {s('target')}"
         elif act == "project/init":
             name = body.get("name") or None
             if name is not None and (not isinstance(name, str) or "/" in name or name in (".", "..") or "\x00" in name):
@@ -1377,7 +1377,7 @@ class Handler(BaseHTTPRequestHandler):
                 if p is None:
                     return self._json(404, {"error": f"看板服务里没有项目 {pid}"})
                 msg = PJ.archive(pid, p.snapshot(), snapshot(), p.interval, by="看板页面上" if who.via == "session" else f"经命令行（{who.name}）",
-                                 check_owner=lambda: U.need_project(who, pid), own=who.role != "admin", user=None if who.role == "admin" else who.name)
+                                 check_owner=lambda: U.need_project(who, pid), own=who.role != "admin", who=who)
             elif act == "config":
                 p = self.board.projects.get(pid)
                 if p is None:

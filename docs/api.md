@@ -107,7 +107,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `GET /api/hosts`、`GET /api/client/install.sh`、`GET /api/client/wheel` | `read` |
 | `GET /api/project/<id>/(status\|disk\|records)`（实验会话的只读命令，#52） | `read`；普通用户只看自己的项目（`users.need_project`） |
 | `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
-| `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit)`、`/api/override/(pause\|resume)`（[命令行](#命令行162)） | `project`；普通用户只改自己下的项目级暂停（`users.need_pause`，#16） |
+| `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit)`、`/api/override/(pause\|resume)`（[命令行](#命令行162)） | `project`；普通用户只改自己下的暂停，项目级的与带 `--host` 的同一条（`users.need_pause`，#16、#27） |
 | `POST /api/pool/lend`（入池开关，#24） | `project`；持有人本人改自己的服务器，管理员代别人改要能做平台操作（`users.can_ops`）、开时勾「已和这人说好」（`pool.need_holder`、`pool.set_lend`） |
 | `POST /api/worker/(stop\|limit)`、`/api/override/(drain\|undrain)` | `admin`，只给管理员 |
 | `POST /api/borrow`、`/api/host/(return\|restore)` | `admin`，只给管理员；公网须开启账号许可 |

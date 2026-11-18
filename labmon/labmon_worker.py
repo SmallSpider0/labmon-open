@@ -6220,6 +6220,9 @@ def main(argv=None):
     ap.add_argument("--now", action="store_true", help="override add pause：立即按停法停下正在跑的")
     ap.add_argument("--once", action="store_true", help="override add pause --now：停完就删掉这条（暂停由看板写来的全局那条挡，不在这台另留）")
     ap.add_argument("--at", type=float, help="override add deadline：截止时刻（epoch 秒），之前跑不完的任务不放行（目标 borrow 为约定归还）")
+    ap.add_argument("--by", help="override add：谁下的（看板的账号名，记进这条的 by；看板据它判断谁能撤，#27）")
+    ap.add_argument("--expect-by", help="override add / rm：在锁里核对这台已有的同种同目标指令（不算 once）是这个账号下的，或没有；"
+                                        "是别人下的或没记是谁的就不改（看板按 users.need_pause 定了才传，#27）")
     ap.add_argument("--keep", type=json.loads, help='override add guest：给对方留的量，JSON {"vram": 每张对方的卡 GiB, "ram": GiB, "cpu": 核, "hold": 预先留出, "away": 对方说好不用到几点（epoch 秒，那以前不留）}')
     ap.add_argument("--list", action="store_true", help="fit：位置参数是 ROOT JOBS，看这条清单还会跑的行能在几台上再开几条车道")
     ap.add_argument("--hosts", help="fit --list：看哪几台（逗号分隔；看板按共用 worker 目录的在用主机给，缺省只看这台）")
@@ -6370,12 +6373,21 @@ def main(argv=None):
                 ap.error("override add|rm pause|focus|drain|deadline|guest [目标]")
             kind, target = a.args[1], (a.args[2] if len(a.args) > 2 else None)
             with flock(p.overrides):              # worker 同时在改（到期清理、pause --now 记 applied）
+                cur = json.loads(read(p.overrides, "[]") or "[]")
+                # 看板按快照核过谁能动（users.need_pause）；快照可能晚一轮，这里在锁里再核一次现状（同 --expect-project）
+                if a.expect_by is not None and not a.once and any(
+                        o["kind"] == kind and o.get("target") == target and not o.get("once")
+                        and (o.get("by") or "").lower() != a.expect_by.lower() for o in cur):
+                    print("这台上 %s 的%s不是你下的（管理员下的，或没记是谁）：刷新后再试，或找管理员"
+                          % (target or "", {"pause": "暂停", "focus": "优先"}.get(kind, "指令")), file=sys.stderr)
+                    return 2
                 # 同种同目标的换成新的；“只停一次”（once）与这台单独下的各管各的：全局的 pause --now 不替掉这台已有的暂停（Codex 审查）
-                ovr = [o for o in json.loads(read(p.overrides, "[]") or "[]")
+                ovr = [o for o in cur
                        if not (o["kind"] == kind and o.get("target") == target and (a.args[0] == "rm" or bool(o.get("once")) == a.once))]
                 if a.args[0] == "add":
                     ovr.append({"kind": kind, "target": target, "until": a.until, "now": a.now, "t": time.time(),
-                                **({"at": a.at} if a.at else {}), **({"keep": a.keep} if a.keep else {}), **({"once": True} if a.once else {})})
+                                **({"at": a.at} if a.at else {}), **({"keep": a.keep} if a.keep else {}), **({"once": True} if a.once else {}),
+                                **({"by": a.by} if a.by else {})})
                 write(p.overrides, json.dumps(ovr, ensure_ascii=False))
             if a.once:                            # 只停一次：暂停的记录由看板记（全局的那条），停下的任务 worker 各记一条 stop
                 print("下一轮按停法停下 %s 正在跑的" % target)

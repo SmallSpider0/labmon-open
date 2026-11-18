@@ -32,7 +32,7 @@ from stat import S_ISDIR
 
 from . import lan as L
 from . import workerctl as W
-from .config import HOSTS_LOCK, ConfigError, _expand, _write_checked, done_files, done_key, fmt_dur, fmt_time, load, pause_by, sched, set_project, set_sched_ovr, set_weight
+from .config import HOSTS_LOCK, ConfigError, _expand, _write_checked, done_files, done_key, fmt_dur, fmt_time, load, sched, set_project, set_sched_ovr, set_weight
 from .records import log_events, tell
 from .state import load_json, load_rows, save_json, snapshot, state_dir, state_root, write_atomic
 
@@ -390,9 +390,10 @@ def _regs_of(pid: str, glob: dict) -> tuple[list[dict], list[str]]:
     return out, unread
 
 
-def _host_ovr(pid: str, glob: dict) -> list[tuple[str, str]]:
-    """按主机下的（--host，worker 状态 overrides 里不带 global 的）暂停、优先：[(主机, 种类)]。全局的在主机清单 [sched] 里，另撤。"""
-    return [(e["id"], o["kind"]) for e in glob.get("hosts") or [] for o in (e.get("status") or {}).get("overrides") or []
+def host_ovr(pid: str, glob: dict) -> list[tuple[str, str, str | None]]:
+    """只在某几台单独下的（--host，全局快照里 worker 状态 overrides 中不带 global、once 的）暂停、优先：[(主机, 种类, 谁下的)]，没记是谁的为 None（#27）。
+    全局的在主机清单 [sched] 里，另撤。归档撤哪些、users.pause_ok 判按主机的暂停都按它。"""
+    return [(e["id"], o["kind"], o.get("by")) for e in glob.get("hosts") or [] for o in (e.get("status") or {}).get("overrides") or []
             if o.get("kind") in ("pause", "focus") and o.get("target") == pid and not o.get("global") and not o.get("once")]
 
 
@@ -401,12 +402,17 @@ def _last(out: str) -> str:
 
 
 def archive(pid: str, psnap: dict | None, glob: dict | None, interval: float = 60, by: str = "用命令行", check_owner=None, own: bool = False,
-            user: str | None = None) -> str:
+            who=None) -> str:
     """归档一个项目（见模块说明）。移除登记、撤按主机的指令有一处失败就停在那里：不撤调度、不记归档，报回已移除的与失败的（worker rm 重做无害，再来一次接着做）；
     不停的话调度撤了、看板摘了，那台的登记却还在，那台 worker 往后照样放它的清单。没有能代办的那几台（已归还、又没有共用 worker_home 的在用主机）跳过，写进结果。
     by：谁做的（「看板页面上」「用命令行」），记进条目，labmon wait 报“已归档”时写上（archived_msg）。返回说明；不能归档或没做完报 ConfigError。
-    user：普通用户归档时是他的账号名（#16）：主机清单里只撤他自己下的暂停，管理员定的权重、优先与别人下的暂停留着（恢复后照旧生效）；None（管理员）全撤。"""
+    who：看板上谁做的（users.Ident；None 是本机命令行）。普通用户（#16、#27）项目级与只在某几台下的暂停只撤 users.pause_ok 说他能动的，
+    管理员定的权重、优先（项目级与按主机的）与别人下的暂停留着（恢复后照旧生效）；按主机撤时另带 expect_by，快照晚了、那台已换人下的 worker 不撤。管理员全撤。"""
     glob = glob or {}
+    pause_ok = None
+    if who is not None and who.role != "admin":
+        from . import users                             # users 在模块级 import 本模块
+        pause_ok = lambda h: users.pause_ok(who, pid, h, glob)  # noqa: E731
     with HOSTS_LOCK, _reg_locked(), _locked():
         if check_owner is not None:
             check_owner()
@@ -414,7 +420,10 @@ def archive(pid: str, psnap: dict | None, glob: dict | None, interval: float = 6
         if why:
             raise ConfigError(f"{pid} 现在不能归档：{why}")
         regs, unread = _regs_of(pid, glob)
-        ovr = _host_ovr(pid, glob)
+        mine = None if pause_ok is None else who.name
+        hovr = host_ovr(pid, glob)
+        ovr = [(h, k) for h, k, _ in hovr if pause_ok is None or (k == "pause" and pause_ok(h))]
+        left = [f"{h} 上的{'暂停' if k == 'pause' else '优先'}" for h, k, _ in hovr if (h, k) not in ovr]
         if (regs or ovr) and not L.check(force=True)["ok"]:
             raise ConfigError("本机不在内网：移除登记要连服务器，回到内网再归档")
         done, bad, skip = [], [], []
@@ -432,7 +441,7 @@ def archive(pid: str, psnap: dict | None, glob: dict | None, interval: float = 6
                 bad.append(f"{name}：{_last(out) or '退出码 %d' % rc}")
         for hid, kind in ovr:
             try:
-                rs = W.override_each("rm", kind, pid, [hid])
+                rs = W.override_each("rm", kind, pid, [hid], expect_by=mine)
             except ConfigError as e:
                 bad.append(f"{hid} 撤{'暂停' if kind == 'pause' else '优先'}：{e}")
                 continue
@@ -442,20 +451,20 @@ def archive(pid: str, psnap: dict | None, glob: dict | None, interval: float = 6
             msg = f"归档 {pid} 没做完：" + "；".join(bad) + (f"。已移除 {len(done)} 条登记（{gone}）" if done else "") + "。调度与看板都没动，连上后再归档一次接着做"
             log_events([{"kind": "project", "msg": msg[:400]}])
             raise ConfigError(msg)
-        if user is None:                                    # 各自只在有那一行时改、记一条（暂停、优先记成 override 的撤销，项目页时间线的区间照样闭合）
+        if pause_ok is None:                                # 各自只在有那一行时改、记一条（暂停、优先记成 override 的撤销，项目页时间线的区间照样闭合）
             set_weight(pid, None)
             for kind in ("pause", "focus"):
                 set_sched_ovr(kind, pid, False)
-        elif (pause_by().get(pid) or "").lower() == user.lower():
+        elif pause_ok(None):
             set_sched_ovr("pause", pid, False)
-        sw = sched() if user is not None else {}
-        kept = [n for k, n in (("weight", "权重"), ("focus", "优先"), ("pause", "暂停")) if pid in (sw.get(k) or {})]
+        sw = sched() if pause_ok is not None else {}
+        kept = [n for k, n in (("weight", "权重"), ("focus", "优先"), ("pause", "暂停")) if pid in (sw.get(k) or {})] + left
         title = (psnap or {}).get("title") or pid
         a = archived()
         a[pid] = {"id": pid, "title": title, "t": round(time.time()), "revision": uuid.uuid4().hex, "by": by, "regs": done, "skipped": skip + [f"{h}（登记没读到）" for h in unread]}
         _save(a)
         msg = (f"归档 {pid}（{title}）：" + (f"移除了 {len(done)} 条登记" if done else "没有要移除的登记")
-               + ("，撤掉了它的权重、暂停与优先" if user is None else f"，管理员定的{'、'.join(kept)}留着（恢复后照旧生效）" if kept else "") + "，看板不再采集它；"
+               + ("，撤掉了它的权重、暂停与优先" if pause_ok is None else f"，管理员定的{'、'.join(kept)}留着（恢复后照旧生效）" if kept else "") + "，看板不再采集它；"
                "登记目录（配置与输出）、共享盘、用量记录都留着，labmon project restore " + pid + " 可加回")
         log_events([{"kind": "project", "msg": msg, "detail": "；".join(([f"移除 {gone}"] if gone else []) + [f"没动 {x}" for x in a[pid]["skipped"]])[:400]}])
         return msg + ("。没动：" + "；".join(a[pid]["skipped"]) if a[pid]["skipped"] else "")

@@ -503,11 +503,11 @@ python3 /root/data1/alice/labmon/labmon_worker.py slot --host 29 --project demo-
 
 项目的暂停、优先缺省是所有主机的（含之后新开、借来、换了 id 的，#96）：记在主机清单的 `[sched.pause]`、`[sched.focus]`（一个项目一行，值是到期时刻或 `true` 无期限；暂停是谁下的另记在 `[sched.pause_by]`，看板自己写、worker 不读，#16），
 看板每轮随 `sched.json` 写给各在用主机，worker 当成同名的临时指令（`sched_ovr`），约 1 分钟内生效；看板没开时 worker 用上次写的那份，到期照样不挡。
-带 `--host` 的、drain 与看板下的截止存在各主机的 `hosts/<主机>/overrides.json`，只管那一台。都带到期时间，工作台列出：
+带 `--host` 的、drain 与看板下的截止存在各主机的 `hosts/<主机>/overrides.json`，只管那一台；经看板下的带 `--host` 的暂停、优先另记谁下的（条目的 `by`，看板的账号名，#27）。都带到期时间，工作台列出：
 
 ```bash
 labmon pause demo-b [--until 11-10] [--now]   # 不再放行它的新请求；--now 再按各自的停法停下正在跑的（停法以现在的登记为准，重新登记 --stop term 对正在跑的也生效）
-labmon resume demo-b                          # 撤所有主机的暂停（--host 单独下的要带 --host 撤）；普通用户只能撤自己下的，管理员下的找管理员（#16）
+labmon resume demo-b                          # 撤所有主机的暂停（--host 单独下的要带 --host 撤）；普通用户只能撤、改自己下的，管理员（或没记是谁）下的找管理员，带不带 --host 一样（#16、#27）
 labmon focus a1 --until 11-17              # 它的请求排在同一人别的项目前面（不越过别人的项目，仍受余量限制）；只给管理员（#16）；总览的调度卡上也能点「优先」「暂停」
 labmon unfocus a1
 labmon drain 29 [--until …]               # 这台主机不再放行新请求

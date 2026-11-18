@@ -123,10 +123,12 @@ def borrow(sid: str, until: float | None, projects: str | None, holder: str | No
 
 
 def override(verb: str, target: str, host_ids: list[str] | None, until: float | None, now: bool, immediate_hosts: list[str] | None = None,
-             by: str | None = None, check=None) -> dict:
+             by: str | None = None, check=None, own: bool = False) -> dict:
     """labmon pause|resume|focus|unfocus|drain|undrain：项目的不带 --host 记在主机清单（所有主机，含之后加入的，#96），带 --host 的、drain 与 --now
     经 workerctl.override_each 下给那几台。每台一行：worker 打印的“生效中：…”，或 ssh 连不上的原因。
-    by：谁下的（项目级暂停记进主机清单，#16）；check()：项目级暂停写之前在主机清单的锁里核能不能动（users.need_pause，不行抛 users.Denied）。"""
+    by：谁下的（项目级暂停记进主机清单 [sched.pause_by]，#16；带 --host 的暂停、优先记进那几台指令的 by，#27）。
+    check(主机或 None)：暂停写之前核能不能动（users.need_pause，不行抛 users.Denied）：项目级的在主机清单的锁里核一次（None），带 --host 的逐台核，都过了才写。
+    own：普通用户（#27）：带 --host 的暂停另带 expect_by，worker 在锁里再核一次那台的现状（看板按快照核，快照可能晚一轮）。"""
     o = Out()
     action, kind = OVR[verb]
     try:
@@ -142,13 +144,17 @@ def override(verb: str, target: str, host_ids: list[str] | None, until: float | 
                     return o.done(3)
             if kind != "drain" and not host_ids:      # 项目级设置随 sched.json 发给各主机
                 if kind == "pause" and check is not None:
-                    check()
+                    check(None)
                 o.p("[labmon] " + set_sched_ovr(kind, tgt, action == "add", until if action == "add" else None, by=by))
                 if not (now and kind == "pause" and action == "add"):
                     return o.done(0)
                 rs = W.override_each("add", "pause", tgt, hs if immediate_hosts is None else immediate_hosts, None, True, once=True)
             else:
-                rs = W.override_each(action, kind, tgt, hs, until, now)
+                if kind == "pause" and check is not None:
+                    for h in hs:
+                        check(h)
+                rs = W.override_each(action, kind, tgt, hs, until, now, by=by if kind in ("pause", "focus") else None,
+                                     expect_by=by if own and kind == "pause" else None)
     except ConfigError as e:
         o.err(f"[labmon] {e}")
         return o.done(3)

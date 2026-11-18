@@ -2194,10 +2194,13 @@ const SFLAG = {focus: ["优先", "unfocus"], paused: ["暂停", "resume"]};
 const flagHosts = f => f.hosts.map(h => hostShort(D.hosts.find(x => x.id === h) || {id: h})).join("、");
 // 项目级暂停是不是看页面的人自己下的（快照 paused.by，#16）：普通用户只能恢复、改自己下的；没记是谁的当管理员下的
 const pauseMine = f => !!f?.by && String(f.by).toLowerCase() === String(ME?.name || "").toLowerCase();
-// 优先、暂停的说明：到期，或只在哪几台（单独下的）与撤销命令；项目级的暂停另写谁下的，普通用户恢复不了的写找管理员
+// 优先、暂停的说明：到期，或只在哪几台（单独下的）与撤销命令；暂停另写谁下的，普通用户恢复不了的写找管理员（项目级 #16；
+// 按主机的 paused.by 是 {主机: 谁下的}，#27：不是他下的那几台不给命令）
 function flagTip(k, p) {
   const f = p[k], [what, undo] = SFLAG[k];
-  return f.hosts ? `只在 ${flagHosts(f)} 上单独下的${what}${f.until ? `，到 ${tsNear(f.until)}` : ""}：` + f.hosts.map(h => `labmon ${undo} ${p.id} --host ${h}`).join("；")
+  const theirs = k === "paused" && f.hosts && f.by && canWrite(p.id) && !canWeight() ? f.hosts.filter(h => h in f.by && !pauseMine({by: f.by[h]})) : [];
+  return f.hosts ? `只在 ${flagHosts(f)} 上单独下的${what}${f.until ? `，到 ${tsNear(f.until)}` : ""}：`
+      + f.hosts.filter(h => !theirs.includes(h)).map(h => `labmon ${undo} ${p.id} --host ${h}`).concat(theirs.length ? [`${flagHosts({hosts: theirs})} 上的不是你下的，撤销找管理员`] : []).join("；")
     : (f.until ? `到 ${tsNear(f.until)}` : "无期限") + "，所有主机（含之后加入的）"
       + (k !== "paused" ? "" : (f.by ? `；${f.by} 下的` : canWeight() ? "；没记是谁下的" : "") + (canWrite(p.id) && !canWeight() && !pauseMine(f) ? "：不是你下的，恢复找管理员" : ""));
 }

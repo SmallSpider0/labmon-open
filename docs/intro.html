@@ -490,7 +490,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <li><b>跨主机</b>：跑过的读各主机共享盘上的 <code>usage.jsonl</code>；别的主机在跑的读它们 <code>status.json</code> 里的 <code>share.run</code>（按状态里写的时刻 <code>t</code>，3 分钟内的才算，不看文件修改时间：共享盘服务器与容器的时钟可能不同）。一个项目在 29 上用得多，在别的主机上就让别的项目先。</li>
         <li><b>屏障</b>：按顺序第一个卡在资源上、等满 <code>wait_cap_min</code>（缺省 30 分钟）的请求。回填条件 <code>fits_before</code>：现在 + 预计时长 × 1.2 不晚于屏障预计放行的时刻。时长不知道的不回填；放不下的请求不成屏障；占位任务不受屏障限制。</li>
         <li><b>等了多久</b>只算没被临时指令挡住的时间：pause 半小时一 resume，等待从 resume 时重新起算，不会立刻成屏障。依赖没满足的同样不算。</li>
-        <li><b>不抢占</b>在跑的任务。半衰期、等待上限、各项目权重与项目级的优先、暂停写在主机清单的 <code>[sched]</code>，也能在调度卡上改，所有主机生效；项目不能自己给自己提优先级：权重与优先只有管理员能改，管理员下的暂停普通用户撤不掉。</li>
+        <li><b>不抢占</b>在跑的任务。半衰期、等待上限、各项目权重与项目级的优先、暂停写在主机清单的 <code>[sched]</code>，也能在调度卡上改，所有主机生效；项目不能自己给自己提优先级：权重与优先只有管理员能改，管理员下的暂停（所有主机的，或只在某几台下的）普通用户撤不掉。</li>
       </ul>
       <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/worker.md#准入">worker.md「准入」排序、屏障与回填、公平份额</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/scheduler.md#设计要点为什么这样">scheduler.md「设计要点」</a></p>
     </div></details>
