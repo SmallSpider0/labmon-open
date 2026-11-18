@@ -839,7 +839,7 @@ class Handler(BaseHTTPRequestHandler):
             got = A.hosts()
             if who.role != "admin":                    # 普通用户只列开给他的主机（#167）
                 ok = U.access(who).allowed
-                got["hosts"] = [h for h in got["hosts"] if str(h.get("id")) in ok]
+                got["hosts"] = [dict(h, home_with=[x for x in h["home_with"] if x in ok]) for h in got["hosts"] if str(h.get("id")) in ok]
             return self._json(200, got)
         m = PROJECT_CONFIG_PATH.fullmatch(path)
         if m:
@@ -1118,7 +1118,8 @@ class Handler(BaseHTTPRequestHandler):
             sub = act[len("worker/"):]
             args = _worker_args(sub, body)
             r = A.worker(sub, s("host"), args, body.get("gpus") or None, project=body.get("project") or None,
-                         stop=body.get("stop") or None, own=who.role != "admin")
+                         stop=body.get("stop") or None, own=who.role != "admin",
+                         may=None if who.role == "admin" else lambda hid: U.may_host(who, hid))
             what = f"worker {sub} {s('host')} {' '.join(args)}"
         elif act.startswith("override/"):
             verb = act[len("override/"):]

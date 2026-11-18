@@ -87,7 +87,7 @@ labmon pause <项目> [--until 11-10] [--now] [--host 29] | resume | focus <项�
 labmon project init 29 [项目]           # 按共享盘目录规范建目录
 labmon project archive|restore <项目 id>  # 项目做完了收起（要求暂时没实验；移除登记、撤权重与指令、看板不再采集，不删数据）/ 加回
 
-labmon host list | return <id> [--now] | restore <id>    # 主机清单：在用 / 借来的 / 已归还
+labmon host list | return <id> [--now] | restore <id>    # 主机清单：在用 / 借来的 / 已归还，共用共享盘的几台
 labmon borrow <组内服务器> [--until "明天 18:30"] [--for a1]   # 借来用（约定精确到分；要 admin 令牌）；不给参数列出在借的
 labmon fleet [status <id>] | probe <id> | boot [id] | import <id> <Json 文件>   # 组内服务器（看板那台机器上）
 labmon notify test [文字]               # 照 ~/.config/labmon/notify.toml 试推一条到手机（Bark 或 ntfy）

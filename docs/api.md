@@ -268,7 +268,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 | `POST /api/override/<动作> {"target", "hosts", "until", "now"}` | `{"rc", "out", "err"}`；`until` 是 epoch 秒（相对写法在命令行那台机器上解析） |
 | `POST /api/borrow {"id", "until", "for", "from", "away"}` | `{"rc", "out", "err"}`（`api.borrow`） |
 | `POST /api/host/(return\|restore) {"id", "at", "now"}` | `{"rc", "out", "err"}`（`api.host`；`at` 是 epoch 秒，清单里写带年份的） |
-| `GET /api/hosts` | `{"missing", "hosts": [{"id", "returned", "ssh", "port", "label", "borrow"}]}`：`labmon host list`、`labmon borrow` 列表用 |
+| `GET /api/hosts` | `{"missing", "hosts": [{"id", "returned", "ssh", "port", "label", "borrow", "worker_home", "home_with"}]}`：`labmon host list`、`labmon borrow` 列表用；`worker_home` 补了缺省值，`home_with` 是与它共用 worker 目录（同一块共享盘）的别的在用主机（`config.home_peers`，已归还的为空；普通用户只列他能用的） |
 
 `labmon collect` 用 `POST /p/<id>/collect`，`project archive|restore` 用 `POST /project/archive|restore`（命令行做的记成“经命令行（名字）”），`project push|pull` 用上面[项目配置](#项目配置)的两个接口。
 改东西的每条记一行服务日志（谁、做了什么、退出码）。

@@ -1547,6 +1547,30 @@ class RegsTest(unittest.TestCase):
         self.assertIn("没搬到 b：清单不存在", str(e.exception))
         self.assertEqual((len([e for e in records(cat="config") if e.get("kind") == "config"]), len(told())), (2, 2))
 
+    def test_home_peers_in_host_list_and_worker_status(self):
+        # 共用 worker 目录（同一块共享盘）的在用主机（#35 A）：a、b 同目录，c 另一块盘，已归还的 gone 不算；
+        # /api/hosts 每台给 worker_home 与 home_with，worker status 末尾补一行，普通用户只列他能用的
+        from labmon import api as A
+        from labmon import workerctl as W
+        self.assertEqual((K.home_peers("a"), K.home_peers("c"), K.home_peers("gone")), (["a", "b"], ["c"], []))
+        hs = {h["id"]: h for h in A.hosts()["hosts"]}
+        self.assertEqual((hs["a"]["home_with"], hs["b"]["home_with"], hs["c"]["home_with"], hs["gone"]["home_with"]), (["b"], ["a"], [], []))
+        self.assertEqual(hs["a"]["worker_home"], str(self.d / "alice" / "labmon"))
+        with mock.patch.object(W, "run_out", return_value=(0, "worker：运行中 PID 1\n")):
+            out = A.worker("status", "a", [])["out"]
+            self.assertIn(f"与 b 共用 worker 目录 {self.d / 'alice' / 'labmon'}", out)
+            self.assertNotIn("共用", A.worker("status", "a", [], may=lambda h: h == "a")["out"])
+            self.assertNotIn("共用", A.worker("status", "c", [])["out"])
+        with mock.patch.object(W, "run_out", return_value=(3, "连不上\n")):
+            self.assertNotIn("共用", A.worker("status", "a", [])["out"])
+        import contextlib
+        import io
+        from labmon import __main__ as M
+        with mock.patch.object(M, "_call", return_value=A.hosts()), contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(M.main(["host", "list"]), 0)
+        self.assertEqual([x for x in out.getvalue().splitlines() if "共用" in x],
+                         [f"  共用 worker 目录 {self.d / 'alice' / 'labmon'}（同一块共享盘，放在这块盘上的文件各台都读得到）：a、b"])
+
     def test_prev_host_and_home_host(self):
         # 在用主机那项带 pool 与上一台 prev：同一个池里最近归还的自用主机（fleetboot.last_mine，给自己开回来沿用端口的那台，接上卡排第一）；
         # 别的池、没写 platform_job 的不算。代读、代办的那台是同一 worker_home 里照主机清单顺序的第一台在用主机（config.home_host）

@@ -337,7 +337,7 @@ labmon borrow 27-15152 --until "明天 18:30" --for a1    # 借来：探一次�
 labmon borrow                                            # 在借的
 labmon host return 27-15152 [--now]                     # 要还：不再放新任务，跑完自动还；--now 是正在跑的按各自的停法停下
 labmon host restore 27-15152                            # 撤销跑完就还（还掉之前；过了约定时间先改约定）
-labmon host list                                         # 各主机在用 / 借来的 / 已归还
+labmon host list                                         # 各主机在用 / 借来的 / 已归还；末尾按 worker 目录列共用同一块共享盘的几台
 ```
 
 - 借用中这台同时是调度主机（id 用组内服务器的），实验会话 `labmon worker add <id> ROOT JOBS --project <项目>` 往上登记队列；`labmon wait` 报 `borrow:<id>`。
