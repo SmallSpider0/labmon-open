@@ -276,7 +276,7 @@ function kpis() {
     // 利用率：近 1 小时的吃满程度（只有保活时按 0，worker 的 10 秒样本，#51），utilText 出字；曲线是各卡近 10 分钟平均
     const series = gl.map((g, k) => ({name: gl.length > 1 ? gname(g) : "", color: CC[k % CC.length],
       pts: HIST(g.host.id).filter(r => r.busy && r.busy[g.index] != null).map(r => [r.t, r.busy[g.index]])}));
-    const ut = g => utilText(gpuBusy(g.host, g.index), g.util), U = utilText(utilAvg(gl.map(g => gpuBusy(g.host, g.index))), avg(gl.map(g => g.util)));
+    const ut = g => utilText(gpuBusy(g.host, g.index), g.util), U = utilText(utilAvg(gl.map(g => gpuBusy(g.host, g.index)), gl.map(g => g.util)));
     const mine = utilMine(D.gpu_mine);
     // 卡与显存是整台主机的（含同机别的项目与 labmon 之外的进程）：本项目没任务在跑时写明，免得看成自己的
     const whole = "整台主机的数字，含同机别的项目与 labmon 之外的进程；本项目在跑 " + D.jobs.filter(j => j.status === "running" && !j.hold).length + " 个任务\n";
@@ -755,7 +755,7 @@ function resourcesCard() {
     if (gp.length) {
       const cols = ["var(--accent)", "#1D9E75", "#D85A30", "#7F77DD", "#D4537E", "#BA7517", "#639922", "#888780"];
       const series = gp.map((g, k) => ({name: gp.length > 1 ? "GPU" + g.index : "", color: cols[k % cols.length], pts: H.filter(r => r.busy && r.busy[k] != null).map(r => [r.t, r.busy[k]])}));
-      const U = utilText(utilAvg(gp.map(g => gpuBusy(h, g.index))), avg(gp.map(g => g.util)));
+      const U = utilText(utilAvg(gp.map(g => gpuBusy(h, g.index)), gp.map(g => g.util)));
       tiles.push(tile(`GPU 利用率${gp.length > 1 ? " · " + gp.length + " 卡" : ""}`, `${U.big}${U.span ? `<span class="mut" style="font-weight:400"> ${U.span}</span>` : ""}`, chart({series, t0, t1: NOW, ymax: 100, fmt: v => f1(v, 0) + "%"}),
         U.tip + "\n曲线是各卡近 10 分钟平均\n\n" + gp.map(g => `GPU${g.index} ${g.name}  ${utilText(gpuBusy(h, g.index), g.util).big}  ${f1(g.temp, 0)}°C  ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n")));
       const tot = sum(gp.map(g => g.mem_total)) / 1024;     // 显存探针给的是 MiB

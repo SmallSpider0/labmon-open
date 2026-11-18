@@ -133,16 +133,21 @@ class CollectTest(Tmp):
         t = time.time()
         f = usage_file("h")
         f.parent.mkdir(parents=True, exist_ok=True)
-        for r in ({"t": t - 3600, "s": t - 7200, "p": "p", "g": ["a", "b"], "u": 90},     # 2 卡 × 1 小时 90%
-                  {"t": t - 90000, "s": t - 93600, "p": "p", "g": ["a"], "u": 10},        # 窗口外
-                  {"t": t - 3600, "s": t - 7200, "p": "q", "g": ["a"], "u": 10},          # 别的项目
-                  {"t": t - 3600, "s": t - 7200, "p": "p", "g": ["a"]}):                  # 旧行没有 u
+        for r in ({"t": t - 3600, "s": t - 7200, "n": "a1", "p": "p", "g": ["a", "b"], "u": 90},     # 2 卡 × 1 小时 90%
+                  {"t": t - 90000, "s": t - 93600, "n": "a0", "p": "p", "g": ["a"], "u": 10},        # 窗口外
+                  {"t": t - 3600, "s": t - 7200, "n": "q1", "p": "q", "g": ["a"], "u": 10},          # 别的项目
+                  {"t": t - 3600, "s": t - 7200, "n": "a2", "p": "p", "g": ["a"]}):                  # 旧行没有 u
             append_row(f, r, O.USAGE_KEEP_S, t)
-        glob = {"hosts": [{"id": "h", "status": {"running": [{"project": "p", "gpus": ["c"], "t0": t - 3600, "use": {"util_mean": 30}}]}}]}
+        glob = {"hosts": [{"id": "h", "status": {"running": [{"name": "r", "project": "p", "gpus": ["c"], "t0": t - 3600, "use": {"util_mean": 30}}]}}]}
         m = C.gpu_mine("p", ["h"], glob, t)
         self.assertEqual((m["util"], m["n"]), (70.0, 2))                                       # (90×2 + 30×1) / 3
         self.assertAlmostEqual(m["card_s"], 3 * 3600, delta=2)
         self.assertIsNone(C.gpu_mine("x", ["h"], glob, t))
+        # 刚跑完：用量行已写、状态里还在 running（#54 审查）：按 主机、任务、开始时刻 认同一次，只算一遍
+        t0 = round(t - 3600)
+        append_row(f, {"t": t - 10, "s": t0, "n": "dup", "p": "p", "g": ["d"], "u": 50}, O.USAGE_KEEP_S, t)
+        g2 = {"hosts": [{"id": "h", "status": {"running": [dict(glob["hosts"][0]["status"]["running"][0]), {"name": "dup", "project": "p", "gpus": ["d"], "t0": t0 + 0.4, "use": {"util_mean": 50}}]}}]}
+        self.assertEqual(C.gpu_mine("p", ["h"], g2, t)["n"], 3)
         # worker 不在、状态停在两天前（#54 审查）：在跑的只算到状态最后写的时刻，落在窗口外就不算
         stale = {"hosts": [{"id": "z", "worker_up": False, "status": {"t": t - 2 * 86400, "running": [
             {"project": "p", "gpus": ["c"], "t0": t - 3 * 86400, "use": {"util_mean": 80}}]}}]}

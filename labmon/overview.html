@@ -1754,8 +1754,8 @@ function home() {
   const jobs = D.hosts.flatMap(h => jobsOf(h).map(j => ({...j, h})));
   const allw = D.hosts.flatMap(h => (h.status?.waiting || []).map(w => ({...w, h})));
   const waits = allw.filter(w => w.name), blocked = allw.filter(w => !w.name);
-  const gu = hs.flatMap(h => h.status.info.gpus || []), gUsed = gu.reduce((a, g) => a + g.used, 0), gTot = gu.reduce((a, g) => a + g.total, 0);
-  const U = utilText(utilAvg(hs.flatMap(h => h.busy || [])), null), now = D.generated;
+  const gu = hs.flatMap(h => (h.status.info.gpus || []).map(g => ({...g, h}))), gUsed = gu.reduce((a, g) => a + g.used, 0), gTot = gu.reduce((a, g) => a + g.total, 0);
+  const U = utilText(utilAvg(gu.map(g => gpuBusy(g.h, g.i)), gu.map(g => g.util))), now = D.generated;
   const lease = D.hosts.filter(h => h.lease_end).sort((a, b) => a.lease_end - b.lease_end)[0];
   // 全部跑完：worker 推演里最晚的结束（与任务卡标题、项目表同一来源）
   const fin = D.hosts.flatMap(h => planLanes(h).flatMap(l => l.jobs.map(j => ({p: l.project, t1: j.t1 || 0})))).sort((a, b) => b.t1 - a.t1)[0];
@@ -2924,7 +2924,7 @@ const holdCount = n => [...D.fleet.servers, ...D.fleet.mine].filter(x => x.holde
 // GPU 利用率去掉保活（吃满程度：只有保活时按 0 算，#51），返回 utilText 的结果（v 是数）。自用主机的样本（fleet.from_worker）带各卡 worker 的平均值 busy；
 // 组内服务器只有探针此刻的样本（5 秒内每 0.5 秒采一次取平均），按样本的状态（与探针同口径；自用主机的 x.state 是平台操作口径，只跑 CPU 任务也算 job）
 function fUtil(x) {
-  const a = x.sample || {}, b = utilAvg((a.gpus || []).map(g => g.busy));
+  const a = x.sample || {}, gs = a.gpus || [], b = gs.some(g => g.busy) ? utilAvg(gs.map(g => g.busy), gs.map(g => g.util)) : null;
   if (b) return utilText(b);
   return utilText(a.util == null ? null : a.state === "keepalive" ? {now: 0, ka: a.util, how: FLEET_HOW} : {now: a.util_real ?? a.util, how: FLEET_HOW});
 }

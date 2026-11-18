@@ -1455,13 +1455,18 @@ t("project", "正常快照渲染不报错、不漏 NaN/undefined，各块都在"
 });
 t("project", "GPU 利用率（#51）：大字是近 1 小时的吃满程度（保活按 0），小字是各卡与本项目近 24 小时；没有 worker 数据的卡退回探针此刻值", () => {
   const h = app(P), i0 = h.lastIndexOf('<div class="kpi"', h.indexOf("GPU 利用率 · ")), kpi = h.slice(i0, h.indexOf('<div class="kpi"', i0 + 1));
-  has(kpi, "GPU 利用率 · 3 卡 · 整机"); has(kpi, '38<small>% 近 1 小时 平均');                 // srv-a 两张卡 (72.3 + 4.2) / 2；srv-b 没有 busy 不进平均
+  has(kpi, "GPU 利用率 · 3 卡 · 整机"); has(kpi, '56<small>% 近 1 小时 平均');                 // (72.3 + 4.2 + 90) / 3：srv-b 没有 busy，按探针此刻值逐卡补进平均（#54 审查）
   has(kpi, "srv-a·0 72%"); has(kpi, "srv-a·1 4%"); has(kpi, "借 OWNER 90%"); has(kpi, "本项目近 24 小时 63%");
-  const tt = tips(kpi); has(tt, "近 1 小时平均 38%"); has(tt, "只有保活（顶到 99%）"); has(tt, "保活按 0 算"); has(tt, "14.5 卡·时，平均把所用的卡用到 63%");
+  const tt = tips(kpi); has(tt, "近 1 小时平均 56%"); has(tt, "其中 1 张卡没有 worker 数据"); has(tt, "只有保活（顶到 99%）"); has(tt, "保活按 0 算"); has(tt, "14.5 卡·时，平均把所用的卡用到 63%");
   has(h, '38%<span class="mut" style="font-weight:400"> 近 1 小时</span>');                    // 主机小图
   ok(run(P, "utilText({now: 0, m10: 0, h1: 4.2, cov: 1200, ka: 99}).span") === "近 20 分钟", "worker 刚起不满 1 小时该写实际多久");
   has(run(P, "utilText({now: 0, m10: 0, h1: 4.2, cov: 1200, ka: 99}).sub"), "只有保活（顶到 99%）");
   const raw = run(P, "utilText(null, 55)"); ok(raw.span === "此刻" && raw.big === "55%" && raw.tip.includes("含保活"), "没有 worker 数据该退回探针此刻值并写明");
+  // 多卡里有卡没有 worker 数据（#54 审查）：那张按探针此刻值算进平均，悬停写明，不把部分卡当整机
+  const mix = run(P, "utilText(utilAvg([{now: 0, m10: 0, h1: 0, cov: 3600}, null], [0, 100]))");
+  ok(mix.big === "50%" && mix.tip.includes("1 张卡没有 worker 数据"), "混合时该逐卡回退：" + JSON.stringify(mix));
+  ok(run(P, "utilText(utilAvg([null], [40])).span") === "此刻", "全是探针值时按此刻写");
+  ok(run(P, "utilText(utilAvg([{now: 30, m10: null, h1: null, cov: 20}]))").span === "此刻", "样本不够时不该冒充 10 分钟平均");
   ok(run(P, "utilText(null).big") === "—" && run(P, "utilMine(null)") === null, "没有数据该是空");
   // 本项目刚跑完、卡此刻空着（近 1 小时平均还高）：不该说是别的项目在用（#54 审查：按此刻值判）
   const Q = pjCtx({...PJ, jobs: PJ.jobs.filter(j => j.status !== "running"), hosts: PJ.hosts.map(x => ({...x, gpus: (x.gpus || []).map(g => ({...g, util: 0})),

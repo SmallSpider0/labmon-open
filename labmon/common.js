@@ -292,16 +292,22 @@ const noWorkBadge = since => since ? `<span class="badge b-mute" ${tip(noWorkTip
 // 没有 worker 的数据时 b 为空，raw 是探针此刻的值（不到 1 秒的瞬时值，含保活）。返回 {v 大字的数, big 大字, span 大字是多久的平均, ka 只有保活的那句（地方小时只写它）, sub 小字, tip 悬停}
 const UTIL_HOW = "保活按 0 算：worker 每 10 秒采一次各卡的利用率，卡上只有保活时记 0（保活只是占着卡）。nvidia-smi 的利用率是有核函数在跑的时间占比";
 const pctText = v => v == null ? "—" : Math.round(v) + "%";
-function utilAvg(bs) {
-  bs = (bs || []).filter(b => b?.now != null);
-  if (!bs.length) return null;
-  const m = k => { const v = bs.map(b => b[k]).filter(x => x != null); return v.length ? v.reduce((a, x) => a + x, 0) / v.length : null; };
-  const nka = bs.filter(b => b.ka != null).length;
-  return {now: m("now"), m10: m("m10"), h1: m("h1"), d1: m("d1"), cov: Math.min(...bs.map(b => b.cov || 0)), d1cov: Math.min(...bs.map(b => b.d1cov || 0)),
-          ka: nka === bs.length ? m("ka") : null, nka: nka < bs.length ? nka : 0, how: bs[0].how};
+// 几张卡合起来（bs 各卡的吃满程度，raws 各卡探针此刻的值）：没有 worker 数据的卡按探针此刻值逐卡补进平均，nprobe 记几张（#54 审查）；
+// 近 10 分钟、1 小时有 worker 卡缺（样本不够）就不写那一档，24 小时同样；覆盖时长取有 worker 数据的卡里最短的
+function utilAvg(bs, raws = []) {
+  const cs = (bs || []).map((b, i) => b?.now != null ? b : raws[i] != null ? {now: raws[i], probe: true} : null).filter(Boolean);
+  if (!cs.length) return null;
+  const mean = v => v.reduce((a, x) => a + x, 0) / v.length, wk = cs.filter(c => !c.probe), nprobe = cs.length - wk.length;
+  if (!wk.length) return {now: mean(cs.map(c => c.now)), probe: true};
+  const m = k => wk.some(c => c[k] == null) ? null : mean(cs.map(c => c.probe ? c.now : c[k]));
+  const nka = wk.filter(c => c.ka != null).length;
+  return {now: mean(cs.map(c => c.now)), m10: m("m10"), h1: m("h1"), d1: nprobe || wk.some(c => c.d1 == null) ? null : mean(wk.map(c => c.d1)),
+          cov: Math.min(...wk.map(c => c.cov || 0)), d1cov: Math.min(...wk.map(c => c.d1cov || 0)),
+          ka: nka === cs.length ? mean(wk.map(c => c.ka)) : null, nka: nka < cs.length ? nka : 0, nprobe, how: wk[0].how};
 }
 function utilText(b, raw = null) {
-  if (b?.now == null) return raw == null ? {v: null, big: "—", span: "", ka: "", sub: "", tip: "没有利用率数据"}
+  if (b?.probe) raw = b.now;
+  if (b?.now == null || b.probe) return raw == null ? {v: null, big: "—", span: "", ka: "", sub: "", tip: "没有利用率数据"}
     : {v: raw, big: pctText(raw), span: "此刻", ka: "", sub: "", tip: `探针此刻的值 ${pctText(raw)}：不到 1 秒的瞬时值，含保活（worker 没在写状态，没有平均值）`};
   const v = b.h1 ?? b.m10 ?? b.now;
   const span = b.h1 != null ? (b.cov >= 3300 ? "近 1 小时" : `近 ${dur(b.cov)}`) : b.m10 != null ? "近 10 分钟" : "此刻";
@@ -309,7 +315,7 @@ function utilText(b, raw = null) {
   const d1 = b.d1 != null ? `${b.d1cov >= 82800 ? "24 小时" : dur(b.d1cov)} ${pctText(b.d1)}` : "";
   return {v, big: pctText(v), span, ka, sub: [span !== "此刻" ? `此刻 ${pctText(b.now)}` : "", d1, ka].filter(Boolean).join(" · "),
           tip: [`${span === "此刻" ? "此刻" : span + "平均"} ${pctText(v)}`, span !== "此刻" ? `此刻 ${pctText(b.now)}` : "", b.m10 != null && span !== "近 10 分钟" ? `近 10 分钟 ${pctText(b.m10)}` : "",
-                d1 ? "近 " + d1 : "", ka, b.how || UTIL_HOW].filter(Boolean).join("\n")};
+                d1 ? "近 " + d1 : "", ka, b.nprobe ? `其中 ${b.nprobe} 张卡没有 worker 数据，按探针此刻的值算（不到 1 秒的瞬时值，含保活）` : "", b.how || UTIL_HOW].filter(Boolean).join("\n")};
 }
 // 项目自己的平均利用率（collect.gpu_mine）：近 24 小时本项目的任务平均把所用的卡用到多少，按 卡数 × 时长 加权
 const utilMine = m => m ? {big: pctText(m.util), sub: `本项目近 24 小时 ${pctText(m.util)}`,
