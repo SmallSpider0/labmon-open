@@ -1463,6 +1463,11 @@ t("project", "GPU 利用率（#51）：大字是近 1 小时的吃满程度（�
   has(run(P, "utilText({now: 0, m10: 0, h1: 4.2, cov: 1200, ka: 99}).sub"), "只有保活（顶到 99%）");
   const raw = run(P, "utilText(null, 55)"); ok(raw.span === "此刻" && raw.big === "55%" && raw.tip.includes("含保活"), "没有 worker 数据该退回探针此刻值并写明");
   ok(run(P, "utilText(null).big") === "—" && run(P, "utilMine(null)") === null, "没有数据该是空");
+  // 本项目刚跑完、卡此刻空着（近 1 小时平均还高）：不该说是别的项目在用（#54 审查：按此刻值判）
+  const Q = pjCtx({...PJ, jobs: PJ.jobs.filter(j => j.status !== "running"), hosts: PJ.hosts.map(x => ({...x, gpus: (x.gpus || []).map(g => ({...g, util: 0})),
+    busy: (x.busy || []).map(b => ({...b, now: 0, h1: 70}))}))}, EVN);
+  ok(!app(Q).includes("是别的项目或进程在用"), "历史平均高、此刻空着也说别的项目在用");
+  run(Q, "D.hosts[1].gpus[0].util = 60; render()"); has(app(Q), "是别的项目或进程在用");
   // 时间线主机行的浅底、利用率小图按 history 的 busy：前一半旧行没有 busy，不画
   ok(run(P, "HIST('srv-a').filter(r => r.busy).length") === 72, "history 的 busy 行数不对");
 });

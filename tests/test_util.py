@@ -143,6 +143,10 @@ class CollectTest(Tmp):
         self.assertEqual((m["util"], m["n"]), (70.0, 2))                                       # (90×2 + 30×1) / 3
         self.assertAlmostEqual(m["card_s"], 3 * 3600, delta=2)
         self.assertIsNone(C.gpu_mine("x", ["h"], glob, t))
+        # worker 不在、状态停在两天前（#54 审查）：在跑的只算到状态最后写的时刻，落在窗口外就不算
+        stale = {"hosts": [{"id": "z", "worker_up": False, "status": {"t": t - 2 * 86400, "running": [
+            {"project": "p", "gpus": ["c"], "t0": t - 3 * 86400, "use": {"util_mean": 80}}]}}]}
+        self.assertIsNone(C.gpu_mine("p", ["z"], stale, t))
 
     def test_keep_usage_stores_util(self):
         O._keep_usage(self.d, "h", [{"t0": 1, "t1": time.time(), "name": "a", "project": "p", "rc": "0", "gpus": ["G"], "gpu_util": 77}], time.time(), {"G": 0})

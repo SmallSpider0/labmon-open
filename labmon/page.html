@@ -280,7 +280,8 @@ function kpis() {
     const mine = utilMine(D.gpu_mine);
     // 卡与显存是整台主机的（含同机别的项目与 labmon 之外的进程）：本项目没任务在跑时写明，免得看成自己的
     const whole = "整台主机的数字，含同机别的项目与 labmon 之外的进程；本项目在跑 " + D.jobs.filter(j => j.status === "running" && !j.hold).length + " 个任务\n";
-    const notMine = !D.jobs.some(j => j.status === "running" && !j.hold) && (U.v || 0) > 5;
+    // 是不是别人在用按此刻值判（只有保活时按 0）：近 1 小时平均里有本项目刚跑完的负载（#54 审查）
+    const notMine = !D.jobs.some(j => j.status === "running" && !j.hold) && (avg(gl.map(g => gpuBusy(g.host, g.index)?.now ?? g.util)) || 0) > 5;
     const sub = [gl.length > 1 ? gl.map((g, k) => dot(k, `${esc(gname(g))} ${ut(g).big}`)).join(" · ") : esc(U.sub), mine ? esc(mine.sub) : "",
       notMine ? "本项目没有任务在跑：是别的项目或进程在用" : ""].filter(Boolean);
     out.push(`<div class="kpi" ${tip(whole + U.tip + "\n\n" + gl.map(g => `${g.host.label} GPU${g.index} ${g.name}\n  利用率 ${ut(g).big}（${ut(g).span}）${ut(g).sub ? " · " + ut(g).sub : ""} · ${f1(g.temp, 0)}°C · ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n") + (mine ? "\n\n" + mine.tip : ""))}>
