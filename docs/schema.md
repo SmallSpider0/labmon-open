@@ -126,7 +126,7 @@
   `storage` 是本地盘扫描（`LocalDisk.summary`，[worker.md「本地目录与本地依赖」](worker.md#本地目录与本地依赖)）：`{t, local {项目: {cache, scratch}}, own labmon 目录的总占用, wrote labmon 之外的新写入 {since 起算时刻（开机，借来的是借来时）, b, n 文件数,
   top [[路径, 字节, 最近写入]] 前 8 处, more [其余几处, 字节], pending 还没扫的单位数, t 最近扫完一个单位的时刻}（测不准时为 null）, projects {项目目录: 项目}}`（字节）；
   主机项另有看板算的 `lw`（`fleet.local_writes`，GiB）：`{used, total, own, user labmon 之外的, shm, ok, risk 续租、关机、换人要先勾确认, scan {since, t, b, n, top [[路径, GiB, 最近写入]], more [几处, GiB], partial, pending, err} 或 null}`；
-  `room` 是按记账还能放多少：`{ram, margin, gpus {UUID: MB}, cpu 核, cpu_cap 记账上限（配额向下取整）}`，读不到配额时 `cpu`、`cpu_cap` 为 null；
+  `room` 是按记账还能放多少：`{ram, margin, gpus {UUID: MB}, cpu 核, cpu_cap 记账上限（配额向下取整）, other_cpu, owner}`，读不到配额时 `cpu`、`cpu_cap` 为 null；`other_cpu` 是认得准的 labmon 之外的核数（容器给 2 核以上时才有，否则 null），`owner` 是不放的卡（对方超出预留或刚回落、有停不了的保活），`worker fit` 按这两项判整机独占与卡；
   `running[]` 的 `est` 是资源估计（`estimate`）：`vram`（每卡 GiB）与来源 `src`、`ram`（GiB）与来源 `ram_src`（#61 起 `src` 只指显存；之前放行、被接管的任务没有 `ram_src`，与 `src` 同一来源）、`util`，带 `cpus`（估计核数）、`cpu_src`（来源），`acct` 带 `cpu`（记账核数 = max(估计封顶到 `cpu_cap`, 实测)，开跑满 10 分钟后估计那份换成近 10 分钟窗口核数的最大值、不超过给的核数、不低于 1（#65），占位任务 0），`io_sus` 是记了“读写拥塞嫌疑”的时刻（没记为 null）；
   `waiting[]` 的 `est` 同样带 `ram_src`、`cpus`、`cpu_src`，`cpu_wait` 是一直因 CPU 被挡满 10 分钟后已挡的秒数（不到为 null）；`disk`（共享盘扫描，`mine` 为真的那台在扫）的 `yield` 是共享盘慢、推迟中的说明（没推迟为 null）；
   `running[].use` 另有 `rd`、`wr`（此刻 MiB/s）、`rd_b`、`wr_b`（累计字节）、`cores_peak`、`rd_peak`、`wr_peak`（1 分钟峰值），`conc`（运行期间同卡平均几条 labmon 任务，含自己；不用卡的没有），以及接管时续算用的内部键 `rchar`、`wchar`、`pw`、`conc_s`、`conc_w`、`pks`（近 10 分钟各 1 分钟窗口的 [结束时刻, 核数]，CPU 记账回收用）、`pk0`（从何时起量窗口核数）（看板不读），`running[]` 与 `waiting[]` 带清单的 `cpus`、`io`；

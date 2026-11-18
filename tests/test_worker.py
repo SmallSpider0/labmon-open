@@ -907,6 +907,23 @@ class AdmissionUnitTest(UnitBase):
         self.fit_two_cards(running=run, overrides=[{"kind": "deadline", "at": now + 3600, "target": "renew"}])
         self.assertIn("前跑不完", self.fit_out(["k_s2"])["k_s2"])
 
+    def test_fit_exclusive_keepalive_and_foreign_cpu(self):
+        # Codex 审 #49 第三轮：卡上只有 worker 停得了的保活时独占照开（放任务前先停它，同真放行）；整机独占看状态 room.other_cpu
+        # （认得准的 labmon 之外的核数）：占 3 核时不开（旧代码快照的 cpu 恒为 None，看不到）
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("e_s0", "bp", now - 3600, now - 1800, ram_peak=1.0, vram_peak=1000.0, cores_peak=1.0)])
+        self.hosts.queues({"x": ["e_s1|true   # exclusive=gpu"], "h": ["e_s2|true   # exclusive=host"]}, project="bp")
+        self.hosts.register("t", "x", "bp")
+        self.hosts.register("t", "h", "bp")
+        gs = {"gpus": [{"i": i, "uuid": u, "free": 45000.0, "total": 46000.0} for i, u in enumerate(("GPU-a", "GPU-b"))]}
+        ka = [{"uuid": u, "owner": "keepalive", "mb": 2000, "hpid": 9, "job": None, "ka": False, "comm": "py"} for u in ("GPU-a", "GPU-b")]
+        self.fit_two_cards(running=[], info=gs, gpu_procs=ka)
+        self.assertIn("可以开车道并行", self.fit_out(["e_s1"])["e_s1"])
+        self.fit_two_cards(running=[], info=gs, room={"other_cpu": 3.0})
+        self.assertIn("labmon 之外的进程占 3.0 核", self.fit_out(["e_s2"])["e_s2"])
+        self.fit_two_cards(running=[], info=gs, room={"other_cpu": 0.5})
+        self.assertIn("可以开车道并行", self.fit_out(["e_s2"])["e_s2"])
+
     def test_fit_list_skips_row_in_current(self):
         # Codex 审 #49：放行它的主机状态过期了，状态目录的 current 还写着它在跑：不再分给别的主机（旧代码只看新鲜主机状态里的 running）
         now = self.hosts.now()

@@ -4548,7 +4548,7 @@ class Worker:
             "disk": self.disk.brief() if self.disk else None,
             # 按记账还能放多少：内存 GiB、各卡 MB（整卡任务记账超过卡时写 0）、CPU 核（cpu_cap 是记账上限：配额向下取整；读不到配额都为 None）
             "room": {"ram": ram_free(S), "margin": S["margin"], "gpus": {u: max(0.0, v) for u, v in card_free(S).items()},
-                     "cpu": cpu_free(S), "cpu_cap": S["cpu_cap"],
+                     "cpu": cpu_free(S), "cpu_cap": S["cpu_cap"], "other_cpu": S["cpu"],   # other_cpu：认得准的 labmon 之外的核数（fit 判整机独占，同 intruders）
                      "owner": sorted(S["owner"])},        # 不放的卡（对方超出预留或刚回落、有停不了的保活）：fit 的快照照它（fit_snapshot）
             "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"],
                         "empty": q.get("empty", False), "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {})} for q in queues],
@@ -5505,13 +5505,14 @@ def fit_snapshot(st):
              "vram": {}, "ram": acct(j, "ram"), "cpu": acct(j, "cpu"), "excl": j.get("excl"), "tag": j.get("tag"), "hold": bool(j.get("hold")),
              "ngpu": len(j.get("gpus") or []), "use": j.get("use") or {}, "cards": 0.0} for i, j in enumerate(st.get("running") or [])]
     by = {j["name"]: j for j in jobs}
-    gp = [dict(g, _j=by.get(g.get("job")) if g.get("owner") == "job" else None) for g in st.get("gpu_procs") or []]    # 独占的判断（intruders）要看卡上有谁
+    gp = [dict(g, _j=by.get(g.get("job")) if g.get("owner") == "job" else None) for g in st.get("gpu_procs") or []   # 独占的判断（intruders）要看卡上有谁；
+          if g.get("owner") != "keepalive"]                     # worker 停得了的保活放任务前先停（卡的空闲已加回），停不了的是 other、照算
     cards = [{"i": g["i"], "uuid": g["uuid"], "total": g.get("total") or 0.0, "keep": 0.0, "other": 0.0, "ka": False,
               "free": (room.get("gpus") or {}).get(g["uuid"], g.get("free") or 0.0) + ka.get(g["uuid"], 0.0)} for g in info.get("gpus") or []]
     return {"cards": cards, "limit": (info.get("mem") or {}).get("limit"),
             "room": None if room.get("ram") is None else room["ram"] + sum(j["ram"] for j in jobs), "margin": room.get("margin") or 0,
             "cpu_cap": room.get("cpu_cap"), "cpu_room": None if room.get("cpu") is None else room["cpu"] + sum(j["cpu"] for j in jobs),
-            "jobs": jobs, "ext": st.get("external") or [], "gp": gp, "cpu": None, "holds": {}, "tags": (st.get("limits") or {}).get("tags") or {},
+            "jobs": jobs, "ext": st.get("external") or [], "gp": gp, "cpu": room.get("other_cpu"), "holds": {}, "tags": (st.get("limits") or {}).get("tags") or {},
             "owner": set(room.get("owner") or []), "who": "对方" if st.get("guest") else "labmon 之外的进程",
             "kept": bool((st.get("guest") or {}).get("keep")), "cut": None, "brief": False, "gholds": {}, "gangs": {}, "gfirst": {}}
 
