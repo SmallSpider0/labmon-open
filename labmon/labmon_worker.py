@@ -4718,7 +4718,8 @@ class Worker:
             d = self.ldisk
             st, g = self.info.get("started"), self.guest()
             prune = round(st) if st and (self.info.get("rootfs") or {}).get("ok") else None
-            d.setup(prune, max(prune, round(g.get("t") or prune)) if g and prune else prune, bool(g))
+            # 借来的时刻往下取整（#70）：四舍五入会把起点往后挪最多半秒，借来后半秒内写的文件（文件时刻按内核的粗时钟，还可能早几毫秒）就漏数了
+            d.setup(prune, max(prune, int(g.get("t") or prune)) if g and prune else prune, bool(g))
             d.step(now, self.io_yield)
             self.storage = dict(d.summary(), projects={p: q["project"] for q in queues for p in [project_dir(q["root"])] if p})
         self.disk_do("本地盘", local)
