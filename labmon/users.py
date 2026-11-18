@@ -38,7 +38,7 @@ from pathlib import Path
 from . import projects as PJ
 from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, drop_account_people, host_users, pause_by, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
-from .state import snapshot, state_root, write_atomic
+from .state import file_sig, snapshot, state_root, write_atomic
 
 CLIENT_RECENT_S = 30 * 86400
 
@@ -108,8 +108,7 @@ def _read() -> dict:
     """当前的账号数据（只读，别改它）：文件没变就用缓存。没有或写坏了是空的：没有账号，谁也进不来（只能在本机 labmon user add 重建）。"""
     p = path()
     try:
-        st = p.stat()
-        sig = (st.st_ino, st.st_mtime_ns, st.st_size)
+        sig = file_sig(p)
         c = _CACHE
         if c[0] != sig:
             c[:] = [sig, _parse(p.read_text())]

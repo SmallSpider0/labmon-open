@@ -5,6 +5,7 @@
         snapshot.json   工作台最近一次的全局快照（overview.collect 写，各处经 snapshot() 读）
         其余文件见 overview.py、fleet.py、records.py 的说明
 
+- 按文件缓存读出的内容：file_sig 判文件变没变；
 - JSON 状态文件：load_json、save_json（原子写入 write_atomic：先写临时文件再改名，读的一方不会读到半截）；
 - JSONL（逐行记录）：parse_rows、load_rows、append_row（按保留期修剪；续写的进程内互斥按路径）。
 """
@@ -30,6 +31,17 @@ def usage_file(hid: str) -> Path:
     """一台主机跑完的任务的记录（overview._keep_usage 从 worker 的 usage.jsonl 续写来的，存 30 天）：
     工作台的时间线（occupancy）、调度卡的平均等待（sched_view）与项目页的失败尝试（collect）都读它。"""
     return state_dir() / "usage" / f"{hid}.jsonl"
+
+
+def file_sig(path) -> tuple | None:
+    """文件变没变的签名 (inode, 修改时刻纳秒, 大小)；没有或读不到为 None。按文件缓存读出内容的都拿它比：只比 st_mtime 时，
+    同一个时间戳粒度里连写两次（Linux 上约 4 ms，共享盘更粗）第二次就漏读，要等下次再写才补上（#31）。
+    worker 在服务器上跑、不 import 本包，另有一份 labmon_worker.fsig，口径相同。"""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return st.st_ino, st.st_mtime_ns, st.st_size
 
 
 def load_json(path: Path, default):

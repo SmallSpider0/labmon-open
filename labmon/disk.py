@@ -21,7 +21,7 @@ import time
 from . import fleet as F
 from .config import GIB, active_hosts, all_hosts, pick_color
 from .records import log_events
-from .state import append_row, load_json, load_rows, save_json, snapshot
+from .state import append_row, file_sig, load_json, load_rows, save_json, snapshot
 
 WARN_GB = 30            # 剩余低于这么多 GiB 告警（[fleet.disk] warn_gb 可改）
 SOON_D = 3              # 按近 24 小时的速度不到这么多天就满，且剩余已低于 SOON_FREE，告警（soon_days）
@@ -43,10 +43,10 @@ def _f(name: str):
 def _rows(name: str) -> list[dict]:
     """scans.jsonl、hours.jsonl：文件没变就用上次读的。"""
     f = _f(name)
-    m = f.stat().st_mtime if f.exists() else None
-    c = _CACHE.get(name)
+    m = file_sig(f)
+    c = _CACHE.get(str(f))                      # 按路径：LABMON_STATE 换了（测试）不拿另一个目录的
     if not c or c[0] != m:
-        c = _CACHE[name] = (m, load_rows(f) if m else [])
+        c = _CACHE[str(f)] = (m, load_rows(f) if m else [])
     return c[1]
 
 

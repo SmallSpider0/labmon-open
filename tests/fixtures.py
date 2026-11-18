@@ -154,7 +154,7 @@ def board(case, scopes=("project",), name: str = "boss", role: str = "admin"):
         p.start()
         case.addCleanup(p.stop)
     srv = SV.Server(("127.0.0.1", 0))
-    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    threading.Thread(target=srv.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()   # shutdown 不用等缺省 0.5 秒的轮询
     case.addCleanup(srv.server_close)
     case.addCleanup(srv.shutdown)
     d = Path(tempfile.mkdtemp(prefix="labmon-client-"))

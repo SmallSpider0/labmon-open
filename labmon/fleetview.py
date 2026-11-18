@@ -14,14 +14,14 @@ from . import fleetops as FO
 from . import lease as LS
 from .config import ConfigError, active_hosts, fmt_time, hosts_file, parse_time
 from .service import notify
-from .state import load_rows
+from .state import file_sig, load_rows
 
-_CACHE: dict[str, tuple[float, list]] = {}
+_CACHE: dict[str, tuple[tuple | None, list]] = {}
 
 
 def _hours(sid: str) -> list[dict]:
     f = F.state_dir() / "hours" / f"{sid}.jsonl"
-    m = f.stat().st_mtime if f.exists() else 0
+    m = file_sig(f)
     c = _CACHE.get(str(f))
     if not c or c[0] != m:
         _CACHE[str(f)] = c = (m, load_rows(f))

@@ -16,7 +16,7 @@ from pathlib import Path
 from . import projects as PJ
 from .config import ConfigError, fmt_dur, fmt_time, stale_limit
 from .overview import USAGE_KEEP_S
-from .state import load_json, load_rows, save_json, snapshot, state_dir
+from .state import file_sig, load_json, load_rows, save_json, snapshot, state_dir
 
 JOB_CONFIRM = 2       # wait --job：没见过它在跑、排队就已结束、找不到、不会再跑的，要连着这么多份开始等之后写出的快照都这样才报（#135）
 JOB_BAD_RC = 4        # wait --job 都有了结果、但不全是成功（失败、作废、找不到、不会再跑）的退出码；1 是新告警，2、3 已被参数错、配置错占着
@@ -255,17 +255,10 @@ _RIDS: dict[str, tuple[float, dict]] = {}      # 请求号 → (回话的时刻,
 _RID_LOCK = threading.Lock()
 
 
-def _mtime(p: Path) -> float | None:
-    try:
-        return p.stat().st_mtime
-    except OSError:
-        return None
-
-
 def _sig(out: Path, w: JobWatch | None) -> tuple:
     """判告警要读的文件的修改时刻：项目快照、全局快照（wake、页面上的改动）、projects.json（归档）、被等的别的项目的快照。变了才再判。"""
     others = sorted({k[0] for k in w.keys if k[0] != w.pid}) if w else []
-    return tuple(_mtime(p) for p in [out / "snapshot.json", state_dir() / "snapshot.json", state_dir() / "projects.json"]
+    return tuple(file_sig(p) for p in [out / "snapshot.json", state_dir() / "snapshot.json", state_dir() / "projects.json"]
                  + [PJ.out_dir(p) / "snapshot.json" for p in others if PJ.ID_RE.fullmatch(p)])
 
 
