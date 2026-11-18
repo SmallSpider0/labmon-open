@@ -554,7 +554,7 @@ labmon 之外的按目录一段段斜纹，过门槛变紫），下面「本地�
 
 - **入池**：`[[hosts]]` 块里同样的 `lend`、`lend_hours`（`fleet.conf` 用同一条校验 `fleet._lend_check`）；持有人是 `fleet.host_holder`（`platform_holder`），没有持有人的只有管理员能开。开关、时段、代开的规则与组内服务器一样，都经 `pool.set_lend`；
   「我的账号 → 我的服务器」把自用主机也列进来（标「自用」），主机页多一张「算力池」小卡，组内页的自用主机卡片标「入池」、抽屉有「算力池」那一行。
-  能入池的（`pool._selfs`、`pool._self_bar`）：在用、不是借来或换来的、不是看板本机或回环（`config.share_host`：池里是组里别人的清单，跑在这台的系统账号下）、worker 目录与池同一个（`config.pool_home`）。已归还的自用主机恢复给别人、照抄出新的自用主机时去掉这两行（`config.add_mine_host`）。
+  能入池的（`pool._selfs`、`pool._self_bar`）：在用、不是借来或换来的、不是看板本机或回环（`config.share_host`：池里是组里别人的清单，跑在这台的系统账号下）、worker 目录与池同一个（`config.pool_home`）。每台自用主机各有自己的开关与时段；看板开出来的自用主机（恢复已归还的那块、照抄出新的都算）一律不入池、不沿用上一台的，要入池由持有人手动开（`config.add_mine_host`，维护者 11-18 定）。关机归还的那台自动不再放池清单，上面池放的、没跑完的搬走（下面「搬走」）。
 - **池放的登记带标记**：看板把池清单搬到池以外的主机时 `worker add --pool`（`serve.reg_move` 的 `pool`），登记文件里记 `pool: 1`，进状态的 `queues[].pool` 与全局快照 `regs`。自用主机上哪些是池放的只认它，主人自己的清单没有；
   会话自己 `worker add <自用主机>` 同一条清单会重写登记、标记随之去掉，就是钉在那台。池放的清单 `offers` 不给挪法建议（worker 的 `proj_lanes` 跳过）。撤回照旧 `labmon worker rm pool`（`pool.locate` 认标记）。
 - **放**：候选是借着的池主机加上此刻在池里（入池、在时段内、不在收回后的休息期）、worker 在写状态的自用主机，按空卡数排，同样空的自用主机在前。池清单在自用主机上队首因资源等满 `POOL_WAIT_S` 同样挪走。都放不下才去借组内服务器。

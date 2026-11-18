@@ -800,14 +800,15 @@ def add_mine_host(hid: str, job: str, ssh: str, port: int, pool: str, label: str
     raw = _read_toml(p) if p.exists() else {}
     hosts = raw.get("hosts", [])
     fleet = raw.get("fleet")
-    keys = {"returned": None, "platform_holder": holder, "platform_job": job, "platform_pool": pool, "borrow_until": None, "borrow_from": None}   # 上次借来时的约定不带过来
+    keys = {"returned": None, "platform_holder": holder, "platform_job": job, "platform_pool": pool, "borrow_until": None, "borrow_from": None,   # 上次借来时的约定不带过来
+            "lend": None, "lend_hours": None}   # 入池（#79）：开出来的自用主机一律不入池、要入池由持有人手动开（维护者 11-18 定），恢复的、照抄的都不带
     for s, end, bid in _blocks(lines, "[[hosts]]"):
         h = next((x for x in hosts if str(x.get("id")) == bid), {})
         if h.get("ssh") == ssh and int(h.get("port") or 22) == int(port):
             if not h.get("returned"):
                 raise ConfigError(f"{p} 里已有在用的主机 {bid}（{ssh}:{port}）")
             if holder is not None and host_holder(h, fleet) != holder:
-                keys.update(users=None, lend=None, lend_hours=None)      # 换了人：开给谁用、入池（#79）是原来那人定的
+                keys["users"] = None                                     # 换了人：开给谁用是原来那人定的
             updated = lines[:s + 1] + _set_keys(lines[s + 1:end], keys) + lines[end:]
             # 首次给旧主机写显式归属时，先把旧清单推断的人名固化。与主机改动同一次覆盖写。
             if holder is not None and not h.get("platform_holder") and fleet is not None and not fleet.get("me"):
@@ -825,7 +826,6 @@ def add_mine_host(hid: str, job: str, ssh: str, port: int, pool: str, label: str
     template = next(x for x in hosts if str(x.get("id")) == tpl[0][2])
     if holder is not None and host_holder(template, fleet) != holder:
         keys["users"] = None
-    keys.update(lend=None, lend_hours=None)                  # 入池（#79）只跟着那一台：照抄来的新主机不带
     block = _set_keys(lines[s + 1:end], {"id": hid, "label": label or hid, "ssh": ssh, "port": int(port), **keys})
     block = [l for l in block if not re.match(r"\s*#", l)]               # 照抄的整行注释是原主机的，不带过来
     new = ["\n", f"# {label or hid}：看板换给自己时加的（照抄 {tpl[0][2]}）\n", "[[hosts]]\n"] + block

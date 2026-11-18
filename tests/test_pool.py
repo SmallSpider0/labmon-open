@@ -778,6 +778,25 @@ class SelfPoolTest(TickBase):
         self.assertEqual(self.moves, [])                                            # 关了入池：不放（只问一次要多少资源，给借用看）
         self.assertEqual(self.fits, [("/r/x|jobs/x.txt", ())])
 
+    def test_several_self_hosts_each_own_switch(self):
+        # 一人名下几台自用主机：每台各有自己的入池开关与时段；只往开着的那台放，关了的那台上池放的搬走
+        two = lambda lm, l2: (self.d / "hosts.toml").write_text(HOSTS.format(extra="").replace(   # noqa: E731
+            "[fleet]", MINE.format(lend=lm) + '[[hosts]]\nid = "m2"\nssh = "root@m2"\ndata_root = "/data/me"\nplatform_holder = "AA"\n' + l2 + "\n[fleet]", 1))
+        two("", "")
+        P.set_lend("m2", True, "22:00-09:00", who("AA"), False, False)
+        hs = {h["id"]: h for h in CF.user_hosts()}
+        self.assertNotIn("lend", hs["m"])
+        self.assertEqual((hs["m2"]["lend"], hs["m2"]["lend_hours"]), (True, "22:00-09:00"))
+        two("", "lend = true\n")
+        self.tick(self.snap([self.host("m"), self.host("m2")], [self.pool_list()]))
+        self.assertEqual(self.moves, [("m2", ["jobs/x.txt"], "")])
+        self.moves.clear()
+        P._FIT.clear()
+        two("lend = true\n", "")
+        regs = [{"host": "m2", "state": "active", "queues": [dict(self.pool_list(), pool=True)]}]
+        self.tick(self.snap([self.host("m"), self.host("m2")], [], regs=regs))
+        self.assertEqual([m[:2] for m in self.moves], [("m", ["jobs/x.txt"])])      # m2 关了：池放的搬到开着的 m
+
     def test_lend_view_on_snapshot(self):
         # 快照里自用主机的主机项与组内页 fleet.mine 的 lend：此刻跑着几条池清单
         snap = self.snap([self.host("m")], [], regs=[{"host": "m", "state": "active", "queues": [dict(self.pool_list(), pool=True)]}])
@@ -791,16 +810,16 @@ class SelfPoolTest(TickBase):
     def test_leave_moves_pool_lists_only(self):
         # 关了入池、出了时段：m 上池放的清单（登记带 pool）去放，放不下回池里；主人自己的清单不动；在跑的那一格由 m 跑完（worker 管）
         pq, own = dict(self.pool_list(), pool=True), self.pool_list(root="/r/own", project="pa")
-        regs = [{"host": "m", "state": "active", "queues": [pq, own]}]
+        regs = lambda: [{"host": "m", "state": "active", "queues": [dict(pq), dict(own)]}]   # noqa: E731  每轮一份新的：搬成了 tick 会改快照的 regs（#78 的 _shift）
         for lend in ("", 'lend = true\nlend_hours = "00:00-00:30"\n'):
             self.mine(lend)
             self.moves.clear()
             P._FIT.clear()
-            self.tick(self.snap([self.host("m")], [], regs=regs))
+            self.tick(self.snap([self.host("m")], [], regs=regs()))
             self.assertEqual(self.moves, [("pool", ["jobs/x.txt"], "AA（m） 关了入池" if not lend else "过了入池时段")], lend)
         self.mine()
         self.moves.clear()
-        self.tick(self.snap([self.host("m")], [], regs=regs))
+        self.tick(self.snap([self.host("m")], [], regs=regs()))
         self.assertEqual(self.moves, [])                                            # 还在池里：不搬
         CF.set_fleet_keys({"returned": "2026-11-18 10:00"}, "测试", host="m")       # 归还了：池放的回池里
         self.tick(self.snap([], [], regs=[{"host": "m", "state": "returned", "queues": [pq, own]}]))
