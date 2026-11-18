@@ -833,6 +833,20 @@ class SelfPoolTest(TickBase):
         self.tick(self.snap([self.host("m", waiting=[wa, own]), self.lent("a")], [], regs=regs))
         self.assertEqual(self.moves, [("a", ["jobs/x.txt"], "在 m 上等了 10 分钟还没放行")])   # 主人自己的清单等着不挪
 
+    def test_elsewhere_on_self_host(self):
+        # #80 对自用主机同样成立：池里队首在别处跑的不放到 m；已放到 m、在等别的主机那一格收尾的回池里；m 上主人自己的清单照旧不动
+        q = self.pool_list()
+        k = P.key(q["root"], q["jobs"])
+        heads = {k: {"head": "j2", "n": 3, "dep": None, "held": None, "elsewhere": ["o", "j1"]}}
+        out = self.tick(self.snap([self.host("m")], [q], heads=heads))
+        self.assertEqual((self.moves, self.fits), ([], []))
+        self.assertIn("还在 o 上跑", out["lists"][k]["why"])
+        wa = {"kind": "queue", "root": q["root"], "queue": q["jobs"], "project": "pa", "name": None, "elsewhere": ["o", "j1"], "since": NOW - 5}
+        own = {**wa, "root": "/r/own"}
+        regs = [{"host": "m", "state": "active", "queues": [dict(q, pool=True), self.pool_list(root="/r/own")]}]
+        self.tick(self.snap([self.host("m", waiting=[wa, own])], [], regs=regs), t=NOW + 1)
+        self.assertEqual(self.moves, [("pool", ["jobs/x.txt"], "j1 还在 o 上跑（交给池之前在那台放行的），跑完再放")])
+
     def test_reclaim_self_host(self):
         from fixtures import running_job
         pq, pq2, own = (dict(self.pool_list(root="/r/p", project="pc"), pool=True), dict(self.pool_list(root="/r/q", project="pa"), pool=True),
