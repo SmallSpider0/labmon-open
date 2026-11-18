@@ -64,7 +64,7 @@ function page(O, hash) {                 // 按路由整页渲染（顶栏 + 正
 const ROUTES = ["#/", "#/host/srv-a", "#/host/srv-b", "#/host/没有的主机", "#/log", "#/log?host=srv-a&cat=op&q=x", "#/fleet", "#/fleet/people", "#/fleet/disk",
   "#/fleet/srv/srv-a", "#/fleet/srv/srv-b", "#/fleet/srv/srv-d", "#/fleet/srv/srv-e", "#/fleet/srv/srv-f", "#/fleet/srv/srv-g", "#/fleet/srv/gone",
   "#/fleet/people/OWNER", "#/fleet/people/ME", "#/fleet/people/NEWBIE", "#/fleet/people/GONE", "#/fleet/people/+", "#/fleet/new/pool-public", "#/fleet/guard",
-  "#/p/proj-a", "#/p/proj-a/manage", "#/p/proj-b/manage", "#/p/没有的项目/manage", "#/archived"];
+  "#/fleet/renew", "#/fleet/renew/srv-d", "#/p/proj-a", "#/p/proj-a/manage", "#/p/proj-b/manage", "#/p/没有的项目/manage", "#/archived"];
 const TABS = ["done", "events", "ovr", "queues", "deps", "lw", "log"];
 
 let O;
@@ -349,11 +349,26 @@ t("overview", "本地盘开机以来的新写入（#149）：主机页的资源�
   let r = run(O, 'POP = {k: "renew", id: "srv-d", ack: false}; renewAsk(srvById("srv-d"))'); has(r, LD("续租")); has(r, "已和 PERSON3 说好，本地盘可以清空");
   r = run(O, 'goRenew(srvById("srv-d"))'); has(r, 'class="btn danger"'); has(r, "disabled>续租</button>", "没勾时确认钮该灰着、写「续租」不写「中断」");
   ok(run(O, 'renewAsk(srvById("srv-a"))').includes("确认可以中断、本地盘可以清空"), "自用主机在跑任务又写得多：两件都要说");
+  // 分层（#14）：一句结论 → 琥珀框里要勾的 → 折起来的细节；细节的开合跟着 POP.more，重画不收回去
+  r = run(O, 'POP = {k: "renew", id: "srv-d", ack: false}; renewAsk(srvById("srv-d"))');
+  has(r, '<div class="rk-say"><b>续租 PERSON3</b>：会清空本地盘上 labmon 之外写的 6.2 GiB。</div>'); has(r, '<div class="rk-need">');
+  ok(r.indexOf("rk-need") < r.indexOf("<summary>细节</summary>"), "细节该在要勾的风险后面"); ok(!/<details class="rk-more" open>/.test(r), "细节缺省该收着");
+  has(r.slice(r.indexOf("<summary>细节</summary>")), "停旧作业 → 提交新作业", "步骤该折进细节");
+  ok(/<details class="rk-more" open>/.test(run(O, 'POP.more = true; renewAsk(srvById("srv-d"))')), "展开过的细节重画后又收起了");
+  r = run(O, 'POP = {k: "renew", id: "srv-a", ack: false}; renewAsk(srvById("srv-a"))');
+  has(r, "：会中断在跑的任务，清空本地盘上 labmon 之外写的"); has(r, "丢掉 1 格待跑任务要的本地文件。", "补不了的本地文件该进结论");
+  ok(!run(O, 'renewAsk(srvById("srv-g"))').includes("rk-need"), "空闲又没写多少的不该有要勾的框");
+  has(run(O, 'renewAsk(srvById("srv-g"))'), "现在没有实验在跑，本地盘也没写多少。"); run(O, "POP = null");
   r = run(O, 'POP = {k: "off", id: "srv-d", ack: false}; offAsk(srvById("srv-d"))'); has(r, LD("关机")); has(r, "本地盘可以清空"); ok(!r.includes("会中断它"), "只是本地盘写得多不该说中断");
   ok(run(O, 'offGo(srvById("srv-d"))').includes("disabled"), "没勾就能关机");
   r = run(O, 'FWIZ = {kind: "swap", sid: "srv-d", pv: {}, ack: false}; wizForm()'); has(r, LD("换人")); has(r, "已和 PERSON3 说好，本地盘可以清空"); run(O, "FWIZ = null");
-  r = run(O, 'POP = {k: "renewpick", sel: new Set(["srv-d"]), ack: new Set()}; renewPicker()'); has(r, LD("续租")); has(r, 'data-rack="srv-d"'); has(r, "在跑实验或本地盘写得多：先勾选确认");
-  ok(/data-fop="renewgo" disabled/.test(r), "没勾就能批量续租"); run(O, "POP = null");
+  r = run(O, 'RPICK = {key: DH.renew(""), sel: new Set(["srv-d"]), ack: new Set()}; renewDrawer("")'); has(r, LD("续租")); has(r, 'data-rack="srv-d"'); has(r, "在跑实验或本地盘写得多：先勾选确认");
+  ok(/data-fop="renewgo" disabled/.test(r), "没勾就能批量续租");
+  ok(!/data-fop="renewgo" disabled/.test(run(O, 'RPICK.ack.add("srv-d"); renewDrawer("")')), "勾了确认还是不能批量续租");
+  // 输验证码时勾选锁住：要提交的 ids、ack 已记进 FCAP.next，再改勾选只改了页面、提交的还是旧的（Codex 审查 #20）
+  r = run(O, 'FCAP = {code: "ab12", tok: "t", input: "", t: Date.now(), next: {act: "renew", body: rpBody(RPICK)}, pop: "renew"}; renewDrawer("")');
+  ok(/data-rsel="srv-d" checked\s+disabled/.test(r) && /data-rack="srv-d" checked\s+disabled/.test(r), "输验证码时还能改勾选");
+  run(O, "FCAP = null; RPICK = null");
   // 预备续租的确认也提一句
   has(run(O, 'POP = {k: "reserve", id: "srv-a"}; renewBtns(D.hosts[0])'), LA); run(O, "POP = null");
 });
@@ -419,6 +434,7 @@ t("overview", "窄屏的弹窗贴在屏幕底部，宽表照常横向滚，页�
   ok(/\.pop, ?\.pop-l \.pop ?\{ ?position: fixed; top: auto;[^}]*bottom: calc\(var\(--tabh\) \+ var\(--kb, 0px\)\);[^}]*max-width: none;[^}]*overflow-y: auto;/.test(nar),
      "窄屏的弹窗要 fixed 贴底、让出底栏与软键盘、太高时自己滚");
   ok(/:focus\) \.pop, ?#drw \.pop ?\{ ?bottom: calc\(8px \+ env\(safe-area-inset-bottom\) \+ var\(--kb, 0px\)\);/.test(nar), "打字时（底栏收起）与抽屉里的弹窗贴到底、让出软键盘");
+  ok(/body:has\(#drw [^{]*:focus\) #drw \.pane ?\{ ?bottom: var\(--kb, 0px\);/.test(nar), "抽屉里打字时抽屉要让出软键盘（批量续租底部的验证码，Codex 审查 #20）");
   ok(/\.scroll:has\(\.pop\) ?\{ ?overflow: visible;? ?\}/.test(ovHtml.slice(0, m.index).replace(/\s+/g, " ")), "宽屏的弹窗不被滚动区裁掉（这条不能丢）");
   // fitPops：量软键盘占掉的高度与看得见的高度；贴底（fixed）的不挪；宽屏的超出所在区域（与视口取交）左边往右挪、右边往左挪（#143：抽屉里靠右、向右开的弹窗）
   const O = ovCtx(OV, RR);
@@ -1248,6 +1264,30 @@ t("archive", "侧栏「已归档 N 个」与已归档的抽屉：路由、列出
   const S = ovCtx(OVS, RR); page(S, "#/"); ok(!el(S, "side").innerHTML.includes("已归档"), "没有归档的项目时不该有这一行");
   has(drw(S, "#/archived"), "没有归档的项目");
 });
+ta("overview", "批量续租：验证码回来前抽屉关了或换了一份勾选，旧回执作废（Codex 审查 #20）", async () => {
+  const C = accCtx(OV, ADMIN_ME, "#/fleet/renew/srv-d");
+  run(C, `render(true); OPS = {...fops(), session: {logged_in: false}}; RPICK.ack.add("srv-d");
+    fleetPost = async k => { if (k === "captcha") { RPICK = {key: DH.renew("srv-e"), sel: new Set(["srv-e"]), ack: new Set()}; return {code: "c1", tok: "t1"}; } return {}; }`);
+  await run(C, 'startOp("renew", rpBody(RPICK), "renew")');
+  ok(run(C, "FCAP") === null, "抽屉换了一份勾选，旧的验证码回执还是记进了 FCAP");
+  run(C, 'fleetPost = async k => k === "captcha" ? {code: "c2", tok: "t2"} : {}');
+  await run(C, 'startOp("renew", rpBody(RPICK), "renew")');
+  ok(run(C, 'FCAP?.next.body.ids.join()') === "srv-e", "同一份勾选的验证码该记下");
+  // 验证码已出来、不关抽屉直接换地址（换了一份勾选）：旧验证码作废，底部回到「续租所选」（Codex 审查 #20）
+  const h = run(C, 'RPICK = {key: DH.renew("srv-d"), sel: new Set(["srv-d"]), ack: new Set(["srv-d"])}; FCAP = {code: "c3", tok: "t3", input: "", t: Date.now(), next: {act: "renew", body: rpBody(RPICK)}, pop: "renew"}; renewDrawer("srv-e")');
+  ok(run(C, "FCAP") === null && h.includes('data-fop="renewgo"') && !h.includes("fcapin"), "换了抽屉地址，旧的验证码还留着");
+  // 从续租抽屉切到别的抽屉（服务器抽屉）再关：离开续租那一刻就作废，在途的回执也不再记下（Codex 审查 #20）
+  drw(C, "#/fleet/renew/srv-d");
+  run(C, 'RPICK.ack.add("srv-d"); FCAP = {code: "c4", tok: "t4", input: "", t: Date.now(), next: {act: "renew", body: rpBody(RPICK)}, pop: "renew"}');
+  drw(C, "#/fleet/srv/srv-e");
+  ok(run(C, "RPICK") === null && run(C, "FCAP") === null, "切到服务器抽屉后，续租的勾选与验证码还留着");
+  drw(C, "#/fleet/renew/srv-d");
+  run(C, 'RPICK.ack.add("srv-d"); fleetPost = async k => { if (k === "captcha") { location.hash = "#/fleet/srv/srv-e"; render(true); return {code: "c5", tok: "t5"}; } return {}; }');
+  await run(C, 'startOp("renew", rpBody(RPICK), "renew")');
+  drw(C, "#/fleet");
+  ok(run(C, "FCAP") === null && run(C, "RPICK") === null, "离开续租抽屉后回来的验证码回执还是记进了 FCAP");
+  ok(!drw(C, "#/fleet/renew/srv-d").includes("fcapin"), "重新打开续租抽屉恢复了旧的验证码");
+});
 ta("archive", "永久删除要求管理员和当前归档批次的确认", async () => {
   const A = ovCtx(OV, RR, "#/archived"), U = ovCtx(OV, RR, "#/archived");
   run(U, 'ME = {...ME, admin: false, scopes: ["project", "read"], own: ["proj-old"]}');
@@ -1279,7 +1319,7 @@ t("escape", "恶意快照：各路由与记录卡都转义", () => {
   for (const r of ROUTES) { const h = page(E, r); ok(!raw(h), r + " 没转义"); }
   for (const tab of TABS) { E.RTAB = tab; for (const r of ["#/", "#/host/srv-a", "#/host/srv-b"]) ok(!raw(page(E, r)), `${r} ${tab} 没转义`); }
   E.RTAB = "done";
-  for (const [r, what] of [["#/", "总览"], ["#/host/srv-a", "主机页"], ["#/fleet", "组内"], ["#/fleet/disk", "共享盘"], ["#/fleet/srv/srv-d", "服务器抽屉"], ["#/fleet/srv/srv-a", "自用主机抽屉"], ["#/fleet/people/NEWBIE", "人员抽屉"], ["#/log", "记录页"], ["#/fleet/guard", "保活守护"]])
+  for (const [r, what] of [["#/", "总览"], ["#/host/srv-a", "主机页"], ["#/fleet", "组内"], ["#/fleet/disk", "共享盘"], ["#/fleet/srv/srv-d", "服务器抽屉"], ["#/fleet/srv/srv-a", "自用主机抽屉"], ["#/fleet/people/NEWBIE", "人员抽屉"], ["#/log", "记录页"], ["#/fleet/guard", "保活守护"], ["#/fleet/renew", "批量续租抽屉"]])
     has(page(E, r), BADESC, what + " 没把恶意串转义后写出来：");
   { const tp = tips(page(E, "#/")); has(tp, "挪" + BADESC, "挪法建议悬停"); }
   E.RTAB = "log"; has(page(E, "#/host/srv-a"), BADESC, "worker 日志");
@@ -2061,9 +2101,9 @@ t("auth", "管理员从公网入口来：平台操作的按钮换成一句「请
   ok(/data-fop="rpop"|data-renew=/.test(a), "内网入口的主机页没有续租按钮");
   ok(!/data-fop="rpop"|data-renew=|data-fop="renewone"/.test(b), "公网入口的主机页还有续租按钮"); has(b, "请从内网入口操作，或为此管理员开启公网平台操作");
   has(b, "data-now", "公网入口的立即采集");
-  for (const r of ["#/fleet", "#/fleet/srv/srv-a", "#/fleet/people", "#/fleet/guard"]) {
+  for (const r of ["#/fleet", "#/fleet/srv/srv-a", "#/fleet/people", "#/fleet/guard", "#/fleet/renew"]) {
     const h = page(Pb, r); clean(h, r);
-    ok(!/data-fop="(sync|renewpick|wiz|offpick|bpick|ka|padd|pgive|pdef|pedit|logout)"|data-gdsave/.test(h), r + "：公网入口还有平台操作按钮");
+    ok(!/data-fop="(sync|renewgo|wiz|offpick|bpick|ka|padd|pgive|pdef|pedit|logout)"|data-gdsave|data-drw="#\/fleet\/renew/.test(h), r + "：公网入口还有平台操作按钮");
   }
   has(page(Pb, "#/fleet"), "请从内网入口操作，或为此管理员开启公网平台操作"); has(page(Pb, "#/fleet/srv/srv-a"), "请从内网入口操作，或为此管理员开启公网平台操作");
   has(page(A, "#/fleet"), 'data-fop="sync"', "内网入口的核对按钮");

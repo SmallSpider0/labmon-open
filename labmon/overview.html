@@ -255,6 +255,7 @@ svg.spark { flex: 1; min-width: 0; width: 100%; height: 22px; cursor: crosshair;
 .btn.undo { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
 .btn.pri.dz { background: var(--bad); border-color: var(--bad); color: #fff; }
 .btn.pri.dz:hover:not(:disabled) { background: color-mix(in srgb, var(--bad) 85%, #000); }
+.btn.pri:disabled, .btn.pri.dz:disabled { background: var(--soft); border-color: var(--line); color: var(--muted); opacity: 1; }   /* 主色的灰掉时看得出不能点（#14） */
 .btn.mini-btn { min-height: 24px; padding: 0 10px; margin-left: 8px; font-size: 12px; }
 .lnk { border: 0; background: none; padding: 0; font: inherit; color: var(--accent); cursor: pointer; }
 .lnk:hover { text-decoration: underline; }
@@ -274,7 +275,7 @@ svg.spark { flex: 1; min-width: 0; width: 100%; height: 22px; cursor: crosshair;
 .popw { position: relative; display: inline-flex; }
 .pop { position: absolute; top: calc(100% + 6px); right: 0; z-index: 8; display: block; width: max-content; max-width: min(340px, calc(100vw - 32px));
   background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; box-shadow: 0 6px 20px rgba(0, 0, 0, .14);
-  font-size: 12.5px; line-height: 1.5; white-space: normal; text-align: left; cursor: default; }
+  font-size: 12.5px; line-height: 1.5; white-space: normal; overflow-wrap: anywhere; text-align: left; cursor: default; }   /* 长路径在 / 处也能断行，不撑出横向滚动（#14） */
 .pop-b { display: flex; justify-content: flex-end; gap: 6px; margin-top: 8px; }
 .pop .scroll { overflow-x: auto; }
 .scroll:has(.pop) { overflow: visible; }           /* 宽屏：表格里的弹窗开着时不被滚动区裁掉（窄屏弹窗贴底，滚动区照常，见下面窄屏一段） */
@@ -285,6 +286,25 @@ svg.spark { flex: 1; min-width: 0; width: 100%; height: 22px; cursor: crosshair;
 .pop-w { color: var(--warn); margin-top: 4px; }
 .pop-ck { display: block; margin-top: 6px; }
 @media (min-width: 861px) { .pop:has(> .pform) { width: min(560px, calc(100vw - 32px)); max-width: none; } }   /* 人员设置（镜像、启动命令）：宽一些，输入框不截断（#15）；窄屏照常贴底 */
+/* 平台操作确认的分层（#14，riskSay、riskNeed、riskMore）：一句结论 → 要勾才动的风险（琥珀框）→ 折起来的细节 */
+.rk-say { font-size: 13px; }
+.rk-need { margin-top: 8px; padding: 6px 10px; border-radius: 7px; border: 1px solid color-mix(in srgb, var(--warn) 45%, var(--line));
+           background: color-mix(in srgb, var(--warn) 8%, transparent); font-size: 12.5px; overflow-wrap: anywhere; }
+.rk-need ul { margin: 0; padding-left: 16px; }
+.rk-need .pop-ck { margin-top: 4px; font-weight: 600; }
+.rk-more { margin-top: 6px; }
+.rk-more > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.rk-more > :not(summary) { margin-top: 4px; }
+/* 批量续租抽屉（#14）：一台一行，勾选、名字、状态、租期；下一行要注意的与「已说好」；底部固定一条按钮 */
+.rp-row { display: flex; gap: 10px; align-items: flex-start; padding: 9px 0; border-top: 1px solid var(--line); }
+.rp-row:first-child { border-top: 0; }
+.rp-row > input { margin-top: 3px; flex: none; }
+.rp-m { flex: 1; min-width: 0; }
+.rp-h { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.rp-w { color: var(--warn); margin-top: 3px; overflow-wrap: anywhere; }
+.rp-ack { display: block; margin-top: 4px; }
+.dft { flex: none; padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); background: var(--card); border-top: 1px solid var(--line); }
+.dft > .rn:first-child { margin-top: 0; }
 /* 选一个将来的时刻（whenPick：借卡的约定、改约定、优先的到期）：标题、日期框 + 时、分两个下拉、小签（现在、往后加、清空）、一句到几点 */
 .when { display: grid; justify-items: start; gap: 6px; margin: 10px 0 8px; }
 .when-in { font: inherit; font-size: 13px; min-height: 32px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 7px;
@@ -863,6 +883,7 @@ body.more-open { overflow: hidden; }
   .tlkey.open .tlkey-l { margin-top: 6px; }
   #drw .pane { top: 6vh; left: 0; width: auto; border-left: 0; border-top: 1px solid var(--line); border-radius: 14px 14px 0 0; overflow: hidden;
                box-shadow: 0 -10px 30px rgba(0, 0, 0, .14); transform: translateY(104%); }
+  body:has(#drw :is(input:not([type=checkbox]):not([type=radio]), textarea):focus) #drw .pane { bottom: var(--kb, 0px); }   /* 抽屉里打字时让出软键盘（--kb 由 fitPops 量），底部固定的验证码与按钮不被挡（Codex 审查 #20） */
   .dh { padding-left: 12px; }
   .drawer-tabs { padding: 0 12px; }
   .db { padding: 10px 12px 28px; }
@@ -956,6 +977,7 @@ function route(h = location.hash) {
   let d = h.match(/^#\/log(?:\?(.*))?$/);
   if (d) return {kind: "log", f: Object.fromEntries(new URLSearchParams(d[1] || ""))};
   if (h === "#/fleet/guard") return {kind: "fleet", tab: BGTAB || "slots", drw: {k: "guard", id: ""}};
+  if ((d = h.match(/^#\/fleet\/renew(?:\/(.+))?$/))) return {kind: "fleet", tab: BGTAB || "slots", drw: {k: "renew", id: d[1] ? dec(d[1]) : ""}};
   d = h.match(/^#\/fleet\/srv\/(.+)$/);
   if (d) return {kind: "fleet", tab: BGTAB || "slots", drw: {k: "srv", id: dec(d[1])}};
   if ((d = h.match(/^#\/fleet\/new\/(.+)$/))) return {kind: "fleet", tab: BGTAB || "slots", drw: {k: "new", id: dec(d[1])}};
@@ -1003,7 +1025,7 @@ function closeDrw() {
 }
 function stepDrw(dir) {
   const d = route().drw;
-  if (!d || d.k === "new" || d.k === "guard" || d.k === "proj" || d.k === "arch" || d.k === "account" || d.id === "+") return;
+  if (!d || d.k === "new" || d.k === "guard" || d.k === "renew" || d.k === "proj" || d.k === "arch" || d.k === "account" || d.id === "+") return;
   const ids = d.k === "srv" ? srvOrder() : peopleOrder(), k = ids.indexOf(d.id);
   if (k >= 0 && ids.length > 1) nav(DH[d.k](ids[(k + dir + ids.length) % ids.length]));
 }
@@ -2397,12 +2419,13 @@ const goRenew = (x, primary = false) => !x ? "" : opPop("renew", x,
   `<button class="btn ${FRISKY(x) ? "danger" : primary ? "pri" : ""}" data-fop="renewone" data-id="${esc(x.id)}" ${fops().op?.active ? "disabled" : ""} ${tip(RENEW_TIP)}>${icon("renew")}续租</button>`,
   () => renewAsk(x),
   () => `<button class="btn pri${FRISKY(x) ? " dz" : ""}" data-fop="renew1" data-id="${esc(x.id)}" ${FRISKY(x) && !POP.ack || fops().op?.active ? "disabled" : ""}>${FBUSY(x) ? "中断并续租" : "续租"}</button>`);
+// 续租一台的确认（分层见 riskSay）：自用主机补不了的本地文件也进结论，明细（lossNote）与管整台主机的项目折在「细节」里
 function renewAsk(x) {
-  const h = x.mine ? D.hosts.find(e => e.id === x.id) : null;
-  return `<b>续租${myFleetHost(x) ? "" : " " + esc(x.holder)}</b>：停旧作业 → 提交新作业、等运行 → ${x.mine ? "等 ssh、拉起 worker（ssh 断开约 2 分钟）" : "ssh 上去开保活"}。`
-    + renewWarn(x, !h).map(t => `<div class="pop-w">${esc(t)}</div>`).join("") + (h ? affects(h) + lossNote(h) : "")
-    + (FRISKY(x) ? `<label class="pop-ck"><input type="checkbox" data-pack ${POP.ack ? "checked" : ""}> ${ackText(x)}</label>` : "")
-    + `<div class="sm mut" style="margin-top:4px">开始前会再${x.mine ? "看" : "探"}一次，在跑而这里没确认的就不动。</div>`;
+  const h = x.mine ? D.hosts.find(e => e.id === x.id) : null, fatal = (h?.status?.local?.jobs || []).filter(r => !r.heal);
+  return `<div class="rk-say"><b>续租${myFleetHost(x) ? "" : " " + esc(x.holder)}</b>：${esc(riskSay(x, fatal.length ? [`丢掉 ${fatal.length} 格待跑任务要的本地文件`] : []))}</div>`
+    + riskNeed(x, "续租", "data-pack", POP.ack)
+    + riskMore(`<div>停旧作业 → 提交新作业、等运行 → ${x.mine ? "等 ssh、拉起 worker（ssh 断开约 2 分钟）" : "ssh 上去开保活"}。开始前会再${x.mine ? "看" : "探"}一次，在跑而这里没确认的就不动。</div>`
+      + renewWarn(x, {local: false, risk: false}).map(t => `<div class="pop-w">${esc(t)}</div>`).join("") + (h ? affects(h) + lossNote(h) : ""));
 }
 // 自用主机的续租按钮（概况条）：预备续租 ↔ 取消预备原地换，续租；续租完保持不放行时只有「恢复放行」。
 // 预备续租先在按钮旁确认；取消预备一点就生效，只有在自动预备的时段里（取消后这一期不再自动预备）才先确认
@@ -2729,14 +2752,14 @@ function fleetAlerts(mine = true) {      // mine=false：首页用，自用主�
   if (D.disk?.error) out.push(D.disk.error);
   return out;
 }
-// 组内提醒条；租期快到的那一条带「续租」：打开续租面板并勾上这一台
+// 组内提醒条；租期快到的那一条带「续租」：打开批量续租的抽屉，只勾这一台
 const fleetDue = () => [...D.fleet?.servers || [], ...D.fleet?.mine || []].filter(x => !x.off && leaseSoon(x.lease_end));
 // fold：人员、共享盘选项卡上收成一行「⚠ 组内 N 条提醒」，点开看全部（#15：完整的只在「服务器」选项卡顶上，别的选项卡不把正文挤到第一屏以下）；开合记在本机（cardOpen 的 fleetal）
 function fleetAlertBox(al, btn = true, fold = false) {      // 详情页上工具栏已有「续租」，提醒条不再放
   if (!al.length) return "";
   const due = fleetDue();
   const rows = al.map(m => { const x = due.find(x => m.startsWith(fName(x)) && m.includes("租期"));
-    return `<div>⚠ ${esc(m)}${btn && x && canOps() && !fops().op?.active ? ` ${renewPickPop(`<button class="btn mini-btn" data-fop="renewpick" id="renewpick-${esc(x.id)}" data-id="${esc(x.id)}">续租</button>`, x.id)}` : ""}</div>`; }).join("");
+    return `<div>⚠ ${esc(m)}${btn && x && canOps() && !fops().op?.active ? ` <button class="btn mini-btn" data-drw="${esc(DH.renew(x.id))}">续租</button>` : ""}</div>`; }).join("");
   if (!fold) return `<div class="alerts">${rows}</div>`;
   const open = !!ST.get("cardOpen", {}).fleetal;
   return `<details class="alerts fold fleet-al" data-fold="fleetal" ${open ? "open" : ""}><summary>${icon("chev")}⚠ 组内 ${al.length} 条提醒${open ? "" : `<span class="sm mut" style="margin-left:6px">点开看</span>`}</summary>${rows}</details>`;
@@ -2939,7 +2962,7 @@ function fleetPage() {
     ${syncLine()}
     <button class="btn" data-drw="${DH.guard()}" ${tip("GPU 连着空闲就自动开保活，有实验上来就让出：在这里按台开关、改时间")}>${icon("shield")}保活守护 <span class="mut">${F.servers.filter(x => !x.off && x.guard?.on).length}</span></button>
     ${canOps() ? `${syncPop(`<button class="btn" data-fop="sync" id="fleet-sync" ${act} ${tip("读作业列表，逐台核对作业名、资源池、端口 22→port，更新开机参数，补存克隆配置；再读资源池规格、挂载卷与镜像。只读，不改平台上的作业。对不上的进提醒条，改了的进事件")}>${icon("cloud")}与平台核对</button>`)}
-      ${renewPickPop(`<button class="btn" data-fop="renewpick" id="renewpick-all" ${act} ${tip("选几台一起续租：只登录一次，逐台停旧作业、提交新作业、等运行，再 ssh 上去开保活")}>${icon("hourglass")}续租</button>`)}` : opsNote()}</div>
+      <button class="btn" data-drw="${DH.renew()}" ${act} ${tip("选几台一起续租：只登录一次，逐台停旧作业、提交新作业、等运行，再 ssh 上去开保活")}>${icon("hourglass")}续租</button>` : opsNote()}</div>
     ${pools.map(poolGroup).join("") || `<div class="empty">[fleet] 里还没有服务器。</div>`}${fLegend()}</div>`;
   if (F.unknown.length) s += `<div class="card"><div class="chd"><b>未识别的 GPU 进程</b><span class="sm mut">显卡上有这些进程，但在这台的容器里找不到（多半是同一宿主机上别的容器在用这张卡）</span></div><div class="scroll"><table>
     <tr><th>服务器</th><th>负载</th><th class="r">显存</th><th>目录</th></tr>${F.unknown.map(w => `<tr class="link" tabindex="0" data-drw="${esc(DH.srv(w.id))}"><td class="nw"><b>${esc(w.holder)}</b> <span class="mut sm">${esc(w.id)}</span></td>
@@ -2986,6 +3009,7 @@ async function probeNow(id) {
 /* ---------- 详情抽屉：桌面从右侧滑出、窄屏从底部升起，背后的卡片墙不动。地址写在 hash 里
    （#/fleet/srv/<id>、#/fleet/people/<名字>、#/fleet/new/<池>，不记历史），Esc、点空白处、右上角 × 都能关 ---------- */
 const DH = {srv: id => "#/fleet/srv/" + encodeURIComponent(id), person: n => "#/fleet/people/" + encodeURIComponent(n), new: p => "#/fleet/new/" + encodeURIComponent(p), guard: () => "#/fleet/guard",
+  renew: (id = "") => "#/fleet/renew" + (id ? "/" + encodeURIComponent(id) : ""),
             proj: id => `#/p/${encodeURIComponent(id)}/manage`, arch: () => "#/archived"};
 let DKEY = null, DLAST = "";
 const dHead = (av, title, sub, right = "", mark = "", status = "") => { const b = dBack();
@@ -2995,7 +3019,7 @@ const dHead = (av, title, sub, right = "", mark = "", status = "") => { const b 
 // 从一个抽屉里点开另一个（服务器、人、保活守护）：记下来路，只记一级，返回键回去；关掉抽屉或从页面上点开的就清掉
 let DBACK = null;
 const dBack = () => { const d = DBACK && route(DBACK).drw;
-  return !d || DBACK === location.hash ? "" : d.k === "guard" ? "保活守护" : d.k === "proj" ? "管理" : d.k === "arch" ? "已归档" : d.k === "srv" ? srvById(d.id)?.holder || d.id : d.k === "new" ? "开新的" : d.id === "+" ? "新的人" : d.id; };
+  return !d || DBACK === location.hash ? "" : d.k === "guard" ? "保活守护" : d.k === "renew" ? "续租" : d.k === "proj" ? "管理" : d.k === "arch" ? "已归档" : d.k === "srv" ? srvById(d.id)?.holder || d.id : d.k === "new" ? "开新的" : d.id === "+" ? "新的人" : d.id; };
 const dNav = (ids, id) => ids.length > 1 && ids.includes(id) ? `<span class="dnav"><button class="ib" data-dnav="-1" aria-label="上一个" ${tip("上一个（←）")}>${icon("chevl")}</button><button class="ib" data-dnav="1" aria-label="下一个" ${tip("下一个（→）")}>${icon("chevr")}</button></span>` : "";
 const dSec = (title, body, extra = "", id = "") => `<section class="card"${id ? ` id="${id}"` : ""}><div class="chd wrap"><b>${title}</b>${extra}</div>${body}</section>`;
 const kvHtml = kv => `<div class="kv">${kv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("")}</div>`;
@@ -3058,7 +3082,7 @@ function borrowSec(x) {
 // 占掉的高度（--kb）与看得见的高度（--vvh），弹窗随之上移、变矮，确认键不被键盘挡住
 let POP = null;    // 开着的弹窗 {k: 哪种, id: 哪台, ack: 勾了「可以中断」}；借用表单的输入也记在这里
 const popIs = (k, id) => POP?.k === k && POP.id === id;
-function popClose() { POP = null; if (FCAP?.pop) FCAP = null; }      // 弹窗里取的验证码随弹窗作废
+function popClose() { POP = null; if (FCAP?.pop) FCAP = null; }      // 弹窗里取的验证码随弹窗作废（批量续租抽屉里验证码的「取消」同样经它）
 function popToggle(k, id, extra = {}) { const same = popIs(k, id); popClose(); if (!same) POP = {k, id, ack: false, ...extra}; }   // 再点一下收起
 const popX = `<button type="button" class="btn" data-fop="popx" data-pop-x>取消</button>`;
 const popConfirm = (btn, open, body, go, keep = false) => `<div class="popw">${btn}${open ? `<div class="pop${keep ? " keep" : ""}" role="dialog">${body}${go == null ? "" : `<div class="pop-b">${go}${popX}</div>`}</div>` : ""}</div>`;
@@ -3299,8 +3323,8 @@ let FFOCUS = null;         // 重画完把光标放进这个输入框（验证�
 let FWIZ = null;           // 换人、开机向导：{kind: swap | open, sid, pool, person, image, ack, newp, adv: 展开镜像与参数, pv: 预览, err, busy}
 let FPED = null;           // 添加组内人员的独立抽屉草稿
 const NAME_RE = /^[0-9A-Za-z_~-]{1,32}$/;      // 与 platform.py 一致
-async function startOp(act, body, pop = false) {          // 已登录就直接开始，否则先取验证码（pop：验证码出在按钮旁的弹窗里）
-  const anchor = POP, wiz = FWIZ;
+async function startOp(act, body, pop = false) {          // 已登录就直接开始，否则先取验证码（pop：验证码出在发起处，true 是按钮旁的弹窗，"renew" 是批量续租抽屉的底部）
+  const here = () => pop === "renew" ? RPICK : POP, anchor = POP, from = here(), wiz = FWIZ;   // from：发起的那个弹窗或批量续租抽屉的勾选，回来时已不是它就丢掉验证码
   if (act === "ka" || fops().session?.logged_in) {
     OPS = await fleetPost(act, body);
     if (FWIZ === wiz) FWIZ = null;
@@ -3309,7 +3333,7 @@ async function startOp(act, body, pop = false) {          // 已登录就直接�
   }
   else {
     const j = await fleetPost("captcha");
-    if (pop && POP !== anchor) return;
+    if (pop && here() !== from) return;
     FCAP = {code: j.code, tok: j.tok, input: "", t: Date.now(), next: {act, body}, pop}; FFOCUS = "fcapin";   // tok：这张验证码的标识，提交时带回去（别的页面换过就作废）
     if (route().kind === "fleet" && !pop) FSCROLL = "fpanel";
   }
@@ -3376,10 +3400,7 @@ async function fopAct(act, body) {
         catch (e) { if (POP === pop) pop.err = e.message || String(e); }
       }
     }
-    else if (act === "renewpick") {                    // 缺省勾上 24 小时内到期、没在跑实验的；从提醒条点的只勾那一台
-      const pre = body?.ids || fleetDue().filter(x => !FRISKY(x)).map(x => x.id);
-      popToggle("renewpick", body?.ids?.[0] || "", {route: location.hash, trigger: "renewpick-" + (body?.ids?.[0] || "all"), sel: new Set(pre), ack: new Set()});
-    } else if (act === "renewone") popToggle("renew", body.ids[0]);
+    else if (act === "renewone") popToggle("renew", body.ids[0]);
     else if (act === "renew1") { await dismissDone(); await startOp("renew", {ids: [POP.id], ack: POP.ack ? [POP.id] : []}, true); }
     else if (act === "rpop") popToggle(body.kind, body.ids[0]);          // 主机页的预备续租、取消预备
     else if (act === "guard-edit") {
@@ -3390,14 +3411,13 @@ async function fopAct(act, body) {
       if (POP?.trigger) { document.activeElement?.blur(); FFOCUS = POP.trigger; }
       popClose();
     }
-    else if (act === "renewgo" && POP?.k === "renewpick" && !POP.busy) {
-      const pop = POP;
-      const ids = [...pop.sel], ack = [...pop.ack].filter(i => pop.sel.has(i));
-      pop.busy = true;
+    else if (act === "renewgo" && RPICK && !RPICK.busy) {        // 批量续租抽屉：验证码出在抽屉底部（FCAP.pop = "renew"），开始后进度出在抽屉顶上
+      const R = RPICK, {ids, ack} = rpBody(R);
+      R.busy = true;
       try {
         await dismissDone();
-        if (POP === pop) await startOp("renew", {ids, ack}, true);
-      } finally { pop.busy = false; }
+        if (RPICK === R) await startOp("renew", {ids, ack}, "renew");
+      } finally { R.busy = false; }
     }
     else if (act === "offpick") popToggle("off", body.ids[0]);
     else if (act === "offgo") { await dismissDone(); await startOp("off", {ids: [POP.id], ack: POP.ack ? [POP.id] : []}, true); }
@@ -3497,7 +3517,7 @@ function syncPop(btn) {
     ? `<div class="rn-err">${esc(POP.err)}</div>` : "", FCAP?.pop ? null : "", !!FCAP?.pop);
 }
 // 操作面板：操作进度与换人、开机向导，同一时间只有一个；x 给了就只看这一台的（详情页）。
-// 续租一台、关机的确认（和它们的验证码）在按钮旁的弹窗里，不在面板里。
+// 续租一台、关机的确认（和它们的验证码）在按钮旁的弹窗里，批量续租的验证码在它的抽屉底部（FCAP.pop），都不在面板里。
 // sid：组内服务器页把面板放进这一台的卡里；没有 sid 而有 pool：放在这个池「+ 开新的」那一台；都没有就另起一张卡
 function fPanel(x) {
   const o = fops(), op = o.op, one = ids => (ids || []).length === 1 ? ids[0] : null;
@@ -3517,17 +3537,33 @@ const FRISKY = x => FBUSY(x) || !!x.lw?.risk;
 const ackText = x => { const w = [FBUSY(x) && "可以中断", x.lw?.risk && "本地盘可以清空"].filter(Boolean).join("、");
   return myFleetHost(x) ? `确认${w}` : `已和 ${esc(x.holder)} 说好，${w}`; };
 const workOf = x => (x.sample?.work || x.work || []).filter(v => v.kind !== "keepalive").map(v => v.label).slice(0, 2).join("、");
-// 关机的确认（弹窗里）：做什么、会不会中断；在跑别人实验的要勾「已说好」，自用主机 worker 有任务就不让关
+// 会中断什么（FBUSY 时）：批量续租的注意、确认里要勾的风险共用；verb：续租、关机、换人
+const busyText = (x, verb) => { if (!FBUSY(x)) return ""; const w = workOf(x);
+  return `${x.state === "job" ? `在跑${x.mine ? "任务" : "实验"}` : x.mine ? "有 labmon 之外的 GPU 进程" : "有未识别的 GPU 进程"}${w ? `（${w}）` : ""}，${verb}会中断它`; };
+// 平台操作（续租一台、关机、换人）确认的分层（#14）：一句结论 riskSay → 要勾才动的风险 riskNeed（同 FRISKY，后端 fleetops._risk）→ 其余折进 riskMore。
+// 结论只说会中断、清空、丢掉什么（lose：调用处另加的，如自用主机补不了的本地文件），具体的进程与路径在 riskNeed 里
+function riskSay(x, lose = []) {
+  const hit = [FBUSY(x) && (x.state === "job" ? `中断在跑的${x.mine ? "任务" : "实验"}` : x.mine ? "中断 labmon 之外的 GPU 进程" : "中断未识别的 GPU 进程"),
+    x.lw?.risk && `清空本地盘上 labmon 之外写的 ${g1(lwOut(x.lw))} GiB`, ...lose].filter(Boolean);
+  return hit.length ? `会${hit.join("，")}。` : x.state === "down" ? "现在连不上，看不到在跑什么。" : !x.state ? "还没探到在跑什么。"
+    : `现在没有${x.mine ? "任务" : "实验"}在跑，本地盘也没写多少。`;
+}
+// 要勾才动的风险：琥珀框里逐条写会中断的进程、会清空的本地盘（路径能断行），下面是勾选框（attr：弹窗 data-pack 记进 POP.ack，换人向导 data-wack 记进 FWIZ.ack）
+const riskNeed = (x, verb, attr, on) => !FRISKY(x) ? "" : `<div class="rk-need"><ul>${[busyText(x, verb), lwText(x.lw, verb)].filter(Boolean).map(t => `<li>${esc(t)}</li>`).join("")}</ul>
+  <label class="pop-ck"><input type="checkbox" ${attr} ${on ? "checked" : ""}> ${ackText(x)}</label></div>`;
+// 弹窗里折起来的细节；开合记在 POP.more（document 上的 toggle 监听记），定时重画不收回去
+const riskMore = body => body ? `<details class="rk-more" ${POP?.more ? "open" : ""}><summary>细节</summary>${body}</details>` : "";
+// 关机的确认（弹窗里，分层见 riskSay）：做什么、会不会中断；在跑别人实验的要勾「已说好」，自用主机 worker 有任务就不让关
 function offAsk(x) {
-  const risky = FRISKY(x), down = x.state === "down", busy = x.mine && x.state === "job", lw = lwText(x.lw, "关机");
+  const down = x.state === "down", busy = x.mine && x.state === "job";
   const what = x.mine ? `在平台上停掉 ${esc(x.holder)} 的作业 ${esc(x.job)}，主机清单里这台标成已归还（看板不再连它，也不再拉起 worker）。之后要用可以在这个池点「开新的」。`
     : `在平台上停掉它的作业（作业名、资源池、端口 22→${esc(x.port)} 都对上才停；开始前再探一次）。之后这台不再探、不提醒租期、不算配额；要用时点「开机」。`;
-  return `<b>关机${x.mine ? (myFleetHost(x) ? "（我的自用主机）" : "（自用主机）") : ""}</b>：${what}
-      ${x.mine ? "" : `<div class="sm mut">要接着给别人用，点「换人」更好：停旧后立刻开新的，这台不会被别人占走。</div>`}
-    ${down && !x.mine ? `<div class="pop-w">现在连不上：平台上要是已经没有它运行中的作业，就只在看板上标为已关机。</div>` : ""}
-    ${busy ? `<div class="rn-err">worker 还有任务在跑（${esc(x.work.map(w => w.label).join("、"))}）：先在<a href="#/host/${encodeURIComponent(x.id)}">主机页</a>暂停队列。</div>`
-      : risky ? `${FBUSY(x) ? `<div class="rn-err">现在${x.mine ? "有 labmon 之外的 GPU 进程" : FSN[x.state]}（${esc(workOf(x))}），关机会中断它。</div>` : ""}
-      ${lw ? `<div class="pop-w">${esc(lw)}</div>` : ""}<label class="pop-ck"><input type="checkbox" data-pack ${POP.ack ? "checked" : ""}> ${ackText(x)}</label>` : ""}`;
+  const head = `<b>关机${x.mine ? (myFleetHost(x) ? "（我的自用主机）" : "（自用主机）") : " " + esc(x.holder)}</b>：${x.mine ? "停掉作业，这台标成已归还" : "停掉作业，之后不再探、不提醒租期"}。`;
+  return `<div class="rk-say">${head}${busy ? "" : esc(riskSay(x))}</div>`
+    + (busy ? `<div class="rn-err">worker 还有任务在跑（${esc(x.work.map(w => w.label).join("、"))}）：先在<a href="#/host/${encodeURIComponent(x.id)}">主机页</a>暂停队列。</div>`
+      : riskNeed(x, "关机", "data-pack", POP.ack))
+    + riskMore(`<div>${what}</div>${x.mine ? "" : `<div class="mut">要接着给别人用，点「换人」更好：停旧后立刻开新的，这台不会被别人占走。</div>`}`
+      + (down && !x.mine ? `<div class="pop-w">现在连不上：平台上要是已经没有它运行中的作业，就只在看板上标为已关机。</div>` : ""));
 }
 const offGo = x => `<button class="btn pri dz" data-fop="offgo" data-id="${esc(x.id)}" ${x.mine && x.state === "job" || FRISKY(x) && !POP.ack || fops().op?.active ? "disabled" : ""}>关机</button>`;
 // 换人、开机向导：点一个人 → 一句话核对 → 一个按钮。镜像与参数收在「高级」里
@@ -3572,9 +3608,7 @@ function wizForm() {
     ${chk}
     ${W.person && pv.after ? `<div class="rn-state">${esc(pv.after)}</div>` : ""}
     ${busyMine ? `<div class="rn-state bad">这台 worker 还有任务在跑（${esc(x.work.map(w => w.label).join("、"))}）：先在<a href="#/host/${encodeURIComponent(x.id)}">主机页</a>暂停队列。</div>` : ""}
-    ${risky ? `${FBUSY(x) ? `<div class="rn-state bad">${myFleetHost(x) ? `你的 ${esc(x.id)} 上有 labmon 之外的 GPU 进程` : `${esc(x.holder)} 现在${FSN[x.state]}`}（${esc(workOf(x))}），换人会中断它。</div>` : ""}
-      ${x.lw?.risk ? `<div class="rn-state">${esc(lwText(x.lw, "换人"))}</div>` : ""}
-      <label class="sm" style="display:block;margin-top:6px"><input type="checkbox" data-wack ${W.ack ? "checked" : ""}> ${ackText(x)}</label>` : ""}
+    ${risky ? riskNeed(x, "换人", "data-wack", W.ack) : ""}
     ${W.person ? `<button class="lnk sm wz-tg" data-fop="wizadv">${W.adv ? "收起镜像与参数" : "镜像与参数"}</button>${adv}` : ""}
     <div class="rn"><button class="btn pri" data-fop="wizgo" ${ready ? "" : "disabled"} ${tip("开始前连平台再核一次，有一项不对就什么都不动；出错停在那一步，不自动重试")}>${esc(go)}</button>${fopBtn("wizcancel", "取消")}
       ${why ? `<span class="sm" style="color:${!W.person ? "var(--muted)" : "var(--warn)"}">${esc(why)}</span>` : ""}</div>
@@ -3590,37 +3624,44 @@ function opProgress(op) {
       : `<div class="rn-state">发给 ${esc(op.conn.holder)}：<code>${esc(op.conn.cmd)}</code> <button class="lnk" data-copy="${esc(op.conn.cmd)}">复制</button></div>` : "")
     + (op.active ? "" : `<div class="rn">${fopBtn("dismiss", "知道了")}</div>`);
 }
-// 续租这一台要注意的（批量续租的表格与续租一台的弹窗共用）；local：带上本地文件会丢的一句（弹窗里自用主机改用 lossNote 的明细）
-function renewWarn(x, local = true) {
-  const now = D.generated, w = [], fatal = x.mine && local ? (D.hosts.find(e => e.id === x.id)?.status?.local?.jobs || []).filter(r => !r.heal) : [];
-  if (x.state === "job") w.push(`在跑${x.mine ? "任务" : "实验"}（${workOf(x)}），续租会中断它`);
-  if (x.state === "unknown") w.push(`有未识别的 GPU 进程（${workOf(x)}），续租会中断它`);
-  if (x.state === "down") w.push(`连不上${x.down ? "：" + x.down : ""}`);
+// 续租这一台要注意的（批量续租的抽屉与续租一台的弹窗共用）；local：带上本地文件会丢的一句（弹窗里自用主机改用 lossNote 的明细）；
+// risk：带上要勾的两件（会中断、会清空本地盘；弹窗里它们在 riskNeed 里）
+function renewWarn(x, {local = true, risk = true} = {}) {
+  const w = [], fatal = x.mine && local ? (D.hosts.find(e => e.id === x.id)?.status?.local?.jobs || []).filter(r => !r.heal) : [];
+  if (risk && FBUSY(x)) w.push(busyText(x, "续租"));
+  if (x.state === "down") w.push(x.down || "连不上");          // x.down 本身就是一句（“连不上：timeout”）
   if (!x.last && !x.mine) w.push("还没探过");
   if (fatal.length) w.push(`${fatal.length} 格要用的本地文件会随容器重启清空，续租完先不恢复放行`);
-  if (x.lw?.risk) w.push(lwText(x.lw));
+  if (risk && x.lw?.risk) w.push(lwText(x.lw));
   if (x.lease_end && leaseLeft(x.lease_end) > 2 * 86400) w.push(`租期还${leaseRem(x.lease_end)}，不急`);
   return w;
 }
-function renewPickPop(btn, id = "") {
-  const open = popIs("renewpick", id), cap = open && FCAP?.pop;
-  return popConfirm(btn, open, open ? cap ? capBox() : renewPicker() + fErr() : "", cap ? null : "", true);
-}
-function renewPicker() {
-  const sv = [...D.fleet.servers, ...D.fleet.mine], ids = [...POP.sel];
-  const need = sv.filter(x => POP.sel.has(x.id) && FRISKY(x) && !POP.ack.has(x.id));
-  const rows = sv.map(x => { const on = POP.sel.has(x.id), w = x.off ? ["已关机：要用就开机"] : renewWarn(x);
-    return `<tr><td><input type="checkbox" data-rsel="${esc(x.id)}" ${on ? "checked" : ""} ${x.off ? "disabled" : ""} aria-label="续租 ${esc(x.holder)}"></td>
-      <td><b>${esc(x.mine ? x.label : x.holder)}</b></td><td class="sm nw">${esc(x.id)} <span class="mut">${fKind(x)}</span></td>
-      <td>${fState(x)}</td>
-      <td class="sm nw">${x.lease_end ? leaseHtml(x.lease_end) : "—"}</td>
-      <td class="sm">${w.length ? `<span style="color:var(--warn)">${esc(w.join("；"))}</span>` : `<span class="mut">—</span>`}
-        ${on && FRISKY(x) ? `<label class="nw" style="display:block;margin-top:3px"><input type="checkbox" data-rack="${esc(x.id)}" ${POP.ack.has(x.id) ? "checked" : ""}> ${ackText(x)}</label>` : ""}</td></tr>`; }).join("");
-  return `<div class="rn-note">选要续租的服务器。只登录一次，逐台：停旧作业 → 提交新作业、等运行 → ssh 上去开保活（自用主机是拉起 worker）；一台续完再动下一台。
-      <span class="sm mut">开始前会再探一次各台，在跑实验或本地盘写得多而这里没确认的就停，哪台都不动。状态是 ${D.fleet.interval / 60 | 0} 分钟内探的。</span></div>
-    <div class="scroll"><table><tr><th></th><th>使用人</th><th>服务器</th><th>状态</th><th>租期</th><th>注意</th></tr>${rows}</table></div>
-    <div class="rn"><button class="btn pri" data-fop="renewgo" ${!ids.length || need.length || POP.busy ? "disabled" : ""}>续租所选（${ids.length} 台）</button>
-      ${need.length ? `<span class="sm" style="color:var(--warn)">${esc(need.map(x => x.mine ? x.label : x.holder).join("、"))} 在跑实验或本地盘写得多：先勾选确认</span>` : ""}</div>`;
+// 批量续租的抽屉（#14；#/fleet/renew，从提醒条点的 #/fleet/renew/<id> 只勾那一台）：一台一行，勾选、状态、租期，下一行要注意的；
+// 勾上了又有风险的（FRISKY）在本行勾「已说好」。勾选记在 RPICK（按抽屉地址建、关抽屉清掉）；没登录时验证码出在底部（FCAP.pop = "renew"），开始后进度在顶上；
+// 输验证码、提交中勾选锁住（lock）：要提交的已记进 FCAP.next，改了也不会跟着变
+let RPICK = null;          // {key: 抽屉地址, sel: 勾了要续的, ack: 勾了「已说好」的, busy}
+const rpList = () => [...D.fleet.servers, ...D.fleet.mine];
+const rpBody = R => { const ids = rpList().filter(x => R.sel.has(x.id) && !x.off).map(x => x.id); return {ids, ack: ids.filter(i => R.ack.has(i))}; };
+function renewDrawer(id) {
+  const key = DH.renew(id), op = fops().op, sv = rpList(), ops = canOps();
+  if (RPICK?.key !== key) {                         // 换了地址就是另一份勾选：缺省勾上 24 小时内到期、没在跑实验的；上一份的验证码作废（要提交的记在 FCAP.next 里，不跟着变）
+    RPICK = {key, sel: new Set(id ? [id] : fleetDue().filter(x => !FRISKY(x)).map(x => x.id)), ack: new Set()};
+    if (FCAP?.pop === "renew") FCAP = null;
+  }
+  const R = RPICK, lock = !ops || FCAP?.pop === "renew" || R.busy, {ids} = rpBody(R), need = sv.filter(x => ids.includes(x.id) && FRISKY(x) && !R.ack.has(x.id));
+  const row = x => { const on = R.sel.has(x.id) && !x.off, w = x.off ? ["已关机：要用就开机"] : renewWarn(x), nm = x.mine ? x.label : x.holder;
+    return `<div class="rp-row"><input type="checkbox" data-rsel="${esc(x.id)}" ${on ? "checked" : ""} ${x.off || lock ? "disabled" : ""} aria-label="续租 ${esc(nm)}">
+      <div class="rp-m"><div class="rp-h"><b>${esc(nm)}</b><span class="sm mut">${esc(x.id)} · ${fKind(x)}</span>${fState(x)}<span class="sp"></span><span class="sm nw">${x.lease_end ? leaseHtml(x.lease_end) : "—"}</span></div>
+      ${w.length ? `<div class="sm rp-w">${esc(w.join("；"))}</div>` : ""}
+      ${on && FRISKY(x) ? `<label class="sm rp-ack"><input type="checkbox" data-rack="${esc(x.id)}" ${R.ack.has(x.id) ? "checked" : ""} ${lock ? "disabled" : ""}> ${ackText(x)}</label>` : ""}</div></div>`; };
+  const why = !ids.length ? "先勾要续租的服务器" : need.length ? `${need.map(x => x.mine ? x.label : x.holder).join("、")} 在跑实验或本地盘写得多：先勾选确认` : "";
+  const foot = !ops ? `<div class="rn">${opsNote()}</div>` : FCAP?.pop === "renew" ? capBox()
+    : `<div class="rn"><button class="btn pri" data-fop="renewgo" ${!ids.length || need.length || R.busy || op?.active ? "disabled" : ""}>续租所选（${ids.length} 台）</button>
+      <button class="btn" data-dclose>取消</button>${why ? `<span class="sm" style="color:${ids.length ? "var(--warn)" : "var(--muted)"}">${esc(why)}</span>` : ""}</div>`;
+  return dHead(`<span class="fav">${icon("hourglass")}</span>`, "续租", "只登录一次，逐台：停旧作业 → 提交新作业、等运行 → ssh 上去开保活（自用主机是拉起 worker）；一台续完再动下一台")
+    + `<div class="db">${op?.steps && op.kind === "renew" ? `<div class="card">${opProgress(op)}</div>` : ""}
+      ${dSec("服务器", sv.map(row).join("") || `<div class="empty">没有服务器。</div>`, `<span class="sm mut">开始前会再探一次各台，在跑实验或本地盘写得多而这里没确认的就停，哪台都不动。状态是 ${D.fleet.interval / 60 | 0} 分钟内探的</span>`)}</div>
+    <footer class="dft">${foot}${fErr()}</footer>`;
 }
 // 人员：名单里一人一张小卡（看板账号、占着的服务器、近 30 天用量）；点卡片打开这人的详情抽屉，分配一台、改设置都在抽屉里（#15：卡上不放没文字的图标）
 const SRCN = {job: "从现有作业读的", default: "新的人默认", manual: "手动设置", roster: "只登记了姓名"};
@@ -4417,7 +4458,7 @@ const lanBar = () => LANOFF() ? `<div class="lanbar"><b>本机不在内网</b><s
   + `这期间不探测、不报掉线，统计里算没有数据；续租、换人等平台操作要回到内网再做。回到内网后下一轮采集自动恢复。</span></div>` : "";
 // 这台看板服务是备用（服务租约，#163）：各页顶上一条，说主是谁、何时能接管；数据停在当主时的最后一轮，写操作回 409
 const standbyBar = () => D.server?.role === "standby" ? `<div class="lanbar"><b>备用</b><span>${esc(D.server.say || "")}</span></div>` : "";
-const NONET = new Set(["sync", "renewpick", "renewone", "renewgo", "renew1", "offpick", "offgo", "wiz", "wizgo", "ka", "newcode", "go", "bgo", "bretgo", "bkeep"]);
+const NONET = new Set(["sync", "renewone", "renewgo", "renew1", "offpick", "offgo", "wiz", "wizgo", "ka", "newcode", "go", "bgo", "bretgo", "bkeep"]);
 const noNet = (e, el) => flashTip(e, "本机不在内网：回到内网再操作", el);
 // 项目页用 iframe 嵌入：每个项目一个，切走时只隐藏，回来不重新加载、状态不丢。FRAME 是正显示的那个项目
 let FRAME = null;
@@ -4569,6 +4610,7 @@ async function gdSave() {
   pop.busy = false;
   render(false);
 }
+function renewLeave() { RPICK = null; if (FCAP?.pop === "renew") FCAP = null; }     // 离开续租抽屉：勾选与抽屉里取的验证码一起作废，在途的回执经 startOp 的实例比较丢掉
 function drawer(r) {
   const el = document.getElementById("drw"), pane = document.getElementById("drwp"), d = r.kind === "fleet" && (!LIVE || ME?.admin) && ((D.fleet && !D.fleet.error) || (r.drw?.k === "person" && ME?.scopes.includes("admin"))) || r.kind === "p" || r.kind === "home" ? r.drw : null;
   if (!d) {
@@ -4576,6 +4618,7 @@ function drawer(r) {
     const k = DKEY, back = pane.contains(document.activeElement) || document.activeElement === document.body;
     if (k.startsWith("person:")) { FPED = null; FDK = {}; }
     if (k.startsWith("guard:")) GDERR = null;
+    if (k.startsWith("renew:")) renewLeave();
     pane.querySelector(".secret")?.remove();
     DKEY = null; DLAST = ""; DBACK = null;
     el.classList.remove("on"); el.setAttribute("aria-hidden", "true"); document.documentElement.classList.remove("drw-on");
@@ -4586,7 +4629,8 @@ function drawer(r) {
   }
   const key = `${d.k}:${d.id}`;
   if (DKEY && DKEY !== key && DKEY.startsWith("person:")) { FDK = {}; if (FPED && !FPED.isNew) FPED = null; }
-  const html = d.k === "srv" ? srvDrawer(d.id) : d.k === "new" ? newDrawer(d.id) : d.k === "guard" ? guardDrawer() : d.k === "proj" ? projDrawer(d.id)
+  if (DKEY?.startsWith("renew:") && d.k !== "renew") renewLeave();     // 切到别的抽屉也算离开续租
+  const html = d.k === "srv" ? srvDrawer(d.id) : d.k === "new" ? newDrawer(d.id) : d.k === "guard" ? guardDrawer() : d.k === "renew" ? renewDrawer(d.id) : d.k === "proj" ? projDrawer(d.id)
     : d.k === "arch" ? archDrawer() : directoryDrawer(d);
   const section = d.section || "";
   const previous = pane.dataset.section;
@@ -4627,8 +4671,8 @@ document.addEventListener("change", e => {               // 批量续租的勾�
   if ("regto" in d && POP) { POP.to = d.regto; POP.err = null; return render(false); }   // 换到哪台
   if ("adopt" in d && ADOPT) { ADOPT.sel[d.adopt] = t.checked; return render(false); }    // 接上卡的勾选
   const sel = d.rsel, ack = d.rack;
-  if (POP?.k !== "renewpick" || (!sel && !ack)) return;
-  const set = sel ? POP.sel : POP.ack, id = sel || ack;
+  if (!RPICK || (!sel && !ack) || FCAP?.pop === "renew" || RPICK.busy) return;      // 输验证码、提交中不改（同 renewDrawer 的 lock）
+  const set = sel ? RPICK.sel : RPICK.ack, id = sel || ack;
   t.checked ? set.add(id) : set.delete(id);
   render(false);
 });
@@ -4668,6 +4712,7 @@ tipBind({
 });
 document.addEventListener("toggle", e => {
   if (e.target.matches?.("details.agal")) ST.set("agal", e.target.open);        // 主机页「给实验会话的提示」的开合（common.js 的 alertBox）
+  if (e.target.matches?.("details.rk-more") && POP) POP.more = e.target.open;          // 弹窗里「细节」的开合（riskMore）
   if (e.target.matches?.("details.fold")) {
     const f = ST.get("cardOpen", {}), k = e.target.dataset.fold;
     if (!!f[k] === e.target.open) return;
