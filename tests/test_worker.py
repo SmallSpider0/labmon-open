@@ -2691,7 +2691,8 @@ class PoolListTest(UnitBase):
         Path(self.q["state"], "A2.done").write_text("")
         self.w.peer_t = 0
         self.w.tick([], False)
-        self.assertEqual(json.loads(Path(self.w.p.status).read_text())["pool_heads"], {})
+        h = json.loads(Path(self.w.p.status).read_text())["pool_heads"][k]      # 都跑完了照样列（#86）：head 为 null
+        self.assertEqual((h["head"], h["n"], h["dep"]), (None, 0, None))
 
 
 class SelfPoolTest(UnitBase):

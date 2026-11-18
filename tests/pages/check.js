@@ -2683,6 +2683,9 @@ t("overview", "算力池概况（#76）：摘要行写入池、借着与在等�
   has(dr, 'href="#/p/proj-a"'); has(dr, "/data/me/proj-a/pq/<b>jobs/p.txt</b>"); has(dr, "在池里 · 等了 " + run(C, "dur(3600)"));
   has(dr, "srv-h：显存不够"); has(dr, "这一轮正放到入池的主机上");
   const h = dr.slice(dr.indexOf("jobs/p2.txt")); has(h.slice(0, 400), "在 " + run(C, 'fName(srvById("srv-h"))') + " 上"); ok(!h.slice(0, 400).includes("等了"), "在借着的主机上的不该写等了多久");
+  // #86：池里跑完了的不算在等（摘要行仍是 3 条），收在「池里跑完的清单」里、不写等了多久
+  const dn = dr.indexOf("池里跑完的清单"); ok(dn > dr.indexOf("jobs/p3.txt"), "跑完的该收在等着的后面"); const dh = dr.slice(dn);
+  has(dh, "jobs/cpu.txt"); has(dh, "行都跑完了"); ok(!dh.slice(0, 600).includes("等了"), "跑完的不该写等了多久");
   const P = accCtx(OV, PUB_ME), pd = drw(P, "#/fleet/pool");
   ok(!pd.includes('data-lend="open"') && !pd.includes('data-lend="rc"'), "不能做平台操作的管理员不该有入池设置与收回"); has(pd, "请从内网入口操作");
   const U = accCtx(OVU, USER_ME); page(U, "#/fleet/pool"); ok(!run(U, "DKEY"), "普通用户不该开算力池抽屉");

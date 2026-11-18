@@ -397,8 +397,10 @@ class PoolPlaceTest(TickBase):
         self.assertEqual(out["lists"][k]["why"], "队首在等依赖：等 pb/y 跑完")
         out = self.tick(self.snap([], [q]), sw={"pause": {"pa": None}})
         self.assertEqual(out["lists"][k]["why"], "项目暂停中")
-        out = self.tick(self.snap([], [q], heads={}))
-        self.assertEqual(out["lists"][k]["why"], "清单里没有还要跑的行")
+        out = self.tick(self.snap([], [q], heads={}))            # 新鲜的状态里没有这条：还没读到，不当成跑完了（#86）
+        self.assertEqual(out["lists"][k]["why"], "还没有在跑的 worker 读到这条清单（交上来后约 1 分钟内读到）")
+        out = self.tick(self.snap([], [q], heads={k: {"head": None, "n": 0, "dep": None, "held": None, "elsewhere": None}}))
+        self.assertEqual((out["lists"][k]["why"], out["lists"][k].get("done")), (P.POOL_DONE, True))
         snap = self.snap([], [q])
         snap["hosts"][0]["worker_up"] = False
         self.assertEqual(self.tick(snap)["lists"][k]["why"], "还没有在跑的 worker 读到池里的清单")
@@ -874,6 +876,93 @@ class SelfPoolTest(TickBase):
         snap = {"hosts": [], "regs": [{"host": "m", "queues": [dict(self.pool_list(), pool=True)]}, {"host": "far", "queues": [self.pool_list(root="/r/y")]}]}
         self.assertEqual(P.locate("/r/x", "jobs/x.txt", snap), "m")
         self.assertEqual(P.locate("/r/y", "jobs/x.txt", snap), "pool")              # 主人钉在那台的不算池里的
+
+
+class PoolHeadsTest(TickBase):
+    """#86 真机现场（已脱敏）：清单直接登记在入池的自用主机 m 上、还有剩余行、队首在 m 上跑，交给池（worker add pool）。
+    池的 worker_home 下有两台在写状态（m 与 here，同一个 HOME，fixtures.Hosts 起真 worker）：here 的状态更新，但它这一分钟还没重读池目录
+    （peers 每 PEER_EVERY 秒一次）。旧代码整份取状态最新的 here 的 pool_heads，判成「清单里没有还要跑的行」，池一条不放。"""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_tick()
+        SelfPoolTest.mine(self)                                # m 是入池的自用主机，与 here（看板本机）同一个 worker 目录
+        from fixtures import Hosts
+        self.hosts = Hosts(self.d / "w")
+        self.addCleanup(self.hosts.close)
+        self.m, self.here = self.hosts.worker("m"), self.hosts.worker("here")
+        self.q, = self.hosts.queues({"x": ["a1|sleep 30   # gpus=0", "a2|true   # gpus=0", "a3|true   # gpus=0"]}, "pa")
+        self.k = P.key(self.q["root"], self.q["jobs"])
+
+    def add(self, host):
+        import io
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", out):
+            rc = self.hosts.m.main(["add", self.q["root"], self.q["jobs"], "--host", host, "--project", "pa"])
+        self.assertEqual(rc, 0, out.getvalue())
+
+    def status(self, w):
+        import json
+        return json.loads(Path(w.p.status).read_text())
+
+    def board(self, *ws):
+        hosts = [fake_host(w.host, dict(self.status(w), room={"gpus": {"GPU-a": 40000.0}})) for w in ws]
+        return self.tick({"hosts": hosts, "regs": [{"host": "pool", "state": "pool", "queues": [self.pool_list(self.q["root"], self.q["jobs"])]}]})
+
+    def test_fresh_status_without_pool_list(self):
+        self.add("m")
+        self.m.tick(self.m.registry(), True)                   # a1 在 m 上跑
+        self.assertEqual([j["name"] for j in self.m.running.values()], ["a1"])
+        self.here.tick(self.here.registry(), True)             # here 读过池目录（还是空的）
+        self.add("pool")                                       # 交给池：a1 由 m 跑完
+        self.m.peer_t = 0
+        self.m.tick(self.m.registry(), False)
+        h = self.status(self.m)["pool_heads"][self.k]
+        self.assertEqual((h["head"], h["n"], h["elsewhere"]), ("a2", 2, ["m", "a1"]))
+        self.here.tick(self.here.registry(), False)            # here 的状态更新，pool_heads 还是一分钟前读的
+        self.assertEqual(self.status(self.here)["pool_heads"], {})
+        out = self.board(self.m, self.here)
+        self.assertEqual(out["lists"][self.k]["why"], "a1 还在 m 上跑（交给池之前在那台放行的），跑完再放")   # 旧代码：清单里没有还要跑的行
+        Path(self.q["state"], "a1.done").write_text("")       # a1 在 m 上跑完
+        Path(self.q["state"], "current").unlink()
+        self.m.running.clear()
+        self.m.peer_t = 0
+        self.m.tick(self.m.registry(), False)
+        self.here.tick(self.here.registry(), False)
+        P._FIT.clear()
+        out = self.board(self.m, self.here)
+        self.assertEqual(self.moves, [("m", [self.q["jobs"]], "")], out["lists"].get(self.k))   # 剩下的两行放回入池的 m
+
+    def test_done_and_unseen(self):
+        # 都跑完了的照样列（head 为 null）：看板写跑完了、标 done，页面不算在等；哪一台都还没读到的写还没读到，不当成跑完了
+        self.add("pool")
+        for n in ("a1", "a2", "a3"):
+            Path(self.q["state"]).mkdir(parents=True, exist_ok=True)
+            Path(self.q["state"], n + ".done").write_text("")
+        self.here.tick(self.here.registry(), True)
+        h = self.status(self.here)["pool_heads"][self.k]
+        self.assertEqual((h["head"], h["n"], h["dep"]), (None, 0, None))
+        out = self.board(self.here)
+        self.assertEqual((out["lists"][self.k]["why"], out["lists"][self.k].get("done")), (P.POOL_DONE, True))
+        self.assertEqual(self.moves, [])
+        out = self.board()
+        self.assertEqual(out["lists"][self.k]["why"], "还没有在跑的 worker 读到池里的清单")
+
+    def test_unreadable_loses_to_readable(self):
+        # 读不到清单的那台（带 err）不盖过读得到的；只有读不到的时原因照写
+        self.add("pool")
+        self.here.tick(self.here.registry(), True)
+        self.m.tick(self.m.registry(), True)
+        st = self.status(self.m)
+        st["pool_heads"][self.k] = {"head": None, "n": 0, "held": None, "elsewhere": None, "dep": None, "err": "m 上读不到清单 x"}
+        st["pool_t"] = st["t"] = time.time() + 60
+        Path(self.m.p.status).write_text(__import__("json").dumps(st))
+        self.board(self.here, self.m)
+        self.assertEqual([m[0] for m in self.moves], ["m"])
+        self.moves.clear()
+        P._FIT.clear()
+        out = self.board(self.m)
+        self.assertEqual(out["lists"][self.k]["why"], "m 上读不到清单 x")
 
 
 class PoolGuardTest(Base):

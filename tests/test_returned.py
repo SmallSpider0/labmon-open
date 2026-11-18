@@ -452,6 +452,10 @@ class RegLanesTest(Base):
         snap["pool"]["lists"][k]["since"] = since - 2 * PO.POOL_TELL_S
         save_json(state_dir() / "snapshot.json", snap)
         self.assertEqual([a["key"] for a in C.collect(self.cfg())["alerts"]], ["pool_wait:p1"])
+        snap["pool"]["lists"][k].update(why=PO.POOL_DONE, done=True)    # #86：池里跑完了的不算在等
+        save_json(state_dir() / "snapshot.json", snap)
+        out = C.collect(self.cfg())
+        self.assertIsNone(out["lanes"][0]["waiting"])
 
     def test_registration_overrides_returned_host(self):
         # monitor.toml 写着 host = 已还的 gone，清单已登记到 here：车道在 here 上、id 与用途沿用 monitor.toml 的，不报 returned_unfinished（旧代码会报）

@@ -41,6 +41,7 @@ POOL_REST_S = 3 * 3600         # 主人回来、关了入池、收回之后这�
 POOL_MIN_LEFT_S = 2 * 3600     # 截止（时段结束与租期前 1 小时取早）离现在不到这么久的不借
 POOL_FAIL_S = 3600             # 借不成（begin 失败）之后这么久不再借这台
 POOL_NOFIT_S = 86400           # 借来后哪条都没跑起来、按 R4 还掉的：这个形状（卡数、单卡显存）这么久不再为它借这台
+POOL_DONE = "清单里的行都跑完了：不用了就 labmon worker rm pool 撤掉，往清单里加了行会接着放"   # 池里跑完的清单那一句（#86；pool.lists 带 done）
 POOL_FIT_MAX = 4               # 每轮最多问几次 fit（每次一条 ssh，走长连接）
 POOL_RETRY_S = 5 * 60          # 同一（清单, 候选主机）这么久内不重判
 POOL_TELL_S = 2 * 3600         # 池里待放满这么久，只给实验会话报一次 pool_wait:（collect）
@@ -250,9 +251,17 @@ def _home_sts(snap: dict) -> list[dict]:
 
 
 def _heads(snap: dict) -> tuple[dict, bool]:
-    """池清单各自的队首（worker 状态的 pool_heads：池那个 worker_home 下各台都算一份，取最新的那份）与有没有一份新鲜的状态。"""
-    best = max((st for st in _home_sts(snap) if "pool_heads" in st), key=lambda x: x.get("t") or 0, default=None)
-    return ((best or {}).get("pool_heads") or {}), best is not None
+    """池清单各自的队首（worker 状态的 pool_heads：池那个 worker_home 下各台各算一份）与有没有一份新鲜的状态。逐条取：
+    读得到清单的（没有 err）优先，再取读得最晚的那台的（状态的 pool_t：那台读池目录的时刻，没有按状态的 t）。以前整份取状态最新的那台：
+    它还没读到刚交上来的（peers 每分钟才重读池目录）或读不到清单，别的台读到的也一起丢了，判成没有还要跑的行，池一条不放（#86）。"""
+    sts = sorted((st for st in _home_sts(snap) if "pool_heads" in st), key=lambda x: x.get("pool_t") or x.get("t") or 0)
+    out: dict = {}
+    for st in sts:
+        for k, v in (st.get("pool_heads") or {}).items():
+            if not isinstance(v, dict) or (v.get("err") and k in out and not out[k].get("err")):
+                continue
+            out[k] = v
+    return out, bool(sts)
 
 
 def _share(snap: dict) -> dict:
@@ -568,11 +577,15 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
     for q in (regs.get(POOL) or {}).get("queues") or []:
         it = _item(POOL, q, q.get("added_t") or t)
         pid, hd = it["project"], heads.get(it["key"])
-        it["why"] = ("还没有在跑的 worker 读到池里的清单" if not fresh else "清单里没有还要跑的行" if not hd
+        it["why"] = ("还没有在跑的 worker 读到池里的清单" if not fresh else "还没有在跑的 worker 读到这条清单（交上来后约 1 分钟内读到）" if not hd
+                     else hd["err"] if hd.get("err")
                      else _elsewhere(hd["elsewhere"]) if hd.get("elsewhere")
+                     else POOL_DONE if not hd.get("head")
                      else f"队首在等依赖：{hd['dep'][1]}" if hd.get("dep") else "清单暂停中" if hd.get("held") else "项目暂停中" if pid in paused
                      else "项目主人不是算力池成员（没有开了入池的服务器）" if not _owner_ok(pid, cfg) else None)
         lists[it["key"]] = {k: it[k] for k in ("project", "root", "jobs", "host", "since")}
+        if it["why"] == POOL_DONE:
+            lists[it["key"]]["done"] = True             # 跑完了：页面上不算在等（poolCount），收在后面
         if it["why"] is None:
             pending.append(it)
         else:

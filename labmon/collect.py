@@ -522,8 +522,9 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     lane.update(info)
     if hcfg[q["host"]].get("pool"):                  # 算力池里待放的（#24）：没有 worker 管，等看板放到某台；不报队列进程不在
         pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {}     # 为什么还没放（pool.tick，#25）
-        lane.update(pool=True, managed=True, alive=False, waiting=None if lane.get("paused") else POOL_WAIT + (f"：{pv['why']}" if pv.get("why") else ""),
-                    pool_since=pv.get("since"))     # 从何时起在池里等（页面上写已等多久，#89）
+        done = pv.get("done")                         # 池里跑完了的（pool.lists 的 done，#86）：不算在等、不写已等多久
+        lane.update(pool=True, managed=True, alive=False, waiting=None if lane.get("paused") or done else POOL_WAIT + (f"：{pv['why']}" if pv.get("why") else ""),
+                    pool_since=None if done else pv.get("since"))     # 从何时起在池里等（页面上写已等多久，#89）
     if lane.get("held") and not lane.get("paused") and not any(j["status"] == "running" for j in jobs):
         lane["paused"] = lane["waiting"]          # 被临时指令挡住（drain、本项目暂停、续租截止、约定归还）：按暂停算，不报空转（约定归还挡住的另报 borrow_cut）
     if lane.get("dep") not in (None, "wait"):    # 队首等的依赖跑失败了、找不到、成环：不改就一直不放行（labmon wait 与实验会话据此处理）
@@ -558,7 +559,7 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
                 eta_ts=max(ends) if unfinished and None not in ends and not lane.get("paused") else None)   # 有推演不出的（stuck）就不写
     snap["lanes"].append(lane)
     pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {} if lane.get("pool") else {}
-    if pv.get("since") and unfinished and not lane.get("paused") and t - pv["since"] >= PO.POOL_TELL_S:
+    if pv.get("since") and unfinished and not pv.get("done") and not lane.get("paused") and t - pv["since"] >= PO.POOL_TELL_S:
         work["pool_wait"].append(f"{q.get('jobs')} 等了 {fmt_dur(t - pv['since'])}（{pv.get('why') or '还没放到哪台'}）")   # 项目一条，_lanes 汇总
     if returned and (hcfg[q["host"]].get("borrow") or {}).get("pool") and PO._ours({"stop": q.get("reg_stop")}):
         pass                                         # 算力池借过的主机还掉了：池的清单由看板搬回池里（pool.tick），不叫会话换主机；借给池之前留下的旧登记池不收，照下面报（#88 E）
