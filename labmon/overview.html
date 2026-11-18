@@ -1485,41 +1485,55 @@ function meCan(M, info) {
   const ss = Object.keys(info).length ? Object.keys(info).filter(s => M.scopes.includes(s)) : M.scopes;
   return `这个令牌能做：${ss.map(s => info[s]?.[1] || info[s]?.[0] || s).join("；")}。`;
 }
-/* 入池（#24）：组内服务器空着时借给算力池，跑组里别人交给池的清单。持有人本人在「我的账号 → 概览 → 我的服务器」开关、改时段；
-   管理员在服务器抽屉代开（要能做平台操作、勾「已和这人说好」，代关不用勾）。都经 POST api/pool/lend {id, on, hours, ok}（pool.set_lend）。
-   一台的入池是 {on, hours, open, say}（pool.lend_view：me.servers 与组内服务器的 lend 同一份）；弹窗里的开关、时段、说好记在 POP（on、draft.lf/lt、ok），重画后照样填回去 */
+/* 入池（#24）：组内服务器空着时借给算力池，跑组里别人交给池的清单；自用主机（#79）入池不用借，池清单直接放上来、与主人的清单按份额排。
+   持有人本人在「我的账号 → 概览 → 我的服务器」开关、改时段；管理员在服务器抽屉、自用主机的主机页代开（要能做平台操作、勾「已和这人说好」，代关不用勾）。
+   都经 POST api/pool/lend {id, on, hours, ok}（pool.set_lend）。一台的入池是 {on, hours, open, say, mine, placed, holder}（pool.lend_view：me.servers、
+   组内服务器与自用主机的 lend、快照主机项的 lend 同一份）；弹窗里的开关、时段、说好记在 POP（on、draft.lf/lt、ok），重画后照样填回去 */
 let LMSG = null, LMT = null;                             // 上一次保存的结果 {id, m}（一分钟后收起）
-const lendSrv = id => ((ACC.me || ME)?.servers || []).find(x => x.id === id) || srvById(id);
+const lendSrv = id => ((ACC.me || ME)?.servers || []).find(x => x.id === id) || srvById(id) || D.hosts.find(h => h.id === id && h.lend);
+const lendWho = s => s.holder || s.lend?.holder || "";
+const lendName = s => lendWho(s) ? `${lendWho(s)}（${s.id}）` : s.id;
 const lendMine = id => ((ACC.me || ME)?.servers || []).some(x => x.id === id);
 const lendBadge = L => !L ? "" : L.lent ? `<span class="badge ${L.returning ? "b-warn" : "b-acc"}">${esc(L.say)}</span>`     // 借着、要还（#25）
-  : L.on ? `<span class="badge ${L.open && !L.rest ? "b-acc" : "b-mute"}">${esc(L.say)}</span>` : `<span class="mut">${esc(L.say)}</span>`;
+  : L.on ? `<span class="badge ${L.open && !L.rest && !L.bar ? "b-acc" : "b-mute"}">${esc(L.say)}</span>` : `<span class="mut">${esc(L.say)}</span>`;
 const lendSay = s => lendBadge(s.lend) + (s.lend?.hours ? ` <span class="mut">每天 ${esc(s.lend.hours)}</span>` : "");   // 一台的入池那一句加时段：服务器抽屉、算力池抽屉、我的服务器同一份
 const lendCan = id => LIVE && (lendMine(id) || canOps());      // 能改这台的入池：持有人本人，或能做平台操作的管理员（pool.set_lend 同一条）
 const lendMsg = id => LMSG?.id === id ? `<div class="sm mut">${esc(LMSG.m)}</div>` : "";
+const lendTag = L => `<span class="badge ${L.open && !L.rest && !L.bar ? "b-acc" : "b-mute"}" ${tip(L.say)}>入池</span>`;     // 卡片上的小签（组内服务器与自用主机）
+// 自用主机的主机页（#79）：一行「算力池」，入池与否、跑着几条池清单；持有人本人或能做平台操作的管理员能改、能收回
+function poolCard(h) {
+  const L = h.lend;
+  if (!L || !(L.on || L.placed || LIVE && (lendMine(h.id) || canOps()))) return "";
+  const can = LIVE && (lendMine(h.id) || canOps());
+  return `<div class="card"><div class="chd"><b style="display:inline-flex;align-items:center;gap:6px">${icon("server")}算力池</b>${L.hours ? `<span class="sm mut">每天 ${esc(L.hours)}</span>` : ""}</div>
+    <div class="row wrap" style="gap:8px;align-items:center"><span class="sm">${lendBadge(L)}</span>${can && L.placed ? reclaimPop(h) : ""}${can ? lendPop(h) : ""}</div>${lendMsg(h.id)}</div>`;
+}
 function lendPop(s) {
   const open = popIs("lend", s.id), P = open ? POP : null, mine = lendMine(s.id);
   const btn = `<button class="btn mini-btn" id="lend-${esc(s.id)}" data-lend="open" data-id="${esc(s.id)}" aria-haspopup="dialog" aria-expanded="${open}">入池设置</button>`;
   if (!open) return popConfirm(btn, false);
   const on = !!P.on, dis = on ? "" : "disabled";
-  const body = `<b>${esc(s.holder)}（${esc(s.id)}）入池</b>
-    <div class="sm mut">入池后，时段内这台空着（只有保活或没有进程）时，看板可以把算力池里组里别人的清单放到这台跑。</div>
+  const body = `<b>${esc(lendName(s))} 入池</b>
+    <div class="sm mut">${s.lend?.mine ? "入池后，时段内看板把算力池里组里别人的清单直接放到这台，和你自己的清单按份额排；关掉或出了时段，池里的清单搬到别处（在跑的跑完）。"
+      : "入池后，时段内这台空着（只有保活或没有进程）时，看板可以把算力池里组里别人的清单放到这台跑。"}</div>
     <label class="sm pop-ck"><input type="checkbox" data-lon ${on ? "checked" : ""}> 入池</label>
     <div class="row wrap sm lend-hr${on ? "" : " mut"}">每天 <input type="time" class="ain" id="lendf" data-pop-field="lf" value="${esc(P.draft.lf || "")}" ${dis}>
       到 <input type="time" class="ain" id="lendt" data-pop-field="lt" value="${esc(P.draft.lt || "")}" ${dis}><span class="mut">可跨零点；两格都空是全天</span></div>
-    ${!mine && on ? `<label class="sm pop-ck"><input type="checkbox" data-bok ${P.ok ? "checked" : ""}> 已和 ${esc(s.holder)} 说好</label>` : ""}
+    ${!mine && on && lendWho(s) ? `<label class="sm pop-ck"><input type="checkbox" data-bok ${P.ok ? "checked" : ""}> 已和 ${esc(lendWho(s))} 说好</label>` : ""}
     ${P.err ? `<div class="rn-err">${esc(P.err)}</div>` : ""}`;
-  return popConfirm(btn, true, body, `<button class="btn pri" data-lend="go" data-id="${esc(s.id)}" ${P.busy || (!mine && on && !P.ok) ? "disabled" : ""}>${P.busy ? "正在保存…" : "保存"}</button>`, true);
+  return popConfirm(btn, true, body, `<button class="btn pri" data-lend="go" data-id="${esc(s.id)}" ${P.busy || (!mine && on && lendWho(s) && !P.ok) ? "disabled" : ""}>${P.busy ? "正在保存…" : "保存"}</button>`, true);
 }
-// 收回（#25）：算力池借着的这台，持有人本人或能做平台操作的管理员点；停下池任务、清单回池里重排，几分钟内还回来（POST api/pool/reclaim，pool.reclaim）
+// 收回（#25）：算力池借着的这台，持有人本人或能做平台操作的管理员点；停下池任务、清单回池里重排，几分钟内还回来（POST api/pool/reclaim，pool.reclaim）。
+// 自用主机（#79）：停下池放上来的清单在跑的、搬回池里，主人自己的清单不动
 function reclaimPop(s) {
-  const open = popIs("rc", s.id), P = open ? POP : null;
-  const btn = `<button class="btn mini-btn danger" id="rc-${esc(s.id)}" data-lend="rc" data-id="${esc(s.id)}" aria-haspopup="dialog" aria-expanded="${open}" ${tip("停下这台上的池任务、清单回池里放到别处，几分钟内还回来")}>${icon("stop")}收回</button>`;
+  const open = popIs("rc", s.id), P = open ? POP : null, own = !!s.lend?.mine;
+  const btn = `<button class="btn mini-btn danger" id="rc-${esc(s.id)}" data-lend="rc" data-id="${esc(s.id)}" aria-haspopup="dialog" aria-expanded="${open}" ${tip(own ? "停下这台上池里的任务、清单回池里放到别处，你自己的清单不动" : "停下这台上的池任务、清单回池里放到别处，几分钟内还回来")}>${icon("stop")}收回</button>`;
   if (!open) return popConfirm(btn, false);
-  const body = `<b>收回 ${esc(s.holder)}（${esc(s.id)}）</b><div class="sm">停下池任务、重排到别处，几分钟内还回来。</div>
-    <div class="sm mut">停下的那一格按清单的停法停，在别处重跑；之后 3 小时内算力池不再借这台。</div>${P.err ? `<div class="rn-err">${esc(P.err)}</div>` : ""}`;
+  const body = `<b>收回 ${esc(lendName(s))}</b><div class="sm">${own ? "停下池里放上来的任务、重排到别处，你自己的清单不动。" : "停下池任务、重排到别处，几分钟内还回来。"}</div>
+    <div class="sm mut">停下的那一格按清单的停法停，在别处重跑；之后 3 小时内算力池不再${own ? "往这台放" : "借这台"}。</div>${P.err ? `<div class="rn-err">${esc(P.err)}</div>` : ""}`;
   return popConfirm(btn, true, body, `<button class="btn pri dz" data-lend="rcgo" data-id="${esc(s.id)}" ${P.busy ? "disabled" : ""}>${P.busy ? "正在收回…" : "停下并收回"}</button>`);
 }
-const lendLent = s => !!s?.lend?.lent && lendCan(s.id);    // 这台正借给算力池、看页面的人能收回
+const lendLent = s => !!(s?.lend?.lent || s?.lend?.placed) && lendCan(s.id);    // 这台正借给算力池或跑着池放的清单（自用主机，#79）、看页面的人能收回
 async function lendAct(act, d) {
   const s = lendSrv(d.id);
   if (!s) return;
@@ -1562,12 +1576,12 @@ async function lendAct(act, d) {
   P.busy = false;
   render(false);
 }
-// 「我的账号 → 概览」的「我的服务器」：这个账号对应的人持有的组内服务器（me.servers），各台入池与否、此刻在不在时段里，开关在「入池设置」
+// 「我的账号 → 概览」的「我的服务器」：这个账号对应的人持有的组内服务器与自用主机（me.servers，自用的带 mine，#79），各台入池与否、此刻在不在时段里，开关在「入池设置」
 function myServersSec(M) {
   const ss = M.servers || [];
   if (!ss.length) return "";
-  return dSec("我的服务器", `<div class="sm mut" style="margin-bottom:6px">组内服务器里你持有的。入池后，时段内空着时借给算力池，跑组里别人交给池的清单。</div>
-    <div class="ulist">${ss.map(s => `<div class="urow sm-row"><div class="u">${icon("server")}<div class="t"><b>${esc(s.label || s.id)}</b> <span class="sm mut">${esc(s.id)}${s.pool ? " · " + esc(s.pool) : ""}</span>
+  return dSec("我的服务器", `<div class="sm mut" style="margin-bottom:6px">你持有的组内服务器与自用主机。入池后，时段内组内服务器空着时借给算力池；自用主机不用借，池里的清单直接放上来，和你自己的清单按份额排。</div>
+    <div class="ulist">${ss.map(s => `<div class="urow sm-row"><div class="u">${icon("server")}<div class="t"><b>${esc(s.label || s.id)}</b> <span class="sm mut">${esc(s.id)}${s.pool ? " · " + esc(s.pool) : ""}${s.mine ? " · 自用" : ""}</span>
       <div class="sm">${lendSay(s)}</div>${lendMsg(s.id)}</div></div><div class="acts">${lendLent(s) ? reclaimPop(s) : ""}${LIVE ? lendPop(s) : ""}</div></div>`).join("")}</div>`);
 }
 function mePage(tab) {
@@ -2846,7 +2860,7 @@ function hostPage(id) {
   const h = D.hosts.find(x => x.id === id);
   if (!h) return `<div class="card empty">没有这台主机（可能已归还）。<a href="#/">回总览</a></div>`;
   const st = h.status;
-  let s = alertBox(alertsOf(h), ST.get("agal", false)) + hostStrip(h) + renewCard(h);
+  let s = alertBox(alertsOf(h), ST.get("agal", false)) + hostStrip(h) + renewCard(h) + poolCard(h);
   const evTab = {id: "events", name: "事件", note: recNote({host: h.id}, 40), body: () => recSlice({host: h.id}, 40)};
   if (!st) return s + `<div class="card empty">${esc(h.error || h.status_error || "这台主机上还没有 worker 状态。")}</div>` + recCard("host", [evTab]);
   s += adoptCard(h) + resCard(h);
@@ -3035,11 +3049,12 @@ function gdIcon(x) {
 function fleetCard(x) {
   const now = D.generated, op = fops().op, d = route().drw, a = x.sample || {}, tags = [];
   const gs = a.gpus || [], vr = [a.vram_real, a.vram_total];
-  if (x.mine) tags.push(`<span class="chip" ${tip("worker 管任务与保活；续租、换人、关机在这台的详情里，任务与队列在主机页")}>${myFleetHost(x) ? "我的自用主机" : "自用"}</span>`);
+  if (x.mine) { tags.push(`<span class="chip" ${tip("worker 管任务与保活；续租、换人、关机在这台的详情里，任务与队列在主机页")}>${myFleetHost(x) ? "我的自用主机" : "自用"}</span>`);
+    if (x.lend?.on) tags.push(lendTag(x.lend)); }
   else if (borrowOf(x)) { const b = hostBorrow(x);
     tags.push(borrowBadge(b, now, b.pool ? "" : "借用中 · ", b.for ? " · " + b.for.join("、") : "")); }
   else {
-    if (x.lend?.on) tags.push(`<span class="badge ${x.lend.open ? "b-acc" : "b-mute"}" ${tip(x.lend.say)}>入池</span>`);
+    if (x.lend?.on) tags.push(lendTag(x.lend));
     if (fShare(x)) tags.push(fShare(x));
     if (x.idle_h >= FREE_H) tags.push(`<span class="badge b-ok" ${tip(`最近连着 ${x.idle_h} 小时只有保活或空闲：可以问问 ${x.holder} 还用不用，不用就换给别人`)}>闲置 · ${x.idle_h >= 48 ? Math.floor(x.idle_h / 24) + " 天" : x.idle_h + " 小时"}</span>`);
     if (x.error && !x.down) tags.push(`<span class="sm" style="color:var(--warn)" ${tip(x.error)}>上次没连上</span>`);
@@ -3119,24 +3134,28 @@ function fleetPage() {
   return s;
 }
 /* 算力池概况（#76）：摘要行里的一项与它打开的抽屉 #/fleet/pool。只读组内服务器的 lend（pool.lend_view）与全局快照的 pool.lists（pool.tick 写的待放清单）；
-   入池设置、收回复用 lendPop、reclaimPop，那一句与单台抽屉「算力池」一行同一个 lendSay。自用主机不入池，不算 */
+   入池设置、收回复用 lendPop、reclaimPop，那一句与单台抽屉「算力池」一行同一个 lendSay。入池的自用主机（#79，fleet.mine 的 lend）也算、也列：不用借，借着的只数组内服务器 */
 const poolLists = () => Object.values(D.pool?.lists || {}).sort((a, b) => (a.since || 0) - (b.since || 0));
+const poolSelf = () => D.fleet.mine.filter(x => x.lend?.on || x.lend?.placed);     // 入池的自用主机（还跑着池放的、正搬走的也列）
 function poolCount() {
-  const ls = D.fleet.servers.map(x => x.lend || {}), on = ls.filter(L => L.on || L.lent), lent = ls.filter(L => L.lent);
-  return {on: on.length, open: on.filter(L => L.lent || L.open).length, rest: on.filter(L => !L.lent && L.rest).length,
-          lent: lent.length, back: lent.filter(L => L.returning).length, wait: poolLists().length};
+  const ls = D.fleet.servers.map(x => x.lend || {}), own = poolSelf().map(x => x.lend), lent = ls.filter(L => L.lent);
+  const on = [...ls.filter(L => L.on || L.lent), ...own.filter(L => L.on)];
+  return {on: on.length, open: on.filter(L => L.lent || L.open && !L.rest && !L.bar).length, rest: on.filter(L => !L.lent && L.rest).length,
+          lent: lent.length, back: lent.filter(L => L.returning).length, wait: poolLists().length,
+          self: own.filter(L => L.on).length, placed: own.reduce((n, L) => n + (L.placed || 0), 0)};
 }
 function poolStat() {
   const c = poolCount(), w = c.wait ? ` · ${c.wait} 条在等` : "";
-  const v = c.on ? `${c.on} 台入池（时段内 ${c.open}）· 借着 ${c.lent}${c.back ? `（${c.back} 要还）` : ""}${w}` : `没有服务器入池${w}`;
+  const v = c.on ? `${c.on} 台入池（时段内 ${c.open}${c.self ? `，自用 ${c.self}` : ""}）· 借着 ${c.lent}${c.back ? `（${c.back} 要还）` : ""}${w}` : `没有服务器入池${w}`;
   const t = `${c.on ? `入池 ${c.on} 台：此刻在时段内 ${c.open} 台${c.rest ? `（${c.rest} 台休息中）` : ""}，算力池借着 ${c.lent} 台${c.back ? `，其中 ${c.back} 台要还了` : ""}`
-    : "还没有服务器入池：持有人在「我的账号 → 我的服务器」开，管理员在这台的抽屉里代开"}\n池里等着放的清单 ${c.wait} 条\n\n点开看各台与池里的清单`;
+    : "还没有服务器入池：持有人在「我的账号 → 我的服务器」开，管理员在这台的抽屉里代开"}${c.self || c.placed ? `\n自用主机入池 ${c.self} 台（不用借），跑着池里 ${c.placed} 条清单` : ""}\n池里等着放的清单 ${c.wait} 条\n\n点开看各台与池里的清单`;
   return `<a class="fs fs-l" href="${DH.pool()}" data-drw="${DH.pool()}" ${tip(t)}><span class="mut">算力池</span><b>${esc(v)}</b></a>`;
 }
 function poolDrawer() {
   const F = D.fleet, c = poolCount(), now = D.generated, ls = poolLists();
   const rank = x => x.lend?.lent ? 0 : x.lend?.on ? 1 : 2;
-  const sv = srvOrder().map(srvById).filter(x => x && !x.mine).sort((a, b) => rank(a) - rank(b));
+  const own = new Set(poolSelf().map(x => x.id));
+  const sv = srvOrder().map(srvById).filter(x => x && (!x.mine || own.has(x.id))).sort((a, b) => rank(a) - rank(b));
   const row = x => { const h = DH.srv(x.id);
     return `<div class="gd-row pl-row">${pfav(x.holder, `<span class="cdot" style="background:${fDot(x)}"></span>`)}
       <div class="fc-t"><b><a href="${esc(h)}" data-drw="${esc(h)}">${esc(x.holder)}</a></b><span class="sm mut">${esc(x.id)} · ${fKind(x)}${x.pool ? " · " + esc(x.pool) : ""}${x.off ? " · 已关机" : ""}</span>
@@ -3147,9 +3166,9 @@ function poolDrawer() {
     const name = pj && D.projects.some(p => p.id === pj) ? `<a href="${esc(ph)}">${projName(pj, {always: true})}</a>` : esc(pj || "—");
     return `<div class="gd-row pl-row"><div class="fc-t"><span>${name}</span><code>${esc(nrm(v.root || ""))}/<b>${esc(v.jobs)}</b></code>
       <span class="sm mut">${where(v)}${v.host === "pool" && v.since ? ` · 等了 ${dur(now - v.since)}` : ""}</span>
-      <span class="sm">${v.why ? esc(v.why) : "这一轮正放到借着的服务器上"}</span></div></div>`; };
+      <span class="sm">${v.why ? esc(v.why) : "这一轮正放到入池的主机上"}</span></div></div>`; };
   const head = c.on ? `${c.on} 台入池 · 时段内 ${c.open} · 借着 ${c.lent}${c.back ? `（${c.back} 要还）` : ""}` : "还没有服务器入池";
-  return dHead(`<span class="fav">${icon("dash")}</span>`, "算力池", "组内服务器空着时借给算力池，跑组里别人交给池的清单")
+  return dHead(`<span class="fav">${icon("dash")}</span>`, "算力池", "组内服务器空着时借给算力池，跑组里别人交给池的清单；入池的自用主机不用借，池里的清单直接放上来")
     + `<div class="db">${dSec("服务器", sv.map(row).join("") || `<div class="empty">[fleet] 里还没有服务器。</div>`,
         `<span class="sm mut">${head}</span>${opsNote()}`)}
       ${dSec("池里等着的清单", ls.map(item).join("") || `<div class="empty">池里没有等着放的清单。入池的人或管理员用 <code>labmon worker add pool ROOT JOBS --project P</code> 交清单，放到哪台由看板定。</div>`,

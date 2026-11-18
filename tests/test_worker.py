@@ -2694,6 +2694,47 @@ class PoolListTest(UnitBase):
         self.assertEqual(json.loads(Path(self.w.p.status).read_text())["pool_heads"], {})
 
 
+class SelfPoolTest(UnitBase):
+    """入池的自用主机（#79）：看板把池清单放到这台时 worker add --pool，登记里记 pool；它与主人自己的清单在同一台按人的份额排（不另设优先），
+    状态的 queues、todo 带 pool，offers 不叫会话挪它（落点由看板定）。"""
+
+    def add(self, q, *extra):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", out):
+            rc = self.m.main(["add", q["root"], "jobs/q.txt", "--host", "t", "--project", q["project"], *extra])
+        return rc, out.getvalue()
+
+    def test_pool_flag_and_person_order(self):
+        own, pooled = self.hosts.queues({n: [n + "1|sleep 5   # vram=30 est_min=10"] for n in "ac"})
+        for q in (own, pooled):
+            os.makedirs(q["state"])
+        self.assertEqual(self.add(own)[0], 0)
+        rc, out = self.add(pooled, "--pool")
+        self.assertEqual(rc, 0, out)
+        regs = {json.loads(f.read_text())["project"]: json.loads(f.read_text()) for f in (self.hosts.home / "hosts" / "t" / "queues").glob("*.json")}
+        self.assertEqual((regs["a"].get("pool"), regs["c"].get("pool")), (None, 1))
+        # 主人 amy 的 a 与池里 bob 的 c 同在 t、卡上一次只放得下一个：amy 在别的主机上正用着卡，按人比先放 bob 的池清单
+        now = time.time()
+        self.hosts.status("o", share={"run": [["b", 1.0, now - 3600, now + 3600]]})
+        Path(self.w.p.sched).write_text(json.dumps({"owner": {"a": "k-amy", "b": "k-amy", "c": "k-bob"}}))
+        os.environ["LABMON_GPUS"] = "GPU-aaa:40000:40000"
+        try:
+            qs = self.w.registry()
+            self.assertEqual({q["project"]: q["pool"] for q in qs}, {"a": False, "c": True})
+            self.w.tick(qs, True)
+            st = json.loads(Path(self.w.p.status).read_text())
+            self.assertEqual([j["name"] for j in st["running"]], ["c1"])
+            self.assertEqual(st["waiting"][0]["name"], "a1")
+            self.assertEqual({q["project"]: q.get("pool") for q in st["queues"]}, {"a": None, "c": True})
+            self.assertEqual({ln["project"]: ln.get("pool") for ln in st["todo"]}, {"a": None, "c": 1})
+            lanes = self.w.proj_lanes("t", st["todo"], st["plan"], {})
+            self.assertEqual([x["project"] for x in lanes], ["a"])            # 池放的不进挪法建议
+        finally:
+            os.environ.pop("LABMON_GPUS")
+            for j in self.w.running.values():
+                os.killpg(j["pid"], 9)
+
+
 class RegDupTest(UnitBase):
     """同一条清单登记在两台（#88）：借来的主机还了再借回、自用主机恢复时，旧登记还在那台。两台共享 HOME（fixtures.Hosts）；
     o 的状态是假的（hosts.status），它容器里的任务 PID 在 t 这边看不到（dead_pid）。回来那台不能把 o 手上的任务当中断、删 current、重跑。"""

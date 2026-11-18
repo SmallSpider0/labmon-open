@@ -247,6 +247,12 @@ class PoolRegTest(Base):
         out = OV._regs([], {"here": h}, {"here": (raw, None)}, {}, 100.0)
         self.assertEqual([(x["host"], x["state"], x["label"]) for x in out][:1], [("pool", "pool", "算力池")])
         self.assertEqual(out[0]["queues"][0]["project"], "pa")
+        self.assertNotIn("pool", out[0]["queues"][0])
+        regs = OV._parse_regs(text.replace('"stop": "term"', '"stop": "term", "pool": 1'))      # 池放过去的登记（worker add --pool，#79）带标记
+        self.assertTrue(regs["gone"][0]["pool"])
+        st = {"t": 1.0, "queues": [{"root": "/r/x", "jobs": "j", "project": "pa", "pool": True}, {"root": "/r/y", "jobs": "j", "project": "pa"}]}
+        out = OV._regs([{"id": "m", "label": "m", "status": st}], {"m": {"id": "m", "worker_home": "/data/me/labmon"}}, {"m": ("", None)}, {}, 100.0)
+        self.assertEqual([q.get("pool") for q in out[0]["queues"]], [True, None])
 
 
 # ---------- C：自动借还与收回（#25） ----------
@@ -699,6 +705,175 @@ class PoolStuckTest(TickBase):
         self.assertIsNone(P.want_borrow({"ngpu": 1, "vram": 20.0}, F.conf(), F._load_state(), {}, NOW, (),
                                         {"a": {"queues": [dict(smoke, stop="boundary")]}})[0])
         self.assertEqual(P.want_borrow({"ngpu": 1, "vram": 20.0}, F.conf(), F._load_state(), {}, NOW, (), {"a": {"queues": [smoke]}})[0], "a")
+
+
+MINE = """
+[[hosts]]
+id = "m"
+ssh = "root@m"
+data_root = "/data/me"
+platform_holder = "AA"
+{lend}
+[[hosts]]
+id = "far"
+ssh = "root@far"
+data_root = "/data/other"
+platform_holder = "AA"
+lend = true
+"""
+
+
+class SelfPoolTest(TickBase):
+    """入池的自用主机（#79）：m 是 AA 的自用主机（与池同一个 worker 目录），不借、池清单直接放上来，与主人的清单按 worker 的份额排；
+    关了入池、出了时段就把池放的（登记带 pool）搬走；收回只停池清单。far 的 worker 目录与池不同，here 是看板本机（没有 ssh）：都不放。"""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_tick()
+        self.mine()
+
+    def mine(self, lend='lend = true\n', a='lend = true\n'):
+        """m 的入池写 lend，组内服务器 a 的写 a（缺省都入池）。"""
+        (self.d / "hosts.toml").write_text(HOSTS.format(extra=a).replace("[fleet]", MINE.format(lend=lend) + "\n[fleet]", 1))
+
+    def host(self, hid="m", **st):
+        return fake_host(hid, dict({"room": {"gpus": {"GPU-a": 40000.0}}}, **st))
+
+    def test_lend_and_member(self):
+        self.mine("", "")
+        self.assertFalse(P.member(who("AA")))                                       # far 开着入池但不能入池（worker 目录不同）：不算
+        self.assertIn("入池", P.set_lend("m", True, "22:00-09:00", who("AA"), False, False))
+        h = next(h for h in CF.user_hosts() if h["id"] == "m")
+        self.assertEqual((h["lend"], h["lend_hours"]), (True, "22:00-09:00"))
+        self.assertTrue(P.member(who("AA")))                                        # 只靠自用主机也是池成员
+        P.need_holder(who("AA"), "m")
+        for sid, w, ops, code in (("m", who("BB"), True, 403), ("m", who("boss", "admin"), False, 403), ("here", who("boss", "admin"), True, 409),
+                                  ("far", who("AA"), False, 409), ("nope", who("AA"), False, 404)):
+            with self.assertRaises(U.Denied) as e:
+                P.set_lend(sid, True, None, w, ops, True)
+            self.assertEqual(e.exception.code, code, sid)
+        mine = {x["id"]: x for x in P.my_servers(who("AA"), NOW, {"regs": [{"host": "m", "queues": [dict(self.pool_list(), pool=True)]}]})}
+        self.assertEqual(set(mine), {"a", "m", "far"})
+        self.assertTrue(mine["m"]["mine"] and not mine["a"]["mine"])
+        self.assertEqual(mine["m"]["lend"]["placed"], 1)
+        self.assertIn("不放", mine["far"]["lend"]["say"])
+        self.assertIn("退出算力池", P.set_lend("m", False, None, who("AA"), False, False))
+        self.assertNotIn("lend", next(h for h in CF.user_hosts() if h["id"] == "m"))
+        self.mine('lend = "yes"\n')
+        with self.assertRaises(CF.ConfigError):
+            F.conf()
+
+    def test_place_on_self_host(self):
+        # 池里待放的清单：入池的自用主机 m 空得出来，不用借、直接放过去；没入池的、看板本机、worker 目录不同的不当候选
+        out = self.tick(self.snap([self.host("m"), self.host("far")], [self.pool_list()]))
+        self.assertEqual(self.moves, [("m", ["jobs/x.txt"], "")])
+        self.assertEqual(self.fits, [("/r/x|jobs/x.txt", ("m",))])
+        self.assertEqual(self.starts, [])
+        self.assertNotIn("/r/x|jobs/x.txt", {k for k, v in out["lists"].items() if v.get("why")})
+        self.moves.clear()
+        self.fits.clear()
+        P._FIT.clear()
+        self.mine("", "")
+        self.tick(self.snap([self.host("m")], [self.pool_list()]))
+        self.assertEqual(self.moves, [])                                            # 关了入池：不放（只问一次要多少资源，给借用看）
+        self.assertEqual(self.fits, [("/r/x|jobs/x.txt", ())])
+
+    def test_several_self_hosts_each_own_switch(self):
+        # 一人名下几台自用主机：每台各有自己的入池开关与时段；只往开着的那台放，关了的那台上池放的搬走
+        two = lambda lm, l2: (self.d / "hosts.toml").write_text(HOSTS.format(extra="").replace(   # noqa: E731
+            "[fleet]", MINE.format(lend=lm) + '[[hosts]]\nid = "m2"\nssh = "root@m2"\ndata_root = "/data/me"\nplatform_holder = "AA"\n' + l2 + "\n[fleet]", 1))
+        two("", "")
+        P.set_lend("m2", True, "22:00-09:00", who("AA"), False, False)
+        hs = {h["id"]: h for h in CF.user_hosts()}
+        self.assertNotIn("lend", hs["m"])
+        self.assertEqual((hs["m2"]["lend"], hs["m2"]["lend_hours"]), (True, "22:00-09:00"))
+        two("", "lend = true\n")
+        self.tick(self.snap([self.host("m"), self.host("m2")], [self.pool_list()]))
+        self.assertEqual(self.moves, [("m2", ["jobs/x.txt"], "")])
+        self.moves.clear()
+        P._FIT.clear()
+        two("lend = true\n", "")
+        regs = [{"host": "m2", "state": "active", "queues": [dict(self.pool_list(), pool=True)]}]
+        self.tick(self.snap([self.host("m"), self.host("m2")], [], regs=regs))
+        self.assertEqual([m[:2] for m in self.moves], [("m", ["jobs/x.txt"])])      # m2 关了：池放的搬到开着的 m
+
+    def test_lend_view_on_snapshot(self):
+        # 快照里自用主机的主机项与组内页 fleet.mine 的 lend：此刻跑着几条池清单
+        snap = self.snap([self.host("m")], [], regs=[{"host": "m", "state": "active", "queues": [dict(self.pool_list(), pool=True)]}])
+        snap["fleet"] = {"mine": [{"id": "m"}]}
+        self.tick(snap)
+        e = next(x for x in snap["hosts"] if x["id"] == "m")
+        self.assertEqual((e["lend"]["mine"], e["lend"]["placed"]), (True, 1))
+        self.assertIn("跑着池里 1 条清单", e["lend"]["say"])
+        self.assertEqual(snap["fleet"]["mine"][0]["lend"], e["lend"])
+
+    def test_leave_moves_pool_lists_only(self):
+        # 关了入池、出了时段：m 上池放的清单（登记带 pool）去放，放不下回池里；主人自己的清单不动；在跑的那一格由 m 跑完（worker 管）
+        pq, own = dict(self.pool_list(), pool=True), self.pool_list(root="/r/own", project="pa")
+        regs = lambda: [{"host": "m", "state": "active", "queues": [dict(pq), dict(own)]}]   # noqa: E731  每轮一份新的：搬成了 tick 会改快照的 regs（#78 的 _shift）
+        for lend in ("", 'lend = true\nlend_hours = "00:00-00:30"\n'):
+            self.mine(lend)
+            self.moves.clear()
+            P._FIT.clear()
+            self.tick(self.snap([self.host("m")], [], regs=regs()))
+            self.assertEqual(self.moves, [("pool", ["jobs/x.txt"], "AA（m） 关了入池" if not lend else "过了入池时段")], lend)
+        self.mine()
+        self.moves.clear()
+        self.tick(self.snap([self.host("m")], [], regs=regs()))
+        self.assertEqual(self.moves, [])                                            # 还在池里：不搬
+        CF.set_fleet_keys({"returned": "2026-11-18 10:00"}, "测试", host="m")       # 归还了：池放的回池里
+        self.tick(self.snap([], [], regs=[{"host": "m", "state": "returned", "queues": [pq, own]}]))
+        self.assertEqual(self.moves, [("pool", ["jobs/x.txt"], "m 已归还")])
+
+    def test_waited_on_self_host_moves_on(self):
+        q = dict(self.pool_list(), pool=True)
+        wa = {"kind": "queue", "root": q["root"], "queue": q["jobs"], "project": "pa", "name": "x", "since": NOW - P.POOL_WAIT_S - 5}
+        own = {**wa, "root": "/r/own"}
+        regs = [{"host": "m", "state": "active", "queues": [q, self.pool_list(root="/r/own")]}]
+        self.tick(self.snap([self.host("m", waiting=[wa, own]), self.lent("a")], [], regs=regs))
+        self.assertEqual(self.moves, [("a", ["jobs/x.txt"], "在 m 上等了 10 分钟还没放行")])   # 主人自己的清单等着不挪
+
+    def test_elsewhere_on_self_host(self):
+        # #80 对自用主机同样成立：池里队首在别处跑的不放到 m；已放到 m、在等别的主机那一格收尾的回池里；m 上主人自己的清单照旧不动
+        q = self.pool_list()
+        k = P.key(q["root"], q["jobs"])
+        heads = {k: {"head": "j2", "n": 3, "dep": None, "held": None, "elsewhere": ["o", "j1"]}}
+        out = self.tick(self.snap([self.host("m")], [q], heads=heads))
+        self.assertEqual((self.moves, self.fits), ([], []))
+        self.assertIn("还在 o 上跑", out["lists"][k]["why"])
+        wa = {"kind": "queue", "root": q["root"], "queue": q["jobs"], "project": "pa", "name": None, "elsewhere": ["o", "j1"], "since": NOW - 5}
+        own = {**wa, "root": "/r/own"}
+        regs = [{"host": "m", "state": "active", "queues": [dict(q, pool=True), self.pool_list(root="/r/own")]}]
+        self.tick(self.snap([self.host("m", waiting=[wa, own])], [], regs=regs), t=NOW + 1)
+        self.assertEqual(self.moves, [("pool", ["jobs/x.txt"], "j1 还在 o 上跑（交给池之前在那台放行的），跑完再放")])
+
+    def test_reclaim_self_host(self):
+        from fixtures import running_job
+        pq, pq2, own = (dict(self.pool_list(root="/r/p", project="pc"), pool=True), dict(self.pool_list(root="/r/q", project="pa"), pool=True),
+                        self.pool_list(root="/r/own", project="pa"))
+        run = [dict(running_job("p1", "pc"), root="/r/p", queue="jobs/x.txt"), dict(running_job("q1", "pa"), root="/r/q", queue="jobs/x.txt")]
+        snap = self.snap([self.host("m", running=run)], [], regs=[{"host": "m", "state": "active", "queues": [pq, pq2, own]}])
+        moves, ovr = [], []
+        mv = lambda to, items, pool="": moves.append((to, [i["root"] for i in items]))    # noqa: E731
+        stop = lambda *a, **k: ovr.append((a, k)) or [{"rc": 0}]                          # noqa: E731
+        with self.assertRaises(U.Denied) as e:
+            P.reclaim("m", who("BB"), True, mv, snap, stop)
+        self.assertEqual(e.exception.code, 403)
+        say = P.reclaim("m", who("AA"), False, mv, snap, stop)
+        self.assertEqual(moves, [("pool", ["/r/p"]), ("pool", ["/r/q"])])
+        self.assertEqual(ovr, [(("add", "pause", "pc", ["m"]), {"now": True, "once": True})])   # pa 在 m 上还有主人的清单：不停，在跑的跑完
+        self.assertIn("pa 在这台还有自己的清单", say)
+        self.assertEqual(P.load_json(P.state_dir() / "borrow.json", {})["m"]["pool"]["rest_why"], "收回过")
+        self.tick(self.snap([self.host("m")], [self.pool_list(root="/r/z")]))
+        self.assertNotIn("m", [m[0] for m in self.moves])                          # 休息期里不往 m 放
+        with self.assertRaises(U.Denied) as e:
+            P.reclaim("m", who("AA"), False, mv, {"hosts": [], "regs": [{"host": "m", "queues": [own]}]}, stop)
+        self.assertEqual(e.exception.code, 409)
+
+    def test_locate_pool_flag(self):
+        snap = {"hosts": [], "regs": [{"host": "m", "queues": [dict(self.pool_list(), pool=True)]}, {"host": "far", "queues": [self.pool_list(root="/r/y")]}]}
+        self.assertEqual(P.locate("/r/x", "jobs/x.txt", snap), "m")
+        self.assertEqual(P.locate("/r/y", "jobs/x.txt", snap), "pool")              # 主人钉在那台的不算池里的
 
 
 class PoolGuardTest(Base):

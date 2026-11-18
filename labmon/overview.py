@@ -112,7 +112,12 @@ def _reg_cmd(h: dict) -> str:
             f"echo \"{REG} $id ${{f##*/}} $(stat -c %Y \"$f\" 2>/dev/null || stat -f %m \"$f\" 2>/dev/null)\"; cat \"$f\"; echo; done; done; ")
 
 
-REG_KEYS = ("root", "jobs", "project", "stop", "gpus")     # 登记的全局视图里一条登记带的字段（状态里的 queues 与登记文件共有的）
+REG_KEYS = ("root", "jobs", "project", "stop", "gpus")     # 登记的全局视图里一条登记带的字段（状态里的 queues 与登记文件共有的）；池放的另带 pool（_pool_mark，#79）
+
+
+def _pool_mark(reg: dict) -> dict:
+    """算力池放过来的登记（worker add --pool，#79）在全局视图里带 pool: true，别的不带这个键。"""
+    return {"pool": True} if reg.get("pool") else {}
 
 
 def _parse_regs(text: str, *, strict: bool = False) -> dict:
@@ -135,7 +140,7 @@ def _parse_regs(text: str, *, strict: bool = False) -> dict:
         if strict and not (isinstance(reg, dict) and isinstance(reg.get("project"), str)):
             raise ValueError("登记归属未核实")
         if isinstance(reg, dict):
-            regs.append({**{k: reg.get(k) for k in REG_KEYS}, "added": reg.get("added"), "added_t": int(mt) if mt.isdigit() else None,
+            regs.append({**{k: reg.get(k) for k in REG_KEYS}, **_pool_mark(reg), "added": reg.get("added"), "added_t": int(mt) if mt.isdigit() else None,
                          "key": f[:-5] if f.endswith(".json") else f})
     return out
 
@@ -165,7 +170,7 @@ def _regs(hosts: list[dict], by: dict, got: dict, old: dict, t: float, fleet_cfg
         x = {"host": e["id"], "label": e["label"], "state": "active", "returned": None, "home": h["worker_home"], "stale": False,
              "pool": h.get("platform_pool"), "prev": (prev_host or {}).get("id")}
         if "queues" in st:                            # 不在内网时 status 是沿用上一次采到的
-            x.update(t=st.get("t"), queues=[{**{k: q.get(k) for k in REG_KEYS}, "empty": bool(q.get("empty")), "added_t": q.get("added_t")} for q in st["queues"]],
+            x.update(t=st.get("t"), queues=[{**{k: q.get(k) for k in REG_KEYS}, **_pool_mark(q), "empty": bool(q.get("empty")), "added_t": q.get("added_t")} for q in st["queues"]],
                      stale=bool(e.get("lan_off")))
         elif e["id"] in files or (h["worker_home"] in read and got[e["id"]][0] is not None and not st and not e.get("status_error")):
             # 代读读到了这台的目录，或这台连得上、没有 status.json（代读不会跳过它）而目录里没有登记

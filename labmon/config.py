@@ -800,14 +800,15 @@ def add_mine_host(hid: str, job: str, ssh: str, port: int, pool: str, label: str
     raw = _read_toml(p) if p.exists() else {}
     hosts = raw.get("hosts", [])
     fleet = raw.get("fleet")
-    keys = {"returned": None, "platform_holder": holder, "platform_job": job, "platform_pool": pool, "borrow_until": None, "borrow_from": None}   # 上次借来时的约定不带过来
+    keys = {"returned": None, "platform_holder": holder, "platform_job": job, "platform_pool": pool, "borrow_until": None, "borrow_from": None,   # 上次借来时的约定不带过来
+            "lend": None, "lend_hours": None}   # 入池（#79）：开出来的自用主机一律不入池、要入池由持有人手动开（维护者 11-18 定），恢复的、照抄的都不带
     for s, end, bid in _blocks(lines, "[[hosts]]"):
         h = next((x for x in hosts if str(x.get("id")) == bid), {})
         if h.get("ssh") == ssh and int(h.get("port") or 22) == int(port):
             if not h.get("returned"):
                 raise ConfigError(f"{p} 里已有在用的主机 {bid}（{ssh}:{port}）")
             if holder is not None and host_holder(h, fleet) != holder:
-                keys["users"] = None
+                keys["users"] = None                                     # 换了人：开给谁用是原来那人定的
             updated = lines[:s + 1] + _set_keys(lines[s + 1:end], keys) + lines[end:]
             # 首次给旧主机写显式归属时，先把旧清单推断的人名固化。与主机改动同一次覆盖写。
             if holder is not None and not h.get("platform_holder") and fleet is not None and not fleet.get("me"):

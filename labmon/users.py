@@ -427,7 +427,7 @@ def me(who: Ident, entry: str) -> dict:
         acc = access(who)
         out["own"], out["hosts"] = sorted(acc.projects), sorted(acc.allowed)
     from .pool import member, my_servers              # pool 在顶层 import 本模块
-    out["servers"] = my_servers(who)                  # 我持有的组内服务器与入池（#24，「我的账号 → 我的服务器」）
+    out["servers"] = my_servers(who)                  # 我持有的组内服务器、自用主机（#79）与入池（#24，「我的账号 → 我的服务器」）
     out["pool_member"] = member(who)
     if out["account"]:
         out["sessions"] = sorted(({**_sess_view(k, r), "this": k == who.key} for k, r in d["sessions"].items() if r.get("user") == who.name),

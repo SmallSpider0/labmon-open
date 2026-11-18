@@ -418,6 +418,7 @@ def load_queue(reg):
             "env": envf if os.path.exists(envf) else None, "gpus": reg.get("gpus"),
             # 项目 id 就是登记时写的 --project（add 必写）
             "project": reg["project"], "stop": reg.get("stop") or "boundary",
+            "pool": bool(reg.get("pool")),        # 算力池放过来的（#79，worker add --pool）：看板认哪些清单是池放的（自用主机上与主人的清单分开），offers 不叫会话挪它
             "added_t": reg_added(reg),            # 登记时刻（epoch 秒）：状态里带出去，看板在同一清单登记在两台在用主机上时取晚的（collect.reg_queues）
             "state": env("QUEUE_STATE", "results/_queue"), "logs": env("QUEUE_LOGS", "results/_logs")}
 
@@ -2636,7 +2637,7 @@ class Worker:
             cur = j.get("name")
             ms, left = rows_left(q["state"], c[1], cur)
             ms = ms or set()
-            ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [cur] if cur else [], "deps": {}, "gang": {},
+            ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [cur] if cur else [], "deps": {}, "gang": {}, **({"pool": 1} if q.get("pool") else {}),
                   "held": "paused" if "paused" in ms else (self.override_hit({"project": q["project"]}, ("pause",))
                                                            or self.override_hit({"project": q["project"]}, ("drain",)) or [None])[0]}
             for n, _ in c[1]:
@@ -3488,7 +3489,7 @@ class Worker:
         pl = {(ln.get("root"), ln.get("queue")): ln for ln in plan.get("lanes") or [] if ln.get("kind") == "queue"}
         out = []
         for ln in todo:
-            if not ln.get("queue") or ln.get("held") in ("paused", "pause"):
+            if not ln.get("queue") or ln.get("held") in ("paused", "pause") or ln.get("pool"):   # 算力池放的（#79）：落点由看板定，不给挪法建议
                 continue
             key = (ln["root"], ln["queue"])
             cur = running.get(key)
@@ -4853,7 +4854,7 @@ class Worker:
                      "cpu": cpu_free(S), "cpu_cap": S["cpu_cap"], "other_cpu": S["cpu"],   # other_cpu：认得准的 labmon 之外的核数（fit 判整机独占，同 intruders）
                      "keep": {c["uuid"]: round(c["keep"]) for c in S["cards"] if c["keep"]},   # 各卡给对方留着的 MB（keep_left）：fit 的整卡封顶 card_need 照它
                      "owner": sorted(S["owner"])},        # 不放的卡（对方超出预留或刚回落、有停不了的保活）：fit 的快照照它（fit_snapshot）
-            "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"],
+            "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"], **({"pool": True} if q.get("pool") else {}),
                         "empty": q.get("empty", False), "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {})} for q in queues],
             "plan": self.plan,                    # 推演（forecast）：各队列与单元每个任务的预计开始、结束、用哪几张卡
             "todo": self.todo,                    # 还会跑的任务（list_state）：别的主机的依赖按它认谁还会跑、排在谁后面
@@ -6305,6 +6306,7 @@ def main(argv=None):
     ap.add_argument("--gpus", help="add：只用这些卡（nvidia-smi 序号，逗号分隔）")
     ap.add_argument("--project", help="add：看板的项目 id（必写）；fit：按这个项目的历史估（缺省取同名任务最近一次的项目）")
     ap.add_argument("--expect-project", help="add / rm：在登记锁内核对这条清单所属的项目")
+    ap.add_argument("--pool", action="store_true", help="add：算力池放过来的（看板的 pool.tick 搬清单时带，#79）：登记里记 pool，看板据此认池清单")
     ap.add_argument("--expect-from", help="add：在登记锁内核对这条清单此刻还登记在这台（算力池搬清单用，#25：会话已撤回、已搬走的不再重新登记）")
     ap.add_argument("--stop", help="add：暂停时怎么停：boundary（缺省，等当前任务跑完）/ term / file:<相对 ROOT 的路径>")
     ap.add_argument("--until", type=float, help="override add：到期时刻（epoch 秒）")
@@ -6394,6 +6396,8 @@ def main(argv=None):
                 reg["gpus"] = [int(x) for x in a.gpus.split(",")]
             if a.stop:
                 reg["stop"] = a.stop
+            if a.pool and a.host != POOL:
+                reg["pool"] = 1
             # 两条队列共用状态目录：current、lock、完成标记会互相覆盖。各主机共用同一块盘，别的主机上登记的也算
             st = load_queue(dict(reg, _slug="new"))["state"]
             if a.idle and os.path.exists(os.path.join(st, "current")):

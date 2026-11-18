@@ -1076,7 +1076,7 @@ class FleetOpsTest(unittest.TestCase):
     def test_mine_host_keeps_access_only_for_same_holder(self):
         hf = Path(os.environ["LABMON_HOSTS"])
         hf.write_text('[[hosts]]\nid = "old"\nssh = "root@h"\nport = 15151\nplatform_pool = "p"\n'
-                      'platform_job = "ALICE"\nusers = ["amy"]\nreturned = "2026-11-09 20:00"\n'
+                      'platform_job = "ALICE"\nusers = ["amy"]\nlend = true\nreturned = "2026-11-09 20:00"\n'
                       '[fleet]\nme = "ALICE"\n')
         c = F.conf()
         self.assertEqual(FB.back_port(c, "p", "ALICE"), 15151)
@@ -1088,6 +1088,19 @@ class FleetOpsTest(unittest.TestCase):
         self.assertEqual({h["holder"] for h in FB.mine(c)}, {"EE"})
         self.assertNotIn("users", hs[new])
         self.assertNotIn("users", hs[old])
+        self.assertNotIn("lend", hs[new])                                   # 入池（#79）：开出来的自用主机一律不入池（维护者 11-18 定）
+        self.assertNotIn("lend", hs[old])
+
+    def test_reopened_mine_host_not_in_pool(self):
+        # 同一人关了又开回同一台（同 ssh 与端口、恢复那一块）：入池同样不带，要入池由持有人再手动开（维护者 11-18 定，#79）
+        hf = Path(os.environ["LABMON_HOSTS"])
+        hf.write_text('[[hosts]]\nid = "old"\nssh = "root@h"\nport = 15151\nplatform_pool = "p"\nplatform_holder = "ALICE"\n'
+                      'platform_job = "ALICE"\nusers = ["amy"]\nlend = true\nlend_hours = "22:00-09:00"\nreturned = "2026-11-09 20:00"\n')
+        _, hid = C.add_mine_host("x", "ALICE", "root@h", 15151, "p", holder="ALICE")
+        h = next(h for h in C.all_hosts() if h["id"] == hid)
+        self.assertEqual((hid, h.get("users")), ("old", ["amy"]))            # 同一人：开给谁用照旧
+        self.assertNotIn("lend", h)
+        self.assertNotIn("lend_hours", h)
 
     def test_reopening_last_legacy_host_keeps_old_borrower(self):
         hf = Path(os.environ["LABMON_HOSTS"])
