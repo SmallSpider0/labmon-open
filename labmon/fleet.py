@@ -61,6 +61,7 @@ GPU 进程（宿主机 PID 经 /proc/<pid>/sched 对回容器 PID）与其父进
 from __future__ import annotations
 
 import fcntl
+import hashlib
 import os
 import re
 import shlex
@@ -262,6 +263,29 @@ def account_person(cfg: dict | None, account: str | None) -> tuple[str | None, s
     from .users import account_identity
     accounts, bindings = account_identity()
     return account_people(cfg or {}, {*accounts, account}, bindings)[account]
+
+
+ADMIN_PERSON = "管理员"        # 没有主人的项目（归管理员）在认不出管理员是谁（legacy_person 为空）时算在这个名下
+
+
+def share_key(person: str) -> str:
+    """人员名在 sched.json 的 owner 里的写法（#23）：名字的短哈希，共享盘上不写名字；worker 只拿它分组，看板自己知道是谁。"""
+    return hashlib.sha256(person.encode()).hexdigest()[:12]
+
+
+def project_people(pids, cfg: dict | None = None) -> dict[str, str]:
+    """各项目算在谁名下（按人的公平份额，#23；同一人的几个项目合起来算一份）：项目主人的账号（projects.owner）经 account_people 认人；
+    认不出人员的账号按账号自己算一人（「账号 名字」）；没有主人的（归管理员，#167 之前的项目）取 legacy_person，再没有就是 ADMIN_PERSON。"""
+    from .projects import owner                    # 与 account_person 一样延迟 import（users 在顶层 import projects）
+    from .users import account_identity
+    cfg = conf() if cfg is None else cfg
+    owners = {p: owner(p) for p in pids}
+    names = {}
+    if any(owners.values()):
+        accounts, bindings = account_identity()
+        names = account_people(cfg or {}, {*accounts, *(a for a in owners.values() if a)}, bindings)
+    admin = legacy_person(cfg) or ADMIN_PERSON
+    return {p: (names[a][0] or f"账号 {a}") if a else admin for p, a in owners.items()}
 
 
 def account_choices(cfg: dict, links: dict, bindings=None) -> list[str]:

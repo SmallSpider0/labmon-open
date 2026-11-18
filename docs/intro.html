@@ -432,8 +432,8 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
 
   <!-- 放行顺序 -->
   <div class="algo" id="a-order">
-    <h3>放行顺序：focus、公平份额、屏障与回填<span class="tag">admit</span></h3>
-    <p class="prose">放得下的请求不止一个时，focus 的项目先；再比各项目的 GPU 用量 ÷ 权重，小的先；项目内先来先跑。大任务等不到卡时，小任务可以先插进空档，但一个请求卡在资源上等满 30 分钟就成为<b>屏障</b>：排在它后面的只有预计在它放行前跑完的才放（回填），其余让位。</p>
+    <h3>放行顺序：按人的公平份额、focus、屏障与回填<span class="tag">admit</span></h3>
+    <p class="prose">放得下的请求不止一个时，先比人：同一人（项目主人）的几个项目的 GPU 用量合起来算一份，小的先；同一人的项目之间 focus 的先，再比用量 ÷ 权重，小的先；项目内先来先跑。大任务等不到卡时，小任务可以先插进空档，但一个请求卡在资源上等满 30 分钟就成为<b>屏障</b>：排在它后面的只有预计在它放行前跑完的才放（回填），其余让位。</p>
     <figure>
       <div class="frame">
         <svg viewBox="0 0 760 270" role="img" aria-label="时间轴上，在跑的任务约 70 分钟后结束，届时屏障 proj-a 的大任务放行；proj-c 的 20 分钟短任务乘 1.2 后在 70 分钟前跑得完，回填放行；3 小时的长任务会越过屏障，让位">
@@ -466,10 +466,11 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
           <text class="lbl-b" x="390" y="185">会越过屏障 → 让位</text>
 
           <text class="s" x="20" y="246">排队顺序：</text>
-          <rect class="node" x="92" y="230" width="128" height="24" rx="12"/><text x="156" y="247" text-anchor="middle">focus 的项目先</text>
-          <rect class="node" x="246" y="230" width="176" height="24" rx="12"/><text x="334" y="247" text-anchor="middle">GPU 用量 ÷ 权重 小的先</text>
-          <rect class="node" x="448" y="230" width="140" height="24" rx="12"/><text x="518" y="247" text-anchor="middle">项目内先来先跑</text>
-          <text class="lbl" x="232" y="247" text-anchor="middle">›</text><text class="lbl" x="435" y="247" text-anchor="middle">›</text>
+          <rect class="node" x="92" y="230" width="130" height="24" rx="12"/><text x="157" y="247" text-anchor="middle">人的用量 小的先</text>
+          <rect class="node" x="248" y="230" width="140" height="24" rx="12"/><text x="318" y="247" text-anchor="middle">同一人里 focus 先</text>
+          <rect class="node" x="414" y="230" width="160" height="24" rx="12"/><text x="494" y="247" text-anchor="middle">用量 ÷ 权重 小的先</text>
+          <rect class="node" x="600" y="230" width="130" height="24" rx="12"/><text x="665" y="247" text-anchor="middle">项目内先来先跑</text>
+          <text class="lbl" x="235" y="247" text-anchor="middle">›</text><text class="lbl" x="401" y="247" text-anchor="middle">›</text><text class="lbl" x="587" y="247" text-anchor="middle">›</text>
         </svg>
       </div>
       <div class="legend"><span><i class="lg-lab"></i>在跑</span><span><i class="lg-lab2"></i>屏障预计的放行</span><span><i class="lg-run"></i>回填（浅色段是 ×1.2 的余量）</span><span><i class="lg-bad"></i>让位</span></div>
@@ -477,6 +478,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
     </figure>
     <details><summary>细节：公平份额怎么算、什么不算等待</summary><div class="in">
       <ul>
+        <li><b>按人</b>：组内几个人共用时一人一份，一个人开几个项目不会多分。项目算在谁名下由看板按项目主人定，写给 worker 的是人员名的短哈希；权重只在同一人的项目之间起作用，优先也只排在同一人别的项目前面，不越过别人（维护者 2026-11-17 定）。只有一个人时顺序与按项目比一样。</li>
         <li><b>用量</b>是各项目在所有主机上的 GPU 卡·时，跑过的按半衰期衰减（缺省 24 小时）。在跑的与刚放行的，预计还要跑的整段先记上一笔，所以同一轮里一个项目放了一个，它后面的请求随之往后排。</li>
         <li><b>占几张卡</b>（<code>card_share</code>）：独占整机算这台的全部卡，独占卡算卡数，否则 卡数 × min(1, 估计显存 ÷ 卡的显存)。几个小任务分着一张卡时不按整卡记。</li>
         <li><b>跨主机</b>：跑过的读各主机共享盘上的 <code>usage.jsonl</code>；别的主机在跑的读它们 <code>status.json</code> 里的 <code>share.run</code>（按状态里写的时刻 <code>t</code>，3 分钟内的才算，不看文件修改时间：共享盘服务器与容器的时钟可能不同）。一个项目在 29 上用得多，在别的主机上就让别的项目先。</li>

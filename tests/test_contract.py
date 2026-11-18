@@ -207,10 +207,11 @@ class ContractTest(unittest.TestCase):
         S = snap["sched"]
         self.assertIsInstance(S["cap_min"], NUM)
         self.assertIsInstance(S["hl_h"], NUM)
+        self.assertIsInstance(S["use_sum"], NUM)
         sp = {p["id"]: p for p in S["projects"]}
         self.assertEqual(set(sp), {"pa", "pb"})
         for p in sp.values():
-            self.assertEqual(set(p), {"id", "w", "use", "cards", "queued", "waiting", "wait_avg", "wait_n", "focus", "paused"})
+            self.assertEqual(set(p), {"id", "person", "pk", "puse", "w", "use", "cards", "queued", "waiting", "wait_avg", "wait_n", "focus", "paused"})
         self.assertEqual((sp[wait["project"]]["waiting"], sp[wait["project"]]["queued"]), (1, 1))
         self.assertGreater(sp[run["project"]]["cards"], 0)
         self.assertEqual((sp["pa"]["wait_n"], sp["pa"]["wait_avg"]), (1, 0.0))                             # a0 一来就放行：等待 0 分钟
@@ -257,7 +258,8 @@ class ContractTest(unittest.TestCase):
         eta = json.loads((self.home / "eta.json").read_text())
         self.assertEqual(list(eta["jobs"]), [f"{run['project']}|{run['name']}"])
         self.assertAlmostEqual(eta["jobs"][f"{run['project']}|{run['name']}"], jobs[run["name"]]["eta_ts"], delta=60)
-        self.assertEqual(json.loads((self.home / "sched.json").read_text()), {})
+        sj = json.loads((self.home / "sched.json").read_text())
+        self.assertEqual(sj, {"owner": {k: sj["owner"]["pa"] for k in ("pa", "pb")}})   # 没有 [sched]；两个项目都归管理员、算一个人（#23）
         # 挪法建议的告警（rebalance:）只给实验会话：项目快照里有，工作台的项目摘要经 C.page_alerts 不计数、不列（#40）
         glob, text = C.snapshot(), "把 t 上 jobs/q.txt 的 a1 挪到 t2：整批预计提前 2.0 小时"
         glob["rebalance"] = {"pa": {"key": "rebalance:pa", "target": "t2", "jobs": [], "from": None, "to": 0, "cut": [], "text": text}}

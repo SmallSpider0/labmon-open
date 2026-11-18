@@ -21,10 +21,12 @@
 与 gpu_queue.sh 的不同：
 - 一台主机上的多条队列由同一个 worker 调度，各队列内部仍一次一个任务；不同队列在 GPU 空闲显存够时并行。
 - 放行顺序（admit）与准入（place：能不能放、选哪几张卡、独占留卡与回填、给对方的预留）只有一份，真放行按实时采样拼的资源快照（snapshot）调它，
-  推演（simulate）在模拟的时间轴上维护同样的快照调它。顺序：focus 的项目先；项目之间比衰减后的 GPU 用量 ÷ 权重（卡·时，各主机一起算，
-  在跑的按预计时长先记一笔），小的先；项目内先来先跑。按这个顺序第一个卡在资源上又等满 wait_cap 的成为屏障，
+  推演（simulate）在模拟的时间轴上维护同样的快照调它。顺序（fair_key）：先比人，同一人的几个项目的衰减 GPU 用量（卡·时，各主机一起算，
+  在跑的按预计时长先记一笔）合起来算一份，小的先；同一人的项目之间 focus 的先，再比用量 ÷ 权重，小的先；项目内先来先跑（#23）。
+  按这个顺序第一个卡在资源上又等满 wait_cap 的成为屏障，
   排在它后面的只能回填（预计在它放行前跑完的才放）。
-  半衰期、wait_cap 与各项目权重由看板按用户级主机清单的 [sched] 写进 sched.json，没写的用缺省；项目级的暂停与优先（[sched.pause]、[sched.focus]）
+  半衰期、wait_cap 与各项目权重由看板按用户级主机清单的 [sched] 写进 sched.json，没写的用缺省；项目属于哪个人（owner，看板按项目主人给的人员键）也随它来；
+  项目级的暂停与优先（[sched.pause]、[sched.focus]）
   也随它来，当成同名的临时指令（sched_ovr，所有主机生效）。
   选卡看 nvidia-smi 的空闲显存（别人占着的卡自然排除），用 CUDA_VISIBLE_DEVICES=<UUID> 固定到选中的卡。
   显存、内存按 max(估计, 实测) 记账，CPU 开跑满 10 分钟后估计那份按近 10 分钟窗口核数回收（#65）：内存上限扣 labmon 之外收不回的内存（mem.anon，页缓存不算），CPU 上限是配额向下取整，
@@ -103,7 +105,7 @@ GATE = 0.9               # 容器里收不回的内存（mem.anon，不算页缓
 WAIT_CAP_S = 1800        # 缺省：请求卡在资源上等了这么久，排在它后面的就不能再越过它，只能回填（预计在它放行前跑完的才放）；sched.json 的 wait_cap_min 可改
 HALF_LIFE_S = 86400      # 缺省：项目之间比的 GPU 用量（卡·时）按这个半衰期衰减；sched.json 的 half_life_h 可改
 ONCE_HOLD_S = 1800       # 不带 --host 的 pause --now 下的“只停一次”：等全局暂停随 sched.json 送到才删，最多挡这么久（看板约 1 分钟一轮）
-POLICY = {"cap": WAIT_CAP_S, "hl": HALF_LIFE_S, "w": {}}   # 调度设置的缺省（policy 读 sched.json 覆盖）：w 为各项目权重，不写为 1
+POLICY = {"cap": WAIT_CAP_S, "hl": HALF_LIFE_S, "w": {}, "own": {}}   # 调度设置的缺省（policy 读 sched.json 覆盖）：w 为各项目权重，不写为 1；own 为项目 → 人员键，没写的项目合起来算一个人
 PEER_EVERY = 60          # 别的主机在跑的任务（各自状态里的 share.run，公平份额要算上）多久重读一次
 STATUS_STALE_S = 180     # status.json 这么久没更新（按里面的 t）就算那台 worker 不在：别的主机（peers）与本机（fit）同一口径，与看板的 config.STALE_S 一样
 DEP_STALE_S = 86400      # 别的主机 worker 不在（状态没更新、也没 worker stop）这么久以内，它清单里没跑完的照样算还会跑：续租、重启时等它的不误报找不到
@@ -3042,14 +3044,17 @@ class Worker:
 
     # ---- 调度设置与公平份额 ----
     def policy(self):
-        """调度设置：看板写来的 sched.json（用户级主机清单的 [sched]），没写的用缺省（POLICY）。返回 {cap 秒, hl 秒, w {项目: 权重}}。"""
+        """调度设置：看板写来的 sched.json（用户级主机清单的 [sched]），没写的用缺省（POLICY）。返回 {cap 秒, hl 秒, w {项目: 权重}, own {项目: 人员键}}。
+        own 是看板按项目主人写的（owner，#23；人员名的短哈希，不是名字）：同一个键的几个项目在 fair_key 里合起来算一份。"""
         try:
             d = json.loads(read(self.p.sched, "{}") or "{}")
         except ValueError:
             d = {}
+        own = d.get("owner") if isinstance(d.get("owner"), dict) else {}
         return {"cap": float(d["wait_cap_min"]) * 60 if d.get("wait_cap_min") else POLICY["cap"],
                 "hl": float(d["half_life_h"]) * 3600 if d.get("half_life_h") else POLICY["hl"],
-                "w": {str(k): float(v) for k, v in (d.get("weight") or {}).items()}}
+                "w": {str(k): float(v) for k, v in (d.get("weight") or {}).items()},
+                "own": {str(k): str(v) for k, v in own.items() if v}}
 
     def cards(self, ngpu, vram_gib, excl):
         """这台主机上一个任务占几张卡（card_share；卡的总显存取这台最小的那张）。"""
@@ -5020,23 +5025,43 @@ def _place(x, S, t, pre=None):
                    owner="；对方在用卡 %s（超出预留或刚回落，%d 分钟内不放）" % (owner, GUEST_QUIET_S / 60) if owner else ""), True
 
 
+def person_use(pol, use):
+    """各人员键（pol["own"]）名下几个项目的用量之和 {人员键: 卡·时}（fair_key 的第一项）；没写人员键的项目合在键 None 下。"""
+    own, out = pol.get("own") or {}, {}
+    for q, v in use.items():
+        out[own.get(q)] = out.get(own.get(q), 0.0) + v
+    return out
+
+
+def fair_key(r, focus, pol, use, tot=None):
+    """放行的先后（admit 逐个比；真放行与推演同一份，#23）：
+    (这人的用量, 项目不在 focus 里, 项目的用量 ÷ 权重, 开始等的时刻)，小的先。
+    - 这人的用量：pol["own"] 里同一个人员键的各项目的 use（衰减后的卡·时）之和。所以先比人，一人一份。看板给它上的每个项目都写人员键；
+      没写的（看板上没有的项目、旧看板没写 owner）合起来算一份；
+    - 同一人的项目之间：focus 的先（维护者 2026-11-17 定：优先只在同一人的项目之间排前，不越过别人），再比用量 ÷ 权重（pol["w"] 里没写的为 1）；
+    - 项目内先来先跑。所有项目属于同一人（或都没写人员键）时第一项都相同，顺序与按项目比时（#23 之前）一样。
+    tot：person_use(pol, use) 先算好的（admit 一次挑选里各请求共用），不给时现算。"""
+    p = r["project"]
+    mine = (person_use(pol, use) if tot is None else tot).get((pol.get("own") or {}).get(p), 0.0)
+    return (mine, p not in focus, use.get(p, 0.0) / (pol["w"].get(p) or 1.0), r["since"])
+
+
 def admit(reqs, focus, pol, use, now, place, shadow=lambda r: None):
-    """一轮放行的规则（tick 真放行与 simulate 推演共用，规则只在这一处）。每次取排在最前的一个：focus 的项目先；
-    项目之间比衰减后的 GPU 用量 ÷ 权重（use，卡·时；pol["w"] 里没写的为 1），小的先，放行一个就记上它预计的卡·时（r["charge"]），
+    """一轮放行的规则（tick 真放行与 simulate 推演共用，规则只在这一处）。每次取排在最前的一个（fair_key）：先比人（同一人的几个项目的用量合起来）；
+    同一人的项目之间 focus 的先，再比衰减后的 GPU 用量 ÷ 权重（use，卡·时；pol["w"] 里没写的为 1），小的先，放行一个就记上它预计的卡·时（r["charge"]），
     成组成员留下资源（place 的原因代码 gang_hold，记在 r["code"]）同样记上：留着就占着，后面的按记上之后的排；
     项目内先来先跑。独占任务不另排前面，轮到它时才留卡（place 里）。等得久不另排前面（否则单卡跑长任务时轮到的总是等了一整个任务的那个，
     权重不起作用），只防被越过：place(r) 放行返回 None，否则返回 (原因, 是否卡在资源上)；按这个顺序第一个卡在资源上又等满 pol["cap"] 的
     成为屏障，shadow(r) 给它预计最早能放行的时刻，排在它后面的（占位任务除外）只有预计在那之前跑完的才放（回填，fits_before），其余让位。
-    返回没放行的 [(请求, 原因, 排位)]：排位 {n 在没放行的里排第几, focus, ratio 轮到它时项目的 用量÷权重, barrier 是屏障,
+    返回没放行的 [(请求, 原因, 排位)]：排位 {n 在没放行的里排第几, puse 轮到它时这人（项目主人）的用量, focus, ratio 轮到它时项目的 用量÷权重, barrier 是屏障,
     behind 被哪个屏障挡着 [项目, 任务]}，看板的等待表据此逐条解释。"""
     use, left, barrier, until, out = dict(use), list(reqs), None, False, []
-
-    def key(r):
-        return (r["project"] not in focus, use.get(r["project"], 0.0) / (pol["w"].get(r["project"]) or 1.0), r["since"])
     while left:
+        tot = person_use(pol, use)
+        key = lambda r: fair_key(r, focus, pol, use, tot)
         r = left.pop(min(range(len(left)), key=lambda i: key(left[i])))
         k = key(r)
-        pos = {"n": len(out) + 1, "focus": not k[0], "ratio": round(k[1], 3)}
+        pos = {"n": len(out) + 1, "puse": round(k[0], 3), "focus": not k[1], "ratio": round(k[2], 3)}
         if barrier and not (r["kind"] == "queue" and is_hold(r["name"])):
             if until is False:
                 until = shadow(barrier)            # 后面有请求才推（推演里只排屏障一个时不再往下推）

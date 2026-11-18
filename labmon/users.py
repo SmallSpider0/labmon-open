@@ -816,7 +816,7 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     整项照给（同一台上别人任务的命令行与日志末尾也在里面：一台主机开给谁，谁就看得到这台上的所有任务，docs/api.md「普通用户看到的」）；
     项目、已归档的、挪法建议、配色只留他的，登记只留那些主机上他项目的清单（#167）；共享盘取 VIEW_DISK；主备只给 role 与一句通用的话。
     组内服务器（fleet）、提醒（notices）、给实验会话的消息（wake）、看板服务所在机的体检（hostcheck，#166）给空值，记录的分类去掉组内的那几类。
-    调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上），别人项目的暂停去掉谁下的（by）。"""
+    调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上），别人项目的暂停去掉谁下的（by），主人名去掉、只留分组用的 pk（#23）。"""
     if who.role == "admin" or not snap:
         return snap
     acc = acc or access(who, snap)
@@ -836,9 +836,11 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     sv = snap.get("server")
     out["server"] = {"role": sv.get("role"), "say": STANDBY_SAY if sv.get("role") == "standby" else ""} if isinstance(sv, dict) else None
     sc = snap.get("sched")
-    if isinstance(sc, dict):                          # 调度卡各项目的行照留；别人项目的暂停不给看是谁下的（#16）
-        out["sched"] = {**sc, "projects": [p if p.get("id") in acc.projects or "by" not in (p.get("paused") or {})
-                                           else {**p, "paused": {k: v for k, v in p["paused"].items() if k != "by"}} for p in sc.get("projects") or []]}
+    if isinstance(sc, dict):                          # 调度卡各项目的行照留；别人的项目不给看暂停是谁下的（#16）、主人是谁（#23，留分组用的 pk）
+        def other(p):
+            pa = p.get("paused") or {}
+            return {**p, "person": None, **({"paused": {k: v for k, v in pa.items() if k != "by"}} if "by" in pa else {})}
+        out["sched"] = {**sc, "projects": [p if p.get("id") in acc.projects else other(p) for p in sc.get("projects") or []]}
     dk = snap.get("disk")
     out["disk"] = None
     if isinstance(dk, dict):

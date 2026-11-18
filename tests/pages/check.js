@@ -191,6 +191,35 @@ t("overview", "调度卡：规则一句话短，算法细节（减半）只在 �
   ok(run(O, "POP") === null && run(O, "JSON.stringify(SF)") === JSON.stringify([["sched/weight", {project: "proj-b", weight: 1.5}]]), "调度卡点 −：" + run(O, "JSON.stringify(SF)"));
   run(O, "SWB.clear()");
 });
+t("overview", "#23 份额按人：几个人在用卡时调度卡按人分组、应得按人均分再按权重分，排位解释先比人；只有一人时照旧", () => {
+  const r = run(O, `(() => { const S = D.sched, old = JSON.stringify(S.projects), h = D.hosts[0];
+    Object.assign(S.projects[0], {person: "张三", pk: "k1", puse: 20.9}); Object.assign(S.projects[1], {person: null, pk: "k2", puse: 3.2});
+    S.projects.push({id: "proj-c", person: "张三", pk: "k1", puse: 20.9, w: 1, use: 2.0, cards: 0, queued: 1, waiting: 0, wait_avg: null, wait_n: 0, focus: null, paused: null});
+    const prev = {project: "proj-a", name: "a9", h, pos: {n: 1, puse: 0.5, focus: false, ratio: 1.0}, since: D.generated - 60, why: "放不下"};
+    const x = {project: "proj-b", name: "b9", h, pos: {n: 2, puse: 1.0, focus: false, ratio: 0.5}, since: D.generated - 60, why: "放不下"};
+    const out = [schedCard(), shareBar(S.projects[1]), shareBar(S.projects[0]), rankTip(x, [prev, x])];
+    S.projects = JSON.parse(old); return out; })()`);
+  clean(r[0], "按人的调度卡");
+  has(r[0], "按人轮流（"); has(r[0], 'class="sch-pp"'); has(r[0], "<b>张三</b>"); has(r[0], "<b>其他人</b>", "普通用户看别人的项目没有主人名");
+  has(r[0], "在各自主人的项目里", "优先只在同一人的项目里排前");
+  ok(r[0].indexOf("<b>其他人</b>") < r[0].indexOf("<b>张三</b>"), "人按近期用量合计从小到大排（与放行先后一致）");
+  has(r[1], "/ 50%", "两个人各应得一半"); has(r[2], "/ 25%", "张三的一半再按权重分给他的两个项目");
+  has(tips(r[2]), "应得 1 ÷ 2 人"); ok(tips(r[0]).includes("份额按人算"), "ⓘ 说明份额按人算");
+  has(r[3], "先比人：其他人名下几个项目的用量合计 1.0 卡·时"); has(r[3], "这人近期用得更少（0.5 < 1.0 卡·时）");
+  ok(!leak(r.join("\n")), "按人的调度卡漏 NaN/undefined");
+  const one = run(O, "schedCard()"); has(one, "按份额轮流（"); ok(!one.includes("sch-pp"), "只有一个人时不分组");
+});
+t("overview", "#23 人的用量合计取看板按完整用量算的 puse（含已归档、卡上不列的项目），不只加卡上列着的几行", () => {
+  const r = run(O, `(() => { const S = D.sched, old = JSON.stringify(S), save = JSON.stringify(S.projects);
+    Object.assign(S.projects[0], {person: "张三", pk: "k1", puse: 22.1}); Object.assign(S.projects[1], {person: "李四", pk: "k2", puse: 33.2});   // 李四已归档的项目还有 30 卡·时
+    S.use_sum = 52.1;
+    const out = [schedCard(), personBar([S.projects[1]])]; S.projects = JSON.parse(save); Object.assign(D, {sched: JSON.parse(old)}); return out; })()`);
+  clean(r[0], "按人的调度卡（含已归档用量）");
+  ok(r[0].indexOf("<b>张三</b>") < r[0].indexOf("<b>李四</b>"), "李四名下合计更多（含已归档的），排在张三后面，与 worker 放行先后一致");
+  has(r[0], "合计 33.2 卡·时", "人那一行写完整的合计");
+  has(r[1], "64% <span", "占比的分母是所有项目的用量和（use_sum）");
+  ok(!leak(r.join("\n")), "漏 NaN/undefined");
+});
 t("overview", "#96 调度卡的暂停与恢复：项目级的（所有主机）按钮撤它，只在几台单独下的徽标写主机与带 --host 的撤销命令", () => {
   const h = run(O, "POP = null; schedCard()"); clean(h, "调度卡");
   has(h, `data-sch="uf" data-p="proj-a"`, "proj-a 项目级优先：撤销优先"); has(h, `data-sch="p" data-p="proj-a"`, "proj-a 没暂停：暂停按钮");
