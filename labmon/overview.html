@@ -1484,7 +1484,8 @@ function meCan(M, info) {
 let LMSG = null, LMT = null;                             // 上一次保存的结果 {id, m}（一分钟后收起）
 const lendSrv = id => ((ACC.me || ME)?.servers || []).find(x => x.id === id) || srvById(id);
 const lendMine = id => ((ACC.me || ME)?.servers || []).some(x => x.id === id);
-const lendBadge = L => !L ? "" : L.on ? `<span class="badge ${L.open ? "b-acc" : "b-mute"}">${esc(L.say)}</span>` : `<span class="mut">${esc(L.say)}</span>`;
+const lendBadge = L => !L ? "" : L.lent ? `<span class="badge ${L.returning ? "b-warn" : "b-acc"}">${esc(L.say)}</span>`     // 借着、要还（#25）
+  : L.on ? `<span class="badge ${L.open && !L.rest ? "b-acc" : "b-mute"}">${esc(L.say)}</span>` : `<span class="mut">${esc(L.say)}</span>`;
 const lendMsg = id => LMSG?.id === id ? `<div class="sm mut">${esc(LMSG.m)}</div>` : "";
 function lendPop(s) {
   const open = popIs("lend", s.id), P = open ? POP : null, mine = lendMine(s.id);
@@ -1500,9 +1501,36 @@ function lendPop(s) {
     ${P.err ? `<div class="rn-err">${esc(P.err)}</div>` : ""}`;
   return popConfirm(btn, true, body, `<button class="btn pri" data-lend="go" data-id="${esc(s.id)}" ${P.busy || (!mine && on && !P.ok) ? "disabled" : ""}>${P.busy ? "正在保存…" : "保存"}</button>`, true);
 }
+// 收回（#25）：算力池借着的这台，持有人本人或能做平台操作的管理员点；停下池任务、清单回池里重排，几分钟内还回来（POST api/pool/reclaim，pool.reclaim）
+function reclaimPop(s) {
+  const open = popIs("rc", s.id), P = open ? POP : null;
+  const btn = `<button class="btn mini-btn danger" id="rc-${esc(s.id)}" data-lend="rc" data-id="${esc(s.id)}" aria-haspopup="dialog" aria-expanded="${open}" ${tip("停下这台上的池任务、清单回池里放到别处，几分钟内还回来")}>${icon("stop")}收回</button>`;
+  if (!open) return popConfirm(btn, false);
+  const body = `<b>收回 ${esc(s.holder)}（${esc(s.id)}）</b><div class="sm">停下池任务、重排到别处，几分钟内还回来。</div>
+    <div class="sm mut">停下的那一格按清单的停法停，在别处重跑；之后 3 小时内算力池不再借这台。</div>${P.err ? `<div class="rn-err">${esc(P.err)}</div>` : ""}`;
+  return popConfirm(btn, true, body, `<button class="btn pri dz" data-lend="rcgo" data-id="${esc(s.id)}" ${P.busy ? "disabled" : ""}>${P.busy ? "正在收回…" : "停下并收回"}</button>`);
+}
+const lendLent = s => !!s?.lend?.lent && LIVE && (lendMine(s.id) || canOps());    // 这台正借给算力池、看页面的人能收回
 async function lendAct(act, d) {
   const s = lendSrv(d.id);
   if (!s) return;
+  if (act === "rc") { popToggle("rc", d.id, {trigger: "rc-" + d.id}); return render(false); }
+  if (act === "rcgo") {
+    if (!popIs("rc", d.id) || POP.busy) return;
+    const P = POP;
+    P.busy = true; P.err = null; render(false);
+    try {
+      const r = await postJSON("api/pool/reclaim", {id: d.id});
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      if (POP === P) { FFOCUS = P.trigger; popClose(); }
+      for (const m of [ME, ACC.me]) if (m && j.servers) m.servers = j.servers;
+      LMSG = {id: d.id, m: j.msg}; clearTimeout(LMT); LMT = setTimeout(() => { LMSG = null; render(false); }, 60000);
+      if (ME?.admin) collectNow(true);
+    } catch (e) { if (POP === P) P.err = e.message || String(e); }
+    P.busy = false;
+    return render(false);
+  }
   if (act === "open") {
     const m = /^\s*(\d{1,2}:\d\d)\s*-\s*(\d{1,2}:\d\d)\s*$/.exec(s.lend?.hours || ""), hm = x => x.padStart(5, "0");   // 时段的写法同 fleet.lend_span
     popToggle("lend", d.id, {on: !!s.lend?.on, ok: false, trigger: "lend-" + d.id, draft: {lf: m ? hm(m[1]) : "", lt: m ? hm(m[2]) : ""}});
@@ -1531,7 +1559,7 @@ function myServersSec(M) {
   if (!ss.length) return "";
   return dSec("我的服务器", `<div class="sm mut" style="margin-bottom:6px">组内服务器里你持有的。入池后，时段内空着时借给算力池，跑组里别人交给池的清单。</div>
     <div class="ulist">${ss.map(s => `<div class="urow sm-row"><div class="u">${icon("server")}<div class="t"><b>${esc(s.label || s.id)}</b> <span class="sm mut">${esc(s.id)}${s.pool ? " · " + esc(s.pool) : ""}</span>
-      <div class="sm">${lendBadge(s.lend)}</div>${lendMsg(s.id)}</div></div><div class="acts">${LIVE ? lendPop(s) : ""}</div></div>`).join("")}</div>`);
+      <div class="sm">${lendBadge(s.lend)}</div>${lendMsg(s.id)}</div></div><div class="acts">${lendLent(s) ? reclaimPop(s) : ""}${LIVE ? lendPop(s) : ""}</div></div>`).join("")}</div>`);
 }
 function mePage(tab) {
   if (!LIVE || !ME) return `<div class="card"><div class="empty">账号要经看板服务（labmon serve）打开才看得到。</div></div>`;
@@ -3000,7 +3028,7 @@ function fleetCard(x) {
   const gs = a.gpus || [], vr = [a.vram_real, a.vram_total];
   if (x.mine) tags.push(`<span class="chip" ${tip("worker 管任务与保活；续租、换人、关机在这台的详情里，任务与队列在主机页")}>${myFleetHost(x) ? "我的自用主机" : "自用"}</span>`);
   else if (borrowOf(x)) { const b = hostBorrow(x);
-    tags.push(borrowBadge(b, now, "借用中 · ", b.for ? " · " + b.for.join("、") : "")); }
+    tags.push(borrowBadge(b, now, b.pool ? "" : "借用中 · ", b.for ? " · " + b.for.join("、") : "")); }
   else {
     if (x.lend?.on) tags.push(`<span class="badge ${x.lend.open ? "b-acc" : "b-mute"}" ${tip(x.lend.say)}>入池</span>`);
     if (fShare(x)) tags.push(fShare(x));
@@ -3178,8 +3206,8 @@ function borrowSec(x) {
   if (!b) return BMSG?.id === x.id ? dSec("借用", `<div class="rn-state">${esc(BMSG.msg)}</div>`) : "";
   const hb = hostBorrow(x), run = hostRun(x), wd = D.hosts.find(e => e.id === x.id)?.status?.watchdogs || {};
   const wdt = ws => ws.map(w => `PID ${w.pid}（${w.cmd}：${w.why}）`).join("、");   // worker 找到的保活看门狗
-  const kv = [["借来", ts(b.since)], ...(b.by ? [["借用人", esc(b.by)]] : []), ["约定", b.until ? tsNear(b.until) : "没约定"], ["截止", hb.cutoff ? `${tsNear(hb.cutoff)} <span class="mut">${esc(hb.why || "")}</span>` : "—"],
-    ["给", b.for ? b.for.map(esc).join("、") : "自己的项目"], ["在跑", run.length ? run.map(j => esc(j.name)).join("、") : `<span class="mut">没有任务</span>`],
+  const kv = [["借来", ts(b.since)], ...(b.by ? [["借用人", esc(b.by)]] : []), [b.pool ? "时段到" : "约定", b.until ? tsNear(b.until) : b.pool ? "全天" : "没约定"], ["截止", hb.cutoff ? `${tsNear(hb.cutoff)} <span class="mut">${esc(hb.why || "")}</span>` : "—"],
+    ["给", b.pool ? "算力池里的清单" : b.for ? b.for.map(esc).join("、") : "自己的项目"], ["在跑", run.length ? run.map(j => esc(j.name)).join("、") : `<span class="mut">没有任务</span>`],
     ...hb.keep ? [[hb.keep.away ? "说好不用" : "给对方留", esc(keepText(hb.keep, true)) + (hb.other ? ` <span class="mut">对方此刻：显存 ${mb2g(Object.values(hb.other.vram || {}).reduce((a, v) => a + v, 0))} GiB、内存 ${hb.other.ram ?? "—"} GiB、CPU ${hb.other.cpu ?? "—"} 核</span>` : "")]] : [],
     ...wd.frozen?.length || wd.seen?.length ? [["看门狗", [wd.frozen?.length ? `暂停着（还卡时恢复）：${esc(wdt(wd.frozen))}` : "",
       wd.seen?.length ? `<span class="mut">找到、没动：${esc(wdt(wd.seen))}</span>` : ""].filter(Boolean).join("<br>")]] : []];
@@ -3301,6 +3329,7 @@ const hostRun = x => (D.hosts.find(e => e.id === x.id)?.status?.running || []).f
 // 借用的操作按钮（组内服务器抽屉与主机页共用）：改约定（弹出表单）、跑完就还 ↔ 撤销还（原地换，还掉之前能撤）、现在停（不能撤）。
 // 跑完就还、现在停先在按钮旁确认；过了约定时间的撤不了（下一轮又会要还），要先改约定。正在停下的不出按钮
 function borrowBtns(x) {
+  if (hostBorrow(x)?.pool) return lendMine(x.id) || canOps() ? reclaimPop(x) : "";   // 算力池借来的（#25）：借还由看板定，只能「收回」
   if (!canOps()) return opsNote();
   const b = hostBorrow(x), dis = fops().op?.active ? "disabled" : "", who = esc(x.holder);
   const run = hostRun(x), names = run.map(j => projName(j.project) + esc(j.name)).join("、"), past = b.cutoff && D.generated >= b.cutoff;
@@ -4019,7 +4048,8 @@ const freeCards = h => { const gs = h?.status?.info?.gpus || [], busy = new Set(
 // 能换去的主机：worker 目录相同（同一块共享盘，换过去时才删得掉原来那份）的别的在用主机；借来的只给别的项目用的置灰（worker 也会拒），drain、worker 没在跑的写在后面；
 // info 是给人挑的：空着几张卡、租期
 function regTo(x, pid) {
-  return (D.regs || []).filter(y => y.state === "active" && y.host !== x.host && canUseHost(y.host) && nrm(y.home) === nrm(x.home)).map(y => {
+  return (D.regs || []).filter(y => y.state === "active" && y.host !== x.host && canUseHost(y.host) && nrm(y.home) === nrm(x.home)
+      && !D.hosts.find(e => e.id === y.host)?.borrow?.pool).map(y => {        // 算力池借来的不列：放什么由看板定（#25）
     const h = D.hosts.find(e => e.id === y.host), b = h?.borrow, ov = h?.status?.overrides || [];
     const no = b?.for?.length && !b.for.includes(pid) ? `借来的，只给 ${b.for.join("、")} 用` : "";
     const note = no || [ov.some(o => o.kind === "drain") ? "drain 中，不放行" : "", !h?.worker_up ? "worker 没在跑，拉起后放行" : ""].filter(Boolean).join("，");

@@ -13,7 +13,7 @@ from . import fleetboot as FB
 from . import fleetops as FO
 from . import lease as LS
 from . import pool as PO
-from .config import ConfigError, active_hosts, fmt_time, hosts_file, parse_time
+from .config import POOL_LABEL, ConfigError, active_hosts, fmt_time, hosts_file, parse_time
 from .service import notify
 from .state import file_sig, load_rows
 
@@ -67,14 +67,16 @@ def _rows(sid: str, acc: dict | None) -> list[dict]:
 
 
 def _by_person(since: float) -> dict[str, dict[str, list[dict]]]:
-    """近期所有小时行（组内服务器、自用主机，含已换人、已删掉的、已归还的）按人拆开：{名字: {服务器: [份]}}。"""
+    """近期所有小时行（组内服务器、自用主机，含已换人、已删掉的、已归还的）按人拆开：{名字: {服务器: [份]}}。
+    算力池借着的那部分（bw 的「算力池」，#25）不是一个人：主人那边照记借出，借的那份不列（池里各人的用量看调度卡）。"""
     accs, d, out = F.accs(), F.state_dir() / "hours", {}
     ids = {f.stem for f in d.glob("*.jsonl")} if d.exists() else set()
     for sid in sorted(ids | set(accs)):
         for r in _rows(sid, accs.get(sid)):
             if r["h"] >= since:
                 for name, part in _parts(r):
-                    out.setdefault(name, {}).setdefault(sid, []).append(part)
+                    if name != POOL_LABEL:
+                        out.setdefault(name, {}).setdefault(sid, []).append(part)
     return out
 
 
@@ -143,7 +145,8 @@ def view(hosts: list[dict] | None = None, t: float | None = None, cfg: dict | No
                         "guard": F.guard_state({**s, "off": o}, st, cfg, t, s["id"] in busy),
                         "lend": PO.lend_view(s, t),                 # 入池（#24），与「我的服务器」同一份
                         "borrow": {"since": parse_time(s.get("borrow_since")), "until": parse_time(s.get("borrow_until")), "for": s.get("borrow_for"), "by": F.borrower(s, cfg),
-                                   "away": parse_time(s.get("borrow_away")), "returned": parse_time(s.get("borrow_returned"))} if s.get("borrow_since") else None,   # 时刻都是 epoch 秒
+                                   "away": parse_time(s.get("borrow_away")), "returned": parse_time(s.get("borrow_returned")),
+                                   "pool": bool(s.get("borrow_pool"))} if s.get("borrow_since") else None,   # 时刻都是 epoch 秒；pool：算力池自动借的（#25，by 是「算力池」）
                         # 借得了（对方空着或轻用）的：对方在用什么、借来用时给对方留的量（按对方近 7 天轻用时的用量推荐）
                         "using": B.using(smp) if smp else "",
                         "reserve": B.reserve_for(s["id"], t) if smp and not o and not st.get("down") and not F.borrowed(s) and B.can_borrow(smp) else None})

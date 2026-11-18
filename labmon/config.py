@@ -499,16 +499,18 @@ def pool_home(hosts: list[dict] | None = None) -> str | None:
 
 def guest_host(s: dict, hosts: list[dict]) -> dict:
     """借来的组内服务器当调度主机用时的样子：id 用组内服务器的，照抄一台在用自用主机（_guest_tpl）的 python、data_root、worker_home（显式配的；与 pool_home 同一个目录选择）、shared、mounts、checks
-    （同一套镜像与共享盘），ssh 主机密钥沿用组内服务器的 known_hosts。hosts：[[hosts]] 各块。"""
+    （同一套镜像与共享盘），ssh 主机密钥沿用组内服务器的 known_hosts。hosts：[[hosts]] 各块。
+    算力池自动借来的（borrow_pool，#25）：borrow.pool 为真，名字写「节点（池 · 持有人）」。"""
     from .fleet import state_file                 # fleet 在上层 import 本模块，这里只能延迟 import
     tpl = _guest_tpl(hosts)
     node = str(s.get("ssh", "")).rsplit(".", 1)[-1] or str(s["id"])
+    pool = bool(s.get("borrow_pool"))
     return {**{k: tpl[k] for k in ("python", "data_root", "worker_home", "ka_bin", "shared", "mounts", "checks") if k in tpl},
-            "id": str(s["id"]), "label": f"{node}（借 {s.get('holder')}）", "ssh": s.get("ssh"), "port": s.get("port", 22),
+            "id": str(s["id"]), "label": f"{node}（池 · {s.get('holder')}）" if pool else f"{node}（借 {s.get('holder')}）", "ssh": s.get("ssh"), "port": s.get("port", 22),
             "known_hosts": str(state_file("known_hosts")), "worker": "auto", "returned": s.get("borrow_returned"),
             "borrow": {"holder": str(s.get("holder")), "since": parse_time(s.get("borrow_since")), **_until(s.get("borrow_until")),
                        "for": s.get("borrow_for") or None, "light": bool(s.get("borrow_light")),
-                       "away": parse_time(s.get("borrow_away"))}}
+                       "away": parse_time(s.get("borrow_away")), **({"pool": True} if pool else {})}}
 
 
 def _merge_items(base: list, extra: list, key: str) -> list:

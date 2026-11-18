@@ -24,6 +24,7 @@ from pathlib import Path
 from . import disk as DK
 from . import lan as L
 from . import lease as LS
+from . import pool as PO
 from . import projects as PJ
 from .config import AUTO_GROUP_RE, GIB, HOLD_RE, POOL_LABEL, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
 from .health import link_step
@@ -330,6 +331,8 @@ def build(cfg: dict, probes: dict, out_dir: Path, lan: dict | None = None, glob_
     _history(cfg, snap, state, hist, hist_path, t)
     snap["gpu_mine"] = gpu_mine(cfg["id"], [h["id"] for h in snap["hosts"]], glob_snap, t)
     snap["rebalance"] = (glob_snap.get("rebalance") or {}).get(cfg["id"])    # 挪法建议（rebalance.suggest 在工作台那一轮算好的）：_lane 的 borrow_cut 与 _rebalance 用
+    # 算力池里这个项目待放的清单为什么还没放、从何时起等（pool.tick 在工作台那一轮写的，#25）：池车道的等待原因与 pool_wait 告警用
+    snap["pool"] = {k: v for k, v in ((glob_snap.get("pool") or {}).get("lists") or {}).items() if v.get("project") == cfg["id"]}
     ratios, quiet = _lanes(cfg, snap, state, raw_by_host, t)
     _groups(cfg, snap, state, ratios)
     _host_alerts(cfg, snap, state, hist, glob_snap, t)
@@ -495,7 +498,8 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
         info["fs_skew"] = raw["fs_skew"]
     lane.update(info)
     if hcfg[q["host"]].get("pool"):                  # 算力池里待放的（#24）：没有 worker 管，等看板放到某台；不报队列进程不在
-        lane.update(pool=True, managed=True, alive=False, waiting=None if lane.get("paused") else POOL_WAIT)
+        pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {}     # 为什么还没放（pool.tick，#25）
+        lane.update(pool=True, managed=True, alive=False, waiting=None if lane.get("paused") else POOL_WAIT + (f"：{pv['why']}" if pv.get("why") else ""))
     if lane.get("held") and not lane.get("paused") and not any(j["status"] == "running" for j in jobs):
         lane["paused"] = lane["waiting"]          # 被临时指令挡住（drain、本项目暂停、续租截止、约定归还）：按暂停算，不报空转（约定归还挡住的另报 borrow_cut）
     if lane.get("dep") not in (None, "wait"):    # 队首等的依赖跑失败了、找不到、成环：不改就一直不放行（labmon wait 与实验会话据此处理）
@@ -529,13 +533,23 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
                 failed=sum(j["status"] == "failed" for j in jobs), unfinished=unfinished, no_gpu=no_gpu,
                 eta_ts=max(ends) if unfinished and None not in ends and not lane.get("paused") else None)   # 有推演不出的（stuck）就不写
     snap["lanes"].append(lane)
-    if returned:
+    pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {} if lane.get("pool") else {}
+    if pv.get("since") and unfinished and not lane.get("paused") and t - pv["since"] >= PO.POOL_TELL_S:
+        # 池里待放满 2 小时（同一次待放只报一次：key 带开始等的时刻），只给会话：池里排队是常态，不标红
+        alerts.append(alert(f"pool_wait:{q['id']}:{round(pv['since'])}", "agent",
+                            f"{where} 在算力池里等了 {fmt_dur(t - pv['since'])}：{pv.get('why') or '还没放到哪台'}；"
+                            "要早点跑可以登记到自己能用的主机（labmon worker add <主机> ROOT JOBS --project <项目>，一条清单只归一台，它就出了池）"))
+    if returned and (hcfg[q["host"]].get("borrow") or {}).get("pool"):
+        pass                                         # 算力池借过的主机还掉了：剩下的清单由看板搬回池里（pool.tick），不叫会话换主机
+    elif returned:
         if unfinished:
             left = f"{hcfg[q['host']]['label']} 已归还，{q['name']} 还有 {unfinished} 个任务没跑完"
             alerts.append(alert(f"returned_unfinished:{q['id']}", "both",
                                 f"{left}：把这条清单 labmon worker add 到别的在用主机（车道跟着登记走，monitor.toml 不用改）",
                                 f"{left}：可在项目的「管理」里换到别的主机，或由实验会话登记到别的主机"))
-    elif lane.get("held") == "deadline" and unfinished and (bw := next(x for x in snap["hosts"] if x["id"] == q["host"]).get("borrow") or {}).get("late"):
+    elif lane.get("held") == "deadline" and unfinished and (bw := next(x for x in snap["hosts"] if x["id"] == q["host"]).get("borrow") or {}).get("late") \
+            and not bw.get("pool"):                  # 算力池借来的：看板自己会搬（pool.tick），不叫会话
+
         # 借来的主机上队首被约定归还挡住（borrow.late_jobs 认定约定归还是这台最早的截止）：这台不会再放它，叫醒会话换主机或请用户延长约定
         # （怎么办的那句取 borrow.late_do）；只读 worker 已有的状态，不改放行规则。归还后由上面的 returned_unfinished 接手，续租截止挡住的不报
         # 能挪到哪台、几点跑完（挪法建议里挪的有这条清单的）写在这条告警里，rebalance 不再为这批报一次（_rebalance）；

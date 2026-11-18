@@ -1018,6 +1018,48 @@ class AdmissionUnitTest(UnitBase):
         self.assertEqual(rc, 2)
         self.assertIn("还没登记：写 --project", out)
 
+    def test_fit_list_json_head(self):
+        # #25：算力池往哪台放（pool.fit_head）问 fit --list --json：只看队首（跑完的、在跑的跳过），打一行 JSON：要多少（没有能算的主机也给）、
+        # 各台放不放得下与原因（同 FitHost.open）、状态过期的写原因；池目录（--host pool）没有 worker，不看它自己（旧代码不认 --json）
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("j_s0", "bp", now - 3600, now - 1800, ram_peak=2.0, vram_peak=20000.0, cores_peak=1.0)])
+        q, = self.hosts.queues({"L": ["j_s1|true", "j_s2|true", "j_s3|true   # gpus=3"]}, project="bp")
+        os.makedirs(q["state"])
+        Path(q["state"], "j_s1.done").write_text("")
+        self.hosts.register(self.m.POOL, "L", "bp")
+        self.fit_two_cards(running=[])
+        self.hosts.status("old", age=900, info={"gpus": []})
+        import contextlib
+        import io
+
+        def ask(hosts):
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = self.m.fit_list(self.m.Paths(self.m.POOL), str(self.d / "L"), "jobs/q.txt", "bp", list(hosts), True)
+            self.assertEqual(rc, 0, out.getvalue())
+            return json.loads(out.getvalue().strip().splitlines()[-1])
+        r = ask(("t", "old"))
+        self.assertEqual(r["head"], "j_s2")
+        self.assertEqual((r["need"]["ngpu"], round(r["need"]["vram"]), r["need"]["cpus"], r["need"]["src"]), (1, 21, 1, "同名 近 1 次峰值 ×1.1"))
+        self.assertTrue(r["hosts"]["t"]["ok"], r)
+        self.assertIn("可用", r["hosts"]["t"]["why"])
+        self.assertEqual(r["hosts"]["old"], {"ok": False, "why": "old 的 worker 没在跑（状态 15 分钟没更新）"})
+        self.assertNotIn(self.m.POOL, r["hosts"])
+        self.assertEqual(ask(())["need"]["ngpu"], 1)                           # 没有候选主机也给 need（池据此挑服务器来借）
+        Path(q["state"], "j_s2.done").write_text("")
+        r = ask(("t",))
+        self.assertEqual((r["head"], r["need"]["ngpu"]), ("j_s3", 3))       # 要 3 张卡，t 只有 2 张
+        self.assertFalse(r["hosts"]["t"]["ok"])
+        Path(q["state"], "j_s3.done").write_text("")
+        self.assertIsNone(ask(("t",))["head"])
+        # 池借的主机 gone 换了容器、清单回池里：current 里还记着它放的 j_s3（容器没了，任务也没了）。看板说 gone 已归还（returned.json）时
+        # 不算在跑，j_s3 重新当队首；没说的照旧当在跑、不再分（Codex 审查 #75）
+        os.remove(Path(q["state"], "j_s3.done"))
+        Path(q["state"], "current").write_text("j_s3 4242 %s gone\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+        self.assertIsNone(ask(("t",))["head"])
+        Path(self.m.Paths("t").returned).write_text(json.dumps({"hosts": ["gone"]}))
+        self.assertEqual(ask(("t",))["head"], "j_s3")
+
     def test_job_cmd_first_row(self):
         # 按名字找清单里的一行只有一处（job_cmd）：取第一条、跳过注释行，找不到为 None
         q, = self.hosts.queues({"q": ["# x|old", "x|echo 1   # tag=a", "x|echo 2"]})
@@ -1703,6 +1745,40 @@ class GuestTest(UnitBase):
         self.w.ovr = []                                                                     # 还了：全清
         self.w.guest_scan(t + 7 + self.m.GUEST_QUIET_S)
         self.assertEqual((self.w.back, self.w.back_last, self.w.tight), ({}, {}, None))
+
+    def test_pool_owner_back_blocks_host(self):
+        # #25：主人回来（状态的 guest.owner）不含只因 ka.sh 停不了的保活超出的卡；算力池借来的（keep.pool）主人回来整台不放，
+        # 手动借的照旧只挡那张卡（旧代码没有 owner，keep.pool 也不挡整台）
+        t = time.time()
+        self.cards(40000, 40000)
+        self.guest(dict(self.KEEP, hold=False, pool=1))
+        self.w.other = {"vram": {"GPU-b": 6000.0}, "ram": 1.0, "cpu": 0.5, "ka": {"GPU-b": [5300]}, "gid": {"GPU-b": {5300}}, "ka_cpu": 0.0}
+        self.w.guest_scan(t)
+        self.assertEqual((list(self.w.back), self.w.owner, self.w.guest_block()), (["GPU-b"], [], None))   # 只有停不了的保活：不算回来
+        self.w.other = dict(self.w.other, vram={"GPU-a": 3000.0, "GPU-b": 6000.0}, gid={"GPU-a": {7100}, "GPU-b": {5300}})
+        self.w.guest_scan(t + 1)
+        self.assertEqual(self.w.owner, ["卡 0：对方用 2.9 GiB 显存，借来时对方空着"])
+        self.assertIn("算力池借来的主机：主人回来了（卡 0：", self.w.guest_block())
+        self.assertIn("整台不放新任务", self.w.guest_block())
+        self.guest(dict(self.KEEP, hold=False))                                         # 手动借的：只挡那张卡
+        self.w.guest_scan(t + 2)
+        self.assertIsNone(self.w.guest_block())
+        self.assertEqual(len(self.w.owner), 1)
+
+    def test_pool_owner_new_gpu_proc_within_reserve(self):
+        # 算力池借来时主人在轻用（VS Code、终端：hold 为真、按预留留着），之后主人在卡上起了新的 GPU 进程、显存还在预留以内：
+        # 池借只许 GPU 空着时借，所以有了这样的进程就算主人回来（Codex 审查 #75）；手动借的照旧按预留判
+        t = time.time()
+        self.cards(40000, 40000)
+        self.guest(dict(self.KEEP, hold=True, pool=1))
+        self.w.other = {"vram": {"GPU-a": 1024.0}, "ram": 0.5, "cpu": 0.2, "ka": {}, "gid": {"GPU-a": {7100}}, "ka_cpu": 0.0}
+        self.w.guest_scan(t)
+        self.assertEqual(len(self.w.owner), 1)
+        self.assertIn("卡 0", self.w.owner[0])
+        self.assertIn("主人回来了", self.w.guest_block())
+        self.guest(dict(self.KEEP, hold=True))                                          # 手动借的：在预留以内不挡
+        self.w.guest_scan(t + 1)
+        self.assertIsNone(self.w.guest_block())
 
     def test_unstoppable_keepalive_card_in_plan(self):
         # #45：两卡借来的主机，卡 0 上的单元还要 30 分钟，卡 1 上有对方另起、ka.sh 停不了的保活（只占 6 GiB）：真放行不放卡 1，推演也不放，
@@ -2570,6 +2646,31 @@ class PoolListTest(UnitBase):
         self.assertEqual(self.w.running, {})
 
 
+    def test_pool_heads_dep(self):
+        # #25：worker 状态的 pool_heads 给看板池清单的队首、还剩几行、依赖满足没有（按这台的 dep_state：别的主机还在跑的算 wait）、暂停；
+        # 跑完的不列（旧代码状态里没有 pool_heads）
+        Path(self.q["jobs_path"]).write_text("A|true   # gpus=1 after=X\nA2|true   # gpus=1\n")
+        rc, out = self.add()
+        self.assertEqual(rc, 0, out)
+        qx, = self.hosts.queues({"x": ["X|true   # gpus=0"]}, "pa")
+        self.hosts.status("o", running=[running_job("X", "pa", root=qx["root"])],
+                          todo=[{"project": "pa", "root": qx["root"], "queue": "jobs/q.txt", "jobs": ["X"], "deps": {}, "held": None}])
+        self.w.tick([], True)
+        st = json.loads(Path(self.w.p.status).read_text())
+        k = "%s|jobs/q.txt" % os.path.normpath(self.q["root"])
+        h = st["pool_heads"][k]
+        self.assertEqual((h["head"], h["n"], h["held"]), ("A", 2, None))
+        self.assertEqual(h["dep"][0], "wait")
+        Path(self.q["state"], "A.done").write_text("")
+        self.w.peer_t = 0
+        self.w.tick([], False)
+        h = json.loads(Path(self.w.p.status).read_text())["pool_heads"][k]
+        self.assertEqual((h["head"], h["n"], h["dep"]), ("A2", 1, None))
+        Path(self.q["state"], "A2.done").write_text("")
+        self.w.peer_t = 0
+        self.w.tick([], False)
+        self.assertEqual(json.loads(Path(self.w.p.status).read_text())["pool_heads"], {})
+
 
 class RegDupTest(UnitBase):
     """同一条清单登记在两台（#88）：借来的主机还了再借回、自用主机恢复时，旧登记还在那台。两台共享 HOME（fixtures.Hosts）；
@@ -2608,6 +2709,19 @@ class RegDupTest(UnitBase):
         self.w.tick(self.w.registry(), True)       # 搬来后 o 手上的 j1 还没跑完：t 等它，不重跑
         self.assertEqual(self.w.running, {})
         self.assertEqual(self.events("interrupt"), [])
+
+    def test_add_expect_from_requires_source(self):
+        # 算力池搬清单（#25）带 --expect-from 原来那台：在登记锁里核对那台还登记着它；会话已撤回、已搬走的不再重新登记（Codex 审查 #75）
+        self.ft.unlink()
+        self.fo.unlink()
+        rc, out = self.add("t", "--expect-from", "o")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("已不在 o 上", out)
+        self.assertEqual(list((self.hosts.home / "hosts" / "t" / "queues").glob("*.json")), [])
+        self.fo = self.hosts.register("o", "s", "pa")
+        rc, out = self.add("t", "--expect-from", "o")
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(self.fo.exists())
 
     def test_guarded_add_and_rm_reject_stale_project(self):
         # 看板采到的主人已过期时，worker 在登记锁内按当前文件核对。
@@ -2965,6 +3079,13 @@ class OffersTest(UnitBase):
 
     def rel(self, t):
         return None if t is None else round((t - self.now) / self.H, 2)
+
+    def test_pool_borrowed_host_gives_no_offers(self):
+        # #25：算力池借来的主机（guest 指令的 keep.pool）不给挪法建议：池里的清单放到哪台由看板定（旧代码照常算，同 test_offer_numbers_and_suggestion）
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
+        self.assertIn("pa", self.offer())
+        self.w.ovr = [{"kind": "guest", "target": None, "t": 0, "keep": {"vram": 8, "ram": 16, "cpu": 4, "hold": False, "pool": 1}}]
+        self.assertEqual(self.offer(), {})
 
     def test_offer_numbers_and_suggestion(self):
         # o：a0 在跑还要 1 小时，a1–a5 各 2 小时，排到 11 小时后；t 空着。从 o 的队尾往前挑 a5、a4…，挪前 k 行后 t 在 2k 小时后跑完、

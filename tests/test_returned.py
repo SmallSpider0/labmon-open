@@ -344,6 +344,28 @@ class RegLanesTest(Base):
         self.assertEqual([a["key"] for a in snap["alerts"]], [])
 
 
+    def test_pool_lane_why_and_wait(self):
+        # #25：池车道的等待原因接上 pool.tick 写的为什么还没放；待放满 POOL_TELL_S 给实验会话一条 pool_wait:（只给会话、key 带开始等的时刻）
+        import time
+        from labmon import pool as PO
+        from labmon.state import load_json, save_json, state_dir
+        self.regs(("pool", "pool", [("p1", str(self.root), "jobs/q.txt")]), ("here", "active", []))
+        k = PO.key(str(self.root), "jobs/q.txt")
+        since = round(time.time() - 600)
+        snap = load_json(state_dir() / "snapshot.json", {})
+        snap["pool"] = {"lists": {k: {"project": "p1", "since": since, "why": "池里没有借着、空得出来的服务器"}}}
+        save_json(state_dir() / "snapshot.json", snap)
+        out = C.collect(self.cfg())
+        ln, = out["lanes"]
+        self.assertEqual(ln["waiting"], C.POOL_WAIT + "：池里没有借着、空得出来的服务器")
+        self.assertEqual(out["alerts"], [])
+        snap["pool"]["lists"][k]["since"] = since - PO.POOL_TELL_S
+        save_json(state_dir() / "snapshot.json", snap)
+        out = C.collect(self.cfg())
+        a, = out["alerts"]
+        self.assertEqual((a["key"], a["to"]), ("pool_wait:proj/jobs/q.txt:%d" % (since - PO.POOL_TELL_S), "agent"))
+        self.assertIn("在算力池里等了", a["msg"])
+
     def test_registration_overrides_returned_host(self):
         # monitor.toml 写着 host = 已还的 gone，清单已登记到 here：车道在 here 上、id 与用途沿用 monitor.toml 的，不报 returned_unfinished（旧代码会报）
         q = f'[[queues]]\nid = "q"\nlabel = "训练方"\nhost = "gone"\nroot = "{self.root}"\njobs = "jobs/q.txt"\n'

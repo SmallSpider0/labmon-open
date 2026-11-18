@@ -74,7 +74,7 @@ from pathlib import Path
 
 from . import lan as L
 from . import lease as LS
-from .config import GIB, POOL, ConfigError, _read_toml, all_hosts, fmt_time, hosts_file, set_fleet_keys
+from .config import GIB, POOL, POOL_LABEL, ConfigError, _read_toml, all_hosts, fmt_time, hosts_file, set_fleet_keys
 from .health import container_step, lease_due, link_step
 from .health import lease_end as _lease_end
 from .records import log_events
@@ -206,8 +206,11 @@ def borrowed(s: dict) -> bool:
 
 
 def borrower(s: dict, cfg: dict | None) -> str | None:
-    """这一台（这次或上一次）借给了谁。只有 #70 上线前的借用没有 borrow_by。"""
-    return (s.get("borrow_by") or legacy_person(cfg)) if s.get("borrow_since") else None
+    """这一台（这次或上一次）借给了谁：算力池自动借的（borrow_pool，#25）是「算力池」（POOL_LABEL，按人统计不把它当一个人），
+    其余是借的人（borrow_by；只有 #70 上线前的借用没有它）。"""
+    if not s.get("borrow_since"):
+        return None
+    return POOL_LABEL if s.get("borrow_pool") else s.get("borrow_by") or legacy_person(cfg)
 
 
 def legacy_person(cfg: dict | None) -> str | None:
@@ -851,7 +854,7 @@ def record(s: dict, raw: str | None, err: str | None, cfg: dict, st: dict, t: fl
                 seen.append(w["label"])
                 _event("fleet_unknown", s["id"], f"{label} 有未识别的 GPU 进程：{w['label']}（{w['mb'] / 1024:.1f} GiB）", t, s["holder"])
         st["seen"] = seen[-50:]
-        if a["state"] == "job":
+        if a["state"] == "job" and not borrowed(s):    # 借着期间 GPU 上的是我们的任务：last_job 只记主人的（算力池按它判主人空闲了多久，#25）
             st["last_job"] = t
         # 连着空闲从哪次探测起（保活守护按它计时）；两次探测隔得太久（看板停过、离开内网）就从这次重新算
         keep = a["state"] == "idle" and prev and t - prev <= 2.5 * cfg["interval"]

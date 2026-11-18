@@ -109,6 +109,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
 | `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit)`、`/api/override/(pause\|resume)`（[命令行](#命令行162)） | `project`；普通用户只改自己下的暂停，项目级的与带 `--host` 的同一条（`users.need_pause`，#16、#27） |
 | `POST /api/pool/lend`（入池开关，#24） | `project`；持有人本人改自己的服务器，管理员代别人改要能做平台操作（`users.can_ops`）、开时勾「已和这人说好」（`pool.need_holder`、`pool.set_lend`） |
+| `POST /api/pool/reclaim`（收回，#25） | `project`；持有人本人收回自己的服务器，管理员代别人收回要能做平台操作（`pool.reclaim`） |
 | `POST /api/worker/(stop\|limit)`、`/api/override/(drain\|undrain)` | `admin`，只给管理员 |
 | `POST /api/borrow`、`/api/host/(return\|restore)` | `admin`，只给管理员；公网须开启账号许可 |
 | `POST /api/password`、`/api/tokens/add`、`POST /api/revoke`、`/api/push`、`/api/push/test` | 浏览器会话（`account`） |
@@ -159,6 +160,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/push {"push", "bark" 或 "ntfy"}` | 保存自己的推送，回 `{msg, push}`；`push` 为空时移除。Bark 段填 `key`，可选 `server`、`encrypt_key`；ntfy 段填 `topic`，可选 `server`、`token`；服务地址限于渠道的官方地址或管理员在 `notify.toml` 配置的同渠道地址 |
 | `POST /api/push/test {}` | 用自己的推送配置试发一条，回 `{msg}` |
 | `POST /api/pool/lend {"id", "on", "hours", "ok"}` | 开、关这台组内服务器的入池，`hours` 是 `HH:MM-HH:MM`（空是全天），`ok` 是代开时勾的「已和这人说好」；回 `{msg, servers}`（`servers` 同 `/api/me`）。认不出时段 400、不是自己的 403、代开没勾说好 409 |
+| `POST /api/pool/reclaim {"id"}` | 收回借给算力池的这台（#25，[fleet.md「自动借、放、还」](fleet.md#自动借放还25)）：按各清单的停法停下池任务、清单登记回池里，下一轮放到别处，这台休息 3 小时；回 `{msg, servers}`。不是自己的 403、没借给算力池 409 |
 
 ## 客户端分发
 

@@ -539,6 +539,97 @@ class BorrowTest(Base):
         _, wake = B.check([], time.time(), ovr=self.ovr)
         self.assertEqual([w["key"] for w in wake], [f"borrow_done:{SID}"])
 
+    def pool_begin(self, work=(), fetch=None, **a):
+        """算力池自动借（#25）：不记借的人、写 borrow_pool；探到的容器启动时刻记进 borrow.json 的 pool 子项。持有人开着入池（全天）。"""
+        a = {"work": list(work), "started": 1700000000, **a}
+        if not self.server().get("lend"):
+            K.set_fleet_keys({"lend": True}, "测试：入池", sid=SID)
+        with mock.patch.object(F, "parse", lambda raw: raw), mock.patch.object(F, "analyze", lambda smp, cfg: a):
+            return B.begin(SID, None, None, fetch=fetch or (lambda s: ("raw", None)), ssh=lambda s, cmd, input=None: (0, "", ""),
+                           start=lambda hid: (0, "ok\n"), ovr=self.ovr, pool=True)
+
+    def test_pool_begin_rechecks_lend(self):
+        # 探测期间持有人关了入池：锁里按最新配置再核一次，不写 borrow_pool、不拉起（Codex 审查 #75）
+        def fetch(s):
+            K.set_fleet_keys({"lend": None}, "测试：关了入池", sid=SID)
+            return "raw", None
+        with self.assertRaises(ConfigError) as c:
+            self.pool_begin(fetch=fetch)
+        self.assertIn("入池", str(c.exception))
+        self.assertNotIn("borrow_since", self.server())
+        def fetch2(s):                                                       # 改了时段、此刻不在时段里：同样不借
+            h = time.localtime(time.time() + 3 * 3600)
+            K.set_fleet_keys({"lend": True, "lend_hours": "%02d:00-%02d:30" % (h.tm_hour, h.tm_hour)}, "测试：改时段", sid=SID)
+            return "raw", None
+        with self.assertRaises(ConfigError):
+            self.pool_begin(fetch=fetch2)
+        self.assertNotIn("borrow_since", self.server())
+
+    def test_pool_begin_resets_busy(self):
+        # 再借时清掉上一次借用的 busy（有池任务跑过的时刻），休息期、退避、nofit 留着：不然这次一个也没跑起来也记不下 nofit（Codex 审查 #75）
+        B._update(lambda st: st.__setitem__(SID, {"pool": {"busy": 5, "nofit": [[1, 2.0, 9e9]], "fail": 2}}))
+        self.pool_begin()
+        m = B.load_json(B.state_dir() / "borrow.json", {})[SID]["pool"]
+        self.assertEqual((m.get("busy"), m["nofit"], m["fail"]), (None, [[1, 2.0, 9e9]], 2))
+
+    def test_pool_begin(self):
+        # 写 borrow_pool、不写 borrow_by；guest 指令的 keep 带 pool；borrow.json 记容器启动时刻，休息期、退避跨借用留着（旧代码不认 pool）
+        B._update(lambda st: st.__setitem__(SID, {"pool": {"rest": 1, "fail": 2}}))
+        msg = self.pool_begin()
+        s = self.server()
+        self.assertEqual((s.get("borrow_pool"), s.get("borrow_by")), (True, None))
+        self.assertTrue(msg.startswith("算力池借来"))
+        self.assertEqual(self.keeps[-1].get("pool"), 1)
+        m = B.load_json(B.state_dir() / "borrow.json", {})[SID]["pool"]
+        self.assertEqual((m["started"], m["rest"], m["fail"]), (1700000000, 1, 2))
+        self.assertEqual(F.borrower(s, F.conf()), K.POOL_LABEL)
+        g = next(h for h in user_hosts() if h["id"] == SID)
+        self.assertEqual((g["label"], g["borrow"].get("pool")), ("27（池 · BOB）", True))
+        with self.assertRaises(ConfigError) as c:                            # 池借着的：手动借（改约定）被拒，要用就往池里交
+            self.begin(account="me")
+        self.assertIn("正借给算力池", str(c.exception))
+
+    def test_pool_begin_only_when_gpu_free(self):
+        # 算力池只在 GPU 空着或只有保活时借：主人在轻用小实验（手动借勾了也借）的不借；VS Code、终端照借
+        small = {"kind": "job", "label": "small", "names": [], "mb": 900}
+        with self.assertRaises(ConfigError) as c:
+            self.pool_begin(work=[small], share=True, vscode=True)
+        self.assertIn("算力池只在 GPU 空着或只有保活时借", str(c.exception))
+        self.assertNotIn("borrow_since", self.server())
+        self.assertIn("worker 已拉起", self.pool_begin(vscode=True, share=True))
+
+    def test_pool_check_no_session_wake(self):
+        # 池借的：borrow_check 不给实验会话发 borrow*，提醒只进记录、不弹通知；到点照样要还（drain）
+        self.pool_begin()
+        cut = time.time() + 600
+        K.set_fleet_keys({"borrow_until": K.fmt_time(cut, year=True)}, "测试", sid=SID)
+        ov = [{"kind": "guest", "target": None, "keep": dict(self.KEEP, pool=1)}, {"kind": "deadline", "target": "borrow", "at": K.parse_time(self.server()["borrow_until"])}]
+        fin = lambda hid, wrote=None, kill=(): "已还"
+        msgs, wake = B.check([self.host_entry(running=[("x1", 5)], back=["卡 0"], overrides=ov)], time.time(), finish_fn=fin, ovr=self.ovr)
+        self.assertEqual((msgs, wake), ([], []))
+        msgs, wake = B.check([self.host_entry(running=[("x1", 5)], overrides=ov)], cut + 61, finish_fn=fin, ovr=self.ovr)
+        self.assertEqual((msgs, wake), ([], []))
+        self.assertIn(("add", "drain", SID, None, None), self.calls)
+        self.assertTrue(any(r["kind"] == "borrow_due" for r in records(cat="borrow")))
+        msgs, wake = B.check([self.host_entry(overrides=ov)], cut + 120, finish_fn=fin, ovr=self.ovr)
+        self.assertEqual(msgs, [])                                            # 归还只进记录
+        _, wake = B.check([], cut + 180, ovr=self.ovr)
+        self.assertEqual(wake, [])                                            # 不报 borrow_done：剩下的清单由池搬回池里
+
+    def test_finish_gone(self):
+        # 换了容器（#25 R5）：只 worker stop、删这台的临时指令；不 kill 旧进程组、不停保活、不清 /tmp/labmon、不开保活、不恢复看门狗
+        self.pool_begin()
+        cmds, probed = [], []
+        out = B.finish(SID, ssh=lambda s, cmd: cmds.append(cmd) or (0, "", ""), ka=lambda *a: self.fail("不该开保活"), kill=[42], probe=probed.append, gone=True)
+        self.assertEqual(len(cmds), 1)
+        self.assertIn("stop --host", cmds[0])
+        self.assertIn("overrides.json", cmds[0])
+        for no in ("kill", "ka.sh", "rm -rf /tmp/labmon"):
+            self.assertNotIn(no, cmds[0])
+        self.assertEqual(probed, [SID])
+        self.assertIn("容器换了", out)
+        self.assertTrue(self.server()["borrow_returned"])
+
     def test_finish_thaws_watchdogs_after_keepalive(self):
         """还卡：保活开了之后再恢复借来时暂停的看门狗（worker thaw），结果写进归还的说明。"""
         self.begin()

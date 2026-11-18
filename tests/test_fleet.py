@@ -955,6 +955,15 @@ class GuardTest(unittest.TestCase):
                 self.assertEqual(F.guard_act(host, st, self.c, T0 + 600, False, self.ssh), (None, []))
         self.assertEqual(self.remote, [])
 
+    def test_last_job_only_owner(self):
+        # #25：last_job 只记主人自己的实验（算力池按它判主人空闲了多久）：借着期间 GPU 上的是我们的任务，不刷新（旧代码照刷）
+        host = self.c["servers"][0]
+        st = {}
+        F.record(host, self.manual(job=True), None, self.c, st, T0)
+        self.assertEqual(st["last_job"], T0)
+        F.record(dict(host, borrow_since="2026-11-18 10:00"), self.manual(job=True), None, self.c, st, T0 + 600)
+        self.assertEqual(st["last_job"], T0)
+
     def test_manually_running_process_without_gpu_is_reported_when_start_fails(self):
         self.raw = probe_out(ps=[(1, 0, "/bin/bash"), KA_PS])
         self.reply = "fail 保活进程已存在，尚未看到它占用 GPU"
