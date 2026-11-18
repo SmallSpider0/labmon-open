@@ -102,7 +102,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /sched/…`、`/project/…`、`/reg/…`、`/p/<id>/collect`；`PUT /api/project/<id>/config` | `project` |
 | `POST /collect` | `project` 或 `deploy` |
 | `GET /api/admin/deploy` | `deploy`，只给管理员 |
-| `GET /api/admin/backup`（冷备，回 `.tar.gz`） | `backup`，只给管理员 |
+| `GET /api/admin/backup`（冷备，回 `.tar.gz`） | `backup`，只给管理员，只在内网入口（#17） |
 | `POST /api/admin/deploy`、`/api/worker/start` | `deploy`，只给管理员，只在内网入口 |
 | `GET /api/hosts`、`GET /api/client/install.sh`、`GET /api/client/wheel` | `read` |
 | `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
@@ -110,7 +110,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/worker/(stop\|limit)`、`/api/override/(drain\|undrain)` | `admin`，只给管理员 |
 | `POST /api/borrow`、`/api/host/(return\|restore)` | `admin`，只给管理员；公网须开启账号许可 |
 | `POST /api/password`、`/api/tokens/add`、`POST /api/revoke`、`/api/push`、`/api/push/test` | 浏览器会话（`account`） |
-| `GET /api/users`、`POST /api/users/…` | `admin`，只给管理员 |
+| `GET /api/users`、`POST /api/users/…`（账号管理） | `admin`，只给管理员，只在内网入口（#17）；管理员从公网入口来时，人员页的「账号与权限」只说一句要从内网入口管理 |
 | 没登记的路径 | GET 按 `read`，POST、PUT 按 `admin` 且只给管理员（新写路由忘了登记时从严） |
 
 备用的看板服务（[服务租约](deploy.md#主与备用服务租约)）上，除登录、账号（`/api/login|setup|logout|password|tokens/add|revoke`、`/api/users/…`）与部署（`POST /api/admin/deploy`）外的写请求一律回 409，原因写主是谁、何时能接管，带 `"standby": true`（命令行据此接着试 `client.toml` 里的下一个地址，`serve.standby_ok`）；GET 照答（命令行读的 `GET /api/hosts`、`GET /api/project/<id>/config`、`GET /api/client/wheel` 除外：同样回 409 `standby`，备用上的登记是旧的，`serve.CLI_READS`），`/` 与 `/overview.json` 的 `server` 换成此刻的主备。

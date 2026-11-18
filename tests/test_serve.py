@@ -705,6 +705,18 @@ class AuthTest(unittest.TestCase):
             self.call(self.lan + "/api/users/public-ops", {**body, "enabled": False}, tok=admin)
             self.assertEqual(self.call(self.wan + "/fleet/op/sync", {}, tok=admin)[0], 403)
 
+    def test_backup_and_accounts_only_on_lan(self):
+        # #17：冷备与账号管理只在内网入口（公网入口当没这条路由，开了公网平台许可也一样）；冷备拉取本来就走内网入口（docs/deploy.md）
+        admin, backup = make_token(), make_token(scopes=("backup",))
+        self.call(self.lan + "/api/users/public-ops", {"name": "boss", "enabled": True}, tok=admin)
+        self.assertEqual(self.call(self.wan + "/api/admin/backup", tok=backup)[0], 404)
+        self.assertEqual(self.call(self.wan + "/api/users", tok=admin)[0], 404)
+        for act in ("add", "role", "reset", "revoke", "remove", "hosts"):
+            self.assertEqual(self.call(self.wan + "/api/users/" + act, {"name": "amy"}, tok=admin)[0], 404, act)
+        self.assertEqual(self.call(self.lan + "/api/users", tok=admin)[0], 200)
+        with mock.patch("labmon.serve.BK.make_bytes", return_value=("b.tar.gz", b"x")):
+            self.assertEqual(self.call(self.lan + "/api/admin/backup", tok=backup)[0], 200)
+
     def test_public_entry_has_no_platform_ops(self):
         hit = []
         fake = lambda self, *a: (hit.append(self.path), self._json(200, {"ok": True}))   # noqa: E731
@@ -1058,8 +1070,8 @@ class AuthTest(unittest.TestCase):
         K.hosts_file().write_text('[fleet]\n[fleet.account_people]\nlegacy = "Reserved"\n')
         save_json(F.state_file("people.json"), {"Amy": {}, "Bob": {}, "Reserved": {}})
         boss, ordinary = make_token(), make_token("reader", role="user", scopes=("project",))
-        add = self.wan + "/api/users/add"
-        listing = lambda: json.loads(self.call(self.wan + "/api/users", tok=boss)[2])  # noqa: E731
+        add = self.lan + "/api/users/add"
+        listing = lambda: json.loads(self.call(self.lan + "/api/users", tok=boss)[2])  # noqa: E731
         self.assertEqual(listing()["person_choices"], ["Amy", "Bob"])
         for body in ({"name": "amy"}, {"name": "amy", "person": None}, {"name": "amy", "person": "未知"}):
             rc, _, raw = self.call(add, body, tok=boss)
@@ -1127,7 +1139,7 @@ class AuthTest(unittest.TestCase):
         self.assertEqual(route_of("GET", "/whatever").scope, "read")
         for path in ("/fleet/op/renew", "/fleet/probe/x", "/renew/a/cancel"):
             self.assertTrue(route_of("POST", path).ops, path)
-        self.assertFalse(any(r.lan for r in ROUTES if r.method == "GET"))
+        self.assertEqual({r.path.pattern for r in ROUTES if r.method == "GET" and r.lan}, {r"/api/admin/backup", r"/api/users"})   # 只在内网入口的读：冷备与账号管理（#17）
         self.assertEqual((login_url("/"), login_url("/p/a/"), login_url("/p/a")), ("login?next=", "../../login?next=p/a/", "../login?next=p/a"))
         for bad in ("//evil.example", "https://evil.example", "/abs", "../x", "a\\b", "p/../../x"):
             self.assertEqual(safe_next(bad), "", bad)

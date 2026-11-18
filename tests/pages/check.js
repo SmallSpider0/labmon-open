@@ -2065,6 +2065,20 @@ t("auth", "管理员从公网入口来：平台操作的按钮换成一句「请
   ok(!side(A).includes("#/admin/users"), "管理员侧栏仍有独立账号入口"); has(side(A), 'href="#/me"');
 });
 
+t("auth", "管理员从公网入口来：账号管理只在内网入口，人员页不取账号列表、说一句不标红（#17）", () => {
+  for (const [me, lan] of [[PUB_ME, false], [{...PUB_ME, ops: true}, false], [ADMIN_ME, true]]) {
+    const O = accCtx(OV, me);
+    run(O, `SF = []; fetch = (u, o) => { SF.push(u); return new Promise(() => {}); }`);
+    const people = page(O, "#/fleet/people"), drawer = page(O, "#/fleet/people/OWNER/account");
+    const got = run(O, "SF.filter(u => String(u).includes('api/users')).length");
+    ok(lan ? got > 0 : got === 0, `${me.entry}：取了 ${got} 次 /api/users`);
+    for (const h of [people, drawer]) {
+      ok(h.includes("账号管理只在内网入口") === !lan, me.entry + "：提示不对");
+      ok(lan || !h.includes('data-acc="reload"'), "公网入口还给了重试");
+    }
+  }
+});
+
 ta("overview", "与平台核对的验证码在原按钮旁，取消后不接收旧请求", async () => {
   const A = accCtx(OV, ADMIN_ME, "#/fleet");
   page(A, "#/fleet");

@@ -1248,9 +1248,16 @@ function accLeave(r) {
   if (!directory) delete ACC.at.users;
   if (r.kind !== "me") delete ACC.at.me;
 }
+const ACC_LAN = "账号管理只在内网入口：从内网打开看板再管理账号";
+const accLan = () => ME?.entry === "lan";
+// 账号列表读不了的那句：公网入口的提示不标红、不给重试
+const accErr = (e, retry = true) => !e ? "" : e === ACC_LAN ? `<p class="sm mut">${esc(e)}</p>`
+  : `<p class="rn-err">${esc(e)}${retry ? ' <button class="lnk" data-acc="reload">重试</button>' : ""}</p>`;
 async function accLoad(k) {                            // k：me、users
   if (ACC.load[k]) return;
-  ACC.load[k] = true; ACC.at[k] = Date.now();
+  ACC.at[k] = Date.now();
+  if (k === "users" && !accLan()) { ACC.users = null; ACC.loadError.users = ACC_LAN; return; }   // 公网入口没有 /api/users（#17）：不发请求，直接说
+  ACC.load[k] = true;
   try {
     const r = await api(k === "me" ? "api/me" : "api/users", {cache: "no-store"}, {retry: true}), j = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
@@ -3623,7 +3630,7 @@ function peopleTab() {
   const gone = Object.keys(hs).filter(n => !current.includes(n)).sort(byName);
   const missing = L?.users.filter(u => !people.has(u.fleet_person)) || [];
   const err = ACC.loadError.users || L?.people_error;
-  const feedback = err ? `<p class="rn-err">${esc(err)} <button class="lnk" data-acc="reload">重试</button></p>` : "";
+  const feedback = accErr(err);
   const repair = missing.length ? `<p class="sm mut">账号 ${esc(missing.map(u => u.fleet_person_error || u.name).join("、"))} 暂无可确认的组内人员。请在看板主机核对人员名单，用 <code>labmon user bind</code> 补关联。</p>` : "";
   const add = D.fleet && !D.fleet.error && canOps() ? `<button class="fc add" data-fop="padd"><span class="plus">+</span><b>添加组内人员</b><span class="sm mut">登记服务器分配所需资料</span></button>` : "";
   const def = `<div class="pdef sm"><span class="mut">新的人默认</span><span ${tip(d.image || "")}>镜像 <b>${esc(imgTag(d.image) || "—")}</b></span><span>启动命令 <code>${esc(d.run_cmd || "—")}</code></span>
@@ -3708,7 +3715,7 @@ function directoryDrawer(d) {
     return dHead(pfav(n), esc(n), "") + '<div class="db"><div class="empty">读取账号中…</div></div>';
   }
   const error = ME?.scopes.includes("admin") && ACC.loadError.users;
-  const linkError = error ? `<p class="rn-err">${esc(error)} <button class="lnk" data-acc="reload">重试</button></p>` : "";
+  const linkError = accErr(error);
   const right = dNav(peopleOrder(), n);
   const isMe = u ? u.name === ME?.name : n === ME?.fleet_person;
   // 开通后账号刷新可能已经合卡，设置码仍留在发起的人员抽屉。
@@ -4242,7 +4249,7 @@ function projOwnerSec(p) {
   const b = `<button class="btn mini-btn" data-pj="owner" data-p="${esc(p.id)}">更改项目归属</button>`;
   const form = !open ? "" : `<label>归属给谁 <select class="ain" data-owner ${ACC.load.users ? "disabled" : ""}>
     <option value="">归管理员</option>${(ACC.users?.users || []).map(u => `<option value="${esc(u.name)}"${u.name === POP.owner ? " selected" : ""}>${esc(u.fleet_person && u.fleet_person !== u.name ? `${u.fleet_person}（账号 ${u.name}）` : u.name)}</option>`).join("")}
-    </select></label>${accLine("load")}${pjErr()}`;
+    </select></label>${accErr(ACC.loadError.users, false)}${accLine("load")}${pjErr()}`;
   const go = ACC.load.users || !ACC.users ? "" : pjGo("ownergo", p.id, "保存");
   const edit = canWrite() && ME.account ? popConfirm(b, open, form, go, true) : "";
   return dSec("项目归属", `${permissionRow("归属", label, edit)}${PJMSG && PJMSG.pid === p.id ? `<div class="rn-state">${esc(PJMSG.msg)}</div>` : ""}`);
