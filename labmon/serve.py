@@ -21,6 +21,7 @@
     POST /api/login {"name", "password"}、/api/setup {"name", "code", "password"}（用设置码设口令）、/api/logout：成功种、清会话 Cookie
     GET  /api/me            我是谁：名字、角色、作用域、入口、能不能做平台操作（ops）与写操作（write）；浏览器会话另有自己的会话与令牌
     POST /api/password {"old", "new"}、/api/tokens/add {"name", "scopes"}（回原文，只这一次）、/api/revoke {"id"}（自己的会话或令牌）：只认浏览器会话
+    POST /api/pool/lend {"id", "on", "hours", "ok"}  入池开关（#24，pool.set_lend）：这台组内服务器的持有人本人；管理员代开要能做平台操作、ok 为真；回 {"msg", "servers"}
     GET  /api/users、POST /api/users/add {"name", "admin"}（回设置码）、role {"name", "admin"}、reset {"name"}（回设置码）、revoke {"name", "id"?}、remove {"name"}：管理员，只在内网入口（#17）
 
 部署（#164，deploy.py；管理员的 deploy 作用域）：
@@ -110,6 +111,7 @@ from . import lease as LS
 from . import maint as MT
 from . import overview as O
 from . import platform as PF
+from . import pool as PO
 from . import projects as PJ
 from . import rebalance as RB
 from . import renew as R
@@ -122,7 +124,7 @@ from . import client as CL
 from .config import CLIENT_HEADER, server as server_conf
 from . import dist as DI
 from . import service as S
-from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, cfg_spec, check_future, host_pair, host_users, hosts_file, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
+from .config import ALERT_KEYS, HOSTS_LOCK, POOL, ConfigError, active_hosts, cfg_spec, check_future, host_pair, host_users, hosts_file, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
     stale_limit, user_hosts, STALE_PAD_S, STALE_RUNS
 from .records import cat_of, log_events, records, report, report_headers, schedule_project, tell
 from .service import log, notify, rotate_log
@@ -685,6 +687,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise U.Denied(403, "只能报告你可见的主机")
         elif r.own == "body":
             U.need_project(who, s("project"))
+        elif r.own == "holder":                        # 入池开关（#24）：这台组内服务器的持有人本人
+            PO.need_holder(who, s("id"))
         elif r.own == "init":
             U.need_host(who, s("host"))
         elif r.own == "wait":                          # 等的任务（项目/任务）也只许他自己项目的
@@ -703,8 +707,8 @@ class Handler(BaseHTTPRequestHandler):
             if sub == "add":
                 U.need_project(who, s("project"))
                 U.need_list(who, *args, s("project"))
-            elif sub == "rm":
-                body["project"] = U.need_reg(who, s("host"), *args)
+            elif sub == "rm":                          # 池（#24）：按清单此刻登记在哪核（池里，或已放到借给池的主机上；api.worker 同样经 pool.locate）
+                body["project"] = U.need_reg(who, PO.locate(*args) if s("host") == POOL and len(args) == 2 else s("host"), *args)
             elif body.get("project"):
                 U.need_project(who, s("project"))
         elif r.own == "reg":                           # 页面上搬、移除登记：逐条核
@@ -1066,6 +1070,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.board.overview.wake.set()
                 log(f"账号：{msg}（{who.name}）")
                 return self._json(200, {"msg": msg})
+            if act == "pool/lend":                     # 入池开关（#24）：持有人本人，或能做平台操作、勾了「已和这人说好」的管理员（pool.set_lend 核）
+                on, ok = body.get("on"), body.get("ok", False)
+                if not isinstance(on, bool) or not isinstance(ok, bool) or not isinstance(body.get("hours") or "", str):
+                    raise U.Denied(400, "on、ok 要是布尔值，hours 要是 HH:MM-HH:MM 或空")
+                msg = PO.set_lend(s("id"), on, body.get("hours") or None, who, U.can_ops(who, self.entry), ok)
+                log(f"算力池：{msg}（{who.name}）")
+                return self._json(200, {"msg": msg, "servers": PO.my_servers(who)})
             if act == "admin/deploy":
                 out = DP.apply(body.get("bundle"))
                 log(f"部署由 {who.name} 发起：{out['msg']}")
@@ -1637,8 +1648,8 @@ class Route(NamedTuple):
 
 OPEN = ""
 # own（#167，Handler._own）：普通用户的这个请求按什么核。path 地址里的项目要是他的；new 同 path，还没登记的也放（第一次推就登记）；
-# body 请求体的 project；worker、override、init、wait、reg 见 _own；self 只动自己的账号。
-OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self")
+# body 请求体的 project；worker、override、init、wait、reg 见 _own；self 只动自己的账号；holder 请求体 id 那台组内服务器的持有人本人（#24）。
+OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self", "holder")
 _R = lambda m, p, scope, admin=False, lan=False, own=None, ops=False: Route(m, re.compile(p), scope, admin, lan, own, ops)   # noqa: E731
 # 看板服务的路由表（#160）：每条路由要什么权限只在这里写；Handler._allow 按它调 users.check。
 # 没登记的路径 GET 按 read、POST 与 PUT 按管理员的 admin（新写路由忘了登记时从严）。平台操作由 ops 核对账号入口许可；部署等纯内网路由用 lan。
@@ -1662,6 +1673,7 @@ ROUTES = [
     _R("POST", r"/api/(borrow|host/return|host/restore)", "admin", admin=True, ops=True),   # 借用与借来的还：会 ssh 到组内服务器
     _R("POST", r"/api/wait", "project", own="wait"),                   # labmon wait 的长轮询（waits.wait）
     _R("POST", r"/api/project/init", "project", own="init"),
+    _R("POST", r"/api/pool/lend", "project", own="holder"),            # 入池开关（#24）：持有人本人；管理员代开要能做平台操作（pool.set_lend 核）
     _R("POST", r"/api/project/[^/]+/check", "project", own="new"),
     _R("GET", r"/api/hosts", "read"),                                  # 普通用户只列他能用的（Handler.do_GET）
     _R("GET", PROJECT_CONFIG_PATH.pattern, "read", own="path"),

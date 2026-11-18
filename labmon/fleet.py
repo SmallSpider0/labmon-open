@@ -25,6 +25,8 @@
     port = 15158
     pool = "pool-private"
     # guard = true                  # 保活守护开不开；不写的公用池开、专用池关（页面上「保活守护」里改）
+    # lend = true                   # 入池（#24）：持有人同意空着时给算力池用（页面上「我的账号 → 我的服务器」或抽屉的「入池设置」里改；换人时去掉）
+    # lend_hours = "22:00-09:00"    # 入池的时段：每天一段，可跨零点；不写是全天
 
     [[fleet.rules]]                 # 只写例外（可以一条都没有）：正则匹配 GPU 进程与各级父进程的命令行、工作目录
     match = "/root/demo_eval/"
@@ -73,7 +75,7 @@ from pathlib import Path
 from . import lan as L
 from . import lease as LS
 from .platform import NAME_RE as PERSON_RE
-from .config import GIB, ConfigError, _read_toml, all_hosts, fmt_time, hosts_file, set_fleet_keys
+from .config import GIB, POOL, ConfigError, _read_toml, all_hosts, fmt_time, hosts_file, set_fleet_keys
 from .health import container_step, lease_due, link_step
 from .health import lease_end as _lease_end
 from .records import log_events
@@ -144,6 +146,12 @@ def conf(path: Path | None = None) -> dict | None:
         if miss:
             raise ConfigError(f"{hf} 的 [[fleet.servers]] 缺 {'、'.join(miss)}：{s}")
         s = {**s, "id": str(s["id"]), "holder": str(s["holder"])}
+        if s["id"] == POOL:
+            raise ConfigError(f"{hf} 的 [[fleet.servers]] 不能叫 {POOL}：它是算力池的保留 id")
+        if "lend" in s and not isinstance(s["lend"], bool):
+            raise ConfigError(f"{hf} 里 {s['id']} 的 lend 要写 true 或 false")
+        if s.get("lend_hours") is not None and lend_span(s["lend_hours"]) is None:
+            raise ConfigError(f"{hf} 里 {s['id']} 的 lend_hours「{s['lend_hours']}」认不出：写成 \"22:00-09:00\" 这样（每天一段，可跨零点）")
         s["job"] = str(s.get("job") or s["holder"])          # 平台作业名：缺省就是名字，同名作业已在跑时加了后缀
         s.setdefault("label", s["holder"])
         c["servers"].append(s)
@@ -158,6 +166,39 @@ def conf(path: Path | None = None) -> dict | None:
         except re.error as e:
             raise ConfigError(f"[[fleet.rules]] 的正则写错了：{r['match']}（{e}）") from None
     return c
+
+
+LEND_RE = re.compile(r"\s*(\d{1,2}):(\d\d)\s*-\s*(\d{1,2}):(\d\d)\s*")
+
+
+def lend_span(v) -> tuple[int, int] | None:
+    """入池的时段（[[fleet.servers]] 的 lend_hours，#24）"HH:MM-HH:MM" → (起, 止) 一天里的分钟；可跨零点（起 > 止），起止相同算全天。
+    认不出为 None（fleet.conf 校验、页面提交都经它）。"""
+    m = LEND_RE.fullmatch(v) if isinstance(v, str) else None
+    if not m:
+        return None
+    a, b, c, d = (int(x) for x in m.groups())
+    if a > 23 or c > 24 or b > 59 or d > 59 or (c == 24 and d):
+        return None
+    return a * 60 + b, c * 60 + d
+
+
+def lend_open(s: dict, t: float) -> tuple[bool, float | None]:
+    """这台此刻在不在入池时段里与下一次变化的时刻（epoch 秒，按看板本机时间算；全天的为 None）：(在不在, 何时变)。
+    没开入池的为 (False, None)。「我的服务器」的状态与 C 的自动借（时段结束就是借用的截止）共用。"""
+    if not s.get("lend"):
+        return False, None
+    sp = lend_span(s.get("lend_hours")) if s.get("lend_hours") else None
+    if not sp or sp[0] == sp[1] % 1440:
+        return True, None
+    lt = time.localtime(t)
+    now = lt.tm_hour * 60 + lt.tm_min
+    a, b = sp
+    inside = a <= now < b if a < b else now >= a or now < b
+    nxt = b if inside else a
+    day0 = t - (now * 60 + lt.tm_sec)
+    at = day0 + nxt * 60
+    return inside, at if at > t else at + 86400
 
 
 def borrowed(s: dict) -> bool:

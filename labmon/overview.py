@@ -38,7 +38,7 @@ from . import rebalance as RB
 from . import renew as R
 from .projects import archived_rows, registered
 from .collect import write_page
-from .config import STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, parse_time, pause_by, pick_color, sched, user_hosts
+from .config import POOL, POOL_LABEL, STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, parse_time, pause_by, pick_color, sched, user_hosts
 from .health import container_step, lease_due, lease_end, link_step
 from .records import EVENT_CATS, EVENT_KINDS, log_events, told
 from .state import append_row, load_json, load_rows, parse_rows, save_json, snapshot, state_dir, usage_file, write_atomic
@@ -99,25 +99,28 @@ def reset_sent() -> None:
 
 def _reg_cmd(h: dict) -> str:
     """fetch 里读登记文件的那一段（只有 h["regs"] 的那一台有）：这个 worker_home 下每个有 queues/ 的主机目录先打一行「REG 主机」，
-    再逐个登记文件打「REG 主机 文件名」与原文。h["regs"] 是在用主机的 id：它们有 status.json 时跳过（登记取状态里的 queues），
+    再逐个登记文件打「REG 主机 文件名 修改时刻」与原文（修改时刻是共享盘服务器的时钟，epoch 秒：登记的 added_t，算力池待放从它算，#24）。h["regs"] 是在用主机的 id：它们有 status.json 时跳过（登记取状态里的 queues），
     worker 从没写过状态的照读（刚 worker add、worker 还没起）。只列 hosts/*/queues/*.json 几个小文件，不遍历别的目录。"""
     if h.get("regs") is None:
         return ""
     home, act = shlex.quote(h["worker_home"].rstrip("/")), shlex.quote(" " + " ".join(h["regs"]) + " ")
     return (f"for hd in {home}/hosts/*/; do hd=${{hd%/}}; [ -d \"$hd/queues\" ] || continue; id=${{hd##*/}}; "
             f"case {act} in *\" $id \"*) [ -f \"$hd/status.json\" ] && continue;; esac; echo \"{REG} $id\"; "
-            f"for f in \"$hd\"/queues/*.json; do [ -f \"$f\" ] || continue; echo \"{REG} $id ${{f##*/}}\"; cat \"$f\"; echo; done; done; ")
+            f"for f in \"$hd\"/queues/*.json; do [ -f \"$f\" ] || continue; "
+            f"echo \"{REG} $id ${{f##*/}} $(stat -c %Y \"$f\" 2>/dev/null || stat -f %m \"$f\" 2>/dev/null)\"; cat \"$f\"; echo; done; done; ")
 
 
 REG_KEYS = ("root", "jobs", "project", "stop", "gpus")     # 登记的全局视图里一条登记带的字段（状态里的 queues 与登记文件共有的）
 
 
 def _parse_regs(text: str, *, strict: bool = False) -> dict:
-    """_reg_cmd 读回的那一段 → {主机: [登记]}（登记文件里的 REG_KEYS、added，key 是登记键：文件名去掉 .json）。读坏了的文件跳过（worker 那边记事件）。"""
+    """_reg_cmd 读回的那一段 → {主机: [登记]}（登记文件里的 REG_KEYS、added，added_t 是登记文件的修改时刻，key 是登记键：文件名去掉 .json）。
+    读坏了的文件跳过（worker 那边记事件）。"""
     out: dict = {}
     for chunk in re.split("^" + re.escape(REG) + " ", text, flags=re.M)[1:]:
         head, _, body = chunk.partition("\n")
         hid, _, f = head.strip().partition(" ")
+        f, _, mt = f.partition(" ")
         regs = out.setdefault(hid, [])
         if not f:
             continue
@@ -130,7 +133,8 @@ def _parse_regs(text: str, *, strict: bool = False) -> dict:
         if strict and not (isinstance(reg, dict) and isinstance(reg.get("project"), str)):
             raise ValueError("登记归属未核实")
         if isinstance(reg, dict):
-            regs.append({**{k: reg.get(k) for k in REG_KEYS}, "added": reg.get("added"), "key": f[:-5] if f.endswith(".json") else f})
+            regs.append({**{k: reg.get(k) for k in REG_KEYS}, "added": reg.get("added"), "added_t": int(mt) if mt.isdigit() else None,
+                         "key": f[:-5] if f.endswith(".json") else f})
     return out
 
 
@@ -139,7 +143,8 @@ def _regs(hosts: list[dict], by: dict, got: dict, old: dict, t: float, fleet_cfg
     已归还的与主机清单里已没有的（state 为 returned、unlisted）取每个 worker_home 挑的那一台读回的登记文件（_reg_cmd），
     在用而 worker 从没写过状态的也取文件。这一轮没读到的沿用上一轮快照的那一项、标 stale（上一轮也没有的 queues 为 None）：代读的那台连不上、
     本机不在内网；在用主机这轮连不上（它有 status.json，代读时跳过了它，不能当成没有登记）；刚归还、代读的又连不上（上一轮还是在用，状态按主机清单改）。
-    在用的在前（照主机清单顺序，带 pool 与上一台 prev），再是已归还的（归还晚的在前）、主机清单里没有的。
+    在用的在前（照主机清单顺序，带 pool（平台资源池名）与上一台 prev），再是算力池（host 为 config.POOL、state 为 pool，#24）、
+    已归还的（归还晚的在前）、主机清单里没有的。
     只读，不改登记。"""
     files, read = {}, set()                          # 主机 → (worker_home, 登记)；这一轮读到了的 worker_home
     for hid, h in by.items():
@@ -169,13 +174,15 @@ def _regs(hosts: list[dict], by: dict, got: dict, old: dict, t: float, fleet_cfg
             x.update(t=None, queues=None)
         out.append(x)
     act, known = {e["id"] for e in hosts}, {str(h["id"]): h for h in all_hosts()}
-    tag = lambda hid: {"label": known[hid]["label"] if hid in known else hid, "state": "returned" if hid in known else "unlisted",   # noqa: E731
-                       "returned": parse_time(str(known[hid]["returned"])) if hid in known and known[hid].get("returned") else None}
+    # 算力池（#24）：保留 id pool 下的登记是交给池、还没放到哪台的清单（state 为 pool）
+    tag = lambda hid: {"label": POOL_LABEL, "state": "pool", "returned": None} if hid == POOL else {   # noqa: E731
+        "label": known[hid]["label"] if hid in known else hid, "state": "returned" if hid in known else "unlisted",
+        "returned": parse_time(str(known[hid]["returned"])) if hid in known and known[hid].get("returned") else None}
     rest = [{"host": hid, **tag(hid), "home": home, "stale": False, "t": t, "queues": qs} for hid, (home, qs) in files.items() if hid not in act]
     seen = {x["host"] for x in rest}
     rest += [{**x, **tag(hid), "stale": True} for hid, x in prev.items()
              if hid not in act | seen and x.get("home") not in read and x.get("queues") is not None]
-    rest.sort(key=lambda x: (x["state"] != "returned", -(x.get("returned") or 0), x["host"]))
+    rest.sort(key=lambda x: (x["state"] != "pool", x["state"] != "returned", -(x.get("returned") or 0), x["host"]))
     return out + rest
 
 

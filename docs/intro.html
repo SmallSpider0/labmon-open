@@ -306,6 +306,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
     <li><div><b>挂上 wait。</b>实验会话持续运行 <code>labmon wait -c monitor.toml</code>（Codex 等待同一命令会话，Claude Code 可用后台任务通知）：每轮先与看板同步配置，再问看板有没有新告警（看板那边挂着等，有事就回），出现新告警、看板停了或连不上看板太久（<code>server_unreachable</code>）才退出，醒来先重挂、再逐条处理（<a href="#alerts">见下表</a>）。要等某个任务跑完时加 <code>--job 任务名</code>：同样问看板、不连服务器，任务都有结果时退出并写成功或失败与日志位置。命令行做事都经看板接口（#162），第一次先 <code>labmon login</code> 换一个令牌；借卡、归还、drain、拉起或停 worker 要管理员令牌（<code>labmon login --admin</code>）。</div></li>
     <li><div><b>看看板。</b>项目页看进度、时间线与预计全部跑完；工作台看几台主机一起的情况、谁在等、为什么。</div></li>
     <li><div><b>让路与插队。</b>把服务器让给别的项目用 <code>labmon pause &lt;项目&gt;</code>（正在跑的自然跑完，急的加 <code>--now</code>）；优先与权重在工作台调度卡上点。不要自己 kill 任务，会记成失败。</div></li>
+    <li><div><b>算力池。</b>组内服务器的持有人在「我的账号 → 我的服务器」把空着的服务器入池（可设每天的时段），入池的人就能把清单交给池：<code>labmon worker add pool ROOT JOBS --project proj</code>，放到哪台由看板定，项目页多一栏「算力池」。池里的清单要停得下来：不能限卡、不能等当前任务跑完再停、不能成组或占位。</div></li>
     <li><div><b>续租、借卡、归还。</b>都在工作台点（管理员，从内网入口）：主机页的“预备续租”“续租”（组内服务器页自用主机的抽屉里是同一组），组内服务器抽屉里的“借来用”“跑完就还”。平台验证码由你输。换了主机，到新主机页「接上原来的项目」把清单登记搬过来（搬过去原主机上的登记就删了，在跑的跑完新主机接着放）。</div></li>
   </ol>
 </section>

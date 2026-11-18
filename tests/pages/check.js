@@ -718,7 +718,8 @@ t("overview", "自用主机抽屉（#58）：与组内服务器同一套模板�
   const sa = page(O, "#/fleet/srv/srv-a"), sd = page(O, "#/fleet/srv/srv-d");
   ok(JSON.stringify(secs(sa)) === JSON.stringify(["概况", "worker", "现在", "在跑什么", "本地盘", "近 7 天", "开机参数", "事件"]), "自用主机的节：" + JSON.stringify(secs(sa)));
   ok(JSON.stringify(secs(sd).filter(s => s !== "借用")) === JSON.stringify(secs(sa).filter(s => s !== "worker")), "与组内服务器的节对不上：" + JSON.stringify(secs(sd)));
-  ok(JSON.stringify(keys(sa)) === JSON.stringify(keys(sd)), `概况的行不一样：${JSON.stringify(keys(sa))} / ${JSON.stringify(keys(sd))}`);
+  // 「算力池」（入池，#24）只有组内服务器有：自用主机不借给池
+  ok(JSON.stringify(keys(sa)) === JSON.stringify(keys(sd).filter(k => k !== "算力池")), `概况的行不一样：${JSON.stringify(keys(sa))} / ${JSON.stringify(keys(sd))}`);
   has(sa, "保活由 worker 停启"); ok(!sa.includes("资源曲线、续租与开保活在主机页"), "旧的那句还在");
   for (const b of ["预备续租", "续租", "换人", "关机"]) has(sa, `${b}</button>`, "自用主机的按钮：");
   for (const b of ["立即探测", "开保活", "这是保活", "借来用"]) ok(!sa.includes(b + "</button>"), "自用主机不该有：" + b);
@@ -1423,7 +1424,7 @@ const app = P => el(P, "app").innerHTML;
 let P;
 t("project", "正常快照渲染不报错、不漏 NaN/undefined，各块都在", () => {
   P = pjCtx(PJ, EVN); const h = app(P); clean(h, "项目页");
-  for (const s of ["全部完成", "车道 1", "车道 2", "借 OWNER", "任务明细（9）", "alpha_*", "评估", "投稿截止", "<svg"]) has(h, s);
+  for (const s of ["全部完成", "车道 1", "车道 2", "借 OWNER", "任务明细（10）", "alpha_*", "评估", "投稿截止", "<svg"]) has(h, s);
   has(h, "车道 2 还有 2 个任务不会在这台放行");                          // collect 的 borrow_cut 告警照常列在告警栏
   // 告警给谁看（#142）：红框与条数只算给用户的（borrow_cut 两边都要，列给用户的那句）；失败、空转、挪法建议只给实验会话，
   // 收在红框下面默认折叠的「给实验会话的提示」里，不算告警数
@@ -1515,9 +1516,9 @@ t("project", "运行中的条上百分比是现在线在条上的位置，不是
 t("project", "时间线按主机分组：主机一行表头（利用率、事件都在里面），车道单行缩进，条上去掉自动分组的前缀", () => {
   const A = pjCtx(PJ, EVN); run(A, `TL.v = {a: ${-3 * H}, b: ${12 * H}}; drawTimeline()`);     // 固定 15 小时的视图：条宽与下面省略的写法对得上
   const tl = el(A, "tlbox").innerHTML, labs = [...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
-  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1", "车道 2", "借 OWNER", "车道 1"]), JSON.stringify(labs));
+  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1", "车道 2", "借 OWNER", "车道 1", "算力池", "车道 1"]), JSON.stringify(labs));   // 算力池（#24）同一台主机那样分组
   ok(!tl.includes("GPU 利用率") && !tl.includes(" 事件<") && !tl.includes("同机别的项目<"), "还有单独的利用率、事件行或主机前缀");
-  ok((tl.match(/stroke-opacity="\.4"/g) || []).length === 1, "两台主机之间该有一条分隔线");
+  ok((tl.match(/stroke-opacity="\.4"/g) || []).length === 2, "三组之间该各有一条分隔线");
   has(tl, ">train_s1 · 44%<", "条上去掉 alpha_"); has(tl, ">⏸ unt…ata<", "占位任务"); has(tips(tl), "alpha_train_s1", "悬停是全名");
   ok(!tl.includes('r="2.5"'), "图上只有一个计划项时不该画计划项圆点");
   run(A, 'TL.v = null; LS.set("tl", "week"); drawTimeline()');
@@ -2009,11 +2010,12 @@ function accCtx(snap, me, hash = "#/", extra = {}) {
   return O;
 }
 
-t("auth", "算力池入口已删除：侧栏、路由与项目管理抽屉都不再出现（#12）", () => {
+t("auth", "旧算力池入口已删除：侧栏、路由与项目管理抽屉都不再出现（#12）；交给新算力池的清单列在「主机与队列」里（#24）", () => {
   const O = accCtx(OV, {...ADMIN_ME, pool_access: true});
   ok(!side(O).includes('href="#/pool"'), "侧栏不该再有算力池");
   const html = page(O, "#/p/proj-a/manage");
-  for (const word of ["运行资源", "池任务记录", "算力池"]) ok(!html.includes(word), "项目管理抽屉不该再有" + word);
+  for (const word of ["运行资源", "池任务记录"]) ok(!html.includes(word), "项目管理抽屉不该再有" + word);
+  has(html, "等着放到某台"); has(html, "从算力池撤回");
   ok(!page(O, "#/pool").includes("算力池"), "#/pool 不再是算力池页");
 });
 
@@ -2513,6 +2515,65 @@ ta("auth", "路径前缀（#165）：工作台在 /pfx/、项目页在 /pfx/p/<i
   await new Promise(r => setImmediate(r));
   ok(new URL(run(L, "SF[0]"), base + "/pfx/login").pathname === "/pfx/api/login", "登录请求：" + run(L, "SF[0]"));
   ok(L.location.href === base + "/pfx/p/proj-a/#/host/srv-a", "登录后去：" + L.location.href);
+});
+
+/* ---------- 算力池 B（#24）：入池开关、我的服务器、池清单 ---------- */
+// fetch 桩：记下 POST 的地址与正文；api/pool/lend 回一句与新的 servers
+const lendFetch = (C, servers) => run(C, `SF = []; fetch = (u, o) => { if (o?.body) SF.push([u, JSON.parse(o.body)]);
+  return Promise.resolve({ok: true, json: async () => u === "api/pool/lend" ? {msg: "存好了", servers: ${JSON.stringify(servers)}} : D}); };`);
+ta("overview", "入池（#24）：组内卡片标「入池」，抽屉有「算力池」一行；管理员代开要勾「已和这人说好」，时段两格要么都填要么都空", async () => {
+  const C = ovCtx(OV, RR, "#/fleet");
+  const card = run(C, 'fleetCard(srvById("srv-g"))'); has(card, ">入池</span>"); has(tips(card), "入池，22:00 开始");
+  ok(!run(C, 'fleetCard(srvById("srv-d"))').includes(">入池</span>"), "没入池的不该标");
+  const dr = page(C, "#/fleet/srv/srv-g"); has(dr, "入池，22:00 开始"); has(dr, "每天 22:00-09:00"); has(dr, 'data-lend="open"'); clean(dr, "入池抽屉");
+  const P = accCtx(OV, PUB_ME); ok(!page(P, "#/fleet/srv/srv-g").includes('data-lend="open"'), "不能做平台操作的管理员不该有代开按钮");
+  lendFetch(C, []);
+  await run(C, 'lendAct("open", {id: "srv-g"})');
+  ok(run(C, "POP.on") === true && run(C, "POP.draft.lf") === "22:00" && run(C, "POP.draft.lt") === "09:00", "弹窗没带上现在的时段");
+  let pop = page(C, "#/fleet/srv/srv-g"); has(pop, "已和 PERSON6 说好"); ok(/data-lend="go"[^>]*disabled/.test(pop), "没勾说好时保存该置灰"); clean(pop, "入池弹窗");
+  run(C, 'POP.draft.lt = ""');
+  await run(C, 'lendAct("go", {id: "srv-g"})');
+  has(run(C, "POP.err"), "开始和结束两格"); ok(run(C, "SF.length") === 0, "只填一格不该发请求");
+  run(C, 'POP.draft.lt = "07:30"; POP.ok = true');
+  await run(C, 'lendAct("go", {id: "srv-g"})');
+  ok(JSON.stringify(run(C, "SF[0]")) === JSON.stringify(["api/pool/lend", {id: "srv-g", on: true, hours: "22:00-07:30", ok: true}]), "代开的请求：" + JSON.stringify(run(C, "SF")));
+  ok(run(C, "POP") === null && run(C, "LMSG.m") === "存好了", "存好后该关弹窗、留一句");
+  await run(C, 'lendAct("open", {id: "srv-g"})'); run(C, "POP.on = false; render(false)");
+  ok(!page(C, "#/fleet/srv/srv-g").includes("已和 PERSON6 说好"), "关掉入池不用勾说好");
+  await run(C, 'lendAct("go", {id: "srv-g"})');
+  const off = run(C, 'SF.filter(x => x[0] === "api/pool/lend").at(-1)');
+  ok(JSON.stringify(off[1]) === JSON.stringify({id: "srv-g", on: false, hours: null, ok: false}), "代关的请求：" + JSON.stringify(off));
+});
+ta("auth", "「我的账号」的「我的服务器」（#24）：持有人自己开入池，不用勾说好；没有服务器不显示", async () => {
+  const mine = [{id: "srv-m", holder: "OWNER", label: "OWNER", pool: "pool-public", lend: {on: false, hours: null, open: false, say: "没入池"}}];
+  const U = accCtx(OVU, {...OWNER_ME, servers: mine, pool_member: false}, "#/me");
+  run(U, "ACC.at.me = 1");
+  let m = page(U, "#/me"); has(m, "我的服务器"); has(m, "srv-m"); has(m, "没入池"); clean(m, "我的服务器");
+  ok(!page(accCtx(OVU, OWNER_ME, "#/me"), "#/me").includes("我的服务器"), "没有服务器不该有这一节");
+  const on = [{...mine[0], lend: {on: true, hours: null, open: true, say: "入池，全天"}}];
+  lendFetch(U, on);
+  await run(U, 'lendAct("open", {id: "srv-m"})'); run(U, "POP.on = true; render(false)");
+  m = page(U, "#/me"); ok(!m.includes("说好"), "自己的服务器不该要勾说好"); ok(!/data-lend="go"[^>]*disabled/.test(m), "保存不该置灰");
+  await run(U, 'lendAct("go", {id: "srv-m"})');
+  ok(run(U, "POP") === null, "弹窗：" + JSON.stringify(run(U, "POP")));
+  ok(JSON.stringify(run(U, "SF[0]")) === JSON.stringify(["api/pool/lend", {id: "srv-m", on: true, hours: null, ok: false}]), "请求：" + JSON.stringify(run(U, "SF")));
+  has(page(U, "#/me"), "入池，全天", "存好后用回来的 servers 重画");
+});
+t("reg", "交给算力池的清单（#24）：项目抽屉里一行「算力池 · 等着放到某台」、能撤回；接上卡不搬池里的；池成员能撤", () => {
+  const C = ovCtx(OV, RR);
+  const h = page(C, "#/p/proj-a/manage"); has(h, "算力池"); has(h, "等着放到某台"); has(h, "jobs/p.txt"); has(h, "从算力池撤回");
+  const i = h.indexOf("等着放到某台"); ok(i > 0 && i < h.indexOf("主机清单里没有"), "池里的该排在已不在用的前面");
+  run(C, "D.regs[0].queues = []; D.hosts[0].status.queues = []; ADOPT = null");
+  ok(!run(C, 'hostPage("srv-a")').includes("jobs/p.txt"), "接上卡不该列池里的清单");
+  const U = accCtx(OVU, {...OWNER_ME, pool_member: true}); ok(run(U, 'canUseHost("pool")'), "池成员该能用 pool");
+  ok(!run(accCtx(OVU, OWNER_ME), 'canUseHost("pool")'), "不是池成员不该能用 pool");
+});
+t("project", "项目页的算力池（#24）：顶栏一个「算力池」，车道写在池里等着，资源小图不画它", () => {
+  const C = pjCtx(PJ, EVN), h = app(C);
+  has(h, "算力池"); has(tips(h), "交给算力池、还没放到哪台的清单");
+  ok(run(C, 'laneState(D.lanes.find(l => l.host === "pool"))') === "等待中：在算力池里等着放到某台", "池车道的状态");
+  ok(!run(C, "resourcesCard()").includes("算力池"), "资源小图不该画算力池");
+  ok(run(C, 'hostShort(D.hosts.find(h => h.pool))') === "算力池", "短名");
 });
 
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));

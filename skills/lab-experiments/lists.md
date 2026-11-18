@@ -11,6 +11,7 @@ labmon worker status 29                                  # 登记的队列（清
 labmon worker fit 29 <任务名>…                            # 放不放得下、开不开并行车道（见下）
 labmon worker limit 29 heavy=2                           # 同 tag 同时运行数上限（整台主机共用；只想限本项目就用带项目名的 tag）
 labmon worker rm 29 <目录> <清单> / labmon worker stop 29
+labmon worker add pool <目录> <清单> --project <id>    # 交给算力池（SKILL.md「交给算力池」）；撤回 worker rm pool <目录> <清单>
 ```
 
 - 队列一律用 labmon worker（每台主机一个），不再新建旧的 `gpu_queue.sh`。登记一次即可，之后**插队、追加就改清单**（整体替换：写临时文件再 `mv`），worker 每启动一个任务前重读。

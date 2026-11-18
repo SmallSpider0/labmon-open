@@ -286,6 +286,8 @@ tr.sch-pp td { background: var(--soft); }          /* 调度卡按人分组时�
 .pop .btn { white-space: nowrap; flex-shrink: 0; }
 .pop-w { color: var(--warn); margin-top: 4px; }
 .pop-ck { display: block; margin-top: 6px; }
+.lend-hr { gap: 6px; margin-top: 6px; align-items: center; }
+.lend-hr .ain { width: auto; min-width: 0; }
 @media (min-width: 861px) { .pop:has(> .pform) { width: min(560px, calc(100vw - 32px)); max-width: none; } }   /* 人员设置（镜像、启动命令）：宽一些，输入框不截断（#15）；窄屏照常贴底 */
 /* 平台操作确认的分层（#14，riskSay、riskNeed、riskMore）：一句结论 → 要勾才动的风险（琥珀框）→ 折起来的细节 */
 .rk-say { font-size: 13px; }
@@ -1476,6 +1478,61 @@ function meCan(M, info) {
   const ss = Object.keys(info).length ? Object.keys(info).filter(s => M.scopes.includes(s)) : M.scopes;
   return `这个令牌能做：${ss.map(s => info[s]?.[1] || info[s]?.[0] || s).join("；")}。`;
 }
+/* 入池（#24）：组内服务器空着时借给算力池，跑组里别人交给池的清单。持有人本人在「我的账号 → 概览 → 我的服务器」开关、改时段；
+   管理员在服务器抽屉代开（要能做平台操作、勾「已和这人说好」，代关不用勾）。都经 POST api/pool/lend {id, on, hours, ok}（pool.set_lend）。
+   一台的入池是 {on, hours, open, say}（pool.lend_view：me.servers 与组内服务器的 lend 同一份）；弹窗里的开关、时段、说好记在 POP（on、draft.lf/lt、ok），重画后照样填回去 */
+let LMSG = null, LMT = null;                             // 上一次保存的结果 {id, m}（一分钟后收起）
+const lendSrv = id => ((ACC.me || ME)?.servers || []).find(x => x.id === id) || srvById(id);
+const lendMine = id => ((ACC.me || ME)?.servers || []).some(x => x.id === id);
+const lendBadge = L => !L ? "" : L.on ? `<span class="badge ${L.open ? "b-acc" : "b-mute"}">${esc(L.say)}</span>` : `<span class="mut">${esc(L.say)}</span>`;
+const lendMsg = id => LMSG?.id === id ? `<div class="sm mut">${esc(LMSG.m)}</div>` : "";
+function lendPop(s) {
+  const open = popIs("lend", s.id), P = open ? POP : null, mine = lendMine(s.id);
+  const btn = `<button class="btn mini-btn" id="lend-${esc(s.id)}" data-lend="open" data-id="${esc(s.id)}" aria-haspopup="dialog" aria-expanded="${open}">入池设置</button>`;
+  if (!open) return popConfirm(btn, false);
+  const on = !!P.on, dis = on ? "" : "disabled";
+  const body = `<b>${esc(s.holder)}（${esc(s.id)}）入池</b>
+    <div class="sm mut">入池后，时段内这台空着（只有保活或没有进程）时，看板可以把算力池里组里别人的清单放到这台跑。</div>
+    <label class="sm pop-ck"><input type="checkbox" data-lon ${on ? "checked" : ""}> 入池</label>
+    <div class="row wrap sm lend-hr${on ? "" : " mut"}">每天 <input type="time" class="ain" id="lendf" data-pop-field="lf" value="${esc(P.draft.lf || "")}" ${dis}>
+      到 <input type="time" class="ain" id="lendt" data-pop-field="lt" value="${esc(P.draft.lt || "")}" ${dis}><span class="mut">可跨零点；两格都空是全天</span></div>
+    ${!mine && on ? `<label class="sm pop-ck"><input type="checkbox" data-bok ${P.ok ? "checked" : ""}> 已和 ${esc(s.holder)} 说好</label>` : ""}
+    ${P.err ? `<div class="rn-err">${esc(P.err)}</div>` : ""}`;
+  return popConfirm(btn, true, body, `<button class="btn pri" data-lend="go" data-id="${esc(s.id)}" ${P.busy || (!mine && on && !P.ok) ? "disabled" : ""}>${P.busy ? "正在保存…" : "保存"}</button>`, true);
+}
+async function lendAct(act, d) {
+  const s = lendSrv(d.id);
+  if (!s) return;
+  if (act === "open") {
+    const m = /^\s*(\d{1,2}:\d\d)\s*-\s*(\d{1,2}:\d\d)\s*$/.exec(s.lend?.hours || ""), hm = x => x.padStart(5, "0");   // 时段的写法同 fleet.lend_span
+    popToggle("lend", d.id, {on: !!s.lend?.on, ok: false, trigger: "lend-" + d.id, draft: {lf: m ? hm(m[1]) : "", lt: m ? hm(m[2]) : ""}});
+    return render(false);
+  }
+  if (act !== "go" || !popIs("lend", d.id) || POP.busy) return;
+  const P = POP, f = P.draft.lf || "", t = P.draft.lt || "";
+  if (P.on && !f !== !t) { P.err = "时段要填开始和结束两格，或都空着（全天）"; return render(false); }
+  document.activeElement?.blur?.();
+  P.busy = true; P.err = null; render(false);
+  try {
+    const r = await postJSON("api/pool/lend", {id: d.id, on: !!P.on, hours: P.on && f ? `${f}-${t}` : null, ok: !!P.ok});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+    if (POP === P) { FFOCUS = P.trigger; popClose(); }
+    for (const m of [ME, ACC.me]) if (m && j.servers) m.servers = j.servers;
+    LMSG = {id: d.id, m: j.msg}; clearTimeout(LMT); LMT = setTimeout(() => { LMSG = null; render(false); }, 60000);
+    if (ME?.admin) collectNow(true);                    // 组内服务器的卡片与抽屉取全局快照
+  } catch (e) { if (POP === P) P.err = e.message || String(e); }
+  P.busy = false;
+  render(false);
+}
+// 「我的账号 → 概览」的「我的服务器」：这个账号对应的人持有的组内服务器（me.servers），各台入池与否、此刻在不在时段里，开关在「入池设置」
+function myServersSec(M) {
+  const ss = M.servers || [];
+  if (!ss.length) return "";
+  return dSec("我的服务器", `<div class="sm mut" style="margin-bottom:6px">组内服务器里你持有的。入池后，时段内空着时借给算力池，跑组里别人交给池的清单。</div>
+    <div class="ulist">${ss.map(s => `<div class="urow sm-row"><div class="u">${icon("server")}<div class="t"><b>${esc(s.label || s.id)}</b> <span class="sm mut">${esc(s.id)}${s.pool ? " · " + esc(s.pool) : ""}</span>
+      <div class="sm">${lendBadge(s.lend)}</div>${lendMsg(s.id)}</div></div><div class="acts">${LIVE ? lendPop(s) : ""}</div></div>`).join("")}</div>`);
+}
 function mePage(tab) {
   if (!LIVE || !ME) return `<div class="card"><div class="empty">账号要经看板服务（labmon serve）打开才看得到。</div></div>`;
   if (!ACC.at.me) accLoad("me");
@@ -1512,7 +1569,7 @@ function mePage(tab) {
     ["我的项目", accountList(M.own)],
     ["能用的主机", (M.hosts?.length ? accountList(M.hosts) : "没有单独分配") + (seen.length ? `<span class="sm mut">；你的项目还在 ${accountList(seen)} 上有任务</span>` : "")]
   ]));
-  return head + clientSec(M) + own;
+  return head + myServersSec(M) + clientSec(M) + own;
 }
 function accStatus(u, brief = false) {
   if (u.lock) return `<span class="badge b-bad">${brief ? "已锁定" : `锁到 ${tsNear(u.lock)}`}</span>`;
@@ -2936,6 +2993,7 @@ function fleetCard(x) {
   else if (borrowOf(x)) { const b = hostBorrow(x);
     tags.push(borrowBadge(b, now, "借用中 · ", b.for ? " · " + b.for.join("、") : "")); }
   else {
+    if (x.lend?.on) tags.push(`<span class="badge ${x.lend.open ? "b-acc" : "b-mute"}" ${tip(x.lend.say)}>入池</span>`);
     if (fShare(x)) tags.push(fShare(x));
     if (x.idle_h >= FREE_H) tags.push(`<span class="badge b-ok" ${tip(`最近连着 ${x.idle_h} 小时只有保活或空闲：可以问问 ${x.holder} 还用不用，不用就换给别人`)}>闲置 · ${x.idle_h >= 48 ? Math.floor(x.idle_h / 24) + " 天" : x.idle_h + " 小时"}</span>`);
     if (x.error && !x.down) tags.push(`<span class="sm" style="color:var(--warn)" ${tip(x.error)}>上次没连上</span>`);
@@ -3288,6 +3346,7 @@ function srvDrawer(id) {
     ["容器", x.started ? `已运行 ${dur(now - x.started)} <span class="mut">${ts(x.started)} 启动${e.created ? ` · 作业 ${esc(fcr(e.created))} 创建` : ""}</span>` : "—"],
     ["上次探测", x.last ? `<span ${tip(x.mine ? "worker 最近一次写状态的时刻（自用主机不另外探，每轮采集读 worker 状态）" : "最近一次只读探测")}>${ts(x.last)}</span>${x.error ? ` <span style="color:var(--bad)">${esc(x.error)}</span>` : ""}` : "还没探过"],
     ["保活守护", `${esc(guardText(x))}${wk ? "" : ` <a href="${DH.guard()}" data-drw="${DH.guard()}">设置</a>`}`]);
+  if (x.lend) kv.push(["算力池", `${lendBadge(x.lend)}${x.lend.hours ? ` <span class="mut">每天 ${esc(x.lend.hours)}</span>` : ""}${LIVE && (lendMine(id) || canOps()) ? " " + lendPop(x) : ""}${lendMsg(id)}`]);
   const btns = LIVE ? `<div class="rn">${srvBtns(x)}</div>${PERR[id] ? `<div class="rn-err">${esc(PERR[id])}</div>` : ""}${RERR[id] ? `<div class="rn-err">${esc(RERR[id])}</div>` : ""}` : "";
   s += dSec("概况", kvHtml(kv) + btns) + borrowSec(x) + workerSec(x);
   if (!x.off) {
@@ -3975,9 +4034,10 @@ function regHostBtns(x, qs, p) {
     `<div class="rn-note">把 <b>${who}</b> 在 <b>${from}</b> 上的 ${n} 条清单改到${to.length > 1 ? "哪台跑：" : ` ${tn} 跑`}</div>${pick}
     <div class="sm mut">${[run ? `${from} 上正在跑的 ${run} 个跑完再走，没跑的到 ${tn} 接着跑` : `没跑的到 ${tn} 接着跑`, gp ? `${gp} 条原来限定了 ${from} 的卡号，换过去不限` : "",
       "暂停时怎么停跟着走；实验会话会收到一条消息"].filter(Boolean).join("。")}。</div>${err()}`, go("mvgo", "换过去"), true);
-  const rm = !canUseHost(x.host) ? "" : popConfirm(b("rm", "不用这台", run ? `有 ${run} 个任务在跑：先暂停或等跑完` : `${from} 不再跑这项目的 ${n} 条清单（清单文件、结果和日志都不删）`, !!run), popIs("rrm", id), !popIs("rrm", id) ? "" :
-    `<div class="rn-note"><b>${from}</b> 不再跑 <b>${who}</b> 的 ${n} 条清单：worker 不再从这几条清单里取任务${x.state === "active" ? "" : "（经在用主机代办）"}。</div>
-    <div class="sm mut">清单文件、结果和日志都不删；要再用，在实验会话里 <code>labmon worker add</code>。有任务在跑时会拒绝。实验会话会收到一条消息。</div>${err()}`, go("rmgo", "不用这台"));
+  const pool = x.state === "pool", rmText = pool ? "从算力池撤回" : "不用这台";
+  const rm = !canUseHost(x.host) ? "" : popConfirm(b("rm", rmText, run ? `有 ${run} 个任务在跑：先暂停或等跑完` : `${from} 不再跑这项目的 ${n} 条清单（清单文件、结果和日志都不删）`, !!run), popIs("rrm", id), !popIs("rrm", id) ? "" :
+    `<div class="rn-note">${pool ? `把 <b>${who}</b> 交给算力池的 ${n} 条清单撤回：不再放到别的服务器上跑` : `<b>${from}</b> 不再跑 <b>${who}</b> 的 ${n} 条清单：worker 不再从这几条清单里取任务${x.state === "active" ? "" : "（经在用主机代办）"}`}。</div>
+    <div class="sm mut">清单文件、结果和日志都不删；要再用，在实验会话里 <code>labmon worker add</code>。有任务在跑时会拒绝。实验会话会收到一条消息。</div>${err()}`, go("rmgo", rmText));
   return `<div class="rg-b">${mv}${rm}</div>`;
 }
 async function regPost(act, body) {
@@ -4017,7 +4077,7 @@ let ADOPT = null;                                         // {host, sel: {登记
 function adoptSrc(h) {
   const me = (D.regs || []).find(x => x.host === h.id);
   if (!canWrite() || !me || me.state !== "active" || me.stale || !Array.isArray(me.queues) || me.queues.length || !h.status) return null;
-  const src = D.regs.filter(x => x.state !== "active" && nrm(x.home) === nrm(me.home) && (x.queues || []).some(q => q.project));
+  const src = D.regs.filter(x => (x.state === "returned" || x.state === "unlisted") && nrm(x.home) === nrm(me.home) && (x.queues || []).some(q => q.project));
   return src.length ? {me, src: [...src.filter(x => x.host === me.prev), ...src.filter(x => x.host !== me.prev)]} : null;
 }
 function adoptCard(h) {
@@ -4074,9 +4134,9 @@ function projRegSec(p) {
   const only = (p.lanes || []).filter(l => known(l) && !reg(l)), unk = (p.lanes || []).filter(l => !known(l));
   const hn = id => { const h = D.hosts.find(e => e.id === id); return h ? hostShort(h) : R.find(x => x.host === id)?.label || id; };
   let s = grp.map(({x, qs}) => {
-    const off = x.state !== "active", h = !off && D.hosts.find(e => e.id === x.host), n = regTally(x, qs, p);
+    const pool = x.state === "pool", off = x.state !== "active" && !pool, h = !off && D.hosts.find(e => e.id === x.host), n = regTally(x, qs, p);
     const name = h ? `<a href="#/host/${encodeURIComponent(x.host)}" ${tip(h.label)}>${esc(hostShort(h))}</a>` : `<span ${tip(x.host)}>${esc(x.label || x.host)}</span>`;
-    const tags = [x.state === "unlisted" ? `<span class="badge b-mute" ${tip("主机清单里已经没有这一台，它的清单记录还留在共享盘上")}>主机清单里没有</span>`
+    const tags = [pool ? `<span class="badge b-acc" ${tip("交给算力池、还没放到哪台的清单：看板挑一台入池的组内服务器放过去")}>等着放到某台</span>` : x.state === "unlisted" ? `<span class="badge b-mute" ${tip("主机清单里已经没有这一台，它的清单记录还留在共享盘上")}>主机清单里没有</span>`
       : off ? `<span class="badge b-mute">已归还${x.returned ? " " + esc(ts(x.returned)) : ""}</span>` : "",
       x.stale ? `<span class="badge b-warn" ${tip(off ? "代读它的那台在用主机这一轮没连上，或本机不在内网" : "这台这一轮没读到状态")}>这轮没读到，用的是 ${x.t ? esc(ts(x.t)) : "上一轮"} 的</span>` : ""].filter(Boolean);
     const shown = qs.filter(q => !regQuiet(p, x, q)), hid = qs.length - shown.length;
@@ -4719,6 +4779,7 @@ document.addEventListener("change", e => {               // 批量续租的勾�
   if ("pack" in d && POP) { POP.ack = t.checked; return render(false); }
   if ("wack" in d && FWIZ) { FWIZ.ack = t.checked; return render(false); }
   if ("bok" in d && POP) { POP.ok = t.checked; return render(false); }
+  if ("lon" in d && POP?.k === "lend") { POP.on = t.checked; POP.err = null; return render(false); }
   if ("baway" in d && POP) { POP.away = t.checked; return borrowSync(); }
   if ("blight" in d && POP) { POP.light = t.checked; return render(false); }
   if ("bfor" in d && POP?.sel) { t.checked ? POP.sel.add(d.bfor) : POP.sel.delete(d.bfor); return; }
@@ -4853,6 +4914,8 @@ document.addEventListener("click", e => {
   }
   const wp = e.target.closest?.("[data-wp]");
   if (wp && FWIZ) { FWIZ = {...FWIZ, person: wp.dataset.wp, err: null}; wizPreview(); return; }
+  const ld = e.target.closest?.("[data-lend]");
+  if (ld) { if (!ld.disabled) lendAct(ld.dataset.lend, ld.dataset); return; }
   const ac = e.target.closest?.("[data-acc]");
   if (ac) { if (!ac.disabled && !ACC.busy) accAct(ac.dataset.acc, ac.dataset); return; }
   const sc = e.target.closest?.("[data-sch]");

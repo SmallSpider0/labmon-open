@@ -12,9 +12,10 @@ from contextlib import nullcontext
 from . import borrow as B
 from . import collect as C
 from . import fleet as F
+from . import pool as P
 from . import projects as PJ
 from . import workerctl as W
-from .config import HOSTS_LOCK, ConfigError, active_hosts, all_hosts, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
+from .config import HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
 from .state import snapshot
 
 OVR = {"pause": ("add", "pause"), "resume": ("rm", "pause"), "focus": ("add", "focus"), "unfocus": ("rm", "focus"),
@@ -150,9 +151,14 @@ def override(verb: str, target: str, host_ids: list[str] | None, until: float | 
 def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project: str | None = None, stop: str | None = None, own: bool = False,
            may=None) -> dict:
     """labmon worker start|stop|status|add|rm|limit|fit：经 workerctl.run_out 一次 ssh；输出是 worker 打印的原文。
-    status 成功时末尾补一行与这台共用 worker 目录的在用主机（home_text，#35 A）；may：普通用户能用哪台（None 不限），只列他能用的。"""
+    status 成功时末尾补一行与这台共用 worker 目录的在用主机（home_text，#35 A）；may：普通用户能用哪台（None 不限），只列他能用的。
+    hid 是 pool（算力池，#24）时只认 add、rm；rm 在清单此刻登记的地方撤（pool.locate）。"""
     if sub not in WORKER_ACTS or not hid:
         return usage(f"不认识的 worker 动作 {sub}")
+    if hid == POOL and sub not in ("add", "rm"):         # 算力池（#24）只收清单、撤清单：没有 worker，状态看项目页
+        return usage(f"算力池只能 worker add pool、worker rm pool：池里的清单在项目页看（{POOL_LABEL}那一栏），放到哪台由看板定")
+    if hid == POOL and sub == "rm" and len(rest) == 2:   # 撤回：清单此刻登记在哪（池里，或已放到借给池的主机上）就在哪撤
+        hid = P.locate(rest[0], rest[1])
     try:
         with PJ._reg_locked() if sub == "add" else nullcontext():
             if project and sub != "rm" and (reason := unknown_project(project, require=sub == "add")):

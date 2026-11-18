@@ -12,6 +12,7 @@ from . import fleet as F
 from . import fleetboot as FB
 from . import fleetops as FO
 from . import lease as LS
+from . import pool as PO
 from .config import ConfigError, active_hosts, fmt_time, hosts_file, parse_time
 from .service import notify
 from .state import file_sig, load_rows
@@ -140,6 +141,7 @@ def view(hosts: list[dict] | None = None, t: float | None = None, cfg: dict | No
                         "lw": None if o else F.server_lw(st),
                         "strip": strip, "h0": h0, "idle_h": 0 if o else idle_h, "s7": _stats(rows, t - 7 * 86400), "s30": _stats(rows, t - 30 * 86400),
                         "guard": F.guard_state({**s, "off": o}, st, cfg, t, s["id"] in busy),
+                        "lend": PO.lend_view(s, t),                 # 入池（#24），与「我的服务器」同一份
                         "borrow": {"since": parse_time(s.get("borrow_since")), "until": parse_time(s.get("borrow_until")), "for": s.get("borrow_for"), "by": F.borrower(s, cfg),
                                    "away": parse_time(s.get("borrow_away")), "returned": parse_time(s.get("borrow_returned"))} if s.get("borrow_since") else None,   # 时刻都是 epoch 秒
                         # 借得了（对方空着或轻用）的：对方在用什么、借来用时给对方留的量（按对方近 7 天轻用时的用量推荐）

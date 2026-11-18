@@ -32,7 +32,7 @@
     "mounts": [{"path": "/tmp", "label": "容器 /tmp", "total_gb": 1024.0, "avail_gb": 24.9, "used_pct": 97.6,
                 "min_gb": 10}],                 // 容量与 min_gb 都是 GiB（2^30）；disk_low 按 min_gb 与配置的 max_used_pct 判
     "checks": [{"id": "keepalive", "label": "GPU 保活在跑", "state": "ok|fail|na", "out": "…", "detail": ["…"]}]
-  }],
+  }],                                           // 有交给算力池的清单时另有一项 {"id": "pool", "label": "算力池", "pool": true, "ok", "error"}（#24）：ok 是代读它的在用主机这轮读到了，其余字段都没有
 
   "lanes": [{                                   // 一条车道 = 一条串行流水线
     "id": "r9_a6000", "label": "车道 2", "host": "29", "type": "gpu_queue",   // 自动发现的车道 id 为 <队列 id>:<清单名>；只在 worker 登记里有的为 <目录末级名>/<清单>（#94）
@@ -47,7 +47,8 @@
     "holding": false, "has_hold": false,         // 正在跑暂停任务 / 未完成任务里有暂停任务
     "state_dir": "/root/…/results/_queue",
     "logs_dir": "/root/…/results/_logs",         // 日志目录（探针按清单 .env 的 QUEUE_LOGS 解析，任务日志是 <logs_dir>/<任务>.log）；labmon wait --job 写结果位置用，#135 前的快照没有
-    "returned": null, "read_via": null,          // 所在主机已归还：归还时间；经哪台共用盘的主机代读
+    "returned": null, "read_via": null,          // 所在主机已归还：归还时间；经哪台共用盘的主机代读（算力池的车道也写代读它的在用主机）
+    "pool": false,                               // 交给算力池、还没放到哪台的（host 为 pool，#24）：没有 worker 管，alive 为 false、不报 lock_dead，waiting 写在池里等着
     "frozen_at": null,                           // 已归还且没有主机代读时：归还前最后一次采到的时刻
     "fs_skew": null,                             // 队列状态所在盘与主机的时钟差（秒，盘快为正）；探针已据此校正各文件时间
     "root": "/root/data1/alice/project-a/a1_r9", "queue": "jobs/r9_a6000w.txt",   // 队列目录与清单（配置写的或登记的；自动发现的取发现到的）：页面按它认 worker 的等待、队列结束事件
@@ -153,10 +154,10 @@
   `sched.projects[]` 的 `focus`、`paused` 是 null 或 `{until（epoch 秒，null 为无期限）, hosts}`：`hosts` 为 null 是项目级的（主机清单 `[sched.focus]`、`[sched.pause]`，所有主机），否则是只在这几台单独下的（`--host`），`until` 取最晚的（#96）。项目级的暂停另带 `by`：谁下的（主机清单 `[sched.pause_by]`，`config.pause_by`；没记的为 null，当管理员下的，#16）；普通用户看到的快照只留他自己项目的 `by`。
   `hosts[].status.overrides[]` 里项目级的暂停、优先带 `global: true`（worker 从 `sched.json` 接上的，每台都有一份），`once: true` 的是不带 `--host` 的 `pause --now` 给各台下的“只停一次”：停完照样挡着，全局暂停送到就删（最多 30 分钟）。
 - 顶层 `regs` 是登记的全局视图（`overview._regs`，项目「管理」抽屉用，[workbench.md「项目的管理抽屉」](workbench.md#项目的管理抽屉)）：各主机目录下登记的清单，每台一项
-  `{host, label, state active|returned|unlisted（在用、主机清单里已归还、主机清单里已没有）, returned 归还时刻（epoch 秒，没有为 null）, home 所在 worker_home, t 读到的时刻（在用的是那份状态的 t）,
+  `{host, label, state active|pool|returned|unlisted（在用、算力池里待放的（host 为 pool，#24）、主机清单里已归还、主机清单里已没有）, returned 归还时刻（epoch 秒，没有为 null）, home 所在 worker_home, t 读到的时刻（在用的是那份状态的 t）,
   stale 这一轮没读到、沿用上一轮的, queues [{root, jobs, project, stop, gpus}] 或 null（在用主机这轮既没状态、也没读到文件，上一轮也没有）}`；
   在用主机那项另带 `pool`（`platform_pool`）与 `prev`（上一台：同一个池里最近归还的自用主机的 id，`fleetboot.last_mine`，没有为 null；接上卡排序用，#95）；
-  在用主机的 `queues` 取状态里的，另带 `empty` 与 `added_t`（登记时刻，epoch 秒，那台容器的时钟）；其余取登记文件，另带 `added`（登记时刻的文字，那台容器的时钟）与 `key`（登记键，文件名去掉 `.json`）。在用的在前（照主机清单顺序），再是已归还的（归还晚的在前）、主机清单里没有的。
+  在用主机的 `queues` 取状态里的，另带 `empty` 与 `added_t`（登记时刻，epoch 秒，那台容器的时钟）；其余取登记文件，另带 `added`（登记时刻的文字，那台容器的时钟）、`added_t`（登记文件的修改时刻，epoch 秒，共享盘服务器的时钟；读不到为 null）与 `key`（登记键，文件名去掉 `.json`）。在用的在前（照主机清单顺序），再是算力池、已归还的（归还晚的在前）、主机清单里没有的。
 - `projects[]` 是各项目看板的摘要（`serve.Overview.proj_info` 给什么带什么，只去掉写 `eta.json` 用的 `running`）：`id`、`title`、`alerts`、`alert_msgs`、`generated`、`no_work_since`、`markers`、`quiet`（项目快照的，见上）、`groups`（计划项的进度：`[{id, label, color, auto 自动归出来的, total, done, failed, running, queued}]`，取项目快照的）、`ungrouped`（没归进任何组的任务数，占位任务不算）；`lanes[]` 是 `{host, root, queue, label, unfinished, run 在跑几个, returned}`（项目探针没读到的车道 `unfinished`、`run` 为 null）；
   `cfg` 是项目配置的摘要（`serve.Overview.cfg_info`）：`{path 看板上的配置（登记目录里的 monitor.toml）, out_dir 输出目录（登记目录的 out/）, title, interval, interval_fixed（服务启动参数定了采集间隔）, refresh, hide_done_hours, groups [{id, label, color}], auto_groups,
   markers [{date 原文, label, ts load 解析好的时刻（页面按它填日期框）}], alerts {gpu_idle_util, gpu_idle_min, stale_min, log_silent_min}, spec, stale}`（管理抽屉的「项目配置」节按它画控件，#122、#133）；
@@ -167,7 +168,7 @@
 - 顶层 `archived[]` 是已归档的项目（状态目录 `overview/projects.json`，新的在前，[workbench.md「项目的归档、恢复与永久删除」](workbench.md#项目的归档恢复与永久删除)）：
   `{id, title, t 归档时刻（epoch 秒）, revision 本次归档标识（旧条目没有）, by 谁做的（「看板页面上」「用命令行」，#121 之前归档的没有）, regs 归档时移除的登记 [{host, root, jobs}], skipped 没动的说明（没有能代办的在用主机、登记没读到）}`。
   `fleet.holders[]` 是按人的近 30 天统计（`frac`、`h` 里主人借给别人的时段是 `lent`；`borrowed [{id, from, h}]`、`lent [{id, to, h}]`），`fleet.mine[]` 与 `servers[]` 字段同名（`strip`、`s7`、`s30`、`last`、`error`、`down`、`since`、`started`、`public`、`guard`（`status: "worker"`），`sample` 与探针的同形，见 `fleet.from_worker`；另有平台操作口径的 `state`、`work`；
-  `lw` 同主机项的：组内服务器取探针的根盘 `sample.root` 与扫出的路径（`fleet.server_lw`），自用主机取主机项的，关机的为 null，[fleet.md「本地盘」](fleet.md#本地盘)），`servers[].borrow.by` 是借的人（[fleet.md「使用记录」](fleet.md#使用记录)）。
+  `lw` 同主机项的：组内服务器取探针的根盘 `sample.root` 与扫出的路径（`fleet.server_lw`），自用主机取主机项的，关机的为 null，[fleet.md「本地盘」](fleet.md#本地盘)），`servers[].lend` 是入池 `{on, hours, open 此刻在不在时段里, say}`（`pool.lend_view`，#24），`servers[].borrow.by` 是借的人（[fleet.md「使用记录」](fleet.md#使用记录)）。
 - 顶层 `hostcheck` 是看板服务所在机的体检（`hostcheck.view`，#166，[workbench.md「看板服务所在机的体检」](workbench.md#看板服务所在机的体检)），不是 WSL 时为 null：
   `{t 体检时刻（null 是还没体检过）, name 计算机名, role（primary 主 / standby 备用，取服务租约 lease.view；没跑过租约 null）, boot 开机时刻, reboot 待重启从何时起（不待重启 null）, pause_until 暂停更新到期（没暂停 null）,
   au {manual 是不是通知后手动装, text}, updates {list [{id, title, kb, sec 安全更新, driver, since 第一次看到}]（读不出 null）, src task|search, at 结果是何时的, checked, err},

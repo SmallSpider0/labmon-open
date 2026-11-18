@@ -24,7 +24,7 @@ from pathlib import Path
 from . import lan as L
 from . import lease as LS
 from . import projects as PJ
-from .config import AUTO_GROUP_RE, GIB, HOLD_RE, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
+from .config import AUTO_GROUP_RE, GIB, HOLD_RE, POOL_LABEL, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
 from .health import link_step
 from .state import load_json, load_rows, save_json, snapshot, usage_file, write_atomic
 
@@ -38,6 +38,7 @@ IDLE_GRACE_S = 5 * 60         # 保活与任务都不在要连续这么久才报
 # 告警给谁看（#142，维护者 11-10 定：很多告警是给实验会话的，不都在看板上显眼列）：
 # user 要用户处理（只有用户能做，或机器出了要人看的事）；agent 只给实验会话（会话自己能处理）；both 两边都要（page 给用户写人话，msg 给会话写操作）
 AUDIENCE = ("user", "agent", "both")
+POOL_WAIT = "在算力池里等着放到某台"   # 池车道的等待原因（#24；放到哪台由看板定，C 之后会写具体原因）
 REG_KEEP_S = 24 * 3600        # 登记没了（worker rm、快照里这轮没有）的车道再按上次见到的主机留这么久（同自动发现的 hide_done_hours 缺省）
 
 
@@ -343,6 +344,21 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
         p, err = probes[h["id"]]
         hs = hstate.setdefault(h["id"], {})           # 连通状态（health.link_step 记的 fails / since / down）与 idle_since
         last_path = sd / f"last_probe_{re.sub(r'[^A-Za-z0-9_.-]', '_', h['id'])}.json"
+        if h.get("pool"):
+            # 算力池（#24）：一张小卡，没有 GPU 与挂载点；连没连上看代读池车道的那台（q 的 read_via）
+            rv = next((q["read_via"] for q in cfg["queues"] if q["host"] == h["id"] and q.get("read_via")), None)
+            snap["hosts"].append({"id": h["id"], "label": h["label"], "pool": True, "ok": bool(rv) and probes.get(rv, (None,))[0] is not None,
+                                  "error": None if rv else "没有在用的自用主机代读池里的清单"})
+            raw_by_host[h["id"]] = None
+            continue
+        if h.get("reader_only"):
+            # 只替算力池代读、不是本项目的主机：读到的只用来解析池车道，不进项目快照（主机卡、采样历史、告警都不要）
+            if p is None:
+                p = load_json(last_path, None)
+            else:
+                save_json(last_path, p)
+            raw_by_host[h["id"]] = p
+            continue
         if h["returned"]:
             # 已归还：只留一张标注卡片；没有代读主机的队列沿用归还前最后一次采到的状态
             hs.update(fails=0, down=None)
@@ -442,7 +458,7 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     src = q.get("read_via") or q["host"]                 # 实际读数据的主机（已归还的经共享盘由别的主机代读）
     hp = raw_by_host.get(src)
     raw = ((hp or {}).get("queues") or {}).get(q["id"])
-    host_ok = next(x["ok"] for x in snap["hosts"] if x["id"] == src)
+    host_ok = next((x["ok"] for x in snap["hosts"] if x["id"] in (src, q["host"])), False)     # 只替池代读的主机不在快照里：看池那张卡
     returned = hcfg[q["host"]]["returned"]
     where = f"{hcfg[q['host']]['label']} {q['name']}"     # 告警里指明车道：主机名 + 车道名
     lane = {"id": q["id"], "label": q["name"], "host": q["host"], "type": q["type"], "stale": not host_ok and not returned}
@@ -464,6 +480,8 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     if raw.get("fs_skew"):
         info["fs_skew"] = raw["fs_skew"]
     lane.update(info)
+    if hcfg[q["host"]].get("pool"):                  # 算力池里待放的（#24）：没有 worker 管，等看板放到某台；不报队列进程不在
+        lane.update(pool=True, managed=True, alive=False, waiting=None if lane.get("paused") else POOL_WAIT)
     if lane.get("held") and not lane.get("paused") and not any(j["status"] == "running" for j in jobs):
         lane["paused"] = lane["waiting"]          # 被临时指令挡住（drain、本项目暂停、续租截止、约定归还）：按暂停算，不报空转（约定归还挡住的另报 borrow_cut）
     if lane.get("dep") not in (None, "wait"):    # 队首等的依赖跑失败了、找不到、成环：不改就一直不放行（labmon wait 与实验会话据此处理）
@@ -913,10 +931,11 @@ def collect(cfg: dict, out_dir: Path | None = None, use_ssh: bool = True) -> dic
     out_dir.mkdir(parents=True, exist_ok=True)
     glob_snap = snapshot()                             # 工作台上一轮的全局快照：本项目的登记（车道按它）、借来的主机、同机别的项目
     cfg = lanes_cfg(cfg, glob_snap, out_dir / ".labmon", time.time())
-    live = {h["id"]: h for h in cfg["hosts"] if not h["returned"]}
+    live = {h["id"]: h for h in cfg["hosts"] if not h["returned"] and not h.get("pool")}     # 算力池是合成主机（#24）：不探测，车道由代读的那台读
     lan, probes = L.gather(live, lambda h: run_probe(cfg, h) if (use_ssh or not h["ssh"]) else (None, "未连接（--no-ssh）"),
                            lambda k: use_ssh and bool(live[k]["ssh"]))     # 本机不在内网：不连，也不算探针失败
     probes.update({h["id"]: (None, "已归还") for h in cfg["hosts"] if h["returned"]})     # 不再连接
+    probes.update({h["id"]: (None, POOL_LABEL) for h in cfg["hosts"] if h.get("pool")})
     snap = build(cfg, probes, out_dir, lan, glob_snap)
     if not lan["ok"]:                                  # 数据是离开内网前的：日志多久没更新、GPU 闲置这些按它算不准，不报
         snap["alerts"] = [a for a in snap["alerts"] if a["key"].split(":")[0] not in ("ssh_fail", "log_silent", "noprogress", "gpu_idle")]

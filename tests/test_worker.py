@@ -2275,6 +2275,68 @@ class CrossHostTest(UnitBase):
         self.assertEqual(json.loads(Path(w2.p.status).read_text())["dep_miss"], [])
 
 
+class PoolListTest(UnitBase):
+    """交给算力池的清单（#24）：worker add --host pool 登记在共享盘 HOME/hosts/pool/queues/（池没有 worker、没有状态）；
+    收的清单有限制，停法缺省 term；别处 after= 等池里的行算还会跑，不报找不到。"""
+
+    def setUp(self):
+        super().setUp()
+        self.q, = self.hosts.queues({"p": ["A|true   # gpus=1", "A2|true   # gpus=1"]}, "pa")
+        os.makedirs(self.q["state"])
+
+    def add(self, *extra, jobs="jobs/q.txt"):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", out):
+            rc = self.m.main(["add", self.q["root"], jobs, "--host", "pool", "--project", "pa", *extra])
+        return rc, out.getvalue()
+
+    def regs(self):
+        return [json.loads(f.read_text()) for f in (self.hosts.home / "hosts" / "pool" / "queues").glob("*.json")]
+
+    def test_add_pool_defaults_to_term(self):
+        rc, out = self.add()
+        self.assertEqual(rc, 0, out)
+        reg, = self.regs()
+        self.assertEqual((reg["project"], reg["stop"]), ("pa", "term"))
+        self.assertIsNone(reg.get("gpus"))
+
+    def test_add_pool_refuses(self):
+        rc, out = self.add("--stop", "boundary")
+        self.assertEqual(rc, 2)
+        self.assertIn("--stop boundary", out)
+        rc, out = self.add("--gpus", "0")
+        self.assertEqual(rc, 2)
+        self.assertIn("--gpus", out)
+        Path(self.q["jobs_path"]).write_text("A|true   # gpus=1 gang=g:2\nB|true   # gpus=1 gang=g:2\n")
+        rc, out = self.add()
+        self.assertEqual(rc, 2)
+        self.assertIn("成组", out)
+        Path(self.q["jobs_path"]).write_text("hold_wait|sleep 1\n")
+        rc, out = self.add()
+        self.assertEqual(rc, 2)
+        self.assertIn("占位任务", out)
+        self.assertEqual(self.regs(), [])
+
+    def test_after_pool_row_waits_not_missing(self):
+        # t 上的 B 等池里的 A：池目录里登记着、A 还没跑，算还会跑；满 DEP_MISS_S 也不报找不到，原因写在池里等
+        rc, out = self.add()
+        self.assertEqual(rc, 0, out)
+        qb, = self.hosts.queues({"b": ["B|true   # gpus=0 after=A"]}, "pa")
+        self.w.tick([qb], True)
+        st = json.loads(Path(self.w.p.status).read_text())
+        (x,) = [x for x in st["waiting"] if x["name"] == "B"]
+        self.assertIn("在算力池里等着放到某台", x["why"])
+        self.hosts.advance(self.m.DEP_MISS_S + 1)
+        self.w.peer_t = 0
+        self.w.tick([qb], False)
+        st = json.loads(Path(self.w.p.status).read_text())
+        (x,) = [x for x in st["waiting"] if x["name"] == "B"]
+        self.assertNotEqual(x.get("dep"), "missing")
+        self.assertEqual(self.events("dep"), [])
+        self.assertEqual(self.w.running, {})
+
+
+
 class RegDupTest(UnitBase):
     """同一条清单登记在两台（#88）：借来的主机还了再借回、自用主机恢复时，旧登记还在那台。两台共享 HOME（fixtures.Hosts）；
     o 的状态是假的（hosts.status），它容器里的任务 PID 在 t 这边看不到（dead_pid）。回来那台不能把 o 手上的任务当中断、删 current、重跑。"""

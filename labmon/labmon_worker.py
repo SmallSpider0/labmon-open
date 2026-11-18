@@ -107,6 +107,7 @@ WAIT_CAP_S = 1800        # 缺省：请求卡在资源上等了这么久，排�
 HALF_LIFE_S = 86400      # 缺省：项目之间比的 GPU 用量（卡·时）按这个半衰期衰减；sched.json 的 half_life_h 可改
 ONCE_HOLD_S = 1800       # 不带 --host 的 pause --now 下的“只停一次”：等全局暂停随 sched.json 送到才删，最多挡这么久（看板约 1 分钟一轮）
 POLICY = {"cap": WAIT_CAP_S, "hl": HALF_LIFE_S, "w": {}, "own": {}}   # 调度设置的缺省（policy 读 sched.json 覆盖）：w 为各项目权重，不写为 1；own 为项目 → 人员键，没写的项目合起来算一个人
+POOL = "pool"            # 算力池的保留主机 id（#24，看板那边 config.POOL）：池里待放的清单登记在 hosts/pool/queues/，没有 worker；peers 读它认依赖
 PEER_EVERY = 60          # 别的主机在跑的任务（各自状态里的 share.run，公平份额要算上）多久重读一次
 STATUS_STALE_S = 180     # status.json 这么久没更新（按里面的 t）就算那台 worker 不在：别的主机（peers）与本机（fit）同一口径，与看板的 config.STALE_S 一样
 DEP_STALE_S = 86400      # 别的主机 worker 不在（状态没更新、也没 worker stop）这么久以内，它清单里没跑完的照样算还会跑：续租、重启时等它的不误报找不到
@@ -2637,7 +2638,9 @@ class Worker:
         """还会跑、眼下却不会动的被等任务的说明（等待原因里写）：所在清单暂停、drain，或在 worker 不在的主机上；照常在排的为 None。"""
         host, age, held = self.dep_where.get(k, (None, 0, None))
         why = [{"paused": "所在清单暂停中", "pause": "所在项目暂停中", "drain": "所在主机 drain 中"}.get(held, held)] if held else []
-        if host is not None and age > STATUS_STALE_S:
+        if host == POOL:
+            why.append("在算力池里等着放到某台")
+        elif host is not None and age > STATUS_STALE_S:
             why.append("在 %s 上，那台 worker 已 %d 分钟没更新" % (host, age / 60))
         return "%s %s" % (dep_names([k + (False,)], project), "，".join(why)) if why else None
 
@@ -3155,6 +3158,7 @@ class Worker:
                         self.peer_box += [(st.get("host") or os.path.basename(d), j.get("project"), j["name"]) for j in st.get("running") or [] if not j.get("hold")]
                 except (OSError, ValueError, TypeError, AttributeError, KeyError):
                     continue
+            self.peer_todo += self.pool_todo(now)
             self.peer_regs = {}
             for h in self.peer_st:
                 for o in registry(os.path.join(HOME, "hosts", h, "queues"))[0]:   # 只认那台自己也会跑的：坏了的登记（缺 project 等）那台跳过，这里也不算
@@ -3163,6 +3167,23 @@ class Worker:
                     except OSError:                   # 刚被删掉的
                         continue
         return self.peer
+
+    def pool_todo(self, now):
+        """算力池里待放的清单还会跑的行（#24）：peers 一起读，按别的主机的 todo 的样子 [("pool", 0, now, 清单项)] 记进 peer_todo，
+        别处 after= 等它时算还会跑（不报找不到，dep_note 写在池里等）。池目录没有 worker、没有状态，按登记与清单的状态目录现读（清单按修改时间缓存）。"""
+        out = []
+        for q in registry(os.path.join(HOME, "hosts", POOL, "queues"))[0]:
+            rows = self.list_of(q["jobs_path"])
+            if rows is None:
+                continue
+            ms, left = rows_left(q["state"], rows, None)
+            if not left:
+                continue
+            ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [n for n, _ in left], "gang": {},
+                  "deps": {n: [[p, x] for p, x, _ in d] for n, h in left for d in [dep_keys(dict(h, project=q["project"]))] if d},
+                  "held": "paused" if ms and "paused" in ms else None}
+            out.append((POOL, 0.0, now, ln))
+        return out
 
     # ---- 推演 ----
     def job_spec(self, n, h, est, dur, durk=None):
@@ -3395,7 +3416,8 @@ class Worker:
                     for k in ds:
                         waiters.setdefault(tuple(k[:2]), set()).add((ln.get("project"), n))
         for h, age, _, ln in self.peer_todo:      # 那台 worker 不在（续租、重启）：它的清单还会跑、看不到何时跑完，整批推不出（#25 第 8 条）
-            if h not in self.peer_st and h not in self.gone and ln.get("queue") and ln.get("jobs") and ln.get("held") not in ("paused", "pause"):
+            # 算力池里待放的（#24）不算 worker 不在：放到哪台由看板定，不挡挪法建议
+            if h not in self.peer_st and h not in self.gone and h != POOL and ln.get("queue") and ln.get("jobs") and ln.get("held") not in ("paused", "pause"):
                 others.append({"host": h, "root": ln["root"], "queue": ln["queue"], "project": ln["project"], "pend": [], "run": 0, "end": None,
                                "state": "unknown", "unread": False,
                                "why": "%s 的 worker 不在（状态 %d 分钟没更新），那里的 %s 不知道何时跑完" % (h, age / 60, ln["queue"])})
@@ -5638,6 +5660,23 @@ def slot_main(argv):
         time.sleep(1)
 
 
+def pool_refuse(path, stop, gpus):
+    """worker add --host pool（交给算力池，#24）不收的清单：返回原因；收为 None。池里的清单会放到借来的服务器上跑，主人回来或收回时要停下重排：
+    停法不能是 boundary（等当前任务跑完，收回停不下来），不能限卡（--gpus：各台卡号不同），不能有成组（gang=：借来的随时要还，跨台成组太脆）与占位任务。"""
+    if stop == "boundary":
+        return "交给算力池的清单不能用 --stop boundary：收回时要停得下来，用 --stop term（缺省）或 --stop file:<相对 ROOT 的路径>"
+    if gpus:
+        return "交给算力池的清单不能写 --gpus：放到哪台、用哪几张卡由看板定"
+    rows = parse_jobs(read(path, "") or "")
+    gang = [n for n, c in rows if hints(c).get("gang")]
+    hold = [n for n, _ in rows if is_hold(n)]
+    if gang:
+        return "交给算力池的清单不能有成组的行（gang=）：%s。成组的放到自己的主机上跑" % "、".join(gang[:3])
+    if hold:
+        return "交给算力池的清单不能有占位任务：%s。要等别的任务就写 after=" % "、".join(hold[:3])
+    return None
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["slot"]:
@@ -5703,6 +5742,12 @@ def main(argv=None):
             if not os.path.exists(os.path.join(root, a.args[1])):
                 print("清单不存在：%s/%s" % (root, a.args[1]), file=sys.stderr)
                 return 2
+            if a.host == POOL:
+                bad = pool_refuse(os.path.join(root, a.args[1]), a.stop, a.gpus)
+                if bad:
+                    print(bad, file=sys.stderr)
+                    return 2
+                a.stop = a.stop or "term"         # 池里的清单收回时要停得下来：缺省按 term 停
             guest = next((o for o in json.loads(read(p.overrides, "[]") or "[]") if o.get("kind") == "guest" and o.get("target")), None)
             if guest and a.project not in guest["target"].split(","):
                 print("主机 %s 是借来的，只给 %s 用（这条队列的项目是 %s）" % (a.host, "、".join(guest["target"].split(",")), a.project), file=sys.stderr)

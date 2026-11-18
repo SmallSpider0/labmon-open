@@ -15,6 +15,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj [--gpu
                                                           # 登记一条队列：ROOT 是服务器上的绝对路径，JOBS 相对 ROOT；
                                                           # --project 必写（不写报错退出），是 monitor.toml 的 id：暂停、优先、借卡的
                                                           # “只给谁用”、作废的唤醒都按它认，看板不按目录猜；--gpus 限定只用某些卡
+labmon worker add pool /root/data1/alice/proj jobs/p.txt --project proj    # 交给算力池（成员才能交；不许 --gpus、--stop boundary、gang=、占位任务），见 fleet.md「算力池」
 labmon worker limit 29 heavy=2                           # 同 tag 同时运行数的上限（heavy= 删掉）：整台主机共用，各项目同名的 tag 合并计数
 labmon worker status 29                                  # 登记的队列（清单跑空的标“空着”）、运行中与等待中的任务（等待行带排第几、是不是屏障、预计开始）；末尾一句与哪几台共用 worker 目录（看板按主机清单补）
 labmon worker fit 29 x4_s110_seed2 [--project a1]        # 开并行车道前：显存、内存、CPU 放不放得下，同卡并行时同类约要多久（见“资源估计”）
