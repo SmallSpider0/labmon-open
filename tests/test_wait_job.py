@@ -247,12 +247,40 @@ class CmdWaitJobTest(_Base):
         self.assertIn("[gpu_idle] GPU 空着", out.getvalue())
 
     def test_outdated_exit_after_sync_or_wait_refusal(self):
-        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err, \
+             mock.patch.object(M.dist, "installed", return_value=False), mock.patch.object(M, "_wait_update") as update:
             for sync in ({"act": "error", "code": 426, "msg": "跑 labmon update"}, {"act": "same"}):
                 with mock.patch.object(M, "_sync", return_value=sync), \
                      mock.patch.object(M.client, "call", side_effect=M.client.Failed(426, "跑 labmon update")):
                     self.assertEqual(M.cmd_wait(str(self.d / "m.toml")), 5)
+        update.assert_not_called()                     # 不是看板安装的客户端：照旧退出，交给 labmon update
         self.assertEqual(err.getvalue().count("[client_outdated]"), 2)
+
+    def test_outdated_refusal_tries_update_once(self):
+        # #17：低于最低版本（426）时，看板安装的客户端也先自动更新一次（426 带在跑的提交就按它核对下载的版本），装不成再退出 5
+        commit = "b" * 40
+        cases = [({"act": "error", "code": 426, "msg": "跑 labmon update"}, None, None),
+                 ({"act": "same"}, M.client.Failed(426, "跑 labmon update", {"commit": commit}), commit)]
+        for sync, refusal, want in cases:
+            with mock.patch.object(M, "_sync", return_value=sync), mock.patch.object(M.client, "call", side_effect=refusal), \
+                 mock.patch.object(M.dist, "installed", return_value=True), mock.patch.object(M, "_wait_update", return_value="装不上") as update, \
+                 contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+                self.assertEqual(M.cmd_wait(str(self.d / "m.toml")), 5)
+            self.assertEqual(update.call_count, 1)
+            self.assertEqual(update.call_args.args[0], want)
+            self.assertIn("装不上", err.getvalue())
+            self.assertIn("[client_outdated]", err.getvalue())
+
+    def test_unknown_version_only_hints_once(self):
+        # #17：看板认不出这个客户端的版本（unknown）：不拦、不自动换包，stderr 提示一次
+        polls = [{"client_status": "unknown", "commit": "b" * 40, "jobs": [{"name": "x", "text": "运行中"}]}] * 2 + \
+                [{"done": True, "client_status": "unknown", "jobs": [{"name": "x", "st": "done", "text": "完成"}]}]
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), mock.patch.object(M.client, "call", side_effect=polls), \
+             mock.patch.object(M.dist, "installed", return_value=True), mock.patch.object(M, "_wait_update") as update, \
+             mock.patch.object(M.time, "sleep"), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(M.cmd_wait(str(self.d / "m.toml"), ["x"]), 0)
+        update.assert_not_called()
+        self.assertEqual(err.getvalue().count("认不出这个命令行的版本"), 1)
 
     def test_confirm_state_carried_across_requests(self):
         # 开始等之前就跑完的：要两份开始等之后写的快照；“见过几份”在命令行带回的 watch 里，看板不记会话（#162）

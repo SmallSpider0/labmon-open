@@ -643,6 +643,7 @@ class AuthTest(unittest.TestCase):
             status, _, body = self.call(self.lan + "/api/hosts", tok=raw, headers=version)
             self.assertEqual(status, 426)
             self.assertEqual(json.loads(body)["reason"], "client_outdated")
+            self.assertEqual(json.loads(body)["commit"], S.DP.RUNNING["commit"])     # 在跑的提交：wait 自动更新时核对下载的版本（#17）
             self.assertEqual(self.call(self.lan + "/api/hosts", tok=raw)[0], 200)
             self.assertEqual(self.call(self.lan + "/api/hosts", cookie=sid, headers=version)[0], 200)
             self.assertEqual(self.call(self.lan + "/api/me", tok=raw, headers=version)[0], 200)
@@ -655,6 +656,13 @@ class AuthTest(unittest.TestCase):
                 status, _, body = self.call(self.lan + "/api/hosts", tok=raw, headers=version)
                 self.assertEqual(status, 409)
                 self.assertTrue(json.loads(body)["standby"])
+
+    def test_unknown_client_version_is_not_refused(self):
+        # #17：比看板新、分支上跑、冷备回退后的客户端不在运行版本的祖先链上（unknown）：只提示，不当太旧拒绝
+        raw = make_token(scopes=("project",))
+        self.srv.min_client_commit = "a" * 40
+        with mock.patch("labmon.serve.DI.client_status", return_value="unknown"):
+            self.assertEqual(self.call(self.lan + "/api/hosts", tok=raw, headers={"X-Labmon-Client": "c" * 40})[0], 200)
 
     def test_login_required_even_from_localhost(self):
         # 以前本机来的请求一律放行（trust_local）：现在两个入口都要登录

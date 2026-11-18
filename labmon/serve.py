@@ -640,10 +640,11 @@ class Handler(BaseHTTPRequestHandler):
         minimum = self.board.min_client_commit
         commit = self.headers.get(CLIENT_HEADER, "")
         recovery = path in ("/api/client/wheel", "/api/me", "/api/users", "/api/reports", "/collect", "/api/worker/start") or path.startswith("/api/admin/")
+        # 只拦确认低于最低版本的；比不出先后的（比看板新、分支上跑、冷备回退后：unknown）放行，账号详情与 wait 只提示（#17）
         if minimum and who.via == "token" and commit and not recovery:
-            if DI.client_status(commit, DP.RUNNING["commit"], minimum) in ("below_minimum", "unknown"):
-                self._json(CL.CLIENT_OUTDATED, {"error": f"客户端太旧或版本无法确认：跑 labmon update（最低版本 {minimum[:7]}）",
-                                               "reason": CL.CLIENT_OUTDATED_REASON, "minimum": minimum})
+            if DI.client_status(commit, DP.RUNNING["commit"], minimum) == "below_minimum":
+                self._json(CL.CLIENT_OUTDATED, {"error": f"客户端低于最低版本 {minimum[:7]}：跑 labmon update",
+                                               "reason": CL.CLIENT_OUTDATED_REASON, "minimum": minimum, "commit": DP.RUNNING["commit"]})
                 return False
         if path == "/api/report":
             try:
