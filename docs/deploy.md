@@ -148,6 +148,17 @@ dashboard-host 还需将同一份 `ca.crt` 公钥复制到 `[server].ca_cert` �
    改了仓库里的 `labmon-watch.py` 或 `push.py`，重拷这两个文件即可（下一轮就用新的）。
 6. **核对**：dashboard-host 上 `systemctl --user stop labmon-tunnel`，15 分钟后手机收到“连不上”，再 start 收到“已恢复”；先开计划维护（下节）、等看门狗探到再停，就不推。
 
+## 在看板主机上手工操作
+
+平常部署走 `tools/deploy.py` 的远端模式，不用 ssh（[部署](#部署)）。ssh 只用于部署接口做不了的维护，比如挪走状态目录里的旧文件。
+
+- dashboard-host 是组里共用的一台 Windows 机。看板服务跑在专用 Windows 账号（`<服务账号>`）自己的 WSL 里：systemd 用户单元 `labmon`，状态根是这个 WSL 里的 `~/.local/state/labmon`，代码在 `~/labmon`。
+- WSL 每个 Windows 账号各有一套。用别的账号 ssh 进去再执行 `wsl`，进的是那个账号自己的 WSL：看不到看板服务，那套 WSL 没在跑的话还会被这次连接拉起来。要进服务的 WSL，必须以 `<服务账号>` 的身份 ssh 登录。
+- `<服务账号>` 不是管理员，公钥放在 `C:\Users\<服务账号>\.ssh\authorized_keys`；`<管理员账号>` 的公钥放在 `C:\ProgramData\ssh\administrators_authorized_keys`。
+- Windows 的 ssh 外壳是 cmd，引号很难写对，输出还是 GBK。远程跑 bash 时把脚本从标准输入喂进去：`ssh <服务账号>@dashboard-host 'wsl -e bash -s' < 脚本.sh`；跑 PowerShell 用 `powershell -NoProfile -EncodedCommand <UTF-16LE 的 base64>`。
+- 排查端口时，mirrored 网络下 WSL 里监听的 8443 在 Windows 的 `netstat` 与 `Get-NetTCPConnection` 里都看不到；Windows 回环上的 8765 是别的程序占着的（见[「看板服务的两个入口」](#看板服务的两个入口server)），别把它当成看板。探活用 `/healthz`。
+- 要改状态目录里的文件，先挪进状态根外面带日期的备份目录，不直接删，也不留在状态根里：冷备会把状态根整个打包（[冷备与恢复](#冷备与恢复)）。
+
 ## 计划维护
 
 装更新、重启 dashboard-host、改隧道之前：`labmon server maint 30m`（或 `2h`、`18:30`、`明天 9:00`；最长 1 天，到期自动结束；`labmon server maint off` 提前结束，不给参数看现在）。
