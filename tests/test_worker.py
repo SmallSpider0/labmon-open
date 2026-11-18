@@ -4304,6 +4304,7 @@ class PressTest(UnitBase):
         t0 = self.hosts.now()
         self.w.info = dict(self.w.info, cpu_quota=8.0)
         self.w.other["cpu"] = 0.42
+        self.w.ext = {"old": {"name": "legacy", "use": {"cores": 2.0}}}  # 旧 gpu_queue.sh 的任务：算在 labmon 之外（同 cpu_room），不进超核列表
         now = t0 + 60
         pk = [[round(now), 6.0]]
         self.w.running = {"a": {"key": "a", "name": "train", "project": "pa", "t0": t0, "gpus": [], "est": {"ram": 1.0, "vram": 0.0, "cpus": 2}, "use": {"pks": pk}},
@@ -4315,7 +4316,7 @@ class PressTest(UnitBase):
         self.counters(periods=700, throttled=300)                           # 近 1 分钟一半的周期被限流
         self.w.info["press"] = self.w.press(self.hosts.advance(60))
         th = self.w.throttle(now)
-        self.assertEqual((th["since"], th["for"], th["thr"], th["alert"], th["other"]), (round(now), 0, 50.0, False, 0.4))
+        self.assertEqual((th["since"], th["for"], th["thr"], th["alert"], th["other"]), (round(now), 0, 50.0, False, 2.4))
         self.assertEqual(th["over"], [{"project": "pa", "name": "train", "cores": 6.0, "give": 2}])
         self.counters(periods=1300, throttled=600)
         self.w.info["press"] = self.w.press(self.hosts.advance(self.m.THR_HOLD_S))

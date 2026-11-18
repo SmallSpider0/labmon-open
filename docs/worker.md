@@ -260,7 +260,7 @@ worker 每轮现读主机容量（各卡显存与利用率、cgroup 内存上限
   - `psi`：有 `/proc/pressure` 时（4.20 以上的内核；29 是 3.10，没有）各项的 `some avg60`。
   计数变小（容器重启后 cgroup 归零、换了设备）的那一项那一轮为 null；worker 刚启动的第一轮都为 null。
 - **CPU 限流**（#39，状态的 `throttle`）：`thr` ≥ 25%（`THR_HOT`）起算一段限流，降到 10%（`THR_COOL`）以下才算结束（`thr_step`，滞回免得在门槛上来回跳；`thr` 为 null 的那一轮沿用）。
-  限流中状态写 `throttle`：`{since 起点, for 已持续秒数, thr, alert 持续满 10 分钟（THR_HOLD_S）, over 超核的任务, other labmon 之外此刻占的核（不含保活）}`，其余时候为 null；
+  限流中状态写 `throttle`：`{since 起点, for 已持续秒数, thr, alert 持续满 10 分钟（THR_HOLD_S）, over 超核的任务, other labmon 之外此刻占的核（不含保活，含旧 `gpu_queue.sh` 的任务）}`，其余时候为 null；
   超核（`cpu_over`）：最近一个 1 分钟窗口的核数（`use.pks`，没有或过了两分钟取每轮的 `cores`）≥ 开跑时导出的 `LABMON_CPUS` × 1.5、且多出至少 1 核，占位任务不算。
   起点写在状态里，升级、重启时 `load_prev` 找回（状态没过期时），告警不从头计时。准入与推演不看它；看板按 `alert` 告警（[workbench.md「告警」](workbench.md#告警)），门槛只在 worker。`labmon worker status` 也列一行。
 - **基线历史**：每 5 分钟往 `press.jsonl` 记一行这 5 分钟的聚合值 `{t, ms, ops, mib, busy, await, thr}`，留 14 天（`append_jsonl` 按保留期修剪），worker 重启时读回。

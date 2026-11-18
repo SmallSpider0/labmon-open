@@ -119,7 +119,7 @@
   `done[]` 是这台 `usage.jsonl` 的尾巴（最近 60 行），起止是 `t0` / `t1`（epoch 秒，整数）。
   `info.press` 是主机的 CPU 与读写压力（[worker.md「CPU 与读写」](worker.md#cpu-与读写)）：`{thr 被限流的周期 %, psi {cpu, io, memory} 或 null,
   nfs {path, addr, ms 每次读写的执行时间, ops 每秒次数, mib MiB/s, base 近 14 天基线 ms, n 样本数, need 够用的样本数, floor 基线下限 ms, min_ops 算慢的次数下限, slow 此刻慢不慢} 或 null, disk {dev, busy %, await ms} 或 null}`，“此刻”是近 1 分钟，读不到的为 null；
-  `throttle` 是这一段 CPU 限流（worker 的 `Worker.throttle`，#39；没在限流为 null）：`{since 起点（epoch 秒）, for 已持续秒数, thr 此刻被限流的周期 %, alert 持续满 10 分钟, over [{project, name, cores 1 分钟窗口核数, give 开跑时给的核数}] 超核的任务, other labmon 之外此刻占的核或 null}`，门槛见 [worker.md「CPU 与读写」](worker.md#cpu-与读写)；
+  `throttle` 是这一段 CPU 限流（worker 的 `Worker.throttle`，#39；没在限流为 null）：`{since 起点（epoch 秒）, for 已持续秒数, thr 此刻被限流的周期 %, alert 持续满 10 分钟, over [{project, name, cores 1 分钟窗口核数, give 开跑时给的核数}] 超核的任务, other labmon 之外此刻占的核（含旧 `gpu_queue.sh` 的任务，不含保活）或 null}`，门槛见 [worker.md「CPU 与读写」](worker.md#cpu-与读写)；
   `info.mem` 是 `{limit, used 工作集, anon 收不回的内存（用量 − 文件页，含 shmem 与内核占用；放行与内存闸门看它）, src, peak, failcnt, oom_kill}`（GiB）；
   `info.disk` 只有共享盘一项 `[{path, free, total}]`（GiB；11-10 前还有 `/tmp` 一项，#149 起本地盘看 `info.rootfs`）；`info.rootfs` 是容器根盘 `{used, total, fs, ok 测得准（overlay 且有配额）, shm 容器私有的 /dev/shm 已用（与宿主共用的没有这一项）}`（GiB），读不到为 null；
   `storage` 是本地盘扫描（`LocalDisk.summary`，[worker.md「本地目录与本地依赖」](worker.md#本地目录与本地依赖)）：`{t, local {项目: {cache, scratch}}, own labmon 目录的总占用, wrote labmon 之外的新写入 {since 起算时刻（开机，借来的是借来时）, b, n 文件数,

@@ -3996,7 +3996,7 @@ class Worker:
     def throttle(self, now):
         """状态的 throttle（#39）：这一段 CPU 限流（thr_step）的起点 since、已持续 for 秒、此刻的 thr、持续满 THR_HOLD_S 的 alert，
         超核的任务 over [{project, name, cores, give}]（cpu_over；give 是开跑时导出的 LABMON_CPUS，按核数从多到少；占位任务不算），
-        labmon 之外此刻占的核 other（不含保活；算不出为 None）。没在限流为 None。看板的告警与 fit 都只读它，门槛只在这里。"""
+        labmon 之外此刻占的核 other（不含保活，含旧 gpu_queue.sh 的任务，同 cpu_room；算不出为 None）。没在限流为 None。看板的告警与 fit 都只读它，门槛只在这里。"""
         if self.thr_since is None:
             return None
         over = []
@@ -4008,6 +4008,8 @@ class Worker:
             if c is not None:
                 over.append({"project": j.get("project"), "name": j["name"], "cores": round(c, 1), "give": give})
         oc = self.other["cpu"]
+        if oc is not None:                    # 旧 gpu_queue.sh 的任务不记账，此刻用的核算 labmon 之外（同 cpu_room）
+            oc += sum((j.get("use") or {}).get("cores") or 0.0 for j in self.ext.values())
         return {"since": round(self.thr_since), "for": round(now - self.thr_since), "thr": (self.info.get("press") or {}).get("thr"),
                 "alert": now - self.thr_since >= THR_HOLD_S, "over": sorted(over, key=lambda o: -o["cores"]),
                 "other": None if oc is None else round(oc, 1)}
