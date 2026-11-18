@@ -3252,7 +3252,9 @@ class OffersTest(UnitBase):
         self.assertTrue(o["why"].startswith("这台在预备续租（续租截止"), o["why"])
 
     def test_threshold_and_hysteresis(self):
-        # o：a0 还要 3 小时、a1 50 分钟：挪 a1 早 50 分钟，不到 1 小时不建议；报过同一建议的，降到阈值一半以下才收
+        # o：a0 还要 3 小时、a1 50 分钟：挪 a1 早 50 分钟，不到 1 小时不建议；报过同一建议的，降到阈值一半以下才收。
+        # t 上有任务在跑（不空着：空着时按行比，a1 早 3 小时就报，#62）
+        self.busy()
         self.origin(["a0|true   # est_min=180", "a1|true   # est_min=50"], run=3, step=50 / 60)
         self.offer()
         self.assertEqual(self.suggest(), {})
@@ -3361,7 +3363,9 @@ class OffersTest(UnitBase):
         self.assertNotIn("key", self.suggest().get("pa", {}))
 
     def test_stale_origin_batch_unknown(self):
-        # #25 第 8 条：o2 的 worker 不在（状态过了 STATUS_STALE_S、没 worker stop，DEP_STALE_S 内）：它的清单整条看不见，整批推不出、不建议
+        # #25 第 8 条：o2 的 worker 不在（状态过了 STATUS_STALE_S、没 worker stop，DEP_STALE_S 内）：它的清单整条看不见，整批推不出、不建议。
+        # t 上有任务在跑（空着时跳过 o2 那条、按行比，见 test_idle_receiver_skips_unknown_lane，#62）
+        self.busy()
         self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
         self.origin(["b%d|true   # est_min=120 vram=20" % i for i in range(2)], run=1, host="o2", name="b", age=self.m.STATUS_STALE_S + 60)
         o = self.offer()["pa"]
@@ -3611,6 +3615,128 @@ class OffersTest(UnitBase):
         o = self.offer()["pa"]
         self.assertEqual(len({j["root"] for j in o["jobs"]}), 1)
         self.assertIn("另一个目录或环境", o["why"])
+
+    # ---- #62：接收方空着（没有 labmon 任务在跑）、别处的行在等 ----
+    def lanes_on(self, host, specs, project="pa", age=0, extra_todo=()):
+        """host 上 project 的几条清单（各在自己的目录下，状态是假的、清单是真文件）。spec：(名字, 各行, 在跑的第一行还要几小时（None 没有在跑的，
+        "?" 推演说不出何时跑完）, 待跑的第一行几小时后开跑（None 推演里排不上）, 每行几小时, 推演写的 stuck)。"""
+        todo, lanes, running, queues = [], [], [], []
+        for name, lines, run, start, step, stuck in specs:
+            q, = self.hosts.queues({name: lines}, project)
+            names = [ln.split("|")[0] for ln in lines]
+            jobs = []
+            if run is not None:
+                jobs.append({"name": names[0], "t0": round(self.now - 600), "t1": None if run == "?" else round(self.now + run * self.H), "gpus": [0], "run": True})
+                running.append({"root": q["root"], "queue": q["jobs"], "name": names[0], "project": project})
+            t = None if start is None else self.now + start * self.H
+            for n in names[1 if run is not None else 0:] if t else ():
+                jobs.append({"name": n, "t0": round(t), "t1": round(t + step * self.H), "gpus": [0]})
+                t += step * self.H
+            lanes.append({"root": q["root"], "queue": q["jobs"], "project": project, "kind": "queue", "jobs": jobs, "stuck": stuck, "stuck_dep": None})
+            todo.append({"project": project, "root": q["root"], "queue": q["jobs"], "jobs": names, "deps": {}, "held": None})
+            queues.append({"root": q["root"], "jobs": q["jobs"], "gpus": None, "project": project, "stop": "boundary", "empty": False, "dur": {}})
+        self.hosts.status(host, age=age, running=running, plan={"t": self.now, "lanes": lanes}, todo=todo + list(extra_todo), queues=queues)
+
+    def waiting_rows(self, big):
+        """o 上 pa：x0 在跑还要 big 小时（占着显存，"?" 为说不出何时跑完），b0–b2 各 30 分钟、在等它腾显存（说不出时推演里排不上）。"""
+        self.lanes_on("o", [("x", ["x0|true   # vram=30" + ("" if big == "?" else " est_min=%d" % (big * 60))], big, None, 0, None),
+                            ("b", ["b%d|true   # est_min=30 vram=20" % i for i in range(3)], None, None if big == "?" else big, 0.5,
+                             "等 x0 腾出资源，它不知道要跑多久" if big == "?" else None)])
+
+    def busy(self):
+        """t 上有一个别的项目的任务在跑（不用显存）：t 不算空着。"""
+        self.w.running = {"r0": {"key": "r0", "name": "y0", "project": "px", "t0": self.now - 600, "gpus": ["GPU-a"], "est_min": 600,
+                                 "est": {"ram": 1.0, "vram": 0.0, "cpus": 1}, "use": {}}}
+
+    def test_idle_receiver_batch_held_by_long_job(self):
+        # #62 R2：x0 还要 20 小时，b0–b2 在等它腾显存。挪到空着的 t 上 1.5 小时内跑完、各早 20 小时，但整批被 x0 撑着只早 1.5 小时，
+        # 不到剩余的 10%（2.15 小时）：以前不报。t 没有 labmon 任务在跑：按行比，报
+        self.waiting_rows(20)
+        o = self.offer()["pa"]
+        self.assertTrue(o["idle"])
+        s = self.suggest()["pa"]
+        self.assertEqual((s["key"], s["idle"], [j["name"] for j in s["jobs"]], self.rel(s["there"]), self.rel(s["done"])),
+                         ("rebalance:pa", True, ["b2", "b1", "b0"], 20.5, 1.5))
+        self.assertEqual((self.rel(s["from"]), self.rel(s["to"])), (21.5, 20))
+        from labmon.config import fmt_time
+        self.assertIn("把 o 上 %s/jobs/q.txt 的 b0、b1、b2 挪到 t（这台还没有本项目同一种环境的清单" % (self.d / "b"), s["text"])
+        self.assertIn("t 上现在没有 labmon 任务在跑，这几行在原处最早 %s 才跑完，挪过来 %s 前都跑完；整批预计从 %s 提前到 %s"
+                      % (fmt_time(s["there"]), fmt_time(s["done"]), fmt_time(s["from"]), fmt_time(s["to"])), s["text"])
+        # t 上有任务在跑：不算空着，照旧按整批门槛，不报
+        self.busy()
+        self.assertFalse(self.offer()["pa"]["idle"])
+        self.assertEqual(self.suggest(), {})
+
+    def test_idle_receiver_batch_unknown(self):
+        # #62 R3：x0 没估时、没同类历史，b0–b2 推演里排不上（trapped）：整批何时跑完推不出，挪了也推不出（_top 为 None），
+        # jobs 不空所以连原因也不写。t 空着：b0–b2 挪过来 1.5 小时内跑完，原处说不出何时，报
+        self.waiting_rows("?")
+        self.offer()
+        s = self.suggest()["pa"]
+        self.assertEqual(([j["name"] for j in s["jobs"]], s["from"], s["to"], s["there"]), (["b2", "b1", "b0"], None, None, None))
+        self.assertIn("这几行在原处说不出何时跑完，挪过来", s["text"])
+        self.assertNotIn("整批预计", s["text"])
+        self.busy()
+        self.offer()
+        self.assertNotIn("key", self.suggest().get("pa", {}))
+
+    def test_idle_receiver_skips_unknown_lane(self):
+        # #62 R4：另有一台 worker 不在的 o2 上也有 pa 的清单：说不出它何时跑完，以前整个项目一行也不挑、只写原因。
+        # t 空着：跳过 o2 那条，照样挪 o 上在等的；o2 上有行 after= 等着 b2 的，b 那条不挪（挪走后等它的何时开始会变）
+        self.waiting_rows(5)
+        self.origin(["c0|true   # est_min=120 vram=20", "c1|true   # est_min=120 vram=20"], run=1, host="o2", name="c", age=self.m.STATUS_STALE_S + 60)
+        o = self.offer()["pa"]
+        self.assertEqual([j["name"] for j in o["jobs"]], ["b2", "b1", "b0"])
+        self.assertIn("o2 的 worker 不在", o["why"])
+        s = self.suggest()["pa"]
+        self.assertEqual((s["idle"], s["from"], [j["name"] for j in s["jobs"]]), (True, None, ["b2", "b1", "b0"]))
+        self.origin(["c0|true   # est_min=120 vram=20", "c1|true   # est_min=120 vram=20 after=b2"], run=1, host="o2", name="d", age=self.m.STATUS_STALE_S + 60)
+        self.assertEqual(self.offer()["pa"]["jobs"], [])
+
+    def test_idle_receiver_skips_unmovable_tail(self):
+        # #62 R5：o 上排得最晚的清单 x 队尾 x1 有别的项目的 w 写了 after= 等着（挪不动），b 那条在等：以前在 x1 就停、一行也不挑。
+        # t 空着：跳过 x，挪 b 的；整批被 x 撑着，按行比报。t 不空着时照旧停在 x1
+        w = [{"project": "pb", "root": None, "queue": None, "jobs": ["w"], "deps": {"w": [["pa", "x1"]]}, "held": None}]
+        self.lanes_on("o", [("x", ["x0|true   # est_min=60 vram=20", "x1|true   # est_min=600 vram=20"], 1, 1, 10, None),
+                            ("b", ["b%d|true   # est_min=30 vram=20" % i for i in range(3)], None, 1, 0.5, None)], extra_todo=w)
+        o = self.offer()["pa"]
+        self.assertEqual([j["name"] for j in o["jobs"]], ["b2", "b1", "b0"])
+        self.assertIn("x1 有 w 写了 after= 等着它", o["why"])
+        s = self.suggest()["pa"]
+        # 按行比取最保守的（这几行都跑完的时刻比原处最早跑完的那行早 15 分钟以上）：b0 留在原处 1.5 小时跑完，b1、b2 挪过来 1 小时跑完
+        self.assertEqual(([j["name"] for j in s["jobs"]], s["idle"], self.rel(s["there"]), self.rel(s["done"])), (["b2", "b1"], True, 2, 1))
+        self.busy()
+        o = self.offer()["pa"]
+        self.assertEqual((o["jobs"], o["why"]), ([], "x1 有 w 写了 after= 等着它，不挪"))
+
+    def test_idle_receiver_small_gain(self):
+        # #62：原处 12 分钟后就开跑（过了 MOVE_LEAD_S 能挑），30 分钟跑完；挪到 t 上只早 12 分钟，不到 15 分钟不报；报过的门槛减半（滞回）
+        self.lanes_on("o", [("b", ["b0|true   # est_min=30 vram=20"], None, 0.2, 0.5, None)])
+        o = self.offer()["pa"]
+        self.assertEqual(([j["name"] for j in o["jobs"]], o["idle"]), (["b0"], True))
+        self.assertEqual(self.suggest(), {})
+        self.assertEqual(self.suggest({"pa": {"key": "rebalance:pa", "target": "t"}})["pa"]["key"], "rebalance:pa")
+
+    def test_idle_receiver_prefers_batch_rule(self):
+        # #62 R1：整批门槛够（x0 还要 5 小时，整批早 1.5 小时）时照旧用整批的建议（有“早多少”），不按行比
+        self.waiting_rows(5)
+        self.offer()
+        s = self.suggest()["pa"]
+        self.assertNotIn("idle", s)
+        self.assertIn("（早 1.5 小时）", s["text"])
+
+    def test_idle_host(self):
+        # #62：空着 = 没有 labmon 任务在跑（占位任务不算），推演里也没有 10 分钟内就开跑的
+        self.w.plan = {"t": self.now, "lanes": []}
+        self.assertTrue(self.w.idle(self.now))
+        self.w.running = {"h": {"key": "h", "name": "hold_x", "project": "pa", "gpus": []}}
+        self.assertTrue(self.w.idle(self.now))
+        self.w.plan = {"t": self.now, "lanes": [{"jobs": [{"name": "a", "t0": self.now + 300, "t1": None}]}]}
+        self.assertFalse(self.w.idle(self.now))
+        self.w.plan = {"t": self.now, "lanes": [{"jobs": [{"name": "a", "t0": self.now + 3600, "t1": None}]}]}
+        self.assertTrue(self.w.idle(self.now))
+        self.busy()
+        self.assertFalse(self.w.idle(self.now))
 
 
 class ForecastTest(UnitBase):

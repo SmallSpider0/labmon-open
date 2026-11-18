@@ -179,11 +179,11 @@
   `offers` 是这台能接别的主机上哪些任务（[worker.md「能接别处的任务」](worker.md#能接别处的任务offers)）：每个项目一项（同机多开一条车道的另一项带 `local: true` 与 `gpus` 新车道只许用的卡号（不是全部卡时；否则 null），#43）`{project, local, lane 接在本机哪条清单后面（[目录, 清单]，null 要新建）, before 插在那条清单里哪一行前面（它写了依赖；null 接在末尾）,
   free 本机这个项目原推演里何时跑完（没有为现在；推不出为 null）, ends {"主机|目录|清单": 别的主机上这个项目各清单预计何时跑完（推不出为 null）},
   jobs [{host, root, queue, name, there 原处预计结束（跑不了为 null）, rest 挪走它之后原处那条清单何时跑完, end 挪来前几行时它们在这台何时都跑完, own 这时本机这个项目自己的清单何时跑完, dep 这一行写了 after=/afterany=}]（按挑的顺序，从队尾往前；同机的 rest 是新推演里本机原清单何时跑完）,
-  why 再往下挪不了的原因（只放原因本身，没有为 null）, stop 挪到这台排不上的那一行（why 是推演的原因；与具体某行无关的为 null）, nodur stop 那一行是不是因为没有估时}`；原因句由看板拼（`rebalance.suggest`）。
+  why 再往下挪不了的原因（只放原因本身，没有为 null）, stop 挪到这台排不上的那一行（why 是推演的原因；与具体某行无关的为 null）, nodur stop 那一行是不是因为没有估时, idle 这台此刻空着（没有 labmon 任务在跑、推演里 10 分钟内也没有要开跑的；挑行跳过挪不动、说不出何时放行的清单，同机那项不带，#62）}`；原因句由看板拼（`rebalance.suggest`）。
   `lan_off` 为本机不在内网（这时沿用上一轮的 `status`）；借来的主机带 `borrow`（同上）。
   `offers_kept` 只在这一轮读这台失败（`error`、`status_error`，没 `worker stop`）、沿用它上一轮的 offers 时出现：`{t 那份状态写下的时刻（本机时钟 epoch 秒）, offers}`，按 `STALE_S` 过期（`rebalance.keep_offers`）。
 - 顶层 `rebalance` 是各项目的挪法建议 `{项目: …}`（`rebalance.suggest`，[workbench.md「挪法建议」](workbench.md#挪法建议)）：有建议的 `{key 告警 key（rebalance:<项目>）, target 挪到哪台, lane, before, local 是不是同机多开一条车道, gpus 同机时登记要限的卡（offer 的 gpus）, jobs（offers 的前几项）,
-  from 原来整批何时跑完（推不出为 null）, to 挪后, cut 其中被借用约定挡住的清单 ["主机|目录|清单"]（这句写进 borrow_cut，不另报）, text 那一句（句尾“按 HH:MM 的推演”）}`；
+  from 原来整批何时跑完（推不出为 null）, to 挪后（推不出为 null）, idle 是不是接收方空着、按行比的（这时另带 there 这几行在原处最早何时跑完（说不出为 null）、done 挪过去后何时都跑完，#62）, cut 其中被借用约定挡住的清单 ["主机|目录|清单"]（这句写进 borrow_cut，不另报）, text 那一句（句尾“按 HH:MM 的推演”）}`；
   只有原因的 `{why [每台一句：“主机 上本项目 X 后没活，接不了 任务：原因”，整批推不出时“主机 接不了 任务：原因”], from}`；有主机有空、只因挪来的那一行没有估时推演算不出的，
   另带 `key`（`rebalance:<项目>:est`）、`est: true` 与 `text`（让会话写 est_min 或 fit --list，#43）；都没有的项目不列。offers 里已不在原处的行这一轮截掉（[workbench.md「挪法建议」](workbench.md#挪法建议)）。
 - 顶层 `lan`（`lan.check` 的结果，总是有）、`wake`（给 `labmon wait` 的全局消息 `[{key, msg, projects, host}]`；作废与被挤掉的 `void:` 另带 `job: [项目, 任务]`（`overview._voided`，`labmon wait --job` 按它认等的任务被作废，#135）；页面上的改动 `records.told` 给的 key 是 `page:<what>:<项目>:<毫秒>`、不带 `host`，#121；借来的主机空着半小时以上的 `borrow_idle:<主机>:<起点>`、不带 `host`，#43）、`sched`（调度卡；`use_sum` 是各项目用量（`share.use`）之和；`projects[]` 的 `person` 是项目算在谁名下、`pk` 是 `sched.json` 里的人员键，看板上没有的项目两者为 null，`puse` 是同一个 `pk` 名下各项目的用量合计（取完整的 `share.use`，含已归档的项目；与 worker 的 `person_use` 同一口径），普通用户看到的别人项目 `person` 为 null，#23）、`occ`（各卡被谁占着）、`fleet`、`disk`（共享盘，`disk.update`：其中 `ours` 是自己目录下的各单位 `dirs[]`（`u`、`name`、`b`、`t`、`p` 项目、`d24`、`d7`、`n`、`m`、`top`）与按项目的汇总 `projects{项目: {roots, b, d24, d7, pending, burst, gone, jobs}}`，项目快照的 `storage` 由它来，#53）、`projects`（各项目看板的摘要）。

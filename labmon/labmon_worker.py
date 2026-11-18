@@ -3490,22 +3490,21 @@ class Worker:
         每项 {project, lane 接在本机哪条清单后面（[目录, 清单]，None 要新建）, free 本机这个项目原推演里何时跑完（没有为现在）,
         ends {"主机|目录|清单": 别的主机上这个项目各清单预计何时跑完（不知道为 None）}, jobs [{host, root, queue, name, there 原处预计结束,
         rest 挪走它之后原处那条清单何时跑完, end 挪来前几行时它们在这台何时都跑完, own 这时本机这个项目自己的清单何时跑完}], why 再往下挪不了的原因
-        （只放原因本身）, stop 挪到这台排不上的那一行（why 是推演的原因；与具体某行无关的为 None）}：原因句由看板拼（rebalance.suggest，#25 B）。"""
+        （只放原因本身）, stop 挪到这台排不上的那一行（why 是推演的原因；与具体某行无关的为 None）, idle 这台此刻空着（Worker.idle：挑行时跳过
+        挪不动、说不出何时放行的清单，看板没有整批的挪法时按行比，#62）}：原因句由看板拼（rebalance.suggest，#25 B）。"""
         mine = {(j["q"]["root"], j["q"]["jobs"]): j["name"] for j in self.running.values() if j.get("q")}
         own = self.proj_lanes(self.host, self.todo, self.plan, mine, held)
         others, waiters = [], {}
-        for ln in self.todo:
-            for n, ds in ln["deps"].items():
+        # 谁写了 after= 等着谁：本机与别的主机还会跑的（peer_todo 含 peer_st 的，另有 worker 不在、已归还的与池里待放的：接收方空着时
+        # 跳过说不出何时放行的清单，那边的行可能正等着这里的候选，#62）
+        for ln in self.todo + [x[3] for x in self.peer_todo]:
+            for n, ds in (ln.get("deps") or {}).items():
                 for k in ds:
-                    waiters.setdefault(tuple(k), set()).add((ln["project"], n))
+                    waiters.setdefault(tuple(k[:2]), set()).add((ln.get("project"), n))
         for h, st in sorted(self.peer_st.items()):
             run = {(j.get("root"), j.get("queue")): j["name"] for j in st.get("running") or []}
             hd = {(w.get("root"), w.get("queue")) for w in st.get("waiting") or [] if w.get("held")}
             others += self.proj_lanes(h, st.get("todo") or [], st.get("plan") or {}, run, hd)
-            for ln in st.get("todo") or []:
-                for n, ds in (ln.get("deps") or {}).items():
-                    for k in ds:
-                        waiters.setdefault(tuple(k[:2]), set()).add((ln.get("project"), n))
         for h, age, _, ln in self.peer_todo:      # 那台 worker 不在（续租、重启）：它的清单还会跑、看不到何时跑完，整批推不出（#25 第 8 条）
             # 算力池里待放的（#24）不算 worker 不在：放到哪台由看板定，不挡挪法建议
             if h not in self.peer_st and h not in self.gone and h != POOL and ln.get("queue") and ln.get("jobs") and ln.get("held") not in ("paused", "pause"):
@@ -3514,12 +3513,13 @@ class Worker:
                                "why": "%s 的 worker 不在（状态 %d 分钟没更新），那里的 %s 不知道何时跑完" % (h, age / 60, ln["queue"])})
         renew = [o for o in self.ovr if o["kind"] == "deadline" and o.get("target") != "borrow"]
         cx = {"qs": qs, "base": base, "now": now, "pol": pol, "focus": focus, "use": use, "info": info, "mine": mine, "held": held}
+        idle = self.idle(now)
         out = []
         for p in sorted({ln["project"] for ln in others if ln["pend"]}):
             lns = [ln for ln in others if ln["project"] == p]
             mine_p = [ln for ln in own if ln["project"] == p]
             free = None if None in [ln["end"] for ln in mine_p] else max([now] + [ln["end"] for ln in mine_p])
-            o = {"project": p, "lane": None, "free": free and round(free), "jobs": [], "why": None, "stop": None,
+            o = {"project": p, "lane": None, "free": free and round(free), "jobs": [], "why": None, "stop": None, "idle": idle,
                  "ends": {"%s|%s|%s" % (ln["host"], ln["root"], ln["queue"]): ln["end"] and round(ln["end"]) for ln in lns}}
             out.append(o)
             hit = self.override_hit({"project": p, "name": ""}, ("drain", "guest", "pause"), lasting=True)
@@ -3527,7 +3527,7 @@ class Worker:
                 o["why"] = (hit[1] if hit else "这台在预备续租（%s），不接别处的任务" % ovr_text(renew[0]) if renew
                             else "这台上本项目的清单推演不出何时跑完")
                 continue
-            cands, o["why"] = self.move_cands(lns, free, now, waiters)
+            cands, o["why"] = self.move_cands(lns, free, now, waiters, skip=idle)
             # 接在本机这个项目、与挪来的行同一种环境（目录与 .env）的清单里预计最早跑完的那条后面（推演里在排的才算）；没有就当新的一条
             ends = {(ln["root"], ln["queue"]): ln["end"] for ln in mine_p}
             env = cands and self.list_env(cands[0]["root"], cands[0]["queue"])
@@ -3550,6 +3550,15 @@ class Worker:
                                       dep=bool(cands[k - 1]["h"]["deps"] or cands[k - 1]["h"]["deps_any"])))
         out += self.local_offers(own, others, now, waiters, renew, cx)
         return out
+
+    def idle(self, now):
+        """这台此刻空着（#62）：没有 labmon 任务在跑（占位任务不算，保活不是 labmon 任务），这一次的推演里也没有 MOVE_LEAD_S 内就开跑的。
+        offers 据此在别处挪不动、说不出何时放行的清单上跳过而不是整个项目不挑（move_cands 的 skip），看板按行比（rebalance.suggest）。
+        只看 labmon 自己的任务：外来进程占着的显存推演里照算，放不下的 try_move 照样排不上。"""
+        if any(not is_hold(j["name"]) for j in self.running.values()):
+            return False
+        return not any(not x.get("run") and not is_hold(x["name"]) and x["t0"] < now + MOVE_LEAD_S
+                       for ln in self.plan.get("lanes") or [] for x in ln["jobs"])
 
     def local_offers(self, own, others, now, waiters, renew, cx):
         """同机多开一条车道（#43）：本机这个项目排得最晚的清单队尾几行剪到这台新开的一条车道，整批能提前多少。挑行（move_cands：从队尾往前、
@@ -3596,19 +3605,21 @@ class Worker:
                 out.append(o)
         return out
 
-    def move_cands(self, lns, free, now, waiters):
+    def move_cands(self, lns, free, now, waiters, skip=False):
         """offers 的候选：别的主机上这个项目的清单 lns 里，按“取此刻排得最晚的那条清单的队尾”挑出的几行（至多 MOVE_MAX，
         从原处跑不了的清单挑时至多 MOVE_TRAP_MAX），与挑不下去的原因。各候选带 host、root、queue、name、there（原处预计结束，跑不了为 None）、
         rest（挪走它后那条清单何时跑完）、h（资源提示）、i（在原清单里排第几）、lane（第几条清单）：前 k 行加进推演时按 (lane, i) 排，
         同一条清单里的照原先后。排得最晚的已不晚于本机这个项目何时跑完（free）的不再挑：挪过来只会更晚。
         waiters：{(项目, 任务): {写了 after= 等它的 (项目, 任务)}}（本机与别的主机的 todo）；有不在这批里的等着它就不挪：挪走后等它的何时开始会变。
-        有清单原处何时放行说不出（state unknown）的一行也不挑：整批推不出，挪了也算不出提前多少。一批只取同一种环境（list_env：目录与 .env）的行。"""
+        有清单原处何时放行说不出（state unknown）的一行也不挑：整批推不出，挪了也算不出提前多少。一批只取同一种环境（list_env：目录与 .env）的行。
+        skip（接收方空着，Worker.idle，#62）：看板按行比、不要整批何时跑完，所以说不出何时放行的清单、队尾挪不动的清单（上面那些停的原因）
+        跳过这一条、接着看别的清单，不整批停；原因取第一条跳过的。"""
         unk = next((ln for ln in lns if ln["state"] == "unknown"), None)
-        if unk:
+        if unk and not skip:
             return [], unk["why"]
         end = {i: ln["end"] for i, ln in enumerate(lns)}
-        left = {i: list(ln["pend"]) for i, ln in enumerate(lns)}
-        out = []
+        left = {i: list(ln["pend"]) for i, ln in enumerate(lns) if ln["state"] != "unknown"}
+        out, why = [], unk and unk["why"]
         while True:
             xs = [i for i in left if left[i]]
             if not xs:
@@ -3621,31 +3632,41 @@ class Worker:
                 if end[i] is None:
                     return out, "%s 上 %s 在原处跑不了的超过 %d 行，一次只挑这么多" % (ln["host"], ln["queue"], MOVE_TRAP_MAX)
                 break
-            if out and self.list_env(ln["root"], ln["queue"]) != self.list_env(out[0]["root"], out[0]["queue"]):
-                return out, "再往前是 %s 上另一个目录或环境（.env）的清单 %s，一次只挪一种" % (ln["host"], ln["queue"])
-            if is_hold(n):
-                return out, "%s 上 %s 的队尾 %s 是占位任务，不挪" % (ln["host"], ln["queue"], n)
-            if h is None:
-                return out, ("这台读不到 %s 上的 %s，不挪" % (ln["host"], os.path.join(ln["root"], ln["queue"])) if ln["unread"]
-                             else "%s 不在 %s 里（刚剪过？），不挪" % (n, os.path.join(ln["root"], ln["queue"])))
-            if h.get("gang"):
-                return out, "%s 上 %s 的队尾 %s 是成组的（gang=%s），挪了要连同组的一起看，不挪" % (ln["host"], ln["queue"], n, h["gang"])
-            if t0 is not None and t0 - now < MOVE_LEAD_S:
-                return out, "%s 上的 %s %d 分钟内就开跑，不挪" % (ln["host"], n, MOVE_LEAD_S / 60)
-            ws = waiters.get((ln["project"], n), set()) - {(ln["project"], x["name"]) for x in out}
-            if ws:
-                return out, "%s 有 %s 写了 after= 等着它，不挪" % (n, "、".join(sorted(x for _, x in ws))[:200])
-            if h["needs"]:
-                q = load_queue({"_slug": qslug(ln["root"], ln["queue"]), "root": ln["root"], "jobs": ln["queue"], "project": ln["project"]})
-                job = dict(h, name=n, project=ln["project"], cmd=job_cmd(q, n) or "")
-                miss = [c["pat"] for c in check_needs(job, self.qenv(q)) if not c["files"] and not c["heal"]]
-                if miss:
-                    return out, "%s 缺本地文件：%s（这台上没有，也补不了）" % (n, "、".join(miss[:3]))
+            stop = self.cant_move(ln, n, h, t0, out, now, waiters)
+            if stop:
+                if not skip:
+                    return out, stop
+                why, left[i] = why or stop, []
+                continue
             left[i].pop()
             end[i] = left[i][-1][3] if left[i] else ln["run"]
             out.append({"host": ln["host"], "root": ln["root"], "queue": ln["queue"], "name": n, "there": t1 and round(t1),
                         "rest": end[i] and round(end[i]), "h": h, "i": len(left[i]), "lane": i})
-        return out, None
+        return out, why
+
+    def cant_move(self, ln, n, h, t0, out, now, waiters):
+        """清单 ln 的队尾 n（资源提示 h、原处推演的开始 t0）为什么不挪到这批 out 里（move_cands 用）；能挪为 None。"""
+        if out and self.list_env(ln["root"], ln["queue"]) != self.list_env(out[0]["root"], out[0]["queue"]):
+            return "再往前是 %s 上另一个目录或环境（.env）的清单 %s，一次只挪一种" % (ln["host"], ln["queue"])
+        if is_hold(n):
+            return "%s 上 %s 的队尾 %s 是占位任务，不挪" % (ln["host"], ln["queue"], n)
+        if h is None:
+            return ("这台读不到 %s 上的 %s，不挪" % (ln["host"], os.path.join(ln["root"], ln["queue"])) if ln["unread"]
+                    else "%s 不在 %s 里（刚剪过？），不挪" % (n, os.path.join(ln["root"], ln["queue"])))
+        if h.get("gang"):
+            return "%s 上 %s 的队尾 %s 是成组的（gang=%s），挪了要连同组的一起看，不挪" % (ln["host"], ln["queue"], n, h["gang"])
+        if t0 is not None and t0 - now < MOVE_LEAD_S:
+            return "%s 上的 %s %d 分钟内就开跑，不挪" % (ln["host"], n, MOVE_LEAD_S / 60)
+        ws = waiters.get((ln["project"], n), set()) - {(ln["project"], x["name"]) for x in out}
+        if ws:
+            return "%s 有 %s 写了 after= 等着它，不挪" % (n, "、".join(sorted(x for _, x in ws))[:200])
+        if h["needs"]:
+            q = load_queue({"_slug": qslug(ln["root"], ln["queue"]), "root": ln["root"], "jobs": ln["queue"], "project": ln["project"]})
+            job = dict(h, name=n, project=ln["project"], cmd=job_cmd(q, n) or "")
+            miss = [c["pat"] for c in check_needs(job, self.qenv(q)) if not c["files"] and not c["heal"]]
+            if miss:
+                return "%s 缺本地文件：%s（这台上没有，也补不了）" % (n, "、".join(miss[:3]))
+        return None
 
     def try_move(self, p, cs, tgt, cx, local=False, before=None):
         """假设把项目 p 的候选 cs 挪到这台推演一遍（同一份 simulate，本机的快照、截止、公平份额与依赖都照真推演）：
