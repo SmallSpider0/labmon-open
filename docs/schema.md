@@ -15,8 +15,10 @@
                                                // 有 key 时出 rebalance: 告警，页面上 rebalMark 标一个图标（docs/workbench.md「挪法建议」）
   "lan": {"ok": false, "since": 1793776000, "checked": 1793776260},   // 只在本机不在内网时有（lan.check）：这轮没连 ssh，数据是离开前的，
                                                // ssh_fail、log_silent、noprogress、gpu_idle 这几条告警不报；页面顶上据此写说明
-  "quiet": [{"host": "29", "root": "/root/data1/alice/projects/a1", "queue": "jobs/old.txt"}],   // 这一轮收起的只在登记里有的车道（跑完久了没动，collect._quiet，#117）；
-                                               // 工作台 projects[] 带上，项目「管理」抽屉的逐条清单不列它们（#121）
+  "quiet": [{"host": "29", "root": "/root/data1/alice/projects/a1", "queue": "jobs/old.txt", "last": 1793500000, "idle": true}],
+                                               // 这一轮收起的只在登记里有的车道（跑完久了没动，collect._quiet，#117）；last 最后一次活动（epoch 秒，没有为 0）；
+                                               // idle：登记还在、空了 2 天以上，进了 idle_regs: 提示（collect._idle_regs，#47）；
+                                               // 工作台 projects[] 带上，项目「管理」抽屉的逐条清单不列它们（#121），悬停写其中几条已提示会话
 
   "hosts": [{
     "id": "29", "label": "29（A6000）", "ok": true, "error": null,   // 掉线按 health.link_step 判（连续失败 ≥ 2 次且持续 150 秒），掉线了才报 ssh_fail 告警

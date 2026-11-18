@@ -41,6 +41,7 @@ IDLE_GRACE_S = 5 * 60         # 保活与任务都不在要连续这么久才报
 AUDIENCE = ("user", "agent", "both")
 POOL_WAIT = "在算力池里等着放到某台"   # 池车道的等待原因（#24；放到哪台由看板定，C 之后会写具体原因）
 REG_KEEP_S = 24 * 3600        # 登记没了（worker rm、快照里这轮没有）的车道再按上次见到的主机留这么久（同自动发现的 hide_done_hours 缺省）
+IDLE_REG_S = 2 * 86400        # 收起的登记车道空了这么久，提示实验会话不再用的 worker rm（_idle_regs，#47）
 
 
 # ---------------- 探针 ----------------
@@ -48,7 +49,7 @@ def probe_spec(cfg: dict, host: dict) -> dict:
     return {"mounts": [m["path"] for m in host["mounts"]],
             "checks": [{k: c[k] for k in ("id", "if", "cmd", "detail", "timeout") if k in c} for c in host["checks"]],
             # 本机的队列，以及已归还主机上由本机经共享盘代读的队列（readonly：只读文件，PID 属于别的机器，不查进程）
-            "queues": [{k: v for k, v in q.items() if k not in ("label", "host", "read_via", "reg", "reg_t")} | ({"readonly": True} if q["read_via"] else {})
+            "queues": [{k: v for k, v in q.items() if k not in ("label", "host", "read_via", "reg", "reg_t", "reg_live")} | ({"readonly": True} if q["read_via"] else {})
                        for q in cfg["queues"] if (q["read_via"] or q["host"]) == host["id"]],
             # 所有主机上显式登记的清单：共享盘上别的主机登记过的，自动发现时也要跳过
             "explicit_jobs": sorted({os.path.join(q["root"], q["jobs"]) for q in cfg["queues"] if not q["discover"]}),
@@ -70,7 +71,7 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
     登记没了的再按上次见到的主机留 REG_KEEP_S，之后 monitor.toml 写了的回到它写的主机，没写的收起。
     通配符队列不动：登记过的清单进探针的 explicit_jobs，自动发现跳过它们。
     同一清单两台都登记时比的登记时刻各是那台容器的时钟（状态里的 added_t、登记文件的 added），差几分钟，只在两份登记相隔较久时分得准。
-    只在登记里有的车道带 reg（跑完久了收起，_quiet）与 reg_t（在用主机上的登记时刻）。
+    只在登记里有的车道带 reg（跑完久了收起，_quiet）、reg_t（在用主机上的登记时刻）与 reg_live（这一轮登记还在）。
     mem：{清单路径: {id（只在登记里有的车道定下的 id，之后一直沿用）, host, root, jobs, first, seen, reg_t}}（项目状态目录的 reg_lanes.json，看板的时刻）。"""
     found: dict = {}
     for x in regs or []:
@@ -103,8 +104,9 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
                 lid += "@" + hashlib.sha1(os.path.normpath(m["root"]).encode()).hexdigest()[:6]
             ids.add(lid)
             new[k] = m = dict(m, id=lid)
-        # reg：只在登记里有的车道，跑完久了收起（_quiet）；reg_t：登记时刻（在用主机上的，刚登记的空清单不马上收）
-        out.append({"id": m["id"], "host": m["host"], "root": m["root"], "jobs": m["jobs"], "reg": True, "reg_t": m.get("reg_t")})
+        # reg：只在登记里有的车道，跑完久了收起（_quiet）；reg_t：登记时刻（在用主机上的，刚登记的空清单不马上收）；
+        # reg_live：这一轮登记还在（登记没了、按 REG_KEEP_S 留着的为 False：已经 worker rm 了，_idle_regs 不再提示）
+        out.append({"id": m["id"], "host": m["host"], "root": m["root"], "jobs": m["jobs"], "reg": True, "reg_t": m.get("reg_t"), "reg_live": k in found})
     return out, new
 
 
@@ -229,8 +231,8 @@ def _quiet(q: dict, raw: dict | None, returned: bool, t: float) -> bool:
 
 
 def _lane_specs(cfg: dict, raw_by_host: dict, t: float) -> tuple[list[dict], float, list[dict]]:
-    """配置里的队列 → 车道规格、收起的车道里最晚的一次活动（_no_work 用；没有收起的为 0）、收起的只在登记里有的车道 [{host, root, queue}]
-    （快照的 quiet：项目「管理」抽屉逐条清单里不列这些，#121）。
+    """配置里的队列 → 车道规格、收起的车道里最晚的一次活动（_no_work 用；没有收起的为 0）、收起的只在登记里有的车道 [{host, root, queue, last, idle}]
+    （快照的 quiet：项目「管理」抽屉逐条清单里不列这些，#121；last 是最后一次活动，没有为 0；idle：登记还在、空了 IDLE_REG_S 以上，_idle_regs 提示 worker rm，#47）。
     通配符队列按探针发现的清单展开；展开出的与只在登记里有的车道跑完久了收起（_quiet），monitor.toml 写明的一直显示。
     车道是一台主机上的一条串行队列，即一个并行位，不绑定实验（跑什么看任务归的计划项）。车道名在这里定：
     同一台主机上照配置顺序叫“车道 1”“车道 2”，写了 label（用途）的接在后面，收起的不占号。页面、告警都用它。"""
@@ -240,9 +242,10 @@ def _lane_specs(cfg: dict, raw_by_host: dict, t: float) -> tuple[list[dict], flo
     def keep(q: dict, raw: dict | None) -> None:
         nonlocal last
         if _quiet(q, raw, bool(returned[q["host"]]), t):
-            last = max(last, _last_act(q, raw))
+            act = _last_act(q, raw)
+            last = max(last, act)
             if q.get("reg"):
-                hid.append({"host": q["host"], "root": q["root"], "queue": q["jobs"]})
+                hid.append({"host": q["host"], "root": q["root"], "queue": q["jobs"], "last": round(act), "idle": bool(q.get("reg_live")) and t - act >= IDLE_REG_S})
         else:
             out.append(q)
     for q in cfg["queues"]:
@@ -331,6 +334,7 @@ def build(cfg: dict, probes: dict, out_dir: Path, lan: dict | None = None, glob_
     _groups(cfg, snap, state, ratios)
     _host_alerts(cfg, snap, state, hist, glob_snap, t)
     _no_work(cfg, snap, glob_snap, quiet, t)
+    _idle_regs(cfg, snap, state)
     _storage(cfg, snap, glob_snap, t)
     _rebalance(snap)
     snap["thresholds"] = {"stale_s": stale_limit(cfg["interval"], cfg["alerts"]["stale_min"])}      # 页面据此标“数据过期”，与 labmon wait 同一门槛
@@ -787,6 +791,29 @@ def _no_work(cfg: dict, snap: dict, glob_snap: dict, quiet: float, t: float) -> 
             snap["alerts"].append(alert(f"no_work:{round(since)}", "agent",
                                         f"项目从 {fmt_time(since)} 起没有活了：各车道跑空，也没有在等的任务。要接着跑就把下一批追加到各台的长期清单"
                                         f"（先 labmon worker fit <主机> <目录> <清单> --list --project {cfg['id']} 看能开几条车道）；确实做完了不用管"))
+
+
+def _idle_regs(cfg: dict, snap: dict, state: dict) -> None:
+    """空了很久的登记（#47）：收起的只在登记里有的车道（快照的 quiet）里标了 idle 的（登记还在、最后一次活动早于 IDLE_REG_S，_lane_specs 定），出一条只给实验会话的 idle_regs:，
+    列出这些清单、写 worker rm 的写法。只提示、不删：自动删了，会话以后再往旧清单追加，任务会悄悄不跑。
+    monitor.toml 写明的与自动发现的车道不收进 quiet，也就不列。同一批只叫醒一次：key 带代数，代数与报过的清单记在项目状态的 idle_regs，
+    出现没报过的清单才加一；会话删了一部分、留着长期清单时不变。清单又有活动就从报过的里去掉，再空满 IDLE_REG_S 算新的。"""
+    st = state.setdefault("idle_regs", {"n": 0, "told": []})
+    idle = [x for x in snap["quiet"] if x["idle"]]
+    cur = {f"{x['host']}|{_qpath(x['root'], x['queue'])}" for x in idle}
+    if cur - set(st["told"]):
+        st["n"] += 1
+    st["told"] = sorted(cur)
+    if not idle:
+        return
+    by: dict = {}
+    for x in sorted(idle, key=lambda x: (x["host"], x["root"], x["queue"])):
+        by.setdefault(x["host"], {}).setdefault(x["root"], []).append(x["queue"])
+    where = "；".join(f"{h} 上 " + "；".join(f"{r}：{'、'.join(js)}" for r, js in rs.items()) for h, rs in by.items())
+    snap["alerts"].append(alert(f"idle_regs:{cfg['id']}:{st['n']}", "agent",
+                                f"有 {len(idle)} 条清单空了 {IDLE_REG_S // 86400} 天以上（没有在跑与排队的任务、也没有新的活动），登记还留着：{where}。"
+                                "worker 每轮都要在共享盘上查一遍每条登记：不再用的逐条 labmon worker rm <主机> <目录> <清单> 摘掉（只摘登记，不删文件）；"
+                                "以后还要往里追加的长期清单留着就行，再有新的空清单才会再提示。新任务追加到项目固定目录下的长期清单，不按批、不按代码版本新开"))
 
 
 def dir_name(name: str) -> str:

@@ -416,7 +416,7 @@ def overview() -> dict:
                            {"host": "srv-old2", "root": "/data/me/proj-b/q9", "queue": "jobs/b9.txt", "label": "车道 1", "unfinished": 3, "run": 0, "returned": NOW - 30 * H},
                            {"host": "srv-old3", "root": "/data/me/proj-b/q8", "queue": "jobs/b8.txt", "label": "车道 1", "unfinished": 0, "run": 0, "returned": NOW - 50 * H},
                            {"host": "srv-gone", "root": "/data/me/proj-b/q7", "queue": "jobs/b7.txt", "label": "车道 1", "unfinished": 0, "run": 0, "returned": NOW - 90 * H}],
-                 "markers": [{"label": "组会", "ts": NOW + 86400}], "quiet": [{"host": "srv-a", "root": "/data/me/proj-b/qd", "queue": "jobs/bd.txt"}],
+                 "markers": [{"label": "组会", "ts": NOW + 86400}], "quiet": [{"host": "srv-a", "root": "/data/me/proj-b/qd", "queue": "jobs/bd.txt", "last": NOW - 3 * 86400, "idle": True}],
                  "cfg": CFG_B, "groups": [], "ungrouped": 0, "archive_block": None}],
             # 已归档的项目（projects.json，#97）：侧栏「已归档 N 个」与它的抽屉
             "archived": [{"id": "proj-old", "title": "Gamma 旧实验", "t": NOW - 3 * 86400, "revision": "demo-archive-100",

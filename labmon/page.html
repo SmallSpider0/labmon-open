@@ -549,7 +549,7 @@ function laneRow(l, hb, gs, y, h, c, used) {
   // 车道名缩进挂在主机表头下面，一行；跑的计划项是标签栏右端的小圆点（各车道对齐，最多 4 个），名字见悬停
   const ly = y + h / 2 + 4, ds = gs.slice(0, 4);
   s += `<g ${tip(lt)}><circle cx="10" cy="${ly - 4}" r="3.5" fill="${dc}"/>
-    <text class="lab" x="18" y="${ly}">${esc(fit(l.label + (l.returned ? "（已归还）" : ""), c.L - 24 - 7 * ds.length))}</text>
+    <text class="lab" x="18" y="${ly}">${esc(fit(laneLabel(l) + (l.returned ? "（已归还）" : ""), c.L - 24 - 7 * ds.length))}</text>
     ${ds.map((g, k) => `<circle cx="${c.L - 8 - 7 * (ds.length - 1 - k)}" cy="${ly - 4}" r="2.5" fill="${gcolor(g)}"/>`).join("")}</g>`;
   // 空档：中线虚线＋原因（最可能的一条），悬停列出全部
   for (const g of laneGaps(l, js, hb)) {
