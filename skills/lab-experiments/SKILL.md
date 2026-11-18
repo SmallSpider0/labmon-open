@@ -117,7 +117,7 @@ Codex 与 Claude 共用这份流程。首次使用或接续等待时读 [session
 ## 借来的主机
 
 借不借、借多久由用户定，实验会话不自己去借（`docs/fleet.md`「借用」）。借到后 `labmon wait` 报 `borrow:<id>`，往上登记清单：
-**同一条清单登记过去就从原主机搬走了**，要两边都跑就为这台新建清单（或从原清单剪行过去）再 `labmon worker add <id> <目录> <新清单> --project <id>`，项目页车道跟着登记出现，不用改 `monitor.toml`。
+**同一条清单登记过去就从原主机搬走了**，要两边都跑就为这台新建清单（或从原清单剪行过去）再 `labmon worker add <id> <目录> <新清单> --project <id>`，`labmon status` 的车道跟着登记出现，不用改 `monitor.toml`。
 
 - 约定时间前跑不完的任务不放行，到点不停正在跑的、跑完自动还。对方可能在轻用，撞内存上限时内核先杀我们的（重排后报 `void:`）：这里的任务最好能断点续跑，独占的、急的放自用主机。
 - 要还了（`borrow_due:`）别再往上加任务；`borrow_cut:`、`borrow_back:`、`borrow_done:` 见 [alerts.md](alerts.md)「借来的主机」。
@@ -126,7 +126,7 @@ Codex 与 Claude 共用这份流程。首次使用或接续等待时读 [session
 ## 交给算力池
 
 组里的空闲服务器可以借给全组跑实验（`docs/fleet.md`「算力池」）。用户说可以交给池、且是池成员（管理员，或自己有一台入池的组内服务器）时：
-`labmon worker add pool <目录> <清单> --project <id>`，放到哪台由看板定，项目页多一栏「算力池」。池里的清单要能随时停下重排：
+`labmon worker add pool <目录> <清单> --project <id>`，放到哪台由看板定，`labmon status` 的主机里多一行「算力池」，还没放出去的车道写着在池里等。池里的清单要能随时停下重排：
 不写 `--gpus`、`--stop boundary`、`gang=` 与占位任务（会被拒），任务最好能断点续跑。撤回 `labmon worker rm pool <目录> <清单>`；
 改回自己的主机就 `worker add <主机> …`（一条清单只归一台）。入不入池、什么时段由服务器的持有人在看板上定，会话不改。
 

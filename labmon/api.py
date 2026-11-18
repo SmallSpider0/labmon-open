@@ -296,6 +296,9 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
         if h.get("returned"):
             o.p(f"  {name}：已归还（{fmt_time(h['returned'])}）")
             continue
+        if h.get("pool"):                          # 算力池（#24）：合成主机，没有卡；连没连上看代读池车道的那台
+            o.p(f"  {name}：交给池、还没放到哪台的清单在这里等" + ("" if h.get("ok") else f"；这一轮没读到池里的清单（{h.get('error') or '代读的主机连不上'}）"))
+            continue
         st = "正常" if h.get("ok") else f"连不上：{h.get('error')}" + (f"（上次 {fmt_time(h['last_ok'])}）" if h.get("last_ok") else "")
         cards = "，".join(_card(g) for g in h.get("gpus") or [])
         o.p(f"  {name}：{st}" + (f"；{cards}" if cards else "") + (f"；{borrow_text(h['borrow'])}" if h.get("borrow") else ""))
@@ -396,7 +399,7 @@ def disk(pid: str, psnap: dict | None = None) -> dict:
         o.p("各主机本地盘（续租、容器重启会清空；能重算的缓存放这里，用 needs= 声明）：")
     for hid in ids:
         loc, h = local.get(hid) or {}, hosts.get(hid) or {}
-        if h.get("returned"):
+        if h.get("returned") or h.get("pool"):
             continue
         mine = f"本项目缓存 {_gib(loc.get('cache') or 0)}，单格临时 {_gib(loc.get('scratch') or 0)}" if loc else "本项目没有缓存"
         room = "，".join(f"{m.get('label') or m['path']} 剩 {m['avail_gb']:.1f} GiB" for m in h.get("mounts") or [] if m.get("avail_gb") is not None)

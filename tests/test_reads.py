@@ -59,7 +59,8 @@ class ReadsTest(unittest.TestCase):
              "hosts": [{"id": "h1", "label": "h1（A6000）", "ok": True, "gpus": [{"index": 0, "util": 97, "mem_used": 30720, "mem_total": 46068}],
                         "mounts": [{"path": "/tmp", "label": "容器 /tmp", "avail_gb": 24.9}]},
                        {"id": "h2", "label": "h2", "ok": False, "error": "连不上", "last_ok": now - 900},
-                       {"id": "h3", "label": "h3", "returned": now - 86400}],
+                       {"id": "h3", "label": "h3", "returned": now - 86400},
+                       {"id": "pool", "label": "算力池", "pool": True, "ok": True, "error": None}],
              "lanes": [{"id": "L1", "label": "车道 1", "host": "h1", "queue": "jobs/a.txt", "alive": True, "managed": True, "total": 5, "done": 2,
                         "failed": 1, "unfinished": 2, "eta_ts": now + 7200, "logs_dir": "/data/p1/_logs"},
                        {"id": "L2", "label": "车道 1", "host": "h2", "queue": "jobs/b.txt", "managed": True, "total": 3, "done": 0, "unfinished": 3,
@@ -87,7 +88,7 @@ class ReadsTest(unittest.TestCase):
         self.glob()
         rc, out, err = run(["status", "-c", str(self.cfg)])
         self.assertEqual(rc, 0, err)
-        for s in ("示例（p1）快照", "（2 分钟前）", "预计全部跑完", "h1（A6000）：正常；卡 0 97% 30.0/45 GiB", "h2：连不上：连不上", "h3：已归还",
+        for s in ("示例（p1）快照", "（2 分钟前）", "预计全部跑完", "h1（A6000）：正常；卡 0 97% 30.0/45 GiB", "h2：连不上：连不上", "h3：已归还", "算力池：交给池、还没放到哪台的清单在这里等",
                   "车道 1（h1，jobs/a.txt）：2/5 跑完，失败 1；预计", "车道 1（h2，jobs/b.txt）：0/3 跑完", "推演排不上：放不下：要 60 GiB 显存",
                   "train_s1（车道 1（h1））：进度 50/200，已跑 30 分钟，预计", "（近期速度）", "CPU 3.2 核", "日志 1 分钟前：PROGRESS 50/200 loss=0.3",
                   "排队（2 个）", "train_s2（车道 1（h1））：预计", "big（车道 1（h2））：推演不出何时开始",
@@ -164,6 +165,7 @@ class ReadsTest(unittest.TestCase):
             self.assertIn(s, out)
         self.assertNotIn("projects/q", out)
         self.assertNotIn("h3", out)
+        self.assertNotIn("算力池", out)
         # #53 的细分：项目根下一级目录、24 小时与 7 天增量、最大的几项（假数据：字段名等 #53 定）
         fake = {**DK.project_storage("p1"), "dirs": {f"{root}/cache": 80 * GIB, f"{root}/out": 40 * GIB},
                 "d24": {f"{root}/cache": 33 * GIB}, "d7": {f"{root}/cache": 40 * GIB, f"{root}/out": -GIB},
@@ -219,7 +221,7 @@ class ReadsTest(unittest.TestCase):
     def test_skill_uses_commands_not_pages(self):
         # skill 里不再叫会话看页面、自己 curl：要读的都换成命令（#52）。叫用户在页面上做的（权重、归档）可以提。
         text = "".join(p.read_text() for p in sorted((ROOT / "skills" / "lab-experiments").glob("*.md")))
-        for bad in ("curl", "#/log", "snapshot.json", "主机页", "组内服务器页", "记录页", "项目页「", "labmon fleet", "labmon service"):
+        for bad in ("curl", "#/log", "snapshot.json", "主机页", "组内服务器页", "记录页", "项目页「", "项目页车道", "项目页多", "项目页时间线", "labmon fleet", "labmon service"):
             self.assertFalse(bad in text, f"skill 里还有 {bad}")
         for need in ("labmon status", "labmon disk", "labmon records", "$LABMON_CACHE"):
             self.assertTrue(need in text, f"skill 里没有 {need}")
