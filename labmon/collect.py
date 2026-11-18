@@ -26,7 +26,7 @@ from . import lan as L
 from . import lease as LS
 from . import pool as PO
 from . import projects as PJ
-from .config import AUTO_GROUP_RE, GIB, HOLD_RE, POOL_LABEL, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
+from .config import AUTO_GROUP_RE, GIB, HOLD_RE, POOL, POOL_LABEL, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
 from .health import link_step
 from .state import load_json, load_rows, save_json, snapshot, usage_file, write_atomic
 
@@ -49,8 +49,10 @@ IDLE_REG_S = 2 * 86400        # 收起的登记车道空了这么久，提示实
 def probe_spec(cfg: dict, host: dict) -> dict:
     return {"mounts": [m["path"] for m in host["mounts"]],
             "checks": [{k: c[k] for k in ("id", "if", "cmd", "detail", "timeout") if k in c} for c in host["checks"]],
-            # 本机的队列，以及已归还主机上由本机经共享盘代读的队列（readonly：只读文件，PID 属于别的机器，不查进程）
+            # 本机的队列，以及已归还主机上由本机经共享盘代读的队列（readonly：只读文件，PID 属于别的机器，不查进程）；
+            # 算力池里的（pool，#78）同样代读，但清单是刚从别处搬回池里的：那边手上在跑的还在跑，current 里放行的主机不是这台的照 #95 按在跑算
             "queues": [{k: v for k, v in q.items() if k not in ("label", "host", "read_via", "reg", "reg_t", "reg_live")} | ({"readonly": True} if q["read_via"] else {})
+                       | ({"pool": True} if q["host"] == POOL else {})
                        for q in cfg["queues"] if (q["read_via"] or q["host"]) == host["id"]],
             # 所有主机上显式登记的清单：共享盘上别的主机登记过的，自动发现时也要跳过
             "explicit_jobs": sorted({os.path.join(q["root"], q["jobs"]) for q in cfg["queues"] if not q["discover"]}),
@@ -109,6 +111,19 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
         # reg_live：这一轮登记还在（登记没了、按 REG_KEEP_S 留着的为 False：已经 worker rm 了，_idle_regs 不再提示）
         out.append({"id": m["id"], "host": m["host"], "root": m["root"], "jobs": m["jobs"], "reg": True, "reg_t": m.get("reg_t"), "reg_live": k in found})
     return out, new
+
+
+def reg_sig(regs: list | None) -> dict[str, frozenset]:
+    """各项目的登记此刻在哪（全局快照的 regs，reg_queues 认的那几项）：{项目: {(主机, 清单路径)}}。看板每轮全局采集后比上一轮，
+    变了的项目（搬了、登记了、撤了，含算力池放到某台，#78）当场叫醒它的采集线程（serve.Overview.once），车道不用再等一个项目采集间隔才跟过去。"""
+    out: dict = {}
+    for x in regs or []:
+        if x.get("state") == "unlisted" or x.get("queues") is None:
+            continue
+        for q in x["queues"]:
+            if q.get("project") and q.get("root") and q.get("jobs"):
+                out.setdefault(q["project"], set()).add((x["host"], _qpath(q["root"], q["jobs"])))
+    return {k: frozenset(v) for k, v in out.items()}
 
 
 def lanes_cfg(cfg: dict, glob_snap: dict, sd: Path, t: float, save: bool = True) -> dict:

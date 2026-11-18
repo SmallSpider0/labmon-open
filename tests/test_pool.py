@@ -316,6 +316,32 @@ class PoolPlaceTest(TickBase):
         self.assertEqual(out["lists"]["/r/x|jobs/x.txt"]["since"], NOW - 600)
         self.assertEqual(self.starts, [])
 
+    def test_moved_list_in_this_rounds_regs(self):
+        # #78：放过去的清单，这一轮写出的快照 regs 里就在 a 上、池里没了（旧代码：池里还有、a 上没有，项目车道要再等一轮全局采集）；
+        # 项目车道（collect.reg_queues）与 locate 跟着认 a
+        from labmon import collect as C
+        e = self.lent("a", {"room": {"gpus": {"GPU-a": 40000.0}}})
+        snap = self.snap([e], [self.pool_list()], regs=[{"host": "a", "state": "active", "queues": []}])
+        self.tick(snap)
+        rg = {x["host"]: x for x in snap["regs"]}
+        self.assertEqual(rg["pool"]["queues"], [])
+        self.assertEqual([(q["project"], q["jobs"], q["stop"], q["added_t"]) for q in rg["a"]["queues"]], [("pa", "jobs/x.txt", "term", round(NOW))])
+        cfg = {"id": "pa", "queues": []}
+        self.assertEqual([q["host"] for q in C.reg_queues(cfg, snap["regs"], {}, NOW)[0]], ["a"])
+        self.assertEqual(P.locate("/r/x", "jobs/x.txt", snap), "a")
+
+    def test_moved_back_to_empty_pool_in_regs(self):
+        # #78：要还的主机上剩的清单回池里，池里原来是空的（regs 里没有 pool 那一项）：补一项，排在在用主机之后
+        q = self.pool_list()
+        self.mem("a", started=NOW - 86400)
+        self.probe("a", started=NOW - 300)                                 # 换了容器：剩的登记回池里
+        e = self.lent("a", None)
+        snap = self.snap([e], [], regs=[{"host": "a", "state": "active", "queues": [q]}, {"host": "gone", "state": "returned", "queues": []}])
+        snap["regs"] = [x for x in snap["regs"] if x["host"] != "pool"]
+        self.tick(snap)
+        self.assertEqual([(x["host"], x["state"]) for x in snap["regs"]], [("a", "active"), ("pool", "pool"), ("gone", "returned")])
+        self.assertEqual((snap["regs"][0]["queues"], [y["jobs"] for y in snap["regs"][1]["queues"]]), ([], ["jobs/x.txt"]))
+
     def test_fit_budget_reaches_unasked_lists(self):
         # 前面的清单一直放不下、缓存过期后每轮都要重问：没问过的清单先拿预算，后面的不会永远轮不到（Codex 审查 #75）
         e = self.lent("a")

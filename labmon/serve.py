@@ -294,6 +294,7 @@ class Overview(_Collector):
         self.projects = projects
         self.interval = interval
         self.sync = None             # 每轮采集前按 projects.json 对齐项目（Server.sync，摘下归档的、加回恢复的）
+        self.regs_seen: dict | None = None   # 上一轮各项目的登记在哪（collect.reg_sig）：变了的项目当场叫醒（wake_moved）
 
     def proj_info(self) -> list[dict]:
         """各项目的摘要：给 overview.collect，除 running 外原样进全局快照的 projects（页面要的字段只在这里定，#139）。"""
@@ -356,6 +357,7 @@ class Overview(_Collector):
             if snap is None:                    # 这一轮读出租约在别人手里：已转为备用，什么都不做
                 trouble("工作台", None)
                 return
+            self.wake_moved(snap)
             notify(snap["notices"])             # 掉线、恢复、租期将到：弹系统通知
             push_host_users(snap.get("host_notices") or {})
             for msg in snap["notices"] + O.relaunch(snap):   # 容器重启后自动拉起 worker（主机清单 worker = "auto"）
@@ -364,6 +366,21 @@ class Overview(_Collector):
         except Exception:  # noqa: BLE001 — 服务不因一次采集出错退出
             trouble("工作台", traceback.format_exc())
             log(f"全局页：采集出错\n{traceback.format_exc()}")
+
+
+    def wake_moved(self, snap: dict) -> list[str]:
+        """登记变了的项目（collect.reg_sig 比上一轮：搬、登记、撤，算力池放到某台，#78）当场叫醒它的采集线程：车道按全局快照的 regs 拼，
+        不叫醒要再等一个项目采集间隔（缺省 2 分钟）才跟过去，这期间会话已收到「放到某台」、项目页与 wait --job 还停在原处。
+        服务起来后的第一轮只记不叫（各项目线程刚起，本来就在采）。返回叫醒了哪些（测试看）。"""
+        sig, seen = C.reg_sig(snap.get("regs")), self.regs_seen
+        self.regs_seen = sig
+        if seen is None:
+            return []
+        woke = [p.id for p in self.projects if sig.get(p.id) != seen.get(p.id)]
+        for p in self.projects:
+            if p.id in woke:
+                p.wake.set()
+        return woke
 
 
 def push_host_users(per_host: dict[str, list[str]]) -> None:
