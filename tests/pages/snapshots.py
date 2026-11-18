@@ -603,7 +603,12 @@ def project() -> dict:
         {"id": "alpha_eval_s7", "est_min": 180.0, "status": "queued", "lane": lc, "hold": False, "group": "eval_", "dur_min": None, "dur_src": None},
         {"id": "alpha_eval_s6", "est_min": 180.0, "status": "done", "end_ts": NOW - 30 * H, "start_ts": NOW - 32 * H, "lane": lc, "hold": False, "group": "eval_",
          "dur_min": 120.0, "dur_src": "清单估时", "actual_min": 120.0},
-        {"id": "alpha_pool_s1", "est_min": 60.0, "status": "queued", "lane": "pq/jobs/p.txt", "hold": False, "group": None, "dur_min": 60.0, "dur_src": "清单估时"}]
+        {"id": "alpha_pool_s1", "est_min": 60.0, "status": "queued", "lane": "pq/jobs/p.txt", "hold": False, "group": None, "dur_min": 60.0, "dur_src": "清单估时"},
+        # 算力池放到池借来的 srv-h 上的（#78）：车道跟到那台，在跑与跑完的照常进时间线
+        {"id": "alpha_pool_s2", "est_min": 30.0, "status": "done", "end_ts": NOW - 40 * 60, "start_ts": NOW - 70 * 60, "lane": "ph/jobs/h.txt", "hold": False, "group": None,
+         "dur_min": 30.0, "dur_src": "清单估时", "actual_min": 30.0},
+        {"id": "alpha_pool_s3", "est_min": 60.0, "status": "running", "start_ts": NOW - 35 * 60, "lane": "ph/jobs/h.txt", "hold": False, "group": None, "dur_min": 60.0,
+         "dur_src": "清单估时", "elapsed_min": 35.0, "speed": [], "eta_source": "清单估时", "remaining_min": 25.0, "eta_ts": NOW + 25 * 60, "last_line": "epoch 3"}]
     lane = lambda id_, label, host, root, queue, **kw: {  # noqa: E731
         "id": id_, "label": label, "host": host, "type": "gpu_queue", "stale": False, "root": root, "queue": queue, "alive": False, "pid": None,
         "state_dir": root + "/results/_queue", "paused": None, "managed": True, "waiting": None, "held": None, "stuck": None, "fs_skew": -184.1, "started": True,
@@ -612,7 +617,8 @@ def project() -> dict:
              lane(lb, "车道 2", "srv-a", "/data/me/proj-a/q2", "jobs/q2.txt", paused="临时指令 pause", held="pause", holding=True, has_hold=True, total=2, unfinished=2),
              lane(lc, "车道 1", "srv-b", "/data/me/proj-a/b2", "jobs/b2.txt", waiting="等 beta_eval_s7 跑完", stuck="推演到 7 天后还没轮到", total=2, done=1, unfinished=1),
              # 交给算力池、还没放到哪台的（#24，collect._lane 的 pool）：没有 worker 管，等着放到某台
-             lane("pq/jobs/p.txt", "车道 1", "pool", "/data/me/proj-a/pq", "jobs/p.txt", pool=True, waiting="在算力池里等着放到某台", fs_skew=None, total=1, unfinished=1)]
+             lane("pq/jobs/p.txt", "车道 1", "pool", "/data/me/proj-a/pq", "jobs/p.txt", pool=True, waiting="在算力池里等着放到某台", fs_skew=None, total=1, unfinished=1),
+             lane("ph/jobs/h.txt", "车道 1", "srv-h", "/data/me/proj-a/ph", "jobs/h.txt", alive=True, total=2, done=1, unfinished=1, eta_ts=NOW + 25 * 60)]
     gpu = lambda i, used, util: {"index": i, "name": "NVIDIA RTX A6000", "util": util, "mem_used": used, "mem_total": 46068.0, "temp": 51.0, "power": 87.5, "power_limit": 300.0}  # noqa: E731
     hosts = [{"id": "srv-a", "label": "srv-a（A6000）", "ok": True, "error": None, "borrow": None, "gpus": [gpu(0, 21000.0, 95.0), gpu(1, 900.0, 3.0)],
               "gpu_procs": [{"pid": 2001, "mem": 20500.0, "cmd": "python train.py"}], "cgroup": {"cpu_usage_ns": 1, "cpu_quota": 17.0, "mem_used": 2.8e10, "mem_limit": 1.3e11, "mem_rss": 1.1e9},
@@ -626,6 +632,12 @@ def project() -> dict:
               "loadavg": [1.0, 1.0, 1.0], "cpu_pct": 2.0, "mounts": [], "checks": [],
               "borrow": {"holder": "OWNER", "since": NOW - 16 * H, "until": None, "for": ["proj-a"], "light": True, "cutoff": NOW + 6 * 86400, "why": "OWNER 的租期到期，提前 1 小时",
                          "returning": None, "now": False, "back": [], "tight": None, "overdue": False, "keep": {"vram": 2.0, "ram": 14.5, "cpu": 1.0, "bump": 1.0, "hold": False}, "swap": None}},
+             # 算力池借来的（#25、#78）：池放过去的清单在这台上跑，项目「主机」里有它
+             {"id": "srv-h", "label": "srv-h（池 · PERSON7）", "ok": True, "error": None, "gpus": [gpu(0, 12000.0, 80.0)], "busy": [{"i": 0, "now": 80.0, "m10": 80.0, "h1": 80.0, "cov": 3600, "d1": 40.0, "d1cov": 7200}],
+              "gpu_procs": [], "cgroup": {"cpu_quota": 8.0, "mem_used": 3e9, "mem_limit": 6.5e10, "mem_rss": 1e9},
+              "loadavg": [1.0, 1.0, 1.0], "cpu_pct": 3.0, "mounts": [], "checks": [],
+              "borrow": {"holder": "PERSON7", "since": NOW - 2 * H, "until": NOW + 8 * H, "for": None, "light": False, "cutoff": NOW + 8 * H, "why": "入池时段结束",
+                         "returning": None, "now": False, "back": [], "tight": None, "overdue": False, "keep": {"vram": 2.0, "ram": 4.0, "cpu": 1.0, "bump": 1.0, "hold": False}, "swap": None, "pool": True}},
              {"id": "pool", "label": "算力池", "pool": True, "ok": True, "error": None}]        # 算力池（collect._hosts 的 pool，#24）：一张小卡
     hist = []
     for k in range(144):

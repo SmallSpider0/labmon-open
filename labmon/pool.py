@@ -26,7 +26,7 @@ from . import fleet as F
 from . import fleetops as FO
 from . import lease as LS
 from . import users as U
-from .config import HOSTS_LOCK, POOL, ConfigError, fmt_dur, fmt_time, home_host, home_peers, pool_home, set_fleet_keys, user_hosts
+from .config import HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, fmt_dur, fmt_time, home_host, home_peers, pool_home, set_fleet_keys, user_hosts
 from .labmon_worker import fair_key, person_use
 from .records import log_events
 from .service import log, notify
@@ -343,21 +343,44 @@ def _failed(sid: str, why: str) -> None:
         notify([msg])
 
 
-def _move(it: dict, to: str, move, t: float) -> bool:
-    """把一条清单搬到 to（池主机，或 POOL 回池里待放），记一条 pool 事件；没搬成返回 False、原因写进 it["why"]。"""
+def _move(it: dict, to: str, move, t: float, snap: dict | None = None) -> bool:
+    """把一条清单搬到 to（池主机，或 POOL 回池里待放），记一条 pool 事件；没搬成返回 False、原因写进 it["why"]。
+    snap：这一轮的全局快照（tick 传；reclaim 不在采集那一轮里，不传），搬成了就照搬后的样子改它的 regs（_shift）。"""
     try:
         move(to, [{"root": it["root"], "jobs": it["jobs"], "project": it["project"], "host": it["host"], "stop": it.get("stop")}], pool=it.get("reason") or "")
     except ConfigError as x:
         it["why"] = f"没搬成：{x}"
         log(f"算力池：{it['key']} 没搬到 {to}：{x}")
         return False
+    if snap is not None:
+        _shift(snap, it, to, t)
     _event(it["host"] if to == POOL else to, None, f"算力池把 {it['project']} 的 {it['jobs']}" + (f" 从 {it['host']}" if it["host"] != POOL else "")
            + (" 放回池里待放" if to == POOL else f" 放到 {to}") + (f"（{it['reason']}）" if it.get("reason") else ""), t,
            act="place", project=it["project"])
     return True
 
 
-def _place(items: list[dict], cands: list[dict], regs: dict, t: float, move, fit, budget: list) -> list[dict]:
+def _shift(snap: dict, it: dict, to: str, t: float) -> None:
+    """搬成一条之后，把这一轮全局快照的 regs 改成搬后的样子（#78）：原来那台（或池里）的那一项去掉这条，to 那一项加上（added_t 记看板此刻）。
+    regs 是这一轮放、搬之前读的；不改的话这一轮写出的快照里清单还在原处，项目车道（collect.reg_queues）、pool.locate 要到下一轮全局采集才跟过去，
+    会话这一轮就收到「放到某台」，项目页、wait --job 却还说它在池里等。搬由 worker add 当场做完（原处的登记它删掉），这里照着改就是现状；
+    下一轮 regs 照常从各台状态与登记文件读。池里那一项原来没有时（池里本来是空的）补一项，排在在用主机之后。"""
+    k, regs = it["key"], snap.setdefault("regs", [])
+    q = {"root": it["root"], "jobs": it["jobs"], "project": it["project"], "stop": it.get("stop")}
+    for x in regs:
+        if x["host"] == it["host"] and x.get("queues"):
+            q = next((y for y in x["queues"] if key(y.get("root"), y.get("jobs")) == k), q)
+            x["queues"] = [y for y in x["queues"] if key(y.get("root"), y.get("jobs")) != k]
+    dst = next((x for x in regs if x["host"] == to), None)
+    if dst is None:
+        if to != POOL:                                # 在用主机每轮都有一项；没有（这一轮刚借来的）留给下一轮读
+            return
+        dst = {"host": POOL, "label": POOL_LABEL, "state": "pool", "returned": None, "home": pool_home(), "stale": False, "t": t, "queues": []}
+        regs.insert(next((i for i, x in enumerate(regs) if x.get("state") != "active"), len(regs)), dst)
+    dst["queues"] = [y for y in dst.get("queues") or [] if key(y.get("root"), y.get("jobs")) != k] + [dict(q, added_t=round(t))]
+
+
+def _place(items: list[dict], cands: list[dict], regs: dict, t: float, move, fit, budget: list, snap: dict | None = None) -> list[dict]:
     """把放不下的清单放到候选的池主机上（fit 判；每台每轮一条，免得读到旧的 room 放多了）；要还的主机上放不下的回池里（back）。
     budget[0]：这一轮还能问几次 fit。返回仍放不下的（带 need 与原因 why）。"""
     left, used = [], set()
@@ -391,7 +414,7 @@ def _place(items: list[dict], cands: list[dict], regs: dict, t: float, move, fit
                          "池里借着的服务器都放不下（" + "；".join(whys[:2]) + "）" if whys else "池里没有借着、空得出来的服务器")
             left.append(it)
             continue
-        if _move(it, to, move, t):
+        if _move(it, to, move, t, snap):
             _FIT.pop(ck, None)
             if to != POOL:
                 used.add(to)
@@ -424,12 +447,12 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
     lent = [e for e in snap.get("hosts") or [] if (e.get("borrow") or {}).get("pool") and e["id"] in srv]
     regs = {x["host"]: x for x in snap.get("regs") or []}
     going, gone = _returns(lent, srv, fst, bst, t, ret, fin)
-    for x in regs.values():        # 还掉的池主机目录里还剩的登记（借着时没搬成的）与换了容器的：直接回池里待放
+    for x in list(regs.values()):  # 还掉的池主机目录里还剩的登记（借着时没搬成的）与换了容器的：直接回池里待放
         s = srv.get(x["host"])
         if x["host"] in gone or (s and s.get("borrow_pool") and not F.borrowed(s) and x.get("state") == "returned"):
             for q in x.get("queues") or []:
                 if q.get("stop") not in (None, "boundary"):     # 池放过去的都带停法；别的（借给池之前就留下的）池不收，留给会话自己搬
-                    _move(_item(x["host"], q, t, reason=f"{x['host']} 已还"), POOL, move, t)
+                    _move(_item(x["host"], q, t, reason=f"{x['host']} 已还"), POOL, move, t, snap)
     heads, fresh = _heads(snap)
     paused = set((sw or {}).get("pause") or {})
     lists, pending = {}, []
@@ -465,7 +488,7 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
     cands = [e for e in lent if e["id"] not in going and e["id"] not in gone and e.get("worker_up")
              and not ((e.get("status") or {}).get("guest") or {}).get("owner")]
     cands.sort(key=lambda e: -sum((((e.get("status") or {}).get("room") or {}).get("gpus") or {}).values()))
-    left = _place(pending, cands, regs, t, move, fit or fit_head, [POOL_FIT_MAX])
+    left = _place(pending, cands, regs, t, move, fit or fit_head, [POOL_FIT_MAX], snap)
     busy, asked = FO.busy(), False
     for it in left:                                   # 还放不下的：挑一台来借（一轮最多借一台；平台操作格忙着就等下一轮）
         lv = lists.setdefault(it["key"], {k: it[k] for k in ("project", "root", "jobs", "host", "since")})

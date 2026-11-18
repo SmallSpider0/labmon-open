@@ -259,7 +259,10 @@ def queue_gpu_queue(q):
         who = p[4] if len(p) > 4 else None       # 放行的主机（worker 11-10 起写，#88）
         # 别的主机放行的（清单刚搬到这台、那台还在跑，#95）：PID 属于那台容器，这里查不了；照 worker 的 run_elsewhere 按在跑算，进度照样从共享盘的日志读
         away = bool(who and q.get("me") and who != q["me"])
-        c["alive"] = False if ro else True if away else _pid_alive(c["pid"])
+        if q.get("pool"):                        # 算力池里的（#78）：刚从借来的主机搬回池里，那台手上的那一格还在跑；是这台自己放行的才查 PID
+            c["alive"] = away or (who == q.get("me") and _pid_alive(c["pid"]))
+        else:                                    # 已归还主机的（readonly）都不算在跑
+            c["alive"] = False if ro else True if away else _pid_alive(c["pid"])
         c["stopped"] = _tree_stopped(c["pid"]) if c["alive"] and not away else None
         lf = os.path.join(logs, p[0] + ".log")
         lines = [l.rstrip() for l in _tail(lf).replace("\r", "\n").splitlines() if l.strip()]

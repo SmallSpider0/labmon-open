@@ -1762,6 +1762,27 @@ class RegsTest(unittest.TestCase):
         self.assertEqual((regs["b"]["state"], regs["b"]["stale"], [q["root"] for q in regs["b"]["queues"]]), ("returned", False, ["/r/b"]))
 
 
+class WakeMovedTest(unittest.TestCase):
+    def test_wakes_projects_whose_regs_changed(self):
+        # #78：全局采集一轮后登记变了的项目（算力池放到某台、搬、登记、撤）当场叫醒它的采集线程；没变的、第一轮都不叫
+        class P:
+            def __init__(self, pid):
+                self.id, self.wake = pid, threading.Event()
+        pa, pb = P("pa"), P("pb")
+        ov = Overview([pa, pb])
+        q = lambda p, j: {"root": "/r", "jobs": j, "project": p}          # noqa: E731
+        s1 = {"regs": [{"host": "pool", "state": "pool", "queues": [q("pa", "x.txt")]}, {"host": "h", "state": "active", "queues": [q("pb", "y.txt")]}]}
+        self.assertEqual(ov.wake_moved(s1), [])
+        self.assertEqual(ov.wake_moved(s1), [])
+        s2 = {"regs": [{"host": "pool", "state": "pool", "queues": []}, {"host": "h", "state": "active", "queues": [q("pb", "y.txt"), q("pa", "x.txt")]}]}
+        self.assertEqual(ov.wake_moved(s2), ["pa"])
+        self.assertTrue(pa.wake.is_set())
+        self.assertFalse(pb.wake.is_set())
+        s3 = {"regs": [{"host": "pool", "state": "pool", "queues": []}, {"host": "h", "state": "active", "queues": [q("pa", "x.txt")]},
+                       {"host": "old", "state": "unlisted", "queues": [q("pb", "y.txt")]}]}
+        self.assertEqual(ov.wake_moved(s3), ["pb"])                      # pb 撤掉了（主机清单里没有的那台不算）
+
+
 class LongTermTest(unittest.TestCase):
     def test_spans_and_hourly_util(self):
         # 采集区间：隔得近的接上，断开超过 10 分钟另起一段；每小时 GPU 利用率按次平均，取各次的吃满程度 busy（#51），

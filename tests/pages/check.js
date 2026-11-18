@@ -1439,7 +1439,7 @@ const app = P => el(P, "app").innerHTML;
 let P;
 t("project", "正常快照渲染不报错、不漏 NaN/undefined，各块都在", () => {
   P = pjCtx(PJ, EVN); const h = app(P); clean(h, "项目页");
-  for (const s of ["全部完成", "车道 1", "车道 2", "借 OWNER", "任务明细（10）", "alpha_*", "评估", "投稿截止", "<svg"]) has(h, s);
+  for (const s of ["全部完成", "车道 1", "车道 2", "借 OWNER", "任务明细（12）", "alpha_*", "评估", "投稿截止", "<svg"]) has(h, s);
   has(h, "车道 2 还有 2 个任务不会在这台放行");                          // collect 的 borrow_cut 告警照常列在告警栏
   // 告警给谁看（#142）：红框与条数只算给用户的（borrow_cut 两边都要，列给用户的那句）；失败、空转、挪法建议只给实验会话，
   // 收在红框下面默认折叠的「给实验会话的提示」里，不算告警数
@@ -1459,9 +1459,9 @@ t("project", "正常快照渲染不报错、不漏 NaN/undefined，各块都在"
 });
 t("project", "GPU 利用率（#51）：大字是近 1 小时的吃满程度（保活按 0），小字是各卡与本项目近 24 小时；没有 worker 数据的卡退回探针此刻值", () => {
   const h = app(P), i0 = h.lastIndexOf('<div class="kpi"', h.indexOf("GPU 利用率 · ")), kpi = h.slice(i0, h.indexOf('<div class="kpi"', i0 + 1));
-  has(kpi, "GPU 利用率 · 3 卡 · 整机"); has(kpi, '56<small>% 近 1 小时 平均');                 // (72.3 + 4.2 + 90) / 3：srv-b 没有 busy，按探针此刻值逐卡补进平均（#54 审查）
-  has(kpi, "srv-a·0 72%"); has(kpi, "srv-a·1 4%"); has(kpi, "借 OWNER 90%"); has(kpi, "本项目近 24 小时 63%");
-  const tt = tips(kpi); has(tt, "近 1 小时平均 56%"); has(tt, "其中 1 张卡没有 worker 数据"); has(tt, "只有保活（顶到 99%）"); has(tt, "保活按 0 算"); has(tt, "14.5 卡·时，平均把所用的卡用到 63%");
+  has(kpi, "GPU 利用率 · 4 卡 · 整机"); has(kpi, '62<small>% 近 1 小时 平均');                 // (72.3 + 4.2 + 90 + 80) / 4：srv-b 没有 busy，按探针此刻值逐卡补进平均（#54 审查）
+  has(kpi, "srv-a·0 72%"); has(kpi, "srv-a·1 4%"); has(kpi, "借 OWNER 90%"); has(kpi, "池 PERSON7 80%"); has(kpi, "本项目近 24 小时 63%");
+  const tt = tips(kpi); has(tt, "近 1 小时平均 62%"); has(tt, "其中 1 张卡没有 worker 数据"); has(tt, "只有保活（顶到 99%）"); has(tt, "保活按 0 算"); has(tt, "14.5 卡·时，平均把所用的卡用到 63%");
   has(h, '38%<span class="mut" style="font-weight:400"> 近 1 小时</span>');                    // 主机小图
   ok(run(P, "utilText({now: 0, m10: 0, h1: 4.2, cov: 1200, ka: 99}).span") === "近 20 分钟", "worker 刚起不满 1 小时该写实际多久");
   has(run(P, "utilText({now: 0, m10: 0, h1: 4.2, cov: 1200, ka: 99}).sub"), "只有保活（顶到 99%）");
@@ -1554,9 +1554,9 @@ t("project", "运行中的条上百分比是现在线在条上的位置，不是
 t("project", "时间线按主机分组：主机一行表头（利用率、事件都在里面），车道单行缩进，条上去掉自动分组的前缀", () => {
   const A = pjCtx(PJ, EVN); run(A, `TL.v = {a: ${-3 * H}, b: ${12 * H}}; drawTimeline()`);     // 固定 15 小时的视图：条宽与下面省略的写法对得上
   const tl = el(A, "tlbox").innerHTML, labs = [...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
-  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1 · q1", "车道 2 · q2", "借 OWNER", "车道 1 · b2", "算力池", "车道 1 · p"]), JSON.stringify(labs));   // 算力池（#24）同一台主机那样分组
+  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1 · q1", "车道 2 · q2", "借 OWNER", "车道 1 · b2", "池 PERSON7", "车道 1 · h", "算力池", "车道 1 · p"]), JSON.stringify(labs));   // 算力池（#24）同一台主机那样分组
   ok(!tl.includes("GPU 利用率") && !tl.includes(" 事件<") && !tl.includes("同机别的项目<"), "还有单独的利用率、事件行或主机前缀");
-  ok((tl.match(/stroke-opacity="\.4"/g) || []).length === 2, "三组之间该各有一条分隔线");
+  ok((tl.match(/stroke-opacity="\.4"/g) || []).length === 3, "四组之间该各有一条分隔线");
   has(tl, ">train_s1 · 44%<", "条上去掉 alpha_"); has(tl, ">⏸ unt…ata<", "占位任务"); has(tips(tl), "alpha_train_s1", "悬停是全名");
   ok(!tl.includes('r="2.5"'), "图上只有一个计划项时不该画计划项圆点");
   run(A, 'TL.v = null; LS.set("tl", "week"); drawTimeline()');
@@ -2673,7 +2673,8 @@ t("project", "项目页的算力池（#24）：顶栏一个「算力池」，车
   const C = pjCtx(PJ, EVN), h = app(C);
   has(h, "算力池"); has(tips(h), "交给算力池、还没放到哪台的清单");
   ok(run(C, 'laneState(D.lanes.find(l => l.host === "pool"))') === "等待中：在算力池里等着放到某台", "池车道的状态");
-  ok(!run(C, "resourcesCard()").includes("算力池"), "资源小图不该画算力池");
+  const rc = run(C, "resourcesCard()");
+  ok(!rc.includes("</span> 算力池</b>"), "资源小图不该画算力池"); has(rc, "srv-h（池 · PERSON7）", "池借来的主机照常画（#78）");
   ok(run(C, 'hostShort(D.hosts.find(h => h.pool))') === "算力池", "短名");
 });
 
