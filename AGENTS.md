@@ -130,6 +130,8 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 平台操作在不在做；哪些服务器正在做（探测、保活守护、借用、掉线判定、自动预备续租都问它） | `fleetops._live`；`fleetops.busy()` |
 | 自用主机当成组内的一台（换人、关机、续租、配额与组内页列表；字段与 `fleetview.view` 的 servers 同名，组内页的卡片与抽屉同一套模板，差别只在按钮 `srvBtns` 与操作确认的文字；平台操作口径的 `state`、`work` 与样本 `sample` 分开） | `fleetboot.mine`；自用主机的「worker」节 `workerSec`（overview.html） |
 | 服务器的池类型文字（自用 / 公用 / 专用） | `fKind`（overview.html） |
+| 人的缩写与头像（末尾带数字取首字母 + 数字，多段名取各段首字母，否则前两个字；颜色沿用共享盘上这人的配色 `D.disk.colors`（disk.py 经 `config.pick_color` 定），没有的用主色；角上的状态点由调用方传）；账号名换成组内人员名（账号库的 `fleet_person`，读不到写账号名，#15） | `pabbr`、`pfav`（人员卡、人员抽屉、服务器卡与抽屉、保活守护、分配一台；「我」的头像 `accAv` 取 `pabbr`）；`acctPerson`（项目归属）（overview.html） |
+| 普通用户此刻能用的主机（单独分配的 `ME.hosts` 加上快照里给他看的、他的项目有车道的主机；总览「开始使用」与「我的账号」的「能用的主机」同一口径，#15） | `myHosts`（overview.html） |
 | 组内服务器页面的数据（各台现状、逐小时状态、统计、按人、配额）、详情曲线、人员详情；命令行 `labmon fleet status` / `probe` | `fleetview.view`、`fleetview.detail`、`fleetview.person`；`fleetview.show` |
 | 使用记录（每小时一行，组内服务器与自用主机同一套；借用中的那部分记在行的 `bw[借的人]`）；按人统计（拆小时行：借用中的算给借的人、主人那边记“借出”，按小时归一；人员卡、人员详情、`holders` 共用） | 记 `fleet._hour`（当前小时的累计 `fleet.accs`）；拆 `fleetview._parts`、汇总 `fleetview._by_person`、`fleetview._stats`、借来借出 `fleetview._lending`；页面上 `useBar`、`perHist`（状态名 `PKS`、`PSN`、`PSC`，借来借出的明细 `lendLines`，overview.html） |
 | 自用主机的使用样本（worker 状态换成与探针的 `analyze` 同形的样本：状态只看 GPU 进程，负载按任务归组；每轮全局采集记一次小时行，每 `interval` 写一行逐次样本）；逐次样本的一行（探针与自用主机共用） | `fleet.from_worker`（`fleetboot.mine` 的 `sample`，卡片与抽屉都取它）、`fleet.record_mine`（`overview._notices` 调）；`fleet._series_row`；曲线接口认哪些 id `fleetview.known` |

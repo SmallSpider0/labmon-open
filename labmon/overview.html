@@ -284,6 +284,7 @@ svg.spark { flex: 1; min-width: 0; width: 100%; height: 22px; cursor: crosshair;
 .pop .btn { white-space: nowrap; flex-shrink: 0; }
 .pop-w { color: var(--warn); margin-top: 4px; }
 .pop-ck { display: block; margin-top: 6px; }
+@media (min-width: 861px) { .pop:has(> .pform) { width: min(560px, calc(100vw - 32px)); max-width: none; } }   /* 人员设置（镜像、启动命令）：宽一些，输入框不截断（#15）；窄屏照常贴底 */
 /* 选一个将来的时刻（whenPick：借卡的约定、改约定、优先的到期）：标题、日期框 + 时、分两个下拉、小签（现在、往后加、清空）、一句到几点 */
 .when { display: grid; justify-items: start; gap: 6px; margin: 10px 0 8px; }
 .when-in { font: inherit; font-size: 13px; min-height: 32px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 7px;
@@ -351,6 +352,7 @@ details.fold > summary::-webkit-details-marker { display: none; }
 details.fold > summary svg { width: 15px; height: 15px; color: var(--muted); transform: rotate(-90deg); transition: transform .15s; flex: none; }
 details.fold[open] > summary { margin-bottom: 6px; }
 details.fold[open] > summary svg { transform: none; }
+details.fleet-al > summary { display: flex; align-items: center; gap: 4px; cursor: pointer; padding: 2px 0; }
 details > summary { cursor: pointer; color: var(--muted); font-weight: 600; font-size: 12px; padding: 2px 0; }
 pre { margin: 4px 0 0; font: 11.5px/1.5 ui-monospace, "SF Mono", Menlo, monospace; white-space: pre-wrap; color: var(--muted); }
 svg { display: block; overflow: visible; }
@@ -384,7 +386,7 @@ svg text { font-size: 11px; fill: var(--muted); }
 .pool-summary { display: flex; flex-wrap: wrap; gap: 6px 20px; }
 .pool-queue-detail { overflow-wrap: anywhere; }
 .fav { position: relative; flex: none; width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
-       background: color-mix(in srgb, var(--accent) 13%, var(--card)); color: var(--accent); font-size: 11.5px; font-weight: 700; letter-spacing: -.02em; }
+       background: color-mix(in srgb, var(--pc, var(--accent)) 13%, var(--card)); color: var(--pc, var(--accent)); font-size: 11.5px; font-weight: 700; letter-spacing: -.02em; }
 .fc.off .fav { background: var(--line); color: var(--muted); }
 .fav .cdot { position: absolute; right: -2px; bottom: -2px; width: 9px; height: 9px; box-shadow: 0 0 0 2px var(--card); }
 .fc.off .fav .cdot { box-shadow: 0 0 0 2px var(--soft); }
@@ -650,7 +652,6 @@ a.btn { display: inline-flex; align-items: center; }
 .fstrip.bad { border-color: color-mix(in srgb, var(--bad) 40%, var(--line)); background: color-mix(in srgb, var(--bad) 6%, var(--card)); }
 .fstrip a { margin-left: auto; white-space: nowrap; }
 /* 人员卡 */
-.fc.pc .fc-hd .ib { margin-left: -4px; }
 .slcs { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
 .slc { display: inline-flex; align-items: center; gap: 5px; padding: 1px 8px; border: 1px solid var(--line); border-radius: 6px; font-size: 11.5px; color: var(--fg); white-space: nowrap; }
 a.slc:hover { border-color: var(--accent); }
@@ -661,7 +662,7 @@ a.slc:hover { border-color: var(--accent); }
 .ib:hover { background: var(--soft); color: var(--fg); }
 .ib .ico { width: 17px; height: 17px; }
 .pdef { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 14px; margin-bottom: 10px; padding: 6px 10px; border-radius: 8px; background: var(--soft); }
-.pdef .ib { margin-left: auto; width: 24px; height: 24px; }
+.pdef > .popw { margin-left: auto; }
 .pmore { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-top: 10px; }
 .pmore > .mut { margin-right: 4px; }
 .pform { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: 8px 12px; align-items: center; }
@@ -778,8 +779,10 @@ body.more-open { overflow: hidden; }
 .account-content .account-push { align-items: center; gap: 8px 12px; }
 .acc-hd { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
 .acc-hd .who { flex: 1; min-width: 200px; }
-.acc-hd .who > b { font-size: 17px; font-weight: 650; }
-.acc-tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 3px; }
+.acc-hd .acc-name > b { font-size: 17px; font-weight: 650; }
+.acc-name { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.acc-name .badge { margin: 0; }
+.acc-can { margin-top: 4px; line-height: 1.6; }
 .people-grid { grid-auto-rows: 155px; }
 .people-grid > .add { min-height: 0; }
 .people-grid .people-card { display: grid; grid-template-rows: 32px 18px 20px minmax(0, 1fr); align-items: center; gap: 9px; }
@@ -802,7 +805,9 @@ body.more-open { overflow: hidden; }
 .permission-row .mini-btn { margin-left: 0; }
 .account-created { margin: 6px 0 0; overflow-wrap: anywhere; }
 .directory-status { display: flex; flex-wrap: wrap; align-items: center; gap: 3px 6px; overflow-wrap: anywhere; }
-.people-meta { display: flex; gap: 4px; align-items: center; }
+.people-meta { display: flex; gap: 4px 6px; align-items: center; min-width: 0; white-space: nowrap; }
+.pk { flex: none; color: var(--muted); margin-right: 2px; }       /* 人员卡上每行的小标签：看板账号、服务器 */
+.people-card .slcs { align-items: center; gap: 6px; }
 .drawer-tabs { margin: 0; padding: 0 16px; flex: none; }
 .drawer-tabs .ftab { min-height: 32px; }
 .acc-hd-actions { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -927,6 +932,8 @@ body.more-open { overflow: hidden; }
   .account-content .acc-hd { display: grid; grid-template-columns: auto minmax(0, 1fr); }
   .account-content .acc-hd .who { min-width: 0; }
   .account-content .acc-hd-actions { grid-column: 1 / -1; }
+  .account-command { flex-wrap: wrap; }
+  .account-command code { white-space: pre-wrap; overflow-wrap: anywhere; }
 
 }
 @media (max-width: 600px) {          /* 项目「管理」抽屉（#133）：主机行、危险区上下排，配置的名字放在控件上面，按钮占满一行 */
@@ -1141,6 +1148,13 @@ const icon = k => `<svg class="ico" viewBox="0 0 24 24" aria-hidden="true">${ICO
 const LOGO = (n = 28) => `<svg width="${n}" height="${n}" viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="7" fill="#378ADD"/><rect x="7" y="15" width="4.5" height="10" rx="1.5" fill="#fff"/><rect x="13.75" y="10" width="4.5" height="15" rx="1.5" fill="#fff"/><rect x="20.5" y="18" width="4.5" height="7" rx="1.5" fill="#fff" opacity=".55"/><circle cx="22.75" cy="10" r="2.6" fill="#5DCAA5"/></svg>`;
 // 项目缩写：多段名取各段首字母，否则取前 3 个字符
 const abbr = p => { const ps = String(p).split(/[-_\s]+/).filter(Boolean); return (ps.length > 1 ? ps.map(x => x[0]).join("") : ps[0] || "?").slice(0, 3).toUpperCase(); };
+// 人名缩写（#15）：末尾带数字的取首字母 + 数字（PERSON3 → P3），多段名取各段首字母，否则取前两个字（PERSON 与 PERSON3 不再都是 PER）
+const pabbr = n => { const s = String(n || "?"), m = /^(.*?)[-_\s]*(\d+)$/.exec(s);
+  if (m && m[1]) return (m[1][0] + m[2]).slice(0, 3).toUpperCase();
+  const ps = s.split(/[-_\s.]+/).filter(Boolean); return (ps.length > 1 ? ps.map(x => x[0]).join("") : s).slice(0, 3 - (ps.length < 2)).toUpperCase(); };
+// 人的头像：缩写 + 共享盘上这人的配色（disk.py 经 config.pick_color 定的，与共享盘的图一致；没有的用主色）；extra 是角上的状态点
+const pfav = (n, extra = "", cls = "fav") => { const c = D.disk?.colors?.[n];
+  return `<span class="${cls}"${c ? ` style="--pc:${esc(c)}"` : ""} aria-hidden="true">${esc(pabbr(n))}${extra}</span>`; };
 const inkOn = hex => { const m = /^#(..)(..)(..)$/.exec(hex || ""); if (!m) return "#fff";
   const [r, g, b] = m.slice(1).map(x => parseInt(x, 16) / 255); return 0.299 * r + 0.587 * g + 0.114 * b > 0.62 ? "#1d2330" : "#fff"; };
 // 标签页图标：有告警时右上角加红点，切到别的标签页也看得到
@@ -1268,7 +1282,7 @@ function topbar(r) {
    数据现取 /api/me、/api/users（不进快照，进页时取一次，动了以后重取）；口令只在表单里，令牌原文与设置码只显示这一次（关掉、离开这页就没了） ---------- */
 const ACC = {me: null, users: null, at: {}, load: {}, loadError: {}, busy: false, msg: null, err: null, show: null, view: null, visit: 0};
 // show：刚拿到、只显示这一次的 {page, k: "tok" | "code", where, name, v, until}；msg、err：{k: 显示在哪, m}
-const accAv = (n, cls = "") => `<span class="uav${cls}" aria-hidden="true">${esc(String(n || "?").slice(0, 2).toUpperCase())}</span>`;
+const accAv = (n, cls = "") => `<span class="uav${cls}" aria-hidden="true">${esc(pabbr(n))}</span>`;
 function uaName(ua) {                                  // 会话的浏览器写成「Safari · macOS」，全文在悬停里
   const s = ua || "", b = /Edg\//.test(s) ? "Edge" : /Firefox\//.test(s) ? "Firefox" : /Chrome\//.test(s) ? "Chrome" : /Safari\//.test(s) ? "Safari" : s ? "其他客户端" : "浏览器";
   const o = /iPhone/.test(s) ? "iPhone" : /iPad/.test(s) ? "iPad" : /Android/.test(s) ? "Android" : /Mac OS X|Macintosh/.test(s) ? "macOS" : /Windows/.test(s) ? "Windows" : /Linux/.test(s) ? "Linux" : "";
@@ -1460,6 +1474,14 @@ function accountFormPop(k, name, label, fields) {
   return popConfirm(btn, open, open ? `<form class="aform acc-pop-form" data-accf="${k}" method="post" autocomplete="on">
     ${fields}${accLine("pop")}<div class="pop-b"><button class="btn pri" type="submit" ${ACC.busy ? "disabled" : ""}>${label}</button>${popX}</div></form>` : "", null, true);
 }
+// 「我的账号」页头那句能做什么（#15）：浏览器登录的按角色说人话；令牌打开的按令牌的作用域说它能做的事（scope_info 的说明），不列作用域名
+function meCan(M, info) {
+  const fleet = "组内服务器与平台操作只有管理员看得到";
+  if (M.account) return M.admin ? `可以管理全部项目、主机与账号${M.ops ? "，也能做平台操作（续租、开关机、换人、借卡）" : `；平台操作：${OPS_NOTE}`}。`
+    : M.write ? `可以查看能用的主机，管理自己的项目（调度、配置、登记与归档）。${fleet}。` : `只能查看，不能改。${fleet}。`;
+  const ss = Object.keys(info).length ? Object.keys(info).filter(s => M.scopes.includes(s)) : M.scopes;
+  return `这个令牌能做：${ss.map(s => info[s]?.[1] || info[s]?.[0] || s).join("；")}。`;
+}
 function mePage(tab) {
   if (!LIVE || !ME) return `<div class="card"><div class="empty">账号要经看板服务（labmon serve）打开才看得到。</div></div>`;
   if (!ACC.at.me) accLoad("me");
@@ -1470,9 +1492,9 @@ function mePage(tab) {
     <label>新口令<input class="ain" id="acpn" type="password" autocomplete="new-password" required></label>
     <label>确认新口令<input class="ain" id="acpn2" type="password" autocomplete="new-password" required></label>
     <p class="sm mut">修改后，其他浏览器需要重新登录。</p>`) : "";
-  const head = `<section class="card"><div class="acc-hd">${accAv(M.name)}<div class="who"><b>${esc(M.name)}</b>
-      <div class="acc-tags"><span class="badge ${M.admin ? "b-ok" : "b-mute"}">${esc(M.role_name)}</span><span class="badge b-mute">从${esc(M.entry_name)}来</span></div>
-      <div class="sm mut" style="margin-top:5px">能做：${(Object.keys(info).length ? Object.keys(info).filter(s => M.scopes.includes(s)) : M.scopes).map(s => esc(info[s]?.[0] || s)).join("、")}${M.admin && !M.ops ? `；${OPS_NOTE}` : ""}${M.admin ? "" : "。组内服务器与平台操作只有管理员看得到"}</div></div>
+  const head = `<section class="card"><div class="acc-hd">${accAv(M.name)}<div class="who"><div class="acc-name"><b>${esc(M.name)}</b>
+      <span class="badge ${M.admin ? "b-ok" : "b-mute"}">${esc(M.role_name)}</span><span class="badge b-mute">从${esc(M.entry_name)}来</span></div>
+      <div class="sm mut acc-can">${esc(meCan(M, info))}</div></div>
       ${M.account ? `<div class="acc-hd-actions">${pw}<button class="btn" data-acc="out">${icon("power")}退出登录</button></div>` : ""}</div>${accLine("pw")}${accLine("top")}${ACC.loadError.me ? `<div class="rn-err">${esc(ACC.loadError.me)}</div>` : ""}</section>`;
   if (!M.account) return head + clientSec(M) + `<div class="card"><div class="empty">用令牌打开的页面不能改账号：在浏览器里登录后再来。</div></div>`;
   if (tab === "push") return head + pushSec(M);
@@ -1490,9 +1512,11 @@ function mePage(tab) {
       <label>名称<input class="ain" id="acn" data-pop-field="tokn" value="${esc(draft.tokn || "")}" placeholder="如：部署脚本" maxlength="40" autocomplete="off"></label>
       <label>能做什么<select class="ain" id="acs" data-pop-field="toks">${opts}</select></label>`)}`);
   if (tab === "tokens") return head + toks;
+  // 没单独分配主机、但自己的项目在别的主机上有车道的，照实说在哪几台（与总览「开始使用」同一口径：myHosts）
+  const seen = myHosts().filter(id => !(M.hosts || []).includes(id));
   const own = M.admin ? "" : dSec("项目与主机", kvHtml([
     ["我的项目", accountList(M.own)],
-    ["能用的主机", accountList(M.hosts)]
+    ["能用的主机", (M.hosts?.length ? accountList(M.hosts) : "没有单独分配") + (seen.length ? `<span class="sm mut">；你的项目还在 ${accountList(seen)} 上有任务</span>` : "")]
   ]));
   return head + clientSec(M) + own;
 }
@@ -1502,13 +1526,15 @@ function accStatus(u, brief = false) {
   if (u.setup > Date.now() / 1000) return `<span class="badge b-warn">等设口令${brief ? "" : ` · ${tsNear(u.setup)} 前有效`}</span>`;
   return `<span class="badge b-bad">设置码已过期</span>`;
 }
+// 人员卡上「看板账号」那一行（#15）：账号的角色与要处理的状态单独一行、带标签，不与下面服务器那一行（人员在组内的状态）混在一起
 function accountCardStatus(u, roles) {
-  if (!u) return '<div class="people-meta sm mut">未开通账号</div>';
+  const k = '<span class="pk">看板账号</span>';
+  if (!u) return `<div class="people-meta sm">${k}<span class="mut">未开通</span></div>`;
   const lagging = u.tokens.filter(t => t.client_commit && ["outdated", "below_minimum"].includes(t.client_status)).length;
   const status = accStatus(u, true);
   const alert = status || (u.fleet_person_error ? `<span class="badge b-bad" ${tip(u.fleet_person_error)}>关联有误</span>`
     : lagging ? `<span class="badge b-warn">${lagging} 个待更新</span>` : "");
-  return `<div class="people-meta"><span class="badge ${u.role === "admin" ? "b-ok" : "b-mute"}">${esc(roles[u.role] || u.role)}</span>${alert}</div>`;
+  return `<div class="people-meta sm">${k}<span${u.name !== u.fleet_person ? ` ${tip("账号 " + u.name)}` : ""}>${esc(roles?.[u.role] || u.role)}</span>${alert}</div>`;
 }
 function directoryUsers() {
   if (LIVE && ME?.admin && ME.scopes.includes("admin")) {
@@ -1657,6 +1683,8 @@ function logPage(f) {
 const projAlerts = () => { const by = new Map(); for (const p of D.projects) for (const m of p.alert_msgs || []) by.set(m, [...(by.get(m) || []), p]);
   return [...by].map(([m, ps]) => ({ps, m})); };
 // 页面上的项目名，后面带一个空格：配色点 + 标题（悬停 id）。几个项目时才写，always 总写（指令的对象）；plain 只要文字（悬停提示、受影响列表）
+// 普通用户此刻能用的主机：单独分配给他的（ME.hosts），加上快照里给他看的主机（他的项目有车道的，users.access 的 hosts）
+const myHosts = () => [...new Set([...(ME?.hosts || []), ...D.hosts.map(h => h.id)])];
 const visibleProject = id => !!id && (!LIVE || !!ME?.admin || D.projects.some(p => p.id === id));
 const projName = (id, {always = false, plain = false} = {}) => {
   if (!id || !always && D.projects.length < 2 && (!LIVE || ME?.admin)) return "";
@@ -1664,8 +1692,9 @@ const projName = (id, {always = false, plain = false} = {}) => {
   return plain ? t + " " : `<span class="nw"><span class="dot" style="background:${color(id)}"></span> <span ${tip(id)}>${esc(t)}</span></span> `;
 };
 function home() {
-  const intro = LIVE && ME && !ME.admin && (!D.projects.length || !ME.hosts?.length) ? dSec("开始使用", `
-    ${ME.hosts?.length ? "" : '<p>请管理员在「账号」里给你开主机。</p>'}
+  const noHost = !myHosts().length;      // 确实没有可用主机才提（#15）：没单独分配、但自己项目的任务已在某台上跑的不算
+  const intro = LIVE && ME && !ME.admin && (!D.projects.length || noHost) ? dSec("开始使用", `
+    ${noHost ? '<p>你的账号还没有能用的主机：请管理员在「组内服务器 → 人员」里打开你，在「账号与权限」给你分配主机。</p>' : ""}
     ${D.projects.length ? "" : '<p>从<a href="#/me">我的账号</a>下载命令行，在项目目录里运行 <code>labmon project push</code> 登记项目。</p>'}`) : "";
   if (intro && !D.hosts.length && !D.projects.length) return intro;
   const al = allAlerts(), fal = fleetAlerts(false), pal = projAlerts(), hs = D.hosts.filter(h => h.status?.info);
@@ -2739,11 +2768,15 @@ function fleetAlerts(mine = true) {      // mine=false：首页用，自用主�
 }
 // 组内提醒条；租期快到的那一条带「续租」：打开续租面板并勾上这一台
 const fleetDue = () => [...D.fleet?.servers || [], ...D.fleet?.mine || []].filter(x => !x.off && leaseSoon(x.lease_end));
-function fleetAlertBox(al, btn = true) {      // 详情页上工具栏已有「续租」，提醒条不再放
+// fold：人员、共享盘选项卡上收成一行「⚠ 组内 N 条提醒」，点开看全部（#15：完整的只在「服务器」选项卡顶上，别的选项卡不把正文挤到第一屏以下）；开合记在本机（cardOpen 的 fleetal）
+function fleetAlertBox(al, btn = true, fold = false) {      // 详情页上工具栏已有「续租」，提醒条不再放
   if (!al.length) return "";
   const due = fleetDue();
-  return `<div class="alerts">${al.map(m => { const x = due.find(x => m.startsWith(fName(x)) && m.includes("租期"));
-    return `<div>⚠ ${esc(m)}${btn && x && canOps() && !fops().op?.active ? ` ${renewPickPop(`<button class="btn mini-btn" data-fop="renewpick" id="renewpick-${esc(x.id)}" data-id="${esc(x.id)}">续租</button>`, x.id)}` : ""}</div>`; }).join("")}</div>`;
+  const rows = al.map(m => { const x = due.find(x => m.startsWith(fName(x)) && m.includes("租期"));
+    return `<div>⚠ ${esc(m)}${btn && x && canOps() && !fops().op?.active ? ` ${renewPickPop(`<button class="btn mini-btn" data-fop="renewpick" id="renewpick-${esc(x.id)}" data-id="${esc(x.id)}">续租</button>`, x.id)}` : ""}</div>`; }).join("");
+  if (!fold) return `<div class="alerts">${rows}</div>`;
+  const open = !!ST.get("cardOpen", {}).fleetal;
+  return `<details class="alerts fold fleet-al" data-fold="fleetal" ${open ? "open" : ""}><summary>${icon("chev")}⚠ 组内 ${al.length} 条提醒${open ? "" : `<span class="sm mut" style="margin-left:6px">点开看</span>`}</summary>${rows}</details>`;
 }
 const fcr = c => /^\d{4}-\d\d-\d\d /.test(c || "") ? c.slice(5, 16) : c;     // 平台给的 2026-11-05 10:37:52 → 11-05 10:37，与别处一致
 // 分段条：[[值, 颜色, 提示, class]]
@@ -2885,7 +2918,7 @@ function fleetCard(x) {
       <div class="fc-num" ${tip("GPU 利用率，去掉保活：只有保活时按 0 算")}><b>${u == null ? "—" : Math.round(u) + "%"}</b><span class="sm mut">GPU${ka != null ? ` · 保活 ${Math.round(ka)}%` : ""}</span></div>
       <div class="fc-num"><b>${vr[1] ? `${mb2g(vr[0])}<small> / ${mb2g(vr[1])} GiB</small>` : "—"}</b><span class="sm mut">显存（去掉保活）</span></div></div>`;
   return `<div class="fc${d?.k === "srv" && d.id === x.id ? " sel" : ""}${x.off ? " off" : ""}" id="fc-${esc(x.id)}" data-drw="${esc(h)}" tabindex="0" role="button" aria-label="${esc(x.holder)}（${esc(x.id)}）的详情">
-    <div class="fc-hd"><span class="fav">${esc(abbr(x.holder))}<span class="cdot" style="background:${fDot(x)}"></span></span>
+    <div class="fc-hd">${pfav(x.holder, `<span class="cdot" style="background:${fDot(x)}"></span>`)}
       <div class="fc-t"><span class="fc-n"><b>${esc(x.holder)}</b>${gdIcon(x)}</span><span class="sm mut fc-sub"><span class="fc-ad">${esc(fNode(x.ssh))}:${esc(x.port)}</span><span class="fc-more">${x.job && x.job !== x.holder ? ` · 作业 ${esc(x.job)}` : ""}${nh > 1 ? ` · <span ${tip(`${x.holder} 现在共占 ${nh} 台`)}>共 ${nh} 台</span>` : ""}</span></span></div>
       <div class="fc-st">${fBusy(x) || fBadge(x)}</div>${icon("chev")}</div>
     ${num}<div class="fc-what sm">${fWhat(x)}</div>
@@ -2923,16 +2956,16 @@ function fleetPage() {
   const other = ["keepalive", "unknown", "idle", "down"].filter(k => cnt(k)).map(k => `${FSN[k]} ${cnt(k)}`).join("，");
   const pubFull = q.public_max != null && q.public >= q.public_max;
   const it = (k, v, t = "", bad = false) => `<span class="fs" ${t ? tip(t) : ""}><span class="mut">${k}</span><b style="${bad ? "color:var(--bad)" : ""}">${v}</b></span>`;
-  let s = `<div class="fsum">${[
+  const r = route(), tab = r.tab, o = fops(), P = fPanel(), pools = fPools(), act = o.op?.active ? "disabled" : "";
+  // 指标条与完整的提醒条只在「服务器」选项卡（#15）；人员、共享盘只留一行可展开的提醒，共享盘有自己的指标
+  let s = tab === "people" || tab === "disk" ? fleetAlertBox(al, true, true) : `<div class="fsum">${[
     it("专用池", `${q.private} / ${q.private_max ?? "—"} 台`, (q.private_pools || []).join("\n")),
     it("公用池", `${q.public} / ${q.public_max ?? "—"} 台${pubFull && q.public <= q.public_max ? " · 已满" : ""}`, q.public_max == null ? "没写上限" : q.public > q.public_max ? "超过全组上限，可能被强制关机" : pubFull ? "到全组上限了，再开会被警告" : `全组还能开 ${q.public_max - q.public} 台`, q.public_max != null && q.public > q.public_max),
     it("在跑实验", `${cnt("job")} / ${all.length} 台`, other || "其余没有异常"),
     it("可共享 · 闲置", `${sh.length} · ${free.length} 台`, `可共享：${sh.map(x => x.holder).join("、") || "—"}\n闲置：${free.map(x => x.holder).join("、") || "—"}\n\n可共享：除保活外显存 < ${100 * F.share.vram}%、利用率 < ${F.share.util}%、CPU < ${100 * F.share.cpu}% 配额、内存 < ${100 * F.share.mem}% 上限\n闲置：最近连着 ${FREE_H} 小时以上只有保活或空闲`),
     D.disk?.df ? it("共享盘剩", `${GB(D.disk.df.free)} GiB${D.disk.eta != null ? ` · 约 ${D.disk.eta} 天满` : ""}`,
       `已用 ${GB(D.disk.df.used)} / ${GB(D.disk.df.total)} GiB（${D.disk.root}）${D.disk.eta != null ? `\n按近 24 小时的速度约 ${D.disk.eta} 天满` : ""}`, D.disk.df.free < D.disk.warn_gb * GIB) : "",
-    it(due.length ? "下一个到期" : "最早到期", lease ? `${leaseHtml(lease.lease_end)} · ${esc(lease.holder)}` : "—", lease ? `${lease.holder} ${ts(lease.lease_end)} 到期${due.length ? `\n${due.map(x => x.holder).join("、")} 一天内到期，见提醒条` : ""}` : due.length ? "其余都没有租期" : "还没探到容器启动时间")].join("")}</div>`;
-  s += fleetAlertBox(al);
-  const r = route(), tab = r.tab, o = fops(), P = fPanel(), pools = fPools(), act = o.op?.active ? "disabled" : "";
+    it(due.length ? "下一个到期" : "最早到期", lease ? `${leaseHtml(lease.lease_end)} · ${esc(lease.holder)}` : "—", lease ? `${lease.holder} ${ts(lease.lease_end)} 到期${due.length ? `\n${due.map(x => x.holder).join("、")} 一天内到期，见提醒条` : ""}` : due.length ? "其余都没有租期" : "还没探到容器启动时间")].join("")}</div>` + fleetAlertBox(al);
   const ph = P.h && (P.sid && srvById(P.sid) ? DH.srv(P.sid) : !P.sid && P.pool ? DH.new(P.pool) : null);   // 面板在哪个抽屉里；批量续租、核对不在抽屉里，放在页面上
   if (ph && !(r.drw && DH[r.drw.k](r.drw.id) === ph)) s += opStrip(P, ph);
   if (P.h && !ph) s += `<div class="card" id="fpanel">${P.h}</div>`;
@@ -3493,7 +3526,7 @@ function srvDrawer(id) {
     return dHead(`<span class="fav">?</span>`, esc(id), "组内服务器里已经没有这一台") + `<div class="db">${pr || `<div class="card empty">可能换人时换到了别的端口，或已从主机清单删掉。</div>`}</div>`;
   }
   const now = D.generated, a = x.sample || {}, F = D.fleet, P = fPanel(x), nh = holdCount(x.holder), cmd = `ssh -p ${x.port} ${x.ssh}`, ph = DH.person(x.holder);
-  const head = dHead(`<span class="fav">${esc(abbr(x.holder))}<span class="cdot" style="background:${fDot(x)}"></span></span>`, esc(x.holder),
+  const head = dHead(`${pfav(x.holder, `<span class="cdot" style="background:${fDot(x)}"></span>`)}`, esc(x.holder),
     `${esc(fNode(x.ssh))}:${esc(x.port)} · ${fKind(x)}`, `<span class="fc-st">${fBusy(x) || fBadge(x)}</span>${dNav(srvOrder(), id)}`, gdIcon(x));
   let s = fleetAlertBox(fleetAlerts().filter(m => m.startsWith(fName(x))), false) + (P.h ? `<div class="card" id="fpanel">${P.h}</div>` : "") + fErr();
   const kv = [["使用人", `<a href="${esc(ph)}" data-drw="${esc(ph)}">${esc(x.holder)}</a>${nh > 1 ? ` <span class="mut">共占 ${nh} 台</span>` : ""}${x.job && x.job !== x.holder ? ` <span class="mut">· 作业 ${esc(x.job)}</span>` : ""}`],
@@ -3828,7 +3861,7 @@ function wizForm() {
   const chip = n => { const p = ppl[n], sl = p?.slots || [];
     const sub = !p ? "新的人" : n === ME?.fleet_person ? (sl.length ? `我 · 占 ${sl.length} 台` : "我") : sl.length ? `占 ${sl.length} 台` : "没占服务器";
     return `<button class="pchip${W.person === n ? " on" : ""}" data-wp="${esc(n)}" ${tip(p ? [p.image ? `镜像 ${p.image}（${SRCN[p.src] || ""}）` : "还没读到镜像", p.run_cmd ? "启动命令 " + p.run_cmd : "", p.note || "", sl.length ? "占着 " + sl.join("、") : ""].filter(Boolean).join("\n") : "新的人：按新的人默认的镜像与启动命令开")}>
-      <span class="fav sm">${esc(abbr(n))}</span><span class="pc-t"><b>${esc(n)}</b><span>${esc(sub)}</span></span></button>`; };
+      ${pfav(n, "", "fav sm")}<span class="pc-t"><b>${esc(n)}</b><span>${esc(sub)}</span></span></button>`; };
   const grp = g => names.filter(n => (n === ME?.fleet_person ? "me" : "team") === g);
   const rows = ["me", "team"].map(g => grp(g).length ? `<div class="pg-row"><span class="k">${PGN[g]}</span><div class="pchips">${grp(g).map(chip).join("")}</div></div>` : "").join("");
   const items = (pv.items || []).filter(i => W.person || i.item !== "作业名"), bad = items.filter(i => i.ok === false), unk = items.filter(i => i.ok === null);
@@ -3907,7 +3940,7 @@ function renewPicker() {
     <div class="rn"><button class="btn pri" data-fop="renewgo" ${!ids.length || need.length || POP.busy ? "disabled" : ""}>续租所选（${ids.length} 台）</button>
       ${need.length ? `<span class="sm" style="color:var(--warn)">${esc(need.map(x => x.mine ? x.label : x.holder).join("、"))} 在跑实验或本地盘写得多：先勾选确认</span>` : ""}</div>`;
 }
-// 人员：名单里一人一张小卡（占着的服务器、近 30 天用量）；分配与设置是右上角两个图标，点卡片打开这人的详情抽屉
+// 人员：名单里一人一张小卡（看板账号、占着的服务器、近 30 天用量）；点卡片打开这人的详情抽屉，分配一台、改设置都在抽屉里（#15：卡上不放没文字的图标）
 const SRCN = {job: "从现有作业读的", default: "新的人默认", manual: "手动设置", roster: "只登记了姓名"};
 const imgTag = img => { const last = String(img || "").split("/").pop(); return last.split(":")[1] || last; };
 function peopleTab() {
@@ -3921,7 +3954,7 @@ function peopleTab() {
   const repair = missing.length ? `<p class="sm mut">账号 ${esc(missing.map(u => u.fleet_person_error || u.name).join("、"))} 暂无可确认的组内人员。请在看板主机核对人员名单，用 <code>labmon user bind</code> 补关联。</p>` : "";
   const add = D.fleet && !D.fleet.error && canOps() ? `<button class="fc add" data-fop="padd"><span class="plus">+</span><b>添加组内人员</b><span class="sm mut">登记服务器分配所需资料</span></button>` : "";
   const def = `<div class="pdef sm"><span class="mut">新的人默认</span><span ${tip(d.image || "")}>镜像 <b>${esc(imgTag(d.image) || "—")}</b></span><span>启动命令 <code>${esc(d.run_cmd || "—")}</code></span>
-      ${canOps() ? personSettingsPop("pdef", "", "默认", "修改人员默认设置", true) : ""}</div>`;
+      ${canOps() ? personSettingsPop("pdef", "", "默认", "修改默认设置", "btn mini-btn") : ""}</div>`;
   return `<div class="card"><div class="chd wrap"><b>人员</b><span class="sm mut">换人、开新的时按这人的设置提交。名字也是平台作业名，同名作业在跑时自动加后缀（如 ALICE-2）</span></div>
     ${D.fleet && !D.fleet.error ? def : ""}${feedback}${repair}<div class="fwall people-grid">${current.map(n => personCard(n, ppl[n], hs[n], directoryAccount(n, L))).join("")}${add}</div>
     ${gone.length ? `<div class="pmore sm"><span class="mut">近 30 天还用过</span>${gone.map(n => `<a class="slc" href="${esc(DH.person(n))}" data-drw="${esc(DH.person(n))}" ${tip(`用过 ${hs[n].servers.join("、")}，${hs[n].hours} 小时有数据`)}>${esc(n)}</a>`).join("")}</div>` : ""}</div>`;
@@ -3952,15 +3985,13 @@ function personCard(n, p, h, u) {
   const href = DH.person(n);
   const selected = d?.k === "person" && d.id === n;
   const account = accountCardStatus(u, ACC.users?.roles);
-  const actions = p && canOps() ? givePop(n, "card", true)
-    + personSettingsPop("pedit", n, "card", "修改 " + n + " 的设置", true) : "";
   const slots = n ? [...(p?.slots || []).map(slotChip), ...borrowChips(n)] : [];
-  const servers = slots[0] || '<span class="sm mut">暂无服务器</span>';
+  const servers = '<span class="pk sm">服务器</span>' + (slots[0] || '<span class="sm mut">暂无</span>');
   const more = slots.length > 1 ? `<span class="sm mut nw">+${slots.length - 1} 台</span>` : "";
   const usage = h?.n ? useBar(h) : '<span class="sm mut usage-caption">暂无用量记录</span>';
   return `<div class="fc pc people-card${selected ? " sel" : ""}" data-drw="${esc(href)}" tabindex="0" role="button" aria-label="${esc(name)} 的详情">
-    <div class="fc-hd"><span class="fav" aria-hidden="true">${esc(abbr(name))}</span>
-      <div class="fc-t"><span class="fc-n"><b ${tip(u && n && u.name !== n ? `${name} · 账号 ${u.name}` : name)}>${esc(name)}</b>${isMe ? '<span class="chip">我</span>' : ""}</span></div>${actions}${icon("chev")}</div>${account}
+    <div class="fc-hd">${pfav(name)}
+      <div class="fc-t"><span class="fc-n"><b ${tip(u && n && u.name !== n ? `${name} · 账号 ${u.name}` : name)}>${esc(name)}</b>${isMe ? '<span class="chip">我</span>' : ""}</span></div>${icon("chev")}</div>${account}
     <div class="slcs">${servers}${more}</div><div class="people-overview">${usage}${n ? diskLine(n) : ""}</div></div>`;
 }
 let PER = {};               // 人员抽屉的近 30 天明细（打开时取，2 分钟内不重取）
@@ -3993,7 +4024,7 @@ function directoryDrawer(d) {
   const u = people.has(n) ? directoryAccount(n, L) : null;
   const usage = !u || d.section !== "account";
   const p = fops().people?.[n] || (L?.people?.includes(n) ? {slots: []} : null);
-  const info = u && u.name !== n ? `账号 ${u.name}` : "";
+  const info = u ? `看板账号 ${u.name}` : "";       // 账号的事在标题下单独一行写明是看板账号（#15）
   const status = u
     ? `<div class="directory-status sm"><span class="mut">${esc([info, L.roles[u.role] || u.role].filter(Boolean).join(" · "))}</span>${accStatus(u)}</div>`
     : "";
@@ -4001,7 +4032,7 @@ function directoryDrawer(d) {
   const tabs = u && n ? `<nav class="ftabs drawer-tabs" aria-label="详情分区">${["账号与权限", "服务器与用量"].map((label, i) =>
     `<a class="ftab${i === Number(Boolean(usage)) ? " on" : ""}" href="${esc(paths[i])}"${i === Number(Boolean(usage)) ? ' aria-current="page"' : ""}>${label}</a>`).join("")}</nav>` : "";
   if (d.section === "account" && !u && !L && ACC.load.users) {
-    return dHead(`<span class="fav">${esc(abbr(n))}</span>`, esc(n), "") + '<div class="db"><div class="empty">读取账号中…</div></div>';
+    return dHead(pfav(n), esc(n), "") + '<div class="db"><div class="empty">读取账号中…</div></div>';
   }
   const error = ME?.scopes.includes("admin") && ACC.loadError.users;
   const linkError = error ? `<p class="rn-err">${esc(error)} <button class="lnk" data-acc="reload">重试</button></p>` : "";
@@ -4012,7 +4043,7 @@ function directoryDrawer(d) {
   const openAccount = setup || (L?.person_choices?.includes(n) && !u
     ? `<div class="row wrap"><span class="sm mut">未开通</span>${onboardPop(n)}</div>` : "");
   const onboard = openAccount ? dSec("看板账号", openAccount) : "";
-  return dHead(`<span class="fav">${esc(abbr(n))}</span>`, esc(n), "", right,
+  return dHead(pfav(n), esc(n), "", right,
     isMe ? '<span class="chip">我</span>' : "", status) + tabs + `<div class="db">${linkError}${!usage && u.fleet_person_error ? `<p class="rn-err">${esc(u.fleet_person_error)}</p>` : ""}${onboard}${usage ? (D.fleet && !D.fleet.error ? personSections(n, p, !!u) : dSec("服务器与用量", '<p class="sm mut">暂未读到组内服务器数据。</p>')) : accountSections(u, L)}</div>`;
 }
 function personSections(n, p, hasAccount) {
@@ -4057,22 +4088,21 @@ function personForm() {
     ${FPED.err ? `<div class="rn-err">${esc(FPED.err)}</div>` : ""}`;
 }
 const personTrigger = (act, name, place) => `${act}-${place}-${name}`;
-function personSettingsPop(act, n, place, label, iconOnly = false) {
+function personSettingsPop(act, n, place, label, cls = act === "pdel" ? "btn danger" : "btn") {
   const open = popIs(act, n) && POP.place === place, remove = act === "pdel";
-  const btn = `<button class="${iconOnly ? "ib" : remove ? "btn danger" : "btn"}" id="${esc(personTrigger(act, n, place))}"
-    data-fop="${act}" data-name="${esc(n)}" data-place="${place}" aria-haspopup="dialog" aria-expanded="${open}" aria-label="${esc(label)}"
-    ${iconOnly ? tip(label) : ""}>${iconOnly ? icon("gear") : esc(label)}</button>`;
+  const btn = `<button class="${cls}" id="${esc(personTrigger(act, n, place))}"
+    data-fop="${act}" data-name="${esc(n)}" data-place="${place}" aria-haspopup="dialog" aria-expanded="${open}">${esc(label)}</button>`;
   if (!open) return popConfirm(btn, false);
   const body = (remove ? `<p>确定删除组内人员 ${esc(n)}？</p>` : personFields(POP.draft, false, act === "pdef"))
     + (POP.err ? `<div class="rn-err">${esc(POP.err)}</div>` : "");
   const go = `<button class="btn pri${remove ? " dz" : ""}" data-fop="person-pop-save" ${POP.busy ? "disabled" : ""}>${remove ? "删除组内人员" : "保存"}</button>`;
   return popConfirm(btn, true, body, go, !remove);
 }
-function givePop(n, place, iconOnly = false) {
+function givePop(n, place) {
   const open = popIs("pgive", n) && POP.place === place;
-  const btn = `<button class="${iconOnly ? "ib" : "btn"}" id="${esc(personTrigger("pgive", n, place))}"
+  const btn = `<button class="btn" id="${esc(personTrigger("pgive", n, place))}"
     data-fop="pgive" data-name="${esc(n)}" data-place="${place}" aria-haspopup="dialog" aria-expanded="${open}"
-    aria-label="给 ${esc(n)} 分配一台" ${fops().op?.active ? "disabled" : ""}>${icon("server")}${iconOnly ? "" : "分配一台"}</button>`;
+    ${fops().op?.active ? "disabled" : ""}>${icon("server")}分配一台</button>`;
   return popConfirm(btn, open, open ? givePicker(n) : "", "", true);
 }
 // 分配一台：先挑一台（在用的换人、关着的开机、池里还有空就开新的），点了打开那台的抽屉，向导里人已选好
@@ -4081,7 +4111,7 @@ function givePicker(n) {
   const b = (attrs, av, t, sub, dot) => `<button class="pchip" data-fop="wiz" data-name="${esc(n)}" ${attrs} ${dis}><span class="fav sm">${av}${dot ? `<span class="cdot" style="background:${dot}"></span>` : ""}</span><span class="pc-t"><b>${t}</b><span>${sub}</span></span></button>`;
   const rows = fPools().map(([p, priv]) => {
     const bs = poolMembers(p).map(x => x.off ? b(`data-kind="open" data-id="${esc(x.id)}"`, "关", "开机", `${esc(x.port)} · 已关机`)
-      : x.holder === n || x.state === "down" ? "" : b(`data-kind="swap" data-id="${esc(x.id)}"`, esc(abbr(x.holder)), esc(x.holder), `${esc(x.mine ? "自用 " + x.id : x.port)} · ${x.state ? FSN[x.state] : "还没探到"}`, fDot(x)));
+      : x.holder === n || x.state === "down" ? "" : b(`data-kind="swap" data-id="${esc(x.id)}"`, esc(pabbr(x.holder)), esc(x.holder), `${esc(x.mine ? "自用 " + x.id : x.port)} · ${x.state ? FSN[x.state] : "还没探到"}`, fDot(x)));
     const k = priv ? q.private : q.public, max = priv ? q.private_max : q.public_max;
     if (p && fops().pools?.[p]?.ref && (max == null || k < max)) bs.push(b(`data-kind="open" data-pool="${esc(p)}"`, "+", "开新的", "端口自动挑"));
     return bs.join("") ? `<div class="pg-row"><span class="k" ${tip(p || "没写资源池")}>${priv ? "专用池" : "公用池"}</span><div class="pchips">${bs.join("")}</div></div>` : "";
@@ -4531,15 +4561,18 @@ function cfgPatch(pid) {
   for (const e of sec.querySelectorAll("[data-cfv]")) { const n = t.querySelector(`[data-cfv="${CSS.escape(e.dataset.cfv)}"]`); if (n && n.innerHTML !== e.innerHTML) e.innerHTML = n.innerHTML; }
   for (const e of sec.querySelectorAll("[data-f]")) { const n = t.querySelector(`[data-f="${CSS.escape(e.dataset.f)}"]`); if (n && n.className !== e.className) e.className = n.className; }
 }
+// 项目归属写组内人员名，账号放悬停（#15：与人员页、人员卡同一口径）；人员名取账号库的 fleet_person（只有管理员读得到，读不到的写账号名）
+const acctPerson = (a, L = directoryUsers()) => { const u = L?.users.find(x => x.name === a); return u?.fleet_person || a; };
 function projOwnerSec(p) {
-  const label = p.owner || "归管理员", open = popIs("owner", p.id);
+  const open = popIs("owner", p.id), who = p.owner ? acctPerson(p.owner) : "";
+  const label = p.owner ? `<b ${tip("看板账号 " + p.owner)}>${esc(who)}</b>${p.owner === ME?.name ? ' <span class="chip">我</span>' : ""}` : "<b>归管理员</b>";
   const b = `<button class="btn mini-btn" data-pj="owner" data-p="${esc(p.id)}">更改项目归属</button>`;
-  const form = !open ? "" : `<label>归属账号 <select class="ain" data-owner ${ACC.load.users ? "disabled" : ""}>
-    <option value="">归管理员</option>${(ACC.users?.users || []).map(u => `<option value="${esc(u.name)}"${u.name === POP.owner ? " selected" : ""}>${esc(u.name)}</option>`).join("")}
+  const form = !open ? "" : `<label>归属给谁 <select class="ain" data-owner ${ACC.load.users ? "disabled" : ""}>
+    <option value="">归管理员</option>${(ACC.users?.users || []).map(u => `<option value="${esc(u.name)}"${u.name === POP.owner ? " selected" : ""}>${esc(u.fleet_person && u.fleet_person !== u.name ? `${u.fleet_person}（账号 ${u.name}）` : u.name)}</option>`).join("")}
     </select></label>${accLine("load")}${pjErr()}`;
   const go = ACC.load.users || !ACC.users ? "" : pjGo("ownergo", p.id, "保存");
   const edit = canWrite() && ME.account ? popConfirm(b, open, form, go, true) : "";
-  return dSec("项目归属", `${permissionRow("归属账号", `<b>${esc(label)}</b>`, edit)}${PJMSG && PJMSG.pid === p.id ? `<div class="rn-state">${esc(PJMSG.msg)}</div>` : ""}`);
+  return dSec("项目归属", `${permissionRow("归属", label, edit)}${PJMSG && PJMSG.pid === p.id ? `<div class="rn-state">${esc(PJMSG.msg)}</div>` : ""}`);
 }
 const PROJECT_ATTEMPTS = new Map();
 function projAttemptsSec(p) {
@@ -4960,12 +4993,12 @@ function guardDrawer() {
       <li><b>在服务器上盯 ${esc(fops().guard?.watch_min ?? "—")} 分钟</b><span class="sm mut">每 20 秒看一次 GPU，出现实验或这人自己开的保活就让出。盯完之后靠每次探测，见到别的负载照样让出</span></li></ol>
     ${GDERR ? `<div class="rn-err">${esc(GDERR)}</div>` : ""}`;
   const row = x => { const pend = x.id in GDPEND, on = pend ? GDPEND[x.id] : !!x.guard?.on;    // 没开守护的只写 GPU 现在的情况：开关已经说了没开
-    return `<div class="gd-row"><span class="fav">${esc(abbr(x.holder))}<span class="cdot" style="background:${fDot(x)}"></span></span>
+    return `<div class="gd-row">${pfav(x.holder, `<span class="cdot" style="background:${fDot(x)}"></span>`)}
       <div class="fc-t"><b>${esc(x.holder)}</b><span class="sm mut">${esc(x.id)} · ${esc(x.guard?.status === "off" ? gdSit(x) : guardText(x))}</span></div>${gdIcon(x)}
       <label class="sw" ${tip(on ? "关掉：不再自动开（已开的照样让路）" : "打开：GPU 连着空闲就自动开保活")}><input type="checkbox" role="switch" data-gd="${esc(x.id)}" ${on ? "checked" : ""} ${pend ? "disabled" : dis} aria-label="${esc(x.holder)}（${esc(x.id)}）的保活守护"><i></i></label></div>`; };
   const list = srvOrder().map(srvById).filter(x => x && !x.mine), mine = F.mine || [];
   const grp = (t, xs, f = row) => xs.length ? `<div class="gd-h">${t}</div><div class="gd-rows">${xs.map(f).join("")}</div>` : "";
-  const own = x => `<div class="gd-row"><span class="fav">${esc(abbr(x.holder))}</span><div class="fc-t"><b>${esc(x.holder)}</b><span class="sm mut">${esc(x.id)} · worker 在管保活，不用守护</span></div></div>`;
+  const own = x => `<div class="gd-row">${pfav(x.holder)}<div class="fc-t"><b>${esc(x.holder)}</b><span class="sm mut">${esc(x.id)} · worker 在管保活，不用守护</span></div></div>`;
   const srvs = grp("公用池 · 默认开", list.filter(x => x.public)) + grp("专用池 · 默认关", list.filter(x => !x.public)) + grp("自用", mine, own);
   return dHead(`<span class="fav">${icon("shield")}</span>`, "保活守护", "GPU 连着空闲就自动开保活，免得服务器因为没保活被平台释放")
     + `<div class="db">${dSec("规则", flow, edit)}
