@@ -1,8 +1,9 @@
 """多主机负载均衡的提示（Issue #20 第一档“只提示”）：把各主机 worker 写的 offers 汇成每个项目一条挪法建议。
 
 各台 worker 用自己的放行与推演规则算“别的主机上这个项目的哪几行我能接、接来后几点跑完”（labmon_worker 的 offers）；
-这里按项目挑整批完工最早的一种挪法：哪台、挪前几行，整批从何时提前到何时。整批至少提前 GAIN_S 且至少占剩余时间的 GAIN_FRAC 才建议
-（维护者 2026-11-08 定）；报过建议的项目降到阈值一半以下才收、目标主机沿用上一轮的（滞回，免得在阈值附近或几台之间来回叫醒）。挪不了的写原因（只在页面上，不叫醒）。
+这里按项目挑整批完工最早的一种挪法：哪台、挪前几行（同一台上多开一条车道也算一种，offer 带 local，#43），整批从何时提前到何时。
+整批至少提前 max(GAIN_MIN_S, min(GAIN_S, 剩余时间 × GAIN_SHORT_FRAC), 剩余时间 × GAIN_FRAC) 才建议（_need；维护者 2026-11-08 定 1 小时与 10%，
+#43 按推荐放宽短批：剩 2 小时的批早 36 分钟就报）；报过建议的项目降到阈值一半以下才收、目标主机沿用上一轮的（滞回，免得在阈值附近或几台之间来回叫醒）。挪不了的写原因（只在页面上，不叫醒）。
 labmon 不改任何清单、不改放行规则：建议由实验会话照做（剪行、追加到目标主机的清单，见 SKILL「跑和盯」的 rebalance:）。
 
 看板这头每轮再核对一遍（#25）：offers 里的行这一轮已在原处开跑、已不在原处的 todo（剪过、跑完了）就截掉（各 worker 读别的主机的状态最多晚几分钟）；
@@ -17,7 +18,9 @@ import re
 
 from .config import STALE_S, fmt_dur, fmt_time
 
-GAIN_S = 3600          # 整批完工至少提前这么多秒才建议
+GAIN_S = 3600          # 整批完工至少提前这么多秒才建议（剩余时间短的批按 GAIN_SHORT_FRAC 放宽，不低于 GAIN_MIN_S）
+GAIN_MIN_S = 900
+GAIN_SHORT_FRAC = 0.3
 GAIN_FRAC = 0.1        # 且至少占剩余时间的这么多
 TAIL = "；按 %s 的推演"   # 建议句尾：按几点的推演（log_text 判变没变时去掉它）
 TAIL_RE = re.compile(r"；按 \d\d:\d\d 的推演$")
@@ -42,7 +45,9 @@ def _finish(o: dict, k: int) -> float | None:
 
 
 def _need(f: float, t: float) -> float:
-    return max(GAIN_S, GAIN_FRAC * (f - t))
+    """整批从 f 跑完（现在 t）至少要提前多久才建议：剩余 2 小时要早 36 分钟，剩余 10 小时以上仍按 1 小时与 10%。"""
+    left = f - t
+    return max(GAIN_MIN_S, min(GAIN_S, GAIN_SHORT_FRAC * left), GAIN_FRAC * left)
 
 
 def _text(p: dict, proj: str, label: dict, t: float) -> str:
@@ -53,13 +58,23 @@ def _text(p: dict, proj: str, label: dict, t: float) -> str:
         src.setdefault((j["host"], j["root"], j["queue"]), []).append(j["name"])
     what = "，".join(f"{label.get(h, h)} 上 {r.rstrip('/')}/{q} 的 {'、'.join(ns)}" for (h, r, q), ns in src.items())
     tid = p["target"]
-    where = (f"接在 {p['lane'][0].rstrip('/')}/{p['lane'][1]} 后面" if p.get("lane")
-             else f"这台还没有本项目同一种环境的清单：新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；原清单没有 .env 时也新建一个，只写这两行）"
-             f"并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}")
     to = fmt_time(p["to"])
     when = (f"整批预计从 {fmt_time(p['from'])} 提前到 {to}（早 {fmt_dur(p['from'] - p['to'])}）" if p["from"] is not None
             else f"整批预计 {to} 跑完（现在有任务在原处跑不了，整批何时跑完推不出）")
-    return f"把 {what} 挪到 {label.get(tid, tid)}（{where}）：{when}{TAIL % fmt_time(t, date=False)}"
+    dep = [j["name"] for j in p["jobs"] if j.get("dep")]
+    tail = f"；写了 after= 的 {'、'.join(dep)} 排在挪来的几行最后（等别的任务的行在前会堵住后面的）" if dep and len(dep) < len(p["jobs"]) else ""
+    if p.get("local"):                 # 同机多开一条车道（#43）：剪到新的长期清单，与原清单同目录、同环境
+        # 推演只在没吃满的卡上排（offer 的 gpus）：登记时照样限卡，否则真放行可能放到吃满的卡上（Codex 审 #63）
+        gp = f" --gpus {','.join(map(str, p['gpus']))}（只用这几张卡：别的卡已吃满）" if p.get("gpus") else ""
+        return (f"在 {label.get(tid, tid)} 上多开一条车道：把 {what} 剪到一条新的长期清单（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；"
+                f"原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}{gp}，以后同类任务也往这条追加{tail}："
+                f"{when}{TAIL % fmt_time(t, date=False)}")
+    lane = p.get("lane") and f"{p['lane'][0].rstrip('/')}/{p['lane'][1]}"
+    where = (f"插在 {lane} 里 {p['before']} 前面（它写了 after=，要等别的任务；接在它后面会被它堵住）" if lane and p.get("before")
+             else f"接在 {lane} 后面" if lane
+             else f"这台还没有本项目同一种环境的清单：新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；原清单没有 .env 时也新建一个，只写这两行）"
+             f"并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}")
+    return f"把 {what} 挪到 {label.get(tid, tid)}（{where}{tail}）：{when}{TAIL % fmt_time(t, date=False)}"
 
 
 def log_text(msg: str) -> str:
@@ -120,8 +135,11 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
     这轮读失败的读 keep_offers 沿用的 offers_kept。offers 里已不在原处的行按这一轮读到的来源状态截掉（_fresh）。
     key 只按项目（rebalance:<项目>）：同一项目一直有建议时只叫醒一次，换目标、换挪哪几行都不算新的；建议消失后再出现才再叫醒。
     报过建议的项目门槛减半（滞回）；上一轮的目标主机仍够门槛、跑完的时刻比最优的晚不到 STICK_S 时沿用它，免得几台一样空时每轮换一句。
-    建议 {key 告警 key, target 挪到哪台, lane 接在它哪条清单后面, jobs [{host, root, queue, name, there, rest, end, own}], from 原来整批何时跑完
-    （推不出为 None）, to 挪后, cut 其中被借用约定挡住的清单 ["主机|目录|清单"], text}；挪不了的 {why [每台一句], from}；都没有的项目不列。"""
+    建议 {key 告警 key, target 挪到哪台, lane 接在它哪条清单后面, before 插在那条清单里哪一行前面（它写了依赖；None 接在末尾）,
+    jobs [{host, root, queue, name, there, rest, end, own, dep 这一行写了 after=}], from 原来整批何时跑完
+    （推不出为 None）, to 挪后, cut 其中被借用约定挡住的清单 ["主机|目录|清单"], local 是不是同机多开一条车道, text}；挪不了的 {why [每台一句], from}；
+    没有可挪的、却有一台有空（这个项目早就没活，或同机能多开车道）只因挪来的那一行没有估时推演算不出（offer 的 nodur）时，
+    {key "rebalance:<项目>:est", est: True, text 让会话写 est_min= 或 fit --list, why, from}（#43；同样只给会话、只叫醒一次）；都没有的项目不列。"""
     prev = prev or {}
     label = {e["id"]: e.get("label") or e["id"] for e in hosts}
     late = {f"{e['id']}|{x.get('root')}|{x.get('queue')}" for e in hosts for x in (e.get("borrow") or {}).get("late") or []}
@@ -138,25 +156,37 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
     out = {}
     for proj, xs in sorted(offs.items()):
         was = prev.get(proj) or {}
-        opts, why = [], []
+        opts, why, est = [], [], []
         for hid, o in xs:
             f = _top(list(o["ends"].values()) + [o["free"]])
             for k in range(1, len(o["jobs"]) + 1):
                 new = _finish(o, k)
                 if new is None or (f is not None and f - new < _need(f, t) * (0.5 if was.get("key") else 1)):
                     continue
-                opts.append({"target": hid, "lane": o["lane"], "jobs": o["jobs"][:k], "from": f, "to": new})
+                opts.append({"target": hid, "lane": o["lane"], "before": o.get("before"), "jobs": o["jobs"][:k], "from": f, "to": new, "local": bool(o.get("local")), "gpus": o.get("gpus")})
             # 挪不了：这台这个项目早就没活（离整批跑完还够阈值），却一行也接不了，写明为什么
-            if not o["jobs"] and o.get("why") and (f is None or (o["free"] is not None and f - max(o["free"], t) >= _need(f, t))):
+            idle = f is None or (o["free"] is not None and f - max(o["free"], t) >= _need(f, t))
+            if not o["jobs"] and o.get("why") and idle and not o.get("local"):     # 同机多开不成的不写：fit 会说
                 why.append(_why(hid, o, f, label, t))
+            if not o["jobs"] and o.get("nodur") and (idle or o.get("local")):
+                est.append((hid, o))
         if opts:
             rank = lambda x: (x["to"], len(x["jobs"]))
             best = min(opts, key=rank)
-            same = [x for x in opts if x["target"] == was.get("target") and x["to"] <= best["to"] + STICK_S]
+            same = [x for x in opts if x["target"] == was.get("target") and x["local"] == bool(was.get("local")) and x["to"] <= best["to"] + STICK_S]
             best = dict(min(same or [best], key=rank), key=f"rebalance:{proj}")
             best["cut"] = sorted({_lane(j) for j in best["jobs"]} & late)
             best["text"] = _text(best, proj, label, t)
             out[proj] = best
-        elif why:
+        elif why or est:
             out[proj] = {"why": why, "from": _top([_top(list(o["ends"].values()) + [o["free"]]) for _, o in xs])}
+            if est:
+                out[proj].update(key=f"rebalance:{proj}:est", est=True, text=_est_text(est, proj, label))
     return out
+
+
+def _est_text(est: list, proj: str, label: dict) -> str:
+    """挪来的那一行没有估时、推演算不出能提前多少时给会话的一句（#43）：哪台有空、卡在哪几行，怎么补。"""
+    where = "；".join(f"{label.get(h, h)}" + ("（同机多开一条车道）" if o.get("local") else " ") + f"接 {o['stop']} 时" for h, o in est)
+    return (f"有主机有空，但推演算不出挪过去能提前多少：{where}没有估时（同类没跑过，清单也没写 est_min）。"
+            f"给这类行写 est_min=（分钟，粗估就行），或 labmon worker fit <主机> <目录> <清单> --list --project {proj} 看此刻能再开几条车道")

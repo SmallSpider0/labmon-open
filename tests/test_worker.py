@@ -2963,6 +2963,124 @@ class OffersTest(UnitBase):
         plan = {j["name"]: j for ln in self.w.plan["lanes"] for j in ln["jobs"]}
         self.assertEqual(plan["a5"]["t1"], s["to"])
 
+    def local_lane(self, lines, name="L"):
+        """t 上 pa 自己的一条清单（登记在本机）：返回 (队列, 队首请求)。"""
+        (self.d / "a").mkdir(exist_ok=True)
+        (self.d / "a" / "jobs").mkdir(exist_ok=True)
+        (self.d / "a" / "jobs" / (name + ".txt")).write_text("\n".join(lines) + "\n")
+        q = self.m.load_queue({"_slug": name, "root": str(self.d / "a"), "jobs": "jobs/%s.txt" % name, "project": "pa"})
+        os.makedirs(q["state"], exist_ok=True)
+        self.w.queue_durs([q])
+        r = self.w.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_job(q)), self.now, {})
+        return q, r
+
+    def test_local_lane_offer(self):
+        # #43：t 上 pa 只有一条清单 b0–b5（各 2 小时），一张 46 GiB 的卡还放得下第二条：同机多开一条车道，把队尾 3 行剪过去，
+        # 整批从 12 小时后提前到 6 小时后（旧 offers 只看别的主机，同机的不出）
+        self.hosts.usage("t", [usage_row("b_old", "pa", self.now - 9000, self.now - 1800, tag="bt", ram_peak=1.0, vram_peak=19000.0, gpus=["GPU-a"])])
+        self.w.reload_hist()
+        q, r = self.local_lane(["b%d|true   # est_min=120 vram=20 tag=bt" % i for i in range(6)])
+        o = self.offer([q], [r])["pa"]
+        self.assertTrue(o["local"])
+        self.assertEqual([j["name"] for j in o["jobs"]][:3], ["b5", "b4", "b3"])
+        self.assertEqual([self.rel(j["rest"]) for j in o["jobs"][:3]], [10, 8, 6])
+        s = RB.suggest([{"id": "t", "label": "t", "worker_up": True, "status": {"offers": self.w.offer, "todo": self.w.todo}}], None, self.now)["pa"]
+        self.assertEqual(([j["name"] for j in s["jobs"]], self.rel(s["from"]), self.rel(s["to"]), s["local"]), (["b5", "b4", "b3"], 12, 6, True))
+        self.assertIn("在 t 上多开一条车道：把 t 上 %s/jobs/L.txt 的 b3、b4、b5 剪到一条新的长期清单" % (self.d / "a"), s["text"])
+        self.assertIn("labmon worker add t %s 新清单 --project pa" % (self.d / "a"), s["text"])
+        # 卡吃满了（近 10 分钟 ≥90%）、容器在限流：不出同机的
+        self.w.uwin = {"GPU-a": [(self.now - 60 * i, 95) for i in range(5)]}
+        self.assertNotIn("pa", self.offer([q], [r]))
+        self.w.uwin = {}
+        self.w.info = dict(self.w.info, press={"thr": 40.0})
+        self.assertIn("pa", self.offer([q], [r]))                       # 一轮的 thr 不算：限流按 thr_step 的这一段（状态的 throttle，#39）
+        self.w.thr_since = self.now - 600
+        self.assertNotIn("pa", self.offer([q], [r]))
+
+    def test_local_lane_pins_cards_used_in_forecast(self):
+        # #43（Codex 审 #63）：两张卡里 GPU-a 吃满了（近 10 分钟 95%）、只有 GPU-b 放：推演只在卡 1 上排新车道，
+        # 建议的登记命令要带 --gpus 1，否则真放行按空闲显存可能放到吃满的卡 0
+        self.cards(46000.0, 30000.0, total=46000.0)
+        self.hosts.usage("t", [usage_row("b_old", "pa", self.now - 9000, self.now - 1800, tag="bt", ram_peak=1.0, vram_peak=19000.0, gpus=["GPU-a"])])
+        self.w.reload_hist()
+        self.w.uwin = {"GPU-a": [(self.now - 60 * i, 95) for i in range(5)]}
+        q, r = self.local_lane(["b%d|true   # est_min=120 vram=20 tag=bt" % i for i in range(6)])
+        o = self.offer([q], [r])["pa"]
+        self.assertEqual((o["local"], o["gpus"]), (True, [1]))
+        s = RB.suggest([{"id": "t", "label": "t", "worker_up": True, "status": {"offers": self.w.offer, "todo": self.w.todo}}], None, self.now)["pa"]
+        self.assertTrue(s["local"])
+        self.assertIn("新清单 --project pa --gpus 1", s["text"])
+        self.cards(46000.0, 30000.0, total=46000.0)
+        self.w.uwin = {}                                                  # 两张卡都能放：不限卡，不写 --gpus
+        o = self.offer([q], [r])["pa"]
+        self.assertIsNone(o["gpus"])
+
+    def test_local_lane_without_duration_asks_for_est(self):
+        # #43（Codex 审 #63）：只在本机排队、显存有同 tag 实测、卡也放得下，但任务名没有时长历史又没写 est_min：原推演何时跑完推不出，
+        # 照样给一条同机的 nodur，看板出 rebalance:pa:est（旧代码 free 为 None 时整个项目跳过，什么都不出）
+        self.hosts.usage("t", [usage_row("b_old", "pa", self.now - 9000, self.now - 1800, tag="bt", ram_peak=1.0, vram_peak=19000.0, gpus=["GPU-a"])])
+        self.w.reload_hist()
+        q, r = self.local_lane(["n%d|true   # vram=20 tag=bt" % i for i in range(6)])
+        o = self.offer([q], [r])["pa"]
+        self.assertEqual((o["local"], o["jobs"], o["nodur"]), (True, [], True))
+        s = RB.suggest([{"id": "t", "label": "t", "worker_up": True, "status": {"offers": self.w.offer, "todo": self.w.todo}}], None, self.now)["pa"]
+        self.assertEqual((s["key"], s["est"]), ("rebalance:pa:est", True))
+        self.assertIn("t（同机多开一条车道）接 %s 时没有估时" % o["stop"], s["text"])
+
+    def test_local_lane_skips_hint_only_rows(self):
+        # 只有提示值（没有实测）的 GPU 行不作同机来源：同卡并行怕 OOM（同 fit）
+        q, r = self.local_lane(["c%d|true   # est_min=120 vram=20" % i for i in range(4)], name="H")
+        self.w.reload_hist()
+        o = self.offer([q], [r]).get("pa")
+        self.assertTrue(o is None or not o["jobs"], o)
+
+    def test_gain_threshold_short_batch(self):
+        # #43：门槛 max(15 分钟, min(1 小时, 剩余 30%), 剩余 10%)：剩 2 小时要早 36 分钟（旧门槛要 1 小时），剩 20 小时要 2 小时
+        t = self.now
+        self.assertEqual([RB._need(t + h * self.H, t) for h in (0.5, 1, 2, 5, 20)], [900, 1080, 2160, 3600, 7200])
+
+    def test_no_duration_asks_for_est(self):
+        # #43：o 上 pa 排得很晚、t 空着，但挪来的那一行没有估时：推演算不出能提前多少，不给挪法，出一条只给会话的 rebalance:pa:est
+        self.origin(["a%d|true   # vram=20" % i for i in range(4)], run=1)
+        o = self.offer()["pa"]
+        self.assertEqual((o["jobs"], o["stop"], o["nodur"]), ([], "a3", True))
+        s = self.suggest()["pa"]
+        self.assertEqual((s["key"], s["est"]), ("rebalance:pa:est", True))
+        self.assertIn("t 接 a3 时没有估时", s["text"])
+        self.assertIn("写 est_min=", s["text"])
+
+    def test_insert_before_dep_row(self):
+        # #43：t 上 pa 的清单 r 里第二行写了 after=：挪来的插在它前面（接在后面会被它堵住），建议句写明
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
+        q, r = self.local_lane(["b0|true   # est_min=60 vram=20", "b1|true   # est_min=60 vram=20 after=b0"], name="r")
+        self.offer([q], [r])
+        o = next(x for x in self.w.offer if x["project"] == "pa" and not x.get("local"))
+        self.assertEqual((o["lane"], o["before"]), ([q["root"], "jobs/r.txt"], "b1"))
+        s = self.suggest()["pa"]
+        if not s.get("local"):
+            self.assertIn("插在 %s/jobs/r.txt 里 b1 前面" % q["root"], s["text"])
+
+    def test_insert_before_dep_row_not_ahead_of_own_dep(self):
+        # #43（Codex 审 #63 第二轮）：挪来的 a5 写了 after=b1，而 b1 就是目标清单里第一条写了依赖的行：插在 b1 前面会成环（a5 等 b1、b1 排在 a5 后面），
+        # 所以不插、接在末尾
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(5)] + ["a5|true   # est_min=120 vram=20 after=b1"], run=1)
+        q, r = self.local_lane(["b0|true   # est_min=60 vram=20", "b1|true   # est_min=60 vram=20 after=b0"], name="r")
+        self.offer([q], [r])
+        o = next(x for x in self.w.offer if x["project"] == "pa" and not x.get("local"))
+        self.assertEqual((o["lane"], o["before"]), ([q["root"], "jobs/r.txt"], None))
+        self.assertEqual(o["jobs"][0]["name"], "a5")
+
+    def test_insert_before_dep_row_not_ahead_of_indirect_dep(self):
+        # #43（Codex 审 #63 第三轮）：a5 写 after=x，另一条本机清单上的 x 写 after=b1：a5 间接等 b1，插在 b1 前面同样成环，接在末尾
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(5)] + ["a5|true   # est_min=120 vram=20 after=x"], run=1)
+        q, r = self.local_lane(["b0|true   # est_min=60 vram=20", "b1|true   # est_min=60 vram=20 after=b0"], name="r")
+        (self.d / "a" / "jobs" / "s.env").write_text("QUEUE_STATE=state_s\n")      # 另一条清单：状态目录各写各的
+        q2, r2 = self.local_lane(["x|true   # est_min=60 vram=20 after=b1"], name="s")
+        self.w.queue_durs([q, q2])                                        # local_lane 每次只登记它那一条
+        self.offer([q, q2], [r, r2])
+        o = next(x for x in self.w.offer if x["project"] == "pa" and not x.get("local"))
+        self.assertEqual(o["before"], None)
+
     def test_borrowed_unstoppable_keepalive_card_cannot_take(self):
         # #45：t 是借来只给 pa 用的，唯一的卡上有对方另起、ka.sh 停不了的保活（只占 6 GiB）：真放行一直不放这张卡，t 的推演也不放，
         # 所以接不了 o 上的行，只写原因（旧推演清空了 owner，按剩下的 40 GiB 报能接）

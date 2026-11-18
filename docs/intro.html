@@ -339,7 +339,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
 <section id="alerts">
   <h2>告警与该怎么办</h2>
   <p class="prose">实验会话遇到 labmon 自身的问题时，用 <code>labmon report</code> 把现象和证据交给看板。维护者在记录页查报告，核实后转为仓库 Issue。</p>
-  <p class="prose">项目看板的告警经 <code>labmon wait</code> 叫醒实验会话。每种告警报一次，条件消失再出现才再报。项目暂时没实验时不报主机的事。</p>
+  <p class="prose">项目看板的告警经 <code>labmon wait</code> 叫醒实验会话。每种告警报一次，条件消失再出现才再报。项目暂时没实验时不报主机的事；项目刚跑空时叫醒会话一次（<code>no_work:</code>：要接着跑就追加下一批），借来的主机空着半小时以上也叫醒一次（<code>borrow_idle:</code>），都只给会话、不推给你。</p>
   <p class="prose">告警分给谁看：要你处理的（连不上这台主机、租期、可以续租等）在看板上显眼列出、算进告警数；会话自己能处理的（任务失败、依赖、CPU 被挡、GPU 空转、挪法建议等）不算告警数、不进红框，收在项目页与主机页红框下面默认折叠的“给实验会话的提示”里；两边都要的（磁盘快满、主机空着可能被回收、借来的约定前跑不完、主机已还还有任务）你看到的是人话、看板上能点什么，会话收到的是照着做的操作。下表“给谁”一列就是这个。</p>
   <div class="tbl">
     <table>
@@ -894,7 +894,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
     <p class="prose">清单绑定主机，同一项目常常一台排到第二天、另一台下午就空了。各台 worker 用自己的推演算“别的主机上这个项目排得最晚的几行，我接过来几点跑完”；看板按项目挑整批完工最早的一种，明显提前时报 <code>rebalance:&lt;项目&gt;</code>，写明挪哪几行、挪到哪台、整批提前到几点。labmon 只提示，不改清单、不改放行，挪由实验会话照做。</p>
     <figure>
       <div class="frame">
-        <svg viewBox="0 0 760 250" role="img" aria-label="主机 A 上本项目排到次日 02:00，主机 B 15:00 后就空着；把 A 队尾的 j4、j5 挪到 B，接在 B 的本项目清单后面，A 20:00 跑完、B 21:00 跑完，整批从 02:00 提前到 21:00，早 5 小时，超过 max(1 小时, 剩余 14 小时的 10%)，报 rebalance">
+        <svg viewBox="0 0 760 250" role="img" aria-label="主机 A 上本项目排到次日 02:00，主机 B 15:00 后就空着；把 A 队尾的 j4、j5 挪到 B，接在 B 的本项目清单后面，A 20:00 跑完、B 21:00 跑完，整批从 02:00 提前到 21:00，早 5 小时，超过 max(15 分钟, min(1 小时, 剩余 14 小时的 30%), 剩余 14 小时的 10%)，报 rebalance">
           <line class="axis" x1="150" y1="196" x2="720" y2="196"/>
           <text class="m" x="150" y="212" text-anchor="middle">12:00</text><text class="m" x="270" y="212" text-anchor="middle">15:00</text><text class="m" x="390" y="212" text-anchor="middle">18:00</text><text class="m" x="510" y="212" text-anchor="middle">21:00</text><text class="m" x="630" y="212" text-anchor="middle">00:00</text><text class="m" x="710" y="212" text-anchor="middle">次日 02:00</text>
           <line class="grid" x1="270" y1="40" x2="270" y2="196"/><line class="grid" x1="390" y1="40" x2="390" y2="196"/><line class="grid" x1="630" y1="40" x2="630" y2="196"/>
@@ -924,7 +924,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
           <rect class="node-r" x="390" y="140" width="120" height="22" rx="3"/><text x="398" y="155">j5</text>
           <text class="s" x="518" y="155">接在本项目清单后面</text>
 
-          <text class="s" x="150" y="240">早 5 小时 ≥ max(1 小时, 剩余 14 小时 × 10%)：报 rebalance:&lt;项目&gt;</text>
+          <text class="s" x="150" y="240">早 5 小时 ≥ 门槛（剩 14 小时：1.4 小时）：报 rebalance:&lt;项目&gt;</text>
         </svg>
       </div>
       <figcaption>先取此刻排得最晚那条清单的队尾一行，那条清单的完工随之提前，再取此刻最晚的，逐个加进接收方的推演看几点跑完。只从队尾取：清单里没写 <code>after=</code> 的先后 labmon 看不出来。</figcaption>
@@ -933,9 +933,10 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
       <ul>
         <li><b>数从哪来</b>：每台 worker 读别的在用主机的状态（还会跑的行取 <code>todo</code>，预计时刻取 <code>plan</code>），把挑出的行加进自己的推演，走同一份 <code>simulate</code>：本机别的项目、公平份额、约定截止、依赖、独占都照真放行。结果写进状态的 <code>offers</code>。各台读别的主机的状态最多晚几分钟，看板每轮再按这一轮读到的来源状态核对：已在原处开跑、已剪掉的行截掉。</li>
         <li><b>挑哪几行</b>：至多 5 行；从原处跑不了的清单挑时至多 20 行（挪完才推得出整批何时跑完）。最晚的已不晚于接收方这个项目跑完就停。队尾是占位任务、原处 10 分钟内就开跑、有别处的任务写了 <code>after=</code> 等着它、<code>needs=</code> 缺了在这台又补不了、清单文件里找不到、与前面挑的不是同一个目录或 <code>.env</code> 的到此为止，原因写下来（“29 上本项目 06:34 后没活，接不了 X：放不下（…）”）。</li>
-        <li><b>接在哪</b>：任务在清单的目录下跑、读这条清单的 <code>.env</code>，所以只接到接收方这个项目里目录与 <code>.env</code> 都一样（<code>QUEUE_STATE</code>、<code>QUEUE_LOGS</code> 两行各写各的，不算）、预计最早跑完的那条清单后面（不建议同机多开车道）；没有就新建一条，那句话里写出整句 <code>labmon worker add &lt;主机&gt; &lt;原清单的目录&gt; 新清单 --project &lt;项目&gt;</code>，<code>.env</code> 照抄，但 <code>QUEUE_STATE</code> 与 <code>QUEUE_LOGS</code> 写这条自己的（原清单没有 <code>.env</code> 时也新建一个，只写这两行）；清单写全路径（同项目几个目录下常有同名清单），句尾写按几点的推演。</li>
+        <li><b>接在哪</b>：任务在清单的目录下跑、读这条清单的 <code>.env</code>，所以只接到接收方这个项目里目录与 <code>.env</code> 都一样（<code>QUEUE_STATE</code>、<code>QUEUE_LOGS</code> 两行各写各的，不算）、预计最早跑完的那条清单后面，那条清单里有写了 <code>after=</code> 的行就插在它前面（清单顺序也算依赖，接在它后面会被堵住），挪来的几行里写了依赖的排在最后；没有就新建一条，那句话里写出整句 <code>labmon worker add &lt;主机&gt; &lt;原清单的目录&gt; 新清单 --project &lt;项目&gt;</code>，<code>.env</code> 照抄，但 <code>QUEUE_STATE</code> 与 <code>QUEUE_LOGS</code> 写这条自己的（原清单没有 <code>.env</code> 时也新建一个，只写这两行）；清单写全路径（同项目几个目录下常有同名清单），句尾写按几点的推演。</li>
         <li><b>谁接、谁能挪</b>：接收方 drain、只给别的项目用、项目暂停或在预备续租的不接（借来的主机上对方此刻超出预留不算）。原处推演里排不上、被约定归还、续租截止挡住或 drain 着、在原处跑不了的照样能挪，挪完推得出整批何时跑完就建议。借来的主机上对方此刻超出预留的清单照常推演，队首快开跑时同样不挪；推演里没有又说不出为什么、推演停在依赖上（等的任务跑不成或那台说不出何时跑完：挪走的行带着同样的 <code>after=</code>，不算原处跑不了）、或那台 worker 不在（续租、重启）的，原处何时放行不知道，整批推不出，不建议；已归还（含平台上关了机）的自用主机不算在内。</li>
-        <li><b>门槛</b>：整批至少提前 1 小时，且至少是剩余时间的 10%。报过建议的项目降到门槛一半以下才收；几台一样空时，上一轮建议的那台仍够门槛、跑完的时刻比最优的晚不到 15 分钟就沿用它。告警 key 只按项目：建议一直在时只叫醒一次，换目标、换挪哪几行都不算新的；某台一轮读失败、<code>offers</code> 偶尔出错时沿用上一次的，不会消失一轮再出现、又叫醒一次。会话照做前看最新那句。</li>
+        <li><b>同机多开一条车道</b>（#43）：同一台上排得最晚的清单，队尾几行剪到这台新开的一条车道也算一种挪法，同样的挑法、推演与门槛。只在卡有真余量时算：容器在限流、各卡近 10 分钟利用率都不低于 90%、利用率低的卡上在跑的被 CPU 卡住的都不出；只有清单提示值的 GPU 行不挪。挪来的那一行没有估时、算不出能提前多少时，另给会话一条 <code>rebalance:&lt;项目&gt;:est</code>，让它写 <code>est_min=</code> 或 <code>fit --list</code>。</li>
+        <li><b>门槛</b>：整批至少提前 max(15 分钟, min(1 小时, 剩余时间的 30%), 剩余时间的 10%)：剩 2 小时的批早 36 分钟就报，剩 10 小时以上的仍是 1 小时与 10%。报过建议的项目降到门槛一半以下才收；几台一样空时，上一轮建议的那台仍够门槛、跑完的时刻比最优的晚不到 15 分钟就沿用它。告警 key 只按项目：建议一直在时只叫醒一次，换目标、换挪哪几行都不算新的；某台一轮读失败、<code>offers</code> 偶尔出错时沿用上一次的，不会消失一轮再出现、又叫醒一次。会话照做前看最新那句。</li>
         <li><b>和 <code>borrow_cut</code> 的配合</b>：挪的行在借用约定挡住的清单上时，“可以这样挪：…”接在 <code>borrow_cut</code> 那条末尾，key 变成 <code>borrow_cut:&lt;车道&gt;:rebalance</code>（先报过不带建议的，有了挪法再叫醒一次），这一轮不再另报 <code>rebalance</code>；被挡的清单没配进项目车道、<code>borrow_cut</code> 不出时照报。</li>
         <li><b>页面</b>：那句建议是给实验会话的，看板上不铺整句、不算告警数；项目页“全部完成”的时刻旁、工作台项目表“预计全部跑完”旁各标一个“⇄ 可提前”（窄屏只留“⇄”），悬停（触屏点一下）看那句。别的主机早早空着却一行也接不了的（放不下、依赖不知何时满足、约定前跑不完等）在同一位置标灰“⇄”、悬停看原因，不告警。</li>
         <li><b>只是提示</b>：每轮（约 2 分钟）按那一刻的推演重算，挪过或不再划算的下一轮自动消失；本机不在内网时沿用上一轮的建议。算 <code>offers</code> 出错时沿用上一次的（最多 3 分钟），放行与推演照常。</li>

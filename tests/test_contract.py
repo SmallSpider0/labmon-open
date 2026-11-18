@@ -301,7 +301,13 @@ class ContractTest(unittest.TestCase):
         self.assertEqual(text_times(h["status"]) + text_times(h["done"]), [])
         # 项目“暂时没实验”看的是工作台上一轮快照里 worker 的 running / waiting：工作台采过空的这一轮后，项目下一次采集才标
         self.assertEqual([s["no_work_since"] for s in snaps.values()], [None, None])
-        self.assertTrue(all(C.collect(load(cfg))["no_work_since"] for cfg in self.cfgs.values()))
+        again = [C.collect(load(cfg)) for cfg in self.cfgs.values()]
+        self.assertTrue(all(s["no_work_since"] for s in again))
+        # 跑空了给实验会话一条 no_work:<起点>（#43：只给会话，不进页面告警数）
+        for s in again:
+            a = next(a for a in s["alerts"] if a["key"].startswith("no_work:"))
+            self.assertEqual((a["key"], a["to"]), (f"no_work:{round(s['no_work_since'])}", "agent"))
+            self.assertIn("没有活了", a["msg"])
 
 
 if __name__ == "__main__":
