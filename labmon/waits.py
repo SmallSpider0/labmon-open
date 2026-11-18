@@ -59,8 +59,8 @@ def collector_stale(cfg: dict, snap: dict | None, out: Path) -> str | None:
     age = time.time() - snap["generated"] if snap else None
     if age is not None and age <= stale_limit(cfg["interval"], cfg["alerts"]["stale_min"]):
         return None
-    return (f"采集已停 {age / 60:.0f} 分钟：看板服务可能没在跑（labmon service status）"
-            if age is not None else f"{out / 'snapshot.json'} 不存在：看板服务没在跑？")
+    return (f"采集已停 {age / 60:.0f} 分钟：看板服务可能没在跑，告诉用户（看板那台机器上 labmon service status）"
+            if age is not None else f"看板上还没有 {cfg['id']} 的快照：看板服务可能没在跑，告诉用户（看板那台机器上 labmon service status）")
 
 
 def wait_check(cfg: dict, out: Path, sf: Path, overview: Path | None = None, extra: dict | None = None) -> dict:
@@ -273,8 +273,7 @@ def wait(pid: str, names: list[str] | None = None, watch: dict | None = None, ho
             del _RIDS[r]
         if rid and rid in _RIDS:
             return _RIDS[rid][1]
-    if not PJ.ID_RE.fullmatch(pid) or pid not in PJ.registered():
-        raise PJ.Refused(404, f"看板上没有项目 {pid}：在项目目录里 labmon project push 登记")
+    PJ.require(pid)
     if not _SLOTS.acquire(blocking=False):
         raise Busy(f"看板上同时挂着的 labmon wait 已有 {SLOTS} 个，稍后再来")
     try:
@@ -288,12 +287,8 @@ def wait(pid: str, names: list[str] | None = None, watch: dict | None = None, ho
 
 
 def _wait(pid: str, names: list[str], watch: dict | None, hold: float, extra: dict, overview: Path | None) -> dict:
-    def require_config():
-        if not PJ.cfg_file(pid).is_file():
-            raise PJ.Refused(404, f"看板上没有项目 {pid}：在项目目录里 labmon project push 登记")
-
     with PJ._reg_locked():
-        require_config()
+        PJ.require(pid)
         cfg = PJ.load_cfg(pid)
         registration = PJ.meta(pid)
     out = PJ.out_dir(pid)
@@ -307,7 +302,7 @@ def _wait(pid: str, names: list[str], watch: dict | None, hold: float, extra: di
             sig, last = s, now
             st = w.check() if w else {}
             with PJ._reg_locked():
-                require_config()
+                PJ.require(pid)
                 if PJ.meta(pid) != registration:
                     raise PJ.Refused(409, f"项目 {pid} 的登记已变化，请重新运行 labmon wait")
                 new = wait_check(cfg, out, sf, overview, {**(w.stale if w else {}), **extra})

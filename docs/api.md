@@ -105,6 +105,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `GET /api/admin/backup`（冷备，回 `.tar.gz`） | `backup`，只给管理员，只在内网入口（#17） |
 | `POST /api/admin/deploy`、`/api/worker/start` | `deploy`，只给管理员，只在内网入口 |
 | `GET /api/hosts`、`GET /api/client/install.sh`、`GET /api/client/wheel` | `read` |
+| `GET /api/project/<id>/(status\|disk\|records)`（实验会话的只读命令，#52） | `read`；普通用户只看自己的项目（`users.need_project`） |
 | `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
 | `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit)`、`/api/override/(pause\|resume)`（[命令行](#命令行162)） | `project`；普通用户只改自己下的项目级暂停（`users.need_pause`，#16） |
 | `POST /api/pool/lend`（入池开关，#24） | `project`；持有人本人改自己的服务器，管理员代别人改要能做平台操作（`users.can_ops`）、开时勾「已和这人说好」（`pool.need_holder`、`pool.set_lend`） |
@@ -114,7 +115,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `GET /api/users`、`POST /api/users/…`（账号管理） | `admin`，只给管理员，只在内网入口（#17）；管理员从公网入口来时，人员页的「账号与权限」只说一句要从内网入口管理 |
 | 没登记的路径 | GET 按 `read`，POST、PUT 按 `admin` 且只给管理员（新写路由忘了登记时从严） |
 
-备用的看板服务（[服务租约](deploy.md#主与备用服务租约)）上，除登录、账号（`/api/login|setup|logout|password|tokens/add|revoke`、`/api/users/…`）与部署（`POST /api/admin/deploy`）外的写请求一律回 409，原因写主是谁、何时能接管，带 `"standby": true`（命令行据此接着试 `client.toml` 里的下一个地址，`serve.standby_ok`）；GET 照答（命令行读的 `GET /api/hosts`、`GET /api/project/<id>/config`、`GET /api/client/wheel` 除外：同样回 409 `standby`，备用上的登记是旧的，`serve.CLI_READS`），`/` 与 `/overview.json` 的 `server` 换成此刻的主备。
+备用的看板服务（[服务租约](deploy.md#主与备用服务租约)）上，除登录、账号（`/api/login|setup|logout|password|tokens/add|revoke`、`/api/users/…`）与部署（`POST /api/admin/deploy`）外的写请求一律回 409，原因写主是谁、何时能接管，带 `"standby": true`（命令行据此接着试 `client.toml` 里的下一个地址，`serve.standby_ok`）；GET 照答（命令行读的 `GET /api/hosts`、`GET /api/project/<id>/config`、`GET /api/project/<id>/(status|disk|records)`、`GET /api/client/wheel` 除外：同样回 409 `standby`，备用上的登记是旧的，`serve.CLI_READS`），`/` 与 `/overview.json` 的 `server` 换成此刻的主备。
 
 不过时：没登录或凭据失效 401（页面拿到它就回登录页），没权限 403（改口令时原口令不对也是 403：会话还有效），锁着 429，回 `{"error": "一句人话"}`。
 
@@ -223,7 +224,8 @@ labmon user token <名字> --scope deploy --name 部署 --out ~/.config/labmon/d
 
 ## 命令行（#162）
 
-会动东西的命令经看板接口由看板服务做：`wait`、`check`、`collect`、`worker`、`pause|resume|focus|unfocus|drain|undrain`、`project init|push|pull|archive|restore`、`borrow`、`host`。
+会动东西的命令经看板接口由看板服务做：`wait`、`check`、`collect`、`worker`、`pause|resume|focus|unfocus|drain|undrain`、`project init|push|pull|archive|restore`、`borrow`、`host`；
+实验会话要读的也都有命令（#52，会话不开浏览器看页面、不自己 curl）：`status`（项目现状）、`disk`（项目的磁盘）、`records`（项目的记录），见下面[只读命令](#只读命令52)。
 在哪台电脑上跑都一样，不读写本机的状态、不直接写主机清单、不直接 ssh（客户端 `labmon/client.py`，看板那边的做法 `labmon/api.py`、`labmon/waits.py`）。
 **输出与退出码与以前在本机做的一样**：看板回 `{"rc", "out", "err"}`，命令行原样打到标准输出、标准错误，按 `rc` 退出（`usage` 是参数错，退出码 2）。
 另：连不上看板服务退出码 2（试了 15 秒），看板拒绝（没登录、令牌没这个权限、配置不对、项目没登记）打它说的原因、退出码 3。
@@ -275,8 +277,29 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 | `POST /api/host/(return\|restore) {"id", "at", "now"}` | `{"rc", "out", "err"}`（`api.host`；`at` 是 epoch 秒，清单里写带年份的） |
 | `GET /api/hosts` | `{"missing", "hosts": [{"id", "returned", "ssh", "port", "label", "borrow", "worker_home", "home_with"}]}`：`labmon host list`、`labmon borrow` 列表用；`worker_home` 补了缺省值，`home_with` 是与它共用 worker 目录（同一块共享盘）的别的在用主机（`config.home_peers`，已归还的为空；普通用户只列他能用的） |
 
+| `GET /api/project/<id>/status` | `{"rc", "out", "err", "data"}`：`out` 是排好的项目现状，`data` 是项目快照原样（[schema.md](schema.md)；还没采集过为 null）（`api.status`） |
+| `GET /api/project/<id>/disk` | 同上，`data` 是项目快照的 `storage`（`disk.project_storage`，`api.disk`；字段见 [schema.md](schema.md)） |
+| `GET /api/project/<id>/records?host=&cat=&q=&limit=` | 同上，`data` 是记录行，新的在前（`api.records`；`limit` 缺省 30、最多 1000；`host` 不是这个项目用的主机时 `rc` 3） |
+
 `labmon collect` 用 `POST /p/<id>/collect`，`project archive|restore` 用 `POST /project/archive|restore`（命令行做的记成“经命令行（名字）”），`project push|pull` 用上面[项目配置](#项目配置)的两个接口。
 改东西的每条记一行服务日志（谁、做了什么、退出码）。
+
+### 只读命令（#52）
+
+实验会话要知道的都用命令拿，不看页面（内置浏览器不认看板的自签证书）、不自己拿 CA 与令牌去 curl。项目缺省取当前目录 `monitor.toml` 的 id（`-c` 指别的、或直接写项目 id）；`--json` 打原始数据给脚本用。都只读、不连服务器、不叫醒 `labmon wait`。
+
+```bash
+labmon status  [项目 id] [--json]      # 项目现状：各主机（卡的利用率与显存、掉线、借用）、各车道（几个跑完、预计何时跑完、为什么不跑）、
+                                       # 运行中（进度、已跑、预计结束与依据、此刻 CPU 核数、日志最后一行与多久没更新）、排队的预计开始、
+                                       # 最近失败（退出码、最后一行、日志位置）、计划项（实际/估时）、挪法建议或挪不了的原因、此刻的告警
+labmon disk    [项目 id] [--json]      # 共享盘上本项目各目录的大小、近 24 小时与 7 天的增量与最大的几项，整块盘剩多少、按近来的速度几天满；
+                                       # 各主机本地盘上本项目的缓存与单格临时、本地盘余量（续租、容器重启会清空）
+labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # 项目所用主机上与本项目有关的记录（拉起、掉线、续租、失败、临时指令……）
+```
+
+- `status` 首行写快照是几分钟前的；超过 `config.stale_limit` 的门槛（项目快照的 `thresholds.stale_s`）时写“看板没在采集”，会话告诉用户。项目已归档时先写那句（`projects.archived_msg`）。
+- `disk` 与项目页「本项目占用」同一份数据（项目快照的 `storage`，#53：项目根下的一级目录、删掉的目录、近来结束的任务写了多少；同一组扫描量得的几个任务合成一条，与 `bigwrite:` 告警同一句 `collect.write_text`）；别人的、组里的明细只给管理员。
+- `records` 的“与本项目有关”与项目页时间线的事件同一规则（`records.project_mine`）：去掉同机别的项目的作废、被挤掉与对它的暂停、优先，加上对本项目下的项目级暂停与优先。普通用户再按 `users.visible` 筛。
 
 ### `labmon wait` 的长轮询
 

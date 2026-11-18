@@ -81,6 +81,7 @@ ln -s /path/to/labmon/skills/lab-experiments ~/.claude/skills/lab-experiments
 labmon update                           # 从看板下载当前版本并更新命令行
 labmon login                            # 命令行经看板接口做事（#162）：输口令换一个 project 令牌（--admin：1 小时的 admin 令牌）；连哪个看板写在 ~/.config/labmon/client.toml（docs/api.md「命令行」）
 labmon check   -c monitor.toml          # 看板校验配置，打印各主机的探针规格
+labmon status | disk | records          # 只读（#52，项目缺省取当前目录的 monitor.toml）：项目现状（车道、运行中、排队的预计开始、失败、挪法、告警）/ 项目的磁盘（共享盘各目录与增量、几天满、本地盘缓存）/ 项目的记录；--json 打原始数据
 labmon collect -c monitor.toml          # 让看板立即采集这个项目一次，打出结果与链接
 labmon render  -c monitor.toml          # 看板那台机器上：只用上次的 snapshot.json 重新渲染页面（改页面时用）
 labmon project push -c monitor.toml     # 登记到看板上（第一次推就是登记）/ 推上改动；看板上改过的先 labmon project pull；改了 [[hosts]]、[[queues]] 的加 --admin（docs/workbench.md「项目登记与配置」）
@@ -138,7 +139,7 @@ labmon/projects.py      项目的登记（状态根的 projects/<id>/：配置�
 labmon/projsync.py      项目目录里的 monitor.toml 与看板上那份同步：labmon project push|pull、labmon wait 每轮的 sync
 labmon/client.py        命令行经看板接口做事：入口回退、令牌、登录与更新
 labmon/dist.py          从 main 的已提交文件生成客户端 wheel 与安装脚本
-labmon/api.py           命令行那几条命令（借卡、归还、临时指令、worker、project init、check）在看板服务这边的做法，回 {rc, out, err}
+labmon/api.py           命令行那几条命令（借卡、归还、临时指令、worker、project init、check；只读的 status、disk、records）在看板服务这边的做法，回 {rc, out, err}
 labmon/waits.py         labmon wait 在看板这边：新告警与全局消息、按名字认任务、长轮询 /api/wait
 labmon/lease.py         服务租约：每个 worker_home 下一份，只有主动 worker 的输入、平台与组内服务器、发通知；备用只读租约（labmon server lease）
 labmon/backup.py        冷备与恢复：打包状态根与主机清单（不含秘密），笔记本经 API 取、留 14 份，labmon server restore 恢复
