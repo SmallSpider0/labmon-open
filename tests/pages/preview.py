@@ -110,20 +110,21 @@ def build(out: Path, kind: str = "normal", who=None) -> list[str]:
             people = (snap.get("fleet") or {}).get("ops", {}).get("people", {})
             registered = {**F.registered_people(), **people}
             with patch.object(F, "registered_people", return_value=registered):
-                listing["person_choices"] = F.account_choices({}, {u["name"]: (u["fleet_person"], None) for u in listing["users"]})
+                listing["person_choices"] = U.free_people({u["name"]: {"fleet_person": u["fleet_person"]} for u in listing["users"]})
                 listing["people"] = sorted(registered)
             (out / "api" / "users.json").write_text(json.dumps(listing, ensure_ascii=False))
         (out / "login.html").write_text(C.render_page("login.html", {"empty": False, "entry": entry, "entry_name": U.ENTRIES[entry], "next": "",
                                                                      "pw_min": U.PW_MIN, "lock_min": U.LOCK_S // 60, "fails": U.FAIL_MAX}))
     if not who or ident.role == "admin":
         from labmon import fleet as F, fleetview as FV
+        from labmon.platform import NAME_RE
         fleet = snap.get("fleet") or {}
         people = set(fleet.get("ops", {}).get("people", {})) | {h["holder"] for h in fleet.get("holders", [])}
         if people:
             details = out / "fleet" / "person"
             details.mkdir(parents=True, exist_ok=True)
             for n in people:
-                if F.PERSON_RE.fullmatch(n):
+                if NAME_RE.fullmatch(n):
                     (details / f"{n}.json").write_text(json.dumps(FV.person(n, t=snap["generated"]), ensure_ascii=False))
     fill = (lambda f: f.write_text(C.fill(f.read_text(), "ME", me))) if me else (lambda f: None)
     C.write_page("overview.html", snap, out / "index.html", title="调度总览")

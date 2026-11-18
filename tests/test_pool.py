@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fixtures import make_token  # noqa: E402
 from labmon import api as A  # noqa: E402
 from labmon import config as CF  # noqa: E402
 from labmon import fleet as F  # noqa: E402
@@ -57,6 +58,8 @@ class Base(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {"LABMON_HOSTS": str(self.d / "hosts.toml"), "LABMON_STATE": str(self.d / "state")})
         self.env.start()
         self.write()
+        for name in ("boss", "AA", "BB"):                                    # 持有人按账号绑着的组内人员认（#19：只认账号库的绑定）
+            make_token(name, role="admin" if name == "boss" else "user", scopes=("read",))
 
     def tearDown(self):
         self.env.stop()

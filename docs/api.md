@@ -148,12 +148,12 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/password {"old", "new"}` | 改口令：别的浏览器都要重新登录，这个不用；令牌不受影响 |
 | `POST /api/tokens/add {"name", "scopes": [...]}` | `{"token"（原文，只这一次）, "id", "name", "scopes", "until", "msg", "commit"}` |
 | `POST /api/revoke {"id"}` | 吊销自己的一个会话或令牌（`id` 是列表里给的前 12 位） |
-| `GET /api/users` | 各账号：角色、口令设了没有、设置码到何时、锁到何时、最后用、会话与令牌（只有 id 与摘要）、项目、能用的主机、推送是否已配置、组内人员对应 `fleet_person` 与对应错误 `fleet_person_error`，以及名册与已匹配的当前人员 `people`、可开通账号的人员 `person_choices`。清单读取失败时返回 `people_error`，已有明确关联仍可管理 |
+| `GET /api/users` | 各账号：角色、口令设了没有、设置码到何时、锁到何时、最后用、会话与令牌（只有 id 与摘要）、项目、能用的主机、推送是否已配置、组内人员对应 `fleet_person`（只认账号库的绑定，没关联的为 null，#19）与对应错误 `fleet_person_error`（两个账号绑了同一人、名字不合法），以及名册与已匹配的当前人员 `people`、可开通账号的人员 `person_choices`。清单读取失败时返回 `people_error`，已有明确关联仍可管理 |
 | `POST /api/users/add {"name", "admin", "person"}` | 必须给出已登记、尚未绑定的人员 `person`，成功时返回一次性设置码 `code` 和提示 `msg`。重复绑定返回 409 |
 | `POST /api/users/role {"name", "admin"}` | 设为或撤销管理员 |
 | `POST /api/users/reset {"name"}` | `{"code", "msg"}`：原口令与这人的会话、令牌立即失效（#18） |
 | `POST /api/users/revoke {"name", "id"?}` | 吊销这人的一个会话或令牌；不给 `id` 是全部 |
-| `POST /api/users/remove {"name"}` | 删账号，连同它的会话、令牌、推送配置与主机清单 `[fleet.account_people]` 里它的对应（同名新账号不继承，#17）；`account_people` 写成 `[fleet]` 里的内联表且含这个账号时回 409，改成段落写法再删 |
+| `POST /api/users/remove {"name"}` | 删账号，连同它的会话、令牌、人员绑定、能用的主机、项目归属与推送配置（同名新账号不继承；主机清单只改 `users`，#19） |
 | `POST /api/users/hosts {"name", "hosts": [...]}` | 更新这名普通用户可用的主机 |
 | `POST /project/owner {"project", "owner"}` | 换项目主人；`owner` 为空时归管理员 |
 | `POST /api/push {"push", "bark" 或 "ntfy"}` | 保存自己的推送，回 `{msg, push}`；`push` 为空时移除。Bark 段填 `key`，可选 `server`、`encrypt_key`；ntfy 段填 `topic`，可选 `server`、`token`；服务地址限于渠道的官方地址或管理员在 `notify.toml` 配置的同渠道地址 |

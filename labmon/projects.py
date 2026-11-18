@@ -140,7 +140,7 @@ def meta(pid: str) -> dict:
 
 
 def owner(pid: str) -> str | None:
-    """项目主人的账号名（meta.json 的 owner，#167）；没登记、为空（命令行推的、迁移来的）是 None，即归管理员。账号还在不在由调用方（users.owns）看。"""
+    """meta.json 里记的项目主人（#167）；没登记、为空（命令行推的、迁移来的）是 None。判谁是主人只经 users.owner_of（对上现有账号，#19），别处不直接读它。"""
     o = meta(pid).get("owner")
     return str(o) if o else None
 
@@ -168,11 +168,6 @@ def _set_owner(pid, who, by, *, previous=None):
     log_events([{"kind": "config", "project": pid, "msg": msg}])
     tell(pid, "owner", f"{msg}：之后由 {who or '管理员'} 的账号与令牌管这个项目，别的普通用户的令牌做不了它的写操作")
     return msg
-
-
-def clear_owner(pid: str, name: str, by: str) -> None:
-    """删账号时只清掉仍属于这人的项目。"""
-    set_owner(pid, None, by, previous=name)
 
 
 def registered() -> list[str]:

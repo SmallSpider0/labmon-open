@@ -3,7 +3,7 @@
 文件：状态根目录下的 users.json（权限 600）。口令只存 PBKDF2 哈希，设置码、会话与令牌只存 SHA-256，原文不落盘、不打印、不进日志：
     {"users": {名字: {"role": "admin"|"user", "pw": "pbkdf2_sha256$轮数$盐$哈希" 或 null（还没设、被重置了）,
                       "setup": {"h": 设置码的 SHA-256, "until": epoch 秒} 或 null, "fails": 连着输错几次, "lock": 锁到何时,
-                      "t": 建于, "by": 谁建的}},
+                      "t": 建于, "by": 谁建的, "fleet_person": 绑着的组内人员名 或 null（暂不关联；#19 起每个账号都有这个键，people_of）}},
      "sessions": {SHA-256: {"user", "t", "seen", "until", "entry", "ua"}},
      "tokens":   {SHA-256: {"user", "name", "scopes", "t", "seen", "until"（admin 令牌 1 小时，其余 null）}}}
 读改写整段互斥（_edit：进程内锁 + 旁边 users.lock 上的 flock；看板服务与命令行 labmon user 会同时改）；读按 inode、修改时刻、大小缓存（_read），
@@ -12,7 +12,7 @@
 作用域（SCOPES）：read 只读；project 项目的写操作（立即采集、调度、登记、归档、改配置），含 read；deploy 部署核对（读与立即采集），含 read；
 backup 备份（#163），含 read；reports 只读问题报告元数据（#200）；admin 全部，1 小时过期。另有只给浏览器会话的 account：改自己的口令、管自己的令牌（令牌不能再造令牌）。
 实际权限 = 令牌的作用域（会话取角色的全部）∩ 角色能做的（ROLE_SCOPES：管理员全部，普通用户只读与项目）。
-普通用户的项目写操作另按对象核（#167）：只能动自己是主人的项目（owns，projects.owner），只能用主机清单里列着他的主机（may_host，config.host_users），
+普通用户的项目写操作另按对象核（#167）：只能动自己是主人的项目（owns，owner_of），只能用主机清单里列着他的主机（may_host，config.host_users），
 清单登记按全局快照的 regs 认是谁的（need_reg、need_list）；serve.Handler._own 按路由表的 own 列调这几个。看的也只有自己的（access、view、visible）。
 入口（ENTRIES）：lan 内网入口，public 公网入口（管理员可按账号允许平台操作）（只绑回环，给隧道接）。
 """
@@ -36,7 +36,7 @@ from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 
 from . import projects as PJ
-from .config import CLIENT_HEADER, COMMIT_RE, POOL, ConfigError, drop_account_people, host_users, pause_by, sched, set_host_users, share_host, user_hosts
+from .config import CLIENT_HEADER, COMMIT_RE, POOL, ConfigError, host_users, pause_by, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
 from .state import file_sig, snapshot, state_root, write_atomic
 
@@ -45,6 +45,7 @@ CLIENT_RECENT_S = 30 * 86400
 ITER = 600_000                 # PBKDF2-SHA256 的轮数：随哈希存，以后加轮数旧口令照样认（测试里调低）
 SESSION_S = 30 * 86400         # 会话 30 天，滑动续期
 TOUCH_S = 3600                 # 会话、令牌的“最后用”至多每小时落盘一次（会话同时续期、重发 Cookie）
+CLIENT_TOUCH_S = 300           # 令牌报来的客户端版本变了至多每 5 分钟落盘一次（#19：同一令牌被两个版本交替用时不每次写账号库）
 SETUP_S = 86400                # 设置码 24 小时有效，用一次作废
 ADMIN_TOKEN_S = 3600           # admin 令牌 1 小时过期
 USER_PROJECTS = 20             # 普通用户名下最多几个项目（含已归档的，#18；need_room）
@@ -198,16 +199,6 @@ def _admins(d: dict) -> list[str]:
 def admins() -> list[str]:
     """各管理员的名字（service.notify：给管理员的提醒另推到他们自己填的推送，#167）。"""
     return _admins(_read())
-
-
-def _bindings(users: dict) -> dict:
-    return {name: u["fleet_person"] for name, u in users.items() if "fleet_person" in u}
-
-
-def account_identity() -> tuple[tuple[str, ...], dict]:
-    """同一次读取取得账号拼写与明确的人员选择。"""
-    users = _read()["users"]
-    return tuple(users), _bindings(users)
 
 
 def account(name: str | None) -> dict | None:
@@ -371,8 +362,7 @@ def ident(headers, t: float | None = None) -> Ident:
     version = headers.get(CLIENT_HEADER, "") if via == "token" else ""
     version = version if COMMIT_RE.fullmatch(version) else None
     touch = t - (rec.get("seen") or 0) >= TOUCH_S
-    observe = version and (version != rec.get("client_commit") or t - (rec.get("client_seen") or 0) >= TOUCH_S)
-    if touch or observe:
+    if touch or _observe(rec, version, t):
         with _edit() as d:
             r = d["sessions" if via == "session" else "tokens"].get(k)
             if r:
@@ -381,11 +371,16 @@ def ident(headers, t: float | None = None) -> Ident:
                     if via == "session":
                         r["until"] = round(t + SESSION_S)
                         who.cookie = raw
-                if version and t >= (r.get("client_seen") or 0) and (
-                    version != r.get("client_commit") or t - (r.get("client_seen") or 0) >= TOUCH_S
-                ):
+                if _observe(r, version, t):
                     r.update(client_commit=version, client_seen=round(t))
     return who
+
+
+def _observe(r: dict, version: str | None, t: float) -> bool:
+    """令牌报来的客户端版本要不要记（账号详情的“最近报告的版本”）：同一版本每 TOUCH_S 记一次，换了版本隔 CLIENT_TOUCH_S 就记；
+    读请求不必每次写账号库（#19：同一令牌被没更新的 labmon wait 与新装的命令行交替用时，不每个请求都写）。"""
+    seen = r.get("client_seen") or 0
+    return bool(version) and t >= seen and t - seen >= (TOUCH_S if version == r.get("client_commit") else CLIENT_TOUCH_S)
 
 
 def check(headers, need, admin: bool = False, t: float | None = None) -> Ident:
@@ -509,10 +504,8 @@ def add(name: str, role: str, by: str, t: float | None = None, *, person: str) -
             raise Denied(409, f"已经有账号 {name}")
         if role != "admin" and not _admins(d):
             raise Denied(409, "还没有管理员：第一个账号必须加 --admin")
-        # 新账号不能使已有账号失去唯一的人员对应。
-        from . import fleet as F
         try:
-            F.check_account_binding(F.conf() or {}, d["users"], _bindings(d["users"]), name, person)
+            _check_bind(d["users"], name, person)
         except ConfigError as e:
             raise Denied(409, str(e)) from e
         code, st = _new_code(t)
@@ -522,17 +515,14 @@ def add(name: str, role: str, by: str, t: float | None = None, *, person: str) -
 
 
 def bind_person(name: str, person: str, by: str) -> str:
-    """仅给尚无组内人员的账号补绑定，与新建账号共用写入锁。"""
-    from . import fleet as F
+    """给还没关联组内人员的账号补绑定（本机命令行 labmon user bind；绑着的人认不出、与别的账号冲突的也算没关联），与新建账号共用写入锁。"""
     with _edit() as d:
         k = _key(d["users"], name)
         if not k:
             raise Denied(404, f"没有账号 {name}")
-        cfg = F.conf() or {}
-        bindings = _bindings(d["users"])
-        if bindings.get(k) == person:
+        if d["users"][k].get("fleet_person") == person:
             return f"{k} 已关联组内人员 {person}"
-        F.check_account_binding(cfg, d["users"], bindings, k, person, existing=True)
+        _check_bind(d["users"], k, person, existing=True)
         d["users"][k]["fleet_person"] = person
     msg = f"{k} 已关联组内人员 {person}"
     _log(f"{by} 把账号 {k} 关联到组内人员 {person}")
@@ -540,16 +530,150 @@ def bind_person(name: str, person: str, by: str) -> str:
 
 
 @contextmanager
-def removing_person(person: str, cfg: dict | None):
-    """与账号开通串行，防止移除名册时留下孤立账号。"""
-    from . import fleet as F
+def removing_person(person: str):
+    """从组内名册删人时（fleetboot.set_person）：这人已开通账号就拒绝。与账号开通串行，防止删了名册留下孤立账号。"""
     with _edit(write=False) as d:
-        links = F.account_people(cfg or {}, d["users"], _bindings(d["users"]))
-        bindings = [v for v in _bindings(d["users"]).values() if isinstance(v, str)]
-        bindings += [name for name, _ in links.values() if name]
-        if any(name.casefold() == person.casefold() for name in bindings):
+        if _bound_to(d["users"], person):
             raise Denied(409, f"{person} 已开通账号，请先在「账号与权限」处理账号")
         yield
+
+
+# ---------- 账号对应的组内人员（#19：只认账号库的显式绑定） ----------
+def _bound_to(users: dict, person: str, skip: str | None = None) -> list[str]:
+    """账号库里绑着这个人员名（不分大小写）的账号（skip 除外）。"""
+    return [n for n, u in users.items() if n != skip and isinstance(u.get("fleet_person"), str) and u["fleet_person"].casefold() == person.casefold()]
+
+
+def people_of(users: dict | None = None) -> dict[str, tuple[str | None, str | None]]:
+    """各账号对应的组内人员：{账号: (人员名, 认不出时的说明)}。只看账号库里的 fleet_person（#70 起开通时必填，#19 把以前的账号迁了过来）：
+    是合法的人员名就是这人；null（明确暂不关联）或没有这个键是 (None, None)；两个账号绑到同一个人时两边都不算、都报错。
+    users：账号库里的 users（缺省现读）。"""
+    from .platform import NAME_RE
+    users = _read()["users"] if users is None else users
+    out = {}
+    for name, u in users.items():
+        p = u.get("fleet_person")
+        if p is None:
+            out[name] = (None, None)
+        elif not isinstance(p, str) or not NAME_RE.fullmatch(p):
+            out[name] = (None, f"账号 {name} 关联的人员名不能作平台作业名：在看板主机上 labmon user bind {name} <人员名> 重新关联")
+        elif len(both := [name, *_bound_to(users, p, skip=name)]) > 1:
+            out[name] = (None, f"人员 {p} 对应多个账号（{'、'.join(sorted(both))}）：在看板主机上用 labmon user bind 把其中一个改关联别人")
+        else:
+            out[name] = (p, None)
+    return out
+
+
+def person_of(name: str | None) -> tuple[str | None, str | None]:
+    """这个账号在组内人员表里是谁：(人员名, 认不出时的说明)；没有这个账号、没关联的是 (None, None)（people_of）。
+    平台操作认“我”、借用记借用人、算力池成员、页面上的 ME 都经它。"""
+    users = _read()["users"]
+    k = _key(users, name) if name else None
+    return people_of(users)[k] if k else (None, None)
+
+
+def free_people(users: dict | None = None) -> list[str]:
+    """开通账号时可选的人：组内名册里还没有账号绑着的（「账号与权限」的选项；真开通时 _check_bind 再核一次）。"""
+    from . import fleet as F
+    users = _read()["users"] if users is None else users
+    return sorted((n for n in F.registered_people() if not _bound_to(users, n)), key=str.casefold)
+
+
+def _check_bind(users: dict, account: str, person: str, existing: bool = False) -> None:
+    """把 account 绑到 person 之前核：人员在组内名册里、没有别的账号绑着这人；existing（补绑）时这个账号还没关联上别人。不过抛 ConfigError。"""
+    from . import fleet as F
+    from .platform import NAME_RE
+    if not isinstance(person, str) or not NAME_RE.fullmatch(person) or person not in F.registered_people():
+        raise ConfigError(f"人员 {person} 已不在组内名单，请刷新后重试")
+    if existing and (cur := people_of(users).get(account, (None, None))[0]):
+        raise ConfigError(f"{account} 已关联组内人员 {cur}")
+    if other := _bound_to(users, person, skip=account):
+        raise ConfigError(f"人员 {person} 已开通账号 {other[0]}，每名人员最多开通一个账号")
+
+
+def migrate_people() -> list[str]:
+    """可删（#19 迁移）：部署后主与备用的看板服务各启动过一次就删，连同下面的 _legacy_people 与 serve.serve 里调它的那几行。
+    #70 之前开的账号没有 fleet_person 键，以前按主机清单 [fleet.account_people]、与组内人员或快照 fleet.holders 里的名字同名认人。
+    这里按那套规则认一次：认得出的写进账号库，只能落到账号名本身或当时就认不出的写 null（明确暂不关联，之后可 labmon user bind 补）。
+    已有这个键的账号不动，所以第二次起什么都不做。主机清单读不了时抛 ConfigError（不迁，下次启动再迁）。返回记下的话（也记进记录页）。"""
+    from . import fleet as F
+    users = _read()["users"]
+    if all("fleet_person" in u for u in users.values()):
+        return []
+    cfg = F.conf() or {}
+    got = _legacy_people(cfg, users)
+    notes = []
+    with _edit() as d:
+        for n, u in d["users"].items():
+            if "fleet_person" in u:
+                continue
+            person, why = got.get(n, (None, "迁移时还没有这个账号"))
+            u["fleet_person"] = person
+            notes.append(f"账号 {n} 迁移（#19）：关联组内人员 {person}" if person else
+                         f"账号 {n} 迁移（#19）：没有关联组内人员（{why}），要关联在看板主机上 labmon user bind {n} <人员名>")
+    if notes and cfg.get("account_people"):
+        notes.append("主机清单里的 [fleet.account_people] 已迁进账号库，看板不再读它，可以手删（#19）")
+    for m in notes:
+        _log(m)
+    return notes
+
+
+def _legacy_people(cfg: dict, users: dict) -> dict[str, tuple[str | None, str | None]]:
+    """可删（#19 迁移，同 migrate_people）：#19 之前 fleet.account_people 的规则，只给迁移用。依次看账号库的 fleet_person、
+    主机清单 [fleet.account_people]、与组内人员（fleet.known_people）同名、与快照 fleet.holders 里的名字同名（都不分大小写）；
+    两个账号对上同一人时都不算。与以前不同的只有一处：只能落到账号名本身的（以前就当这是人员名）这里算认不出。"""
+    from . import fleet as F
+    from .platform import NAME_RE
+    names = F.known_people(cfg)
+    by_name, historic = {}, {}
+    for name in sorted(n for n in names if n):
+        by_name.setdefault(name.casefold(), []).append(name)
+    for row in (snapshot().get("fleet") or {}).get("holders", []):
+        if isinstance(row.get("holder"), str):
+            historic.setdefault(row["holder"].casefold(), []).append(row["holder"])
+    mapping = cfg.get("account_people", {})
+    if not isinstance(mapping, dict):
+        return {a: (None, "主机清单的 [fleet.account_people] 不是账号到人员名的表") for a in users}
+    explicit = {}
+    for key, name in mapping.items():
+        explicit.setdefault(key.casefold(), []).append(name)
+    for key, u in users.items():
+        if "fleet_person" in u:
+            explicit[key.casefold()] = [u["fleet_person"]]
+    owners = {}
+    for key, values in explicit.items():
+        for name in values:
+            if isinstance(name, str) and NAME_RE.fullmatch(name):
+                owners.setdefault(name.casefold(), set()).add(key)
+    out, guess = {}, set()
+    for account in users:
+        key = account.casefold()
+        choices = explicit.get(key, [])
+        if len(choices) > 1:
+            out[account] = (None, "[fleet.account_people] 里有多条对应")
+            continue
+        name = choices[0] if choices else account
+        if not isinstance(name, str) or not NAME_RE.fullmatch(name):
+            out[account] = (None, "对应的人员名不能作平台作业名")
+            continue
+        same = by_name.get(name.casefold()) or historic.get(name.casefold(), [])
+        if choices and name in names:
+            person = name
+        elif len(same) > 1:
+            out[account] = (None, "对应多个人员名")
+            continue
+        else:
+            person = same[0] if same else name
+            if not same and not choices:
+                guess.add(account)
+        owners.setdefault(person.casefold(), set()).add(key)
+        out[account] = (person, None)
+    for account, (person, _) in out.items():
+        if person and len(owners[person.casefold()]) > 1:
+            out[account] = (None, f"人员 {person} 对应多个账号")
+        elif account in guess:
+            out[account] = (None, "主机清单里没写对应，组内人员里也没有同名的")
+    return out
 
 
 def set_public_ops(name: str, enabled: bool, by: str) -> str:
@@ -609,8 +733,9 @@ def reset(name: str, by: str, self_ok: bool = False, keep_tokens: bool = False, 
 
 
 def remove(name: str, by: str) -> str:
-    """删掉一个账号（这人不再用看板）：连同它的会话与令牌（下一次请求就失效）、能用的主机、项目归属、推送配置与主机清单 [fleet.account_people] 里的对应。
-    删不了自己，也删不了最后一个管理员。"""
+    """删掉一个账号（这人不再用看板）：删人时唯一的清理入口（#19）。连同它的会话与令牌（下一次请求就失效）、人员绑定（随账号一起删）、
+    能用的主机（主机清单的 users）、项目归属（meta.json 的 owner）与推送配置。暂停是谁下的（[sched.pause_by]、worker 指令的 by）不动：
+    同名新账号要管理员再把项目交给它才用得上。删不了自己，也删不了最后一个管理员。"""
     from .config import HOSTS_LOCK
     with HOSTS_LOCK, PJ._reg_locked(), _edit() as d:
         k = _key(d["users"], name)
@@ -621,10 +746,6 @@ def remove(name: str, by: str) -> str:
         if d["users"][k].get("role") == "admin" and _admins(d) == [k]:
             raise Denied(409, f"{k} 是最后一个管理员，删不掉：先把别人设为管理员")
         from .service import set_user_push
-        try:
-            drop_account_people(k, by)               # 主机清单里这人的人员对应（#17）：先做，写不了就整件不做
-        except ConfigError as e:
-            raise Denied(409, str(e)) from e
         set_host_users(k, [], by)
         for pid in PJ.registered():
             PJ._set_owner(pid, None, by, previous=k)
@@ -647,7 +768,7 @@ def listing(t: float | None = None, *, directory=False) -> dict:
         if not directory:
             raise
         hs, host_error = [], str(e)
-    owners = {pid: (PJ.owner(pid) or "").lower() for pid in PJ.registered()}
+    owners = {pid: owner_of(pid, d["users"]) for pid in PJ.registered()}
     for k, u in sorted(d["users"].items(), key=lambda x: (x[1].get("role") != "admin", x[0].lower())):
         ss = [_sess_view(h, r) for h, r in d["sessions"].items() if r.get("user") == k and not (r.get("until") and r["until"] < t)]
         ts = [_tok_view(h, r) for h, r in d["tokens"].items() if r.get("user") == k and not (r.get("until") and r["until"] < t)]
@@ -658,26 +779,22 @@ def listing(t: float | None = None, *, directory=False) -> dict:
                     "sessions": sorted(ss, key=lambda x: -(x["seen"] or 0)), "tokens": sorted(ts, key=lambda x: -(x["t"] or 0)),
                     # 能用的主机（主机清单里列着他的，#167）、他是主人的项目；管理员的都是“全部”，不列
                     "hosts": [str(h["id"]) for h in hs if k.lower() in host_users(h)] if u.get("role") != "admin" else None,
-                    "projects": sorted(p for p, o in owners.items() if o == k.lower())})
+                    "projects": sorted(p for p, o in owners.items() if o == k)})
     pick = [{"id": str(h["id"]), "label": h.get("label") or str(h["id"]), "returned": bool(h.get("returned"))} for h in hs if "id" in h and share_host(h) and not h.get("borrow")]
     result = {"users": out, "admins": len(_admins(d)), "roles": ROLES, "scope_info": scope_info(), "hosts": pick}
     if directory:
         from . import fleet as F
         roster = set(F.registered_people())
-        bindings = _bindings(d["users"])
+        links = people_of(d["users"])
+        linked = {person for person, _ in links.values() if person}
         if host_error:
             result["hosts_error"] = host_error
         try:
-            cfg = F.conf() or {}
-            known = F.known_people(cfg)
-            links = F.account_people(cfg, d["users"], bindings, names=known)
-            result["person_choices"] = F.account_choices(cfg, links, bindings)
-            people = roster | ({person for person, _ in links.values()} & known)
+            people = roster | (linked & F.known_people(F.conf() or {}))
+            result["person_choices"] = free_people(d["users"])
         except ConfigError as e:
             result["people_error"] = str(e)
-            # 配置坏了时只凭账号库中明确保存的对应维护现有账号。
-            links = F.account_people({}, bindings, bindings, names=roster)
-            people = roster | {person for person, _ in links.values() if person}
+            people = roster | linked                 # 主机清单坏了：认不出谁占着服务器，账号绑着的人都列上
         result["people"] = sorted(people, key=str.casefold)
         for u in out:
             u["fleet_person"], u["fleet_person_error"] = links.get(u["name"], (None, None))
@@ -703,14 +820,16 @@ def _is(a: str | None, b: str | None) -> bool:
     return bool(a) and bool(b) and a.lower() == b.lower()
 
 
+def owner_of(pid: str, users: dict | None = None) -> str | None:
+    """项目主人在账号库里的写法（#19：项目主人只在这里判）：meta.json 的 owner（projects.owner）按不分大小写对上的现有账号；
+    没主人（命令行推的、迁移来的）、主人的账号已删的是 None，即归管理员。users：账号库里的 users（缺省现读；逐个项目判时传一份）。"""
+    o = PJ.owner(pid) if PJ.ID_RE.fullmatch(pid or "") else None
+    return _key(_read()["users"] if users is None else users, o) if o else None
+
+
 def owns(who: Ident, pid: str) -> bool:
-    """能不能动这个项目：管理员都能；普通用户要是它的主人（projects.owner；为空、账号已删的归管理员）。"""
-    if who.role == "admin":
-        return True
-    if not PJ.ID_RE.fullmatch(pid):
-        return False
-    o = PJ.owner(pid)
-    return _is(o, who.name) and _key(_read()["users"], o) is not None
+    """能不能动这个项目：管理员都能；普通用户要是它的主人（owner_of）。"""
+    return who.role == "admin" or owner_of(pid) == who.name
 
 
 def may_host(who: Ident, hid: str) -> bool:
@@ -734,8 +853,8 @@ class Access:
 
 def access(who: Ident, snap: dict | None = None) -> Access:
     """普通用户的 Access（管理员不用它：调用方先看 role）。snap：全局快照（缺省现读），取他的项目有车道的主机。"""
-    me = who.name.lower()
-    projects = {pid for pid in PJ.registered() if (PJ.owner(pid) or "").lower() == me} if _key(_read()["users"], who.name) else set()
+    me, users = who.name.lower(), _read()["users"]
+    projects = {pid for pid in PJ.registered() if owner_of(pid, users) == who.name}
     allowed = {str(h["id"]) for h in user_hosts() if "id" in h and me in host_users(h)}
     snap = snapshot() if snap is None else snap
     lanes = {str(ln.get("host")) for p in (snap or {}).get("projects") or [] if p.get("id") in projects for ln in p.get("lanes") or [] if ln.get("host")}
@@ -754,7 +873,8 @@ def need_room(who: Ident, pid: str) -> None:
     已登记的、管理员不核。调用方持 projects._reg_locked（put_config 的 check_owner），数与登记之间别人加不进来。"""
     if who.role == "admin" or PJ.cfg_file(pid).is_file():
         return
-    n = sum(_is(PJ.owner(p), who.name) for p in PJ.registered())
+    users = _read()["users"]
+    n = sum(owner_of(p, users) == who.name for p in PJ.registered())
     if n >= USER_PROJECTS:
         raise Denied(409, f"你名下已有 {n} 个项目（含已归档的，上限 {USER_PROJECTS} 个）：用不着的先归档，再找管理员永久删除，或请管理员登记")
 

@@ -4,7 +4,7 @@
   进全局快照的 regs（state 为 pool）与项目车道（collect），别处 after= 等它由 worker 的 peers 认。放到哪台、搬走由 C（#25）做。
 - 入池开关：[[fleet.servers]] 的 lend、lend_hours（fleet.conf 校验，fleet.lend_open 判时段），持有人本人在「我的账号 → 我的服务器」开，
   管理员在组内服务器抽屉代开（要能做平台操作、勾「已和这人说好」）。换人时 config.set_fleet_holder 一并去掉。
-- 成员：管理员，或账号对应的人（fleet.account_person）有一台开了入池的组内服务器（member）。users.may_host 对 pool 问它。
+- 成员：管理员，或账号对应的人（users.person_of）有一台开了入池的组内服务器（member）。users.may_host 对 pool 问它。
 不新增状态文件：持久的只有主机清单里的两行。
 """
 from __future__ import annotations
@@ -15,12 +15,12 @@ import time
 from . import fleet as F
 from .config import HOSTS_LOCK, POOL, ConfigError, set_fleet_keys
 from .state import snapshot
-from .users import Denied, Ident
+from .users import Denied, Ident, person_of
 
 
 def _person(who: Ident, cfg: dict | None) -> str | None:
-    """这个账号在组内人员表里是谁（fleet.account_person；认不出为 None）。"""
-    return F.account_person(cfg, who.name)[0] if cfg else None
+    """这个账号在组内人员表里是谁（users.person_of；没有 [fleet]、认不出为 None）。"""
+    return person_of(who.name)[0] if cfg else None
 
 
 def _servers(cfg: dict | None, person: str | None) -> list[dict]:

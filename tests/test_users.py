@@ -339,35 +339,17 @@ class AdminTest(UsersBase):
             U.remove("amy", "boss")
         self.assertEqual(e.exception.code, 404)
 
-    def test_remove_drops_account_people(self):
-        """#17：删账号时连同主机清单 [fleet.account_people] 里这个账号的对应（大小写不敏感）一起删，同名新账号不继承；别的行、别的段不动。"""
-        import tomllib
+    def test_remove_then_same_name_does_not_inherit_person(self):
+        """删账号时人员绑定随账号一起删（#19：主机清单的 [fleet.account_people] 不再读，删账号也不再改主机清单）；同名新账号要重新选人。"""
         hosts = Path(os.environ["LABMON_HOSTS"])
-        hosts.write_text('[fleet]\nme = "BOSS"   # 旧写法\n\n[fleet.account_people]\nboss = "BOSS"\nAmy = "AMY"   # 这人\n"bob" = "BOB"\n\n[[hosts]]\nid = "a"\nssh = "remote-a"\n')
+        text = '[fleet]\n\n[fleet.account_people]\namy = "AMY"\n'
+        hosts.write_text(text)
         self.admin()
-        fixtures.add_account("amy", "user", "boss", t=T0)
+        fixtures.add_account("amy", "user", "boss", t=T0, person="Amy")
         U.remove("amy", "boss")
-        text = hosts.read_text()
-        self.assertEqual(tomllib.loads(text)["fleet"]["account_people"], {"boss": "BOSS", "bob": "BOB"})
-        self.assertIn('me = "BOSS"   # 旧写法', text)
-        self.assertIn('[[hosts]]\nid = "a"', text)
-        fixtures.add_account("bob", "user", "boss", t=T0)
-        hosts.write_text('[fleet]\naccount_people = {bob = "BOB"}\n')               # 写成内联表的：不删账号，说清楚怎么改
-        with self.assertRaises(U.Denied) as e:
-            U.remove("bob", "boss")
-        self.assertEqual(e.exception.code, 409)
-        self.assertIn("[fleet.account_people]", e.exception.msg)
-        self.assertIn("bob", [u["name"] for u in U.listing(t=T0)["users"]])
-        multi = '[fleet.account_people]\nbob = """\nBOB"""\n'
-        hosts.write_text(multi)                                                      # 跨行的值逐行删不掉（Codex 审查）：不删账号，主机清单不动
-        with self.assertRaises(U.Denied) as e:
-            U.remove("bob", "boss")
-        self.assertEqual(e.exception.code, 409)
-        self.assertEqual(hosts.read_text(), multi)
-        self.assertIn("bob", [u["name"] for u in U.listing(t=T0)["users"]])
-        hosts.write_text('[fleet]\naccount_people = {boss = "BOSS"}\n')              # 没有这个账号的对应：照常删，主机清单不动
-        U.remove("bob", "boss")
-        self.assertEqual(hosts.read_text(), '[fleet]\naccount_people = {boss = "BOSS"}\n')
+        self.assertEqual(hosts.read_text(), text)
+        fixtures.add_account("amy", "user", "boss", t=T0, person="Other")
+        self.assertEqual(U.person_of("amy"), ("Other", None))
 
     def test_first_account_must_be_admin(self):
         with self.assertRaises(U.Denied) as e:
@@ -454,6 +436,107 @@ class AdminTest(UsersBase):
         with mock.patch("os.getuid", return_value=os.getuid() + 1):
             with self.assertRaises(U.Denied):
                 U.local_ok()
+
+
+class PeopleTest(UsersBase):
+    """#19：账号对应的组内人员只认账号库的显式绑定（fleet_person）；#70 之前的账号由 migrate_people 一次迁过来。项目主人只经 owner_of 判。"""
+
+    def legacy(self, *names, role="user"):
+        """直接写几条 #70 之前的账号（没有 fleet_person 键）。"""
+        with U._edit() as d:
+            for n in names:
+                d["users"][n] = {"role": role, "pw": None, "setup": None, "t": T0, "by": "旧版"}
+
+    def test_migrate_legacy_accounts_once(self):
+        from labmon import fleetboot as FB
+        from labmon.state import file_sig, save_json, state_dir
+        self.admin()                                                 # 已有绑定的：不动
+        for p in ("ALICE", "Bob", "Eve"):
+            FB.set_person(p, create=True, roster_only=True)
+        hosts = Path(os.environ["LABMON_HOSTS"])
+        hosts.write_text('[fleet]\n\n[fleet.account_people]\n"admin.a" = "ALICE"\ne2 = "Eve"\n')
+        save_json(state_dir() / "snapshot.json", {"fleet": {"holders": [{"holder": "Carol"}]}})
+        self.legacy("admin.a", role="admin")
+        self.legacy("bob", "carol", "dave", "eve", "e2")
+        notes = U.migrate_people()
+        got = {n: u.get("fleet_person", "没有") for n, u in U._read()["users"].items()}
+        self.assertEqual(got, {"boss": "boss", "admin.a": "ALICE",        # 主机清单里写了对应
+                               "bob": "Bob", "carol": "Carol",             # 与组内人员、快照历史同名（沿用那边的拼写）
+                               "dave": None,                               # 只能落到账号名本身：不关联，留给 labmon user bind
+                               "eve": None, "e2": None})                   # 两个账号对上同一人：都不关联
+        self.assertEqual(len(notes), 7)                                    # 迁了的 6 个各一句，外加主机清单那段可以手删
+        self.assertTrue(any("labmon user bind dave" in n for n in notes))
+        self.assertIn("[fleet.account_people]", notes[-1])
+        self.assertEqual(len([r for r in records() if r.get("kind") == "account" and "迁移（#19）" in r["msg"]]), 6)
+        # 迁完不再读主机清单的对应与快照历史：拿掉它们，结果不变
+        hosts.write_text('[fleet]\n')
+        save_json(state_dir() / "snapshot.json", {})
+        self.assertEqual({n: U.person_of(n) for n in ("admin.a", "bob", "carol", "dave", "eve")},
+                         {"admin.a": ("ALICE", None), "bob": ("Bob", None), "carol": ("Carol", None), "dave": (None, None), "eve": (None, None)})
+        sig = file_sig(U.path())
+        self.assertEqual(U.migrate_people(), [])                           # 第二次：什么都不做、不写文件
+        self.assertEqual(file_sig(U.path()), sig)
+        FB.set_person("Dave", create=True, roster_only=True)
+        U.bind_person("dave", "Dave", "本机命令行")                          # 迁成不关联的照样能补绑定
+        self.assertEqual(U.person_of("dave"), ("Dave", None))
+
+    def test_unbound_account_not_guessed_by_name(self):
+        """迁完之后没有绑定的账号（手改过账号库的）不再按同名猜：与组内人员同名也不关联。"""
+        from labmon import fleetboot as FB
+        self.admin()
+        FB.set_person("Amy", create=True, roster_only=True)
+        self.legacy("amy")
+        self.assertEqual(U.person_of("amy"), (None, None))
+        self.assertEqual(U.person_of("boss"), ("boss", None))
+        self.assertEqual(U.person_of("nobody"), (None, None))
+        self.assertIn("Amy", U.free_people())
+
+    def test_bound_conflict_reported_and_rebindable(self):
+        from labmon import fleetboot as FB
+        self.admin()
+        FB.set_person("Pat", create=True, roster_only=True)
+        with U._edit() as d:                                               # 手改出两个账号绑同一人
+            d["users"]["x1"] = {"role": "user", "fleet_person": "Pat"}
+            d["users"]["x2"] = {"role": "user", "fleet_person": "pat"}
+        self.assertIsNone(U.person_of("x1")[0])
+        self.assertIn("对应多个账号", U.person_of("x2")[1])
+        FB.set_person("Kim", create=True, roster_only=True)
+        U.bind_person("x2", "Kim", "本机命令行")
+        self.assertEqual((U.person_of("x1"), U.person_of("x2")), (("Pat", None), ("Kim", None)))
+        with self.assertRaises(U.ConfigError):
+            U.bind_person("x2", "Pat", "本机命令行")                       # 已关联别人的不能改绑
+
+    def test_owner_of_one_rule(self):
+        """项目主人只经 owner_of 判（#19）：大小写与账号不同的认作那个账号，账号已删的归管理员；owns、access、need_room、listing 同一结论。"""
+        from labmon import projects as PJ
+        self.admin()
+        fixtures.add_account("amy", "user", "boss", t=T0)
+        PJ.put_config("p1", 'id = "p1"\n', owner="AMY")
+        PJ.put_config("p2", 'id = "p2"\n', owner="ghost")
+        PJ.put_config("p3", 'id = "p3"\n')
+        self.assertEqual([U.owner_of(p) for p in ("p1", "p2", "p3", "bad/id")], ["amy", None, None, None])
+        amy = U.Ident("amy", "user", frozenset({"read", "project"}), "token", "k")
+        self.assertEqual([U.owns(amy, p) for p in ("p1", "p2", "p3")], [True, False, False])
+        self.assertEqual(U.access(amy, {}).projects, {"p1"})
+        self.assertEqual({u["name"]: u["projects"] for u in U.listing(t=T0)["users"]}, {"boss": [], "amy": ["p1"]})
+        with mock.patch.object(U, "USER_PROJECTS", 1), self.assertRaises(U.Denied) as e:
+            U.need_room(amy, "p4")
+        self.assertIn("1 个", e.exception.msg)
+
+    def test_two_client_versions_on_one_token_do_not_write_every_request(self):
+        """读请求不每次写账号库（#19）：同一令牌被两个版本的客户端交替用，版本变化至多每 CLIENT_TOUCH_S 记一次。"""
+        from labmon.config import CLIENT_HEADER
+        from labmon.state import file_sig
+        self.admin()
+        tok, _ = U.token_add("boss", "t", ["read"], t=T0)
+        a, b = "a" * 40, "b" * 40
+        U.ident({**hdr(token=tok), CLIENT_HEADER: a}, t=T0)
+        sig = file_sig(U.path())
+        for i, v in enumerate((b, a, b, a, b)):
+            U.ident({**hdr(token=tok), CLIENT_HEADER: v}, t=T0 + 10 + i)
+        self.assertEqual(file_sig(U.path()), sig)
+        U.ident({**hdr(token=tok), CLIENT_HEADER: b}, t=T0 + U.CLIENT_TOUCH_S + 1)
+        self.assertEqual(next(iter(U._read()["tokens"].values()))["client_commit"], b)
 
 
 class ViewTest(UsersBase):

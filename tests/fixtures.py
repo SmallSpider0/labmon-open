@@ -185,14 +185,6 @@ def add_account(name, role, by="测试", **kw):
     return U.add(name, role, by, person=person, **kw)
 
 
-def make_legacy_account(name, role):
-    """直接写一条旧账号记录，供历史映射测试。"""
-    from labmon import users as U
-    with U._edit() as d:
-        d["users"][name] = {"role": role}
-    return U.token_add(name, "旧测试账号", ["admin"])[0]
-
-
 def make_token(name: str = "boss", role: str = "admin", scopes=("admin",)) -> str:
     """在当前 LABMON_STATE 下建账号（还没有就建；第一个必须是管理员，建普通用户前先补一个 boss）与一个令牌，返回令牌原文。
     不设口令（不算 PBKDF2）：令牌就够测路由。建的时候不记进记录页（不打乱各用例对记录的断言）。"""

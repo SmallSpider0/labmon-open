@@ -47,6 +47,7 @@ from .health import lease_end
 from .records import log_events
 from .service import notify
 from .state import load_json, save_json, snapshot
+from .users import person_of
 
 LOCK = threading.Lock()
 CAPTCHA_GAP = 10                 # 换验证码至少隔这么多秒（像人点“换一张”）
@@ -1000,7 +1001,7 @@ def run_swap(cfg: dict, cli: P.Client, code: str | None, ids=(), kind: str = "sw
             notes.append(f"{old['holder']}：{_created(oj)} 创建，现在{F.NAMES.get(st, '没探到')}")
         to_me = False
         if kind != "off":
-            actor, error = F.account_person(cfg, account)
+            actor, error = person_of(account)
             if error:
                 raise P.PlatformError(error)
             to_me = bool(name and actor and name.casefold() == actor.casefold())

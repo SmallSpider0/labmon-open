@@ -74,12 +74,11 @@ from pathlib import Path
 
 from . import lan as L
 from . import lease as LS
-from .platform import NAME_RE as PERSON_RE
 from .config import GIB, POOL, ConfigError, _read_toml, all_hosts, fmt_time, hosts_file, set_fleet_keys
 from .health import container_step, lease_due, link_step
 from .health import lease_end as _lease_end
 from .records import log_events
-from .state import append_row, load_json, save_json, snapshot, state_dir as _state_dir
+from .state import append_row, load_json, save_json, state_dir as _state_dir
 
 HERE = Path(__file__).resolve().parent
 PROBE = HERE / "fleet_probe.sh"
@@ -239,73 +238,6 @@ def known_people(cfg: dict) -> set[str]:
     return {name for name in names if name}
 
 
-def account_people(cfg: dict, accounts, bindings=None, *, names: set[str] | None = None) -> dict[str, tuple[str | None, str | None]]:
-    """统一核对账号库显式绑定、旧配置和同名。空绑定表示明确暂不关联。"""
-    names = known_people(cfg) if names is None else names
-    by_name = {}
-    for name in sorted(n for n in names if n):
-        by_name.setdefault(name.casefold(), []).append(name)
-    historic = {}
-    for row in (snapshot().get("fleet") or {}).get("holders", []):
-        name = row["holder"]
-        historic.setdefault(name.casefold(), []).append(name)
-
-    mapping = cfg.get("account_people", {})
-    if not isinstance(mapping, dict):
-        return {a: (None, "主机清单的 [fleet.account_people] 要写成账号到人员名的表") for a in accounts}
-    explicit = {}
-    for key, name in mapping.items():
-        explicit.setdefault(key.casefold(), []).append(name)
-    stored = {key.casefold(): name for key, name in (bindings or {}).items()}
-    for key, name in stored.items():
-        explicit[key] = [name]
-
-    # 即使账号暂未创建，显式条目也占用所写的人员名。两个账号指向一人时都不选。
-    owners = {}
-    for key, values in explicit.items():
-        for name in values:
-            if isinstance(name, str) and PERSON_RE.fullmatch(name):
-                owners.setdefault(name.casefold(), set()).add(key)
-
-    out = {}
-    for account in accounts:
-        key = account.casefold()
-        choices = explicit.get(key, [])
-        if len(choices) > 1:
-            out[account] = (None, f"账号 {account} 在 [fleet.account_people] 中有多条对应")
-            continue
-        name = choices[0] if choices else account
-        if choices and name is None and key in stored:
-            out[account] = (None, None)
-            continue
-        if not isinstance(name, str) or not PERSON_RE.fullmatch(name):
-            out[account] = (None, f"账号 {account} 对应的人员名不能作平台作业名，请核对 [fleet.account_people]")
-            continue
-        same = by_name.get(name.casefold()) or historic.get(name.casefold(), [])
-        if choices and name in names:
-            person = name
-        elif len(same) > 1:
-            out[account] = (None, f"账号 {account} 对应多个人员名，请在 [fleet.account_people] 指定准确的拼写")
-            continue
-        else:
-            person = same[0] if same else name
-        owners.setdefault(person.casefold(), set()).add(key)
-        out[account] = (person, None)
-    for account, (person, _) in out.items():
-        if person and len(owners[person.casefold()]) > 1:
-            out[account] = (None, f"人员 {person} 对应多个账号，请核对 [fleet.account_people]")
-    return out
-
-
-def account_person(cfg: dict | None, account: str | None) -> tuple[str | None, str | None]:
-    """认证账号对应的人员名与无法识别时的说明。已有同名人员保留原有拼写。"""
-    if account is None:
-        return legacy_person(cfg), None
-    from .users import account_identity
-    accounts, bindings = account_identity()
-    return account_people(cfg or {}, {*accounts, account}, bindings)[account]
-
-
 ADMIN_PERSON = "管理员"        # 没有主人的项目（归管理员）在认不出管理员是谁（legacy_person 为空）时算在这个名下
 
 
@@ -315,48 +247,14 @@ def share_key(person: str) -> str:
 
 
 def project_people(pids, cfg: dict | None = None) -> dict[str, str]:
-    """各项目算在谁名下（按人的公平份额，#23；同一人的几个项目合起来算一份）：项目主人的账号（projects.owner）经 account_people 认人；
-    认不出人员的账号按账号自己算一人（「账号 名字」）；没有主人的（归管理员，#167 之前的项目）取 legacy_person，再没有就是 ADMIN_PERSON。"""
-    from .projects import owner                    # 与 account_person 一样延迟 import（users 在顶层 import projects）
-    from .users import account_identity
+    """各项目算在谁名下（按人的公平份额，#23；同一人的几个项目合起来算一份）：项目主人（users.owner_of）绑着的组内人员（users.people_of）；
+    没关联人员的账号按账号自己算一人（「账号 名字」）；没有主人的（归管理员，#167 之前的项目、主人账号已删的）取 legacy_person，再没有就是 ADMIN_PERSON。"""
+    from .users import owner_of, people_of                 # 与 users 互相用到，放在函数里 import
     cfg = conf() if cfg is None else cfg
-    owners = {p: owner(p) for p in pids}
-    names = {}
-    if any(owners.values()):
-        accounts, bindings = account_identity()
-        names = account_people(cfg or {}, {*accounts, *(a for a in owners.values() if a)}, bindings)
+    owners = {p: owner_of(p) for p in pids}
+    names = people_of() if any(owners.values()) else {}
     admin = legacy_person(cfg) or ADMIN_PERSON
-    return {p: (names[a][0] or f"账号 {a}") if a else admin for p, a in owners.items()}
-
-
-def account_choices(cfg: dict, links: dict, bindings=None) -> list[str]:
-    """可在账号表单选择的人，实际保存时仍按同一映射规则查重。"""
-    reserved = {name.casefold() for name, _ in links.values() if name}
-    mapping = cfg.get("account_people", {})
-    if not isinstance(mapping, dict):
-        return []
-    stored = {key.casefold() for key in (bindings or {})}
-    reserved.update(name.casefold() for key, name in mapping.items()
-                    if key.casefold() not in stored and isinstance(name, str))
-    return sorted((name for name in registered_people()
-                   if PERSON_RE.fullmatch(name) and name.casefold() not in reserved), key=str.casefold)
-
-
-def check_account_binding(cfg: dict, accounts, bindings: dict, account: str, person: str, *, existing=False) -> None:
-    """核对页面的显式选择及对其他账号的影响。"""
-    if not PERSON_RE.fullmatch(person) or person not in registered_people():
-        raise ConfigError(f"人员 {person} 已不在组内名单，请刷新后重试")
-    before = account_people(cfg, accounts, bindings)
-    old, _ = before.get(account, (None, None))
-    if existing and old and old != person and (account in bindings or old in known_people(cfg)):
-        raise ConfigError(f"{account} 已关联组内人员 {old}")
-    after = account_people(cfg, {*accounts, account}, {**bindings, account: person})
-    resolved, error = after[account]
-    if error or resolved != person:
-        raise ConfigError(error or "人员对应已经变化，请刷新后重试")
-    for name, (old, _) in before.items():
-        if name != account and old and after[name][0] != old:
-            raise ConfigError(after[name][1] or f"人员对应会影响已有账号 {name}")
+    return {p: (names.get(a, (None, None))[0] or f"账号 {a}") if a else admin for p, a in owners.items()}
 
 
 # ---------- 探测 ----------
