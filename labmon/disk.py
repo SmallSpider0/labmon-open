@@ -73,7 +73,10 @@ def absorb(part: str, t: float) -> None:
     if (ix.get("t") or 0) < (old.get("t") or 0):
         return
     ou, nu, split = old.get("units") or {}, ix.get("units") or {}, set(ix.get("split") or [])
-    fresh = split - set(old.get("split") or [])          # 这次新拆开的目录（扫得太慢、新登记的项目根）：下面的单位是原来那个拆出来的，不算新建
+    # 刚拆开、还没列过的目录（扫得太慢、新登记的项目根；上一份索引里它下面还没有单位）：下面的单位是原来那个拆出来的，不算新建。
+    # 不只比相邻两份索引的 split：worker 拆开时先并进 split、去掉父单位，子单位要等下一次列目录，看板可能在中间取回一份（PR #56 审查）。
+    # 代价是原来空着的目录拆开后第一次新建的不从 0 算，只漏一次。
+    fresh = [s for s in split if not any(o.startswith(s + "/") for o in ou)]
     born = lambda u: ou and u not in ou and not any(u.startswith(s + "/") for s in fresh)
     rows = []
     for u, r in nu.items():
@@ -299,7 +302,8 @@ def _ours(hosts: list[dict], units: dict, ser: dict, grow: dict, gone: dict, t: 
         d24, d7 = grow.get(u, (0, 0))
         dirs.append({"u": u, "name": u[len(base) + 1:], "b": r["b"], "t": r.get("t"), "p": p, "d24": d24, "d7": d7,
                      "n": r.get("n"), "m": r.get("m"), "top": (r.get("top") or [])[:5]})
-    rows = [dict(r, host=e["id"]) for e in hosts for r in load_rows(usage_file(e["id"])) if r.get("t", 0) >= t - JOBS_S and r.get("p") in roots]
+    rows = [dict(r, host=e["id"]) for e in hosts for r in load_rows(usage_file(e["id"]))
+            if r.get("t", 0) >= t - JOBS_S and r.get("p") in roots and r.get("root")]          # 只认清单任务：单元申请没有 root
     running = [(e["id"], j.get("project"), j.get("name"), j.get("t0")) for e in hosts for j in (e.get("status") or {}).get("running") or []]
     out = {}
     for p, rs in roots.items():
@@ -308,7 +312,7 @@ def _ours(hosts: list[dict], units: dict, ser: dict, grow: dict, gone: dict, t: 
         d24 = sum(x["d24"] for x in mine + gn)
         out[p] = {"roots": sorted(rs), "b": sum(x["b"] for x in mine), "d24": d24, "d7": sum(x["d7"] for x in mine + gn),
                   "pending": pend.get(p, 0), "burst": _burst(d24, v), "gone": gn,
-                  "jobs": _job_writes(p, sorted(rs), ser, rows, running, t, v["bigwrite_gb"])}
+                  "jobs": _job_writes(p, sorted(rs), ser, units, rows, running, t, v["bigwrite_gb"])}
     return {"base": base, "dirs": sorted(dirs, key=lambda x: -x["b"]), "projects": out}
 
 
@@ -320,8 +324,8 @@ def _burst(d24: float, v: dict) -> bool:
 def _write(sers: list, s: float, e: float) -> tuple:
     """[s, e] 这段时间项目目录的净增：每个单位取开跑前最后一次扫描到结束后第一次扫描之差，加起来。
     开跑前还没有的单位只在它从 0 算起（看板记了新建，absorb 的 born）时按 0 起算；拆出来的、结束以后才建的算不了，跳过；
-    结束以后还没重扫的记进 pend。返回 (净增, [(单位, 增量)], 最早用到的扫描时刻, 最晚的, pend)。时刻都是 worker 写的（索引与用量行同一口径）。"""
-    tot, parts, lo, hi, pend = 0, [], None, None, 0
+    结束以后还没重扫的记进 pend。返回 (净增, [(单位, 增量)], 最早用到的扫描时刻, 最晚的, pend, 用到的那组扫描)。时刻都是 worker 写的（索引与用量行同一口径）。"""
+    tot, parts, lo, hi, pend, used = 0, [], None, None, 0, []
     for u, sr in sers:
         k0 = bisect.bisect_right(sr, (s, math.inf)) - 1
         if k0 >= 0:
@@ -341,21 +345,24 @@ def _write(sers: list, s: float, e: float) -> tuple:
         if b1 != b0:
             tot += b1 - b0
             parts.append((u, b1 - b0))
+            used.append((u, t0, t1))
             lo, hi = min(lo or t0, t0), max(hi or t1, t1)
-    return tot, parts, lo, hi, pend
+    return tot, parts, lo, hi, pend, tuple(sorted(used))
 
 
-def _job_writes(p: str, roots: list[str], ser: dict, rows: list[dict], running: list, t: float, big_gb: float) -> list[dict]:
+def _job_writes(p: str, roots: list[str], ser: dict, units: dict, rows: list[dict], running: list, t: float, big_gb: float) -> list[dict]:
     """项目 p 近 JOBS_S 内结束的任务各写了多少（_write：项目根下各单位开跑前与跑完那次重扫之差；worker 在任务跑完时提前重扫，Worker.disk_ends）。
     rows 是工作台存的用量记录（_keep_usage 的行加 host），running 是各主机在跑的 (主机, 项目, 任务, 开跑)。
     同一段时间本项目别的任务写的也在里面，with 记同期还有几个本项目任务（用量记录与在跑的）。还有单位没重扫的标 pending，等满 JOB_WAIT_S 就按已有的算；
-    big：算完了、净增超过 big_gb GiB（collect 据此给实验会话 bigwrite: 提示）。只留净增 64 MiB 以上或还在等重扫的，近的在前，最多 30 个。"""
-    sers = [(u, sr) for u, sr in ser.items() if any(u == r or u.startswith(r + "/") for r in roots)]
+    big：算完了、净增超过 big_gb GiB（collect 据此给实验会话 bigwrite: 提示）。用的是同一组扫描的几个任务（并行的）量出来是同一个数，
+    grp 记其中最早结束的那个（「名字:结束时刻」），collect 按它合成一条。只留净增 64 MiB 以上或还在等重扫的，近的在前，最多 30 个。
+    只看此刻索引里的单位（units）与删掉了的（最后一次是 0）：拆开以前整个扫的旧单位不再扫，不算等重扫。"""
+    sers = [(u, sr) for u, sr in ser.items() if any(u == r or u.startswith(r + "/") for r in roots) and (u in units or sr[-1][1] == 0)]
     name = lambda u: next((u[len(r) + 1:] for r in roots if u == r or u.startswith(r + "/")), u)   # noqa: E731
-    mine = [r for r in rows if r.get("p") == p]
-    out = []
+    mine = sorted((r for r in rows if r.get("p") == p), key=lambda r: r["t"])
+    out, grp = [], {}
     for r in mine:
-        tot, parts, lo, hi, pend = _write(sers, r["s"], r["t"])
+        tot, parts, lo, hi, pend, used = _write(sers, r["s"], r["t"])
         wait = pend > 0 and t - r["t"] < JOB_WAIT_S
         if abs(tot) < 64 * 2 ** 20 and not wait:
             continue
@@ -363,7 +370,8 @@ def _job_writes(p: str, roots: list[str], ser: dict, rows: list[dict], running: 
         n = sum(1 for o in mine if o is not r and o["s"] < z and o["t"] > a) + sum(1 for _, q, _, s0 in running if q == p and (s0 or 0) < z)
         out.append({"name": r.get("n"), "host": r["host"], "t0": r["s"], "t1": r["t"], "st": r.get("st"), "b": tot,
                     "top": [[name(u), d] for u, d in sorted(parts, key=lambda x: -x[1])[:3]], "from": lo, "to": hi,
-                    "pending": pend, "wait": wait, "with": n, "big": not wait and tot > big_gb * GIB})
+                    "pending": pend, "wait": wait, "with": n, "big": not wait and tot > big_gb * GIB,
+                    "grp": grp.setdefault(used, f"{r.get('n')}:{r['t']}") if used else f"{r.get('n')}:{r['t']}"})
     return sorted(out, key=lambda x: -x["t1"])[:30]
 
 

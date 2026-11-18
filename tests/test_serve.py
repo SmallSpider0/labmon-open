@@ -1804,6 +1804,82 @@ class DiskTest(unittest.TestCase):
             v, _ = DK.update(hosts(t2 + 60), t2 + 60, {"servers": [], "disk": {}})
             self.assertFalse(v["ours"]["projects"]["pa"]["burst"])           # 门槛与按人的 burst 同一条：30 GiB 以下不算
 
+    def test_project_writes_split_history_slots_and_scan_sets(self):
+        # #53 审查意见（PR #56）：
+        # 1. 拆开前整个项目根扫过的旧单位不再扫，不算等重扫（否则拆开后结束的任务一直 wait、bigwrite 漏报）；
+        # 2. worker 先把父目录并进 split、去掉父单位，子单位下一份索引才出现时，子单位照样不算新建（不误报暴涨）；
+        # 3. 单元申请的用量行（没有 root）不算任务写入；
+        # 4. 合不合成一条按实际用到的那组扫描，不按最外侧两个时刻：先后跑的两个任务各报各的
+        from labmon import disk as DK
+        from labmon.state import append_row, usage_file
+        G = 2 ** 30
+        u = lambda b, t, **k: {"b": b * G, "n": 3, "m": t, "age": [b * G, 0, 0, 0, 0], "t": t, "s": 5, **k}
+        pa = "/r/alice/projects/pa"
+        hosts = lambda t: [{"id": "h", "status": {"t": t, "info": {"disk": [{"path": "/r/alice", "free": 500 * G, "total": 1000 * G}]},
+                                                 "storage": {"projects": {pa: "pa"}}, "running": []}}]
+        cfg = {"servers": [], "disk": {"burst_gb": 20}}
+        use = lambda n, s, e, root=pa + "/run": append_row(usage_file("h"), {"t": e, "s": s, "n": n, "p": "pa", "root": root, "queue": "q.txt" if root else None, "st": "done"}, 30 * 86400, e)
+
+        import shutil
+
+        def board():
+            td = tempfile.mkdtemp()
+            self.addCleanup(shutil.rmtree, td, True)
+            ctx = mock.patch.dict(os.environ, {"LABMON_STATE": td, "LABMON_HOSTS": str(Path(td) / "hosts.toml")})
+            ctx.start()
+            self.addCleanup(ctx.stop)
+            (Path(td) / "hosts.toml").write_text('[[hosts]]\nid = "h"\ndata_root = "/r/alice"\n')
+            (Path(td) / "overview" / "fleet").mkdir(parents=True, exist_ok=True)
+
+        t0 = 1_800_000_000
+        board()                                                          # 1：项目根原来整个是一个单位、扫过几次，后来拆开
+        ix = {"root": "/r", "host": "h", "t": t0, "listed": t0, "split": ["/r/alice/projects"], "units": {pa: u(100, t0), "/r/alice/.": u(0, t0)}}
+        DK.absorb("1\n" + json.dumps(ix), t0)
+        t1 = t0 + 600
+        ix = {**ix, "t": t1, "listed": t1, "split": ["/r/alice/projects", pa], "units": {f"{pa}/out": u(100, t1), "/r/alice/.": u(0, t0)}}
+        DK.absorb("2\n" + json.dumps(ix), t1)
+        use("j", t1 + 60, t1 + 120, root=pa + "/run")
+        use("slot1", t1 + 60, t1 + 120, root=None)                       # 3：单元申请
+        t2 = t1 + 600
+        ix = {**ix, "t": t2, "listed": t2, "units": {f"{pa}/out": u(110, t2), "/r/alice/.": u(0, t0)}}
+        DK.absorb("3\n" + json.dumps(ix), t2)
+        v, _ = DK.update(hosts(t2), t2, cfg)
+        jobs = {j["name"]: j for j in v["ours"]["projects"]["pa"]["jobs"]}
+        self.assertEqual(sorted(jobs), ["j"])
+        self.assertEqual((round(jobs["j"]["b"] / G), jobs["j"]["pending"], jobs["j"]["wait"], jobs["j"]["big"]), (10, 0, False, True))
+
+        board()                                                          # 2：拆开分两份索引到看板
+        ix = {"root": "/r", "host": "h", "t": t0, "listed": t0, "split": ["/r/alice/projects"], "units": {pa: u(100, t0), "/r/alice/.": u(0, t0)}}
+        DK.absorb("1\n" + json.dumps(ix), t0)
+        ix = {**ix, "t": t0 + 60, "split": ["/r/alice/projects", pa], "units": {"/r/alice/.": u(0, t0)}}   # Disk.done：父单位去掉、子单位还没列
+        DK.absorb("2\n" + json.dumps(ix), t0 + 60)
+        ix = {**ix, "t": t1, "listed": t1, "units": {f"{pa}/out": u(100, t1), "/r/alice/.": u(0, t0)}}
+        DK.absorb("3\n" + json.dumps(ix), t1)
+        v, _ = DK.update(hosts(t1), t1, cfg)
+        self.assertEqual(v["ours"]["projects"]["pa"]["d24"], 0)
+        ix = {**ix, "t": t2, "listed": t2, "units": {f"{pa}/out": u(100, t2), f"{pa}/new": u(3, t2), "/r/alice/.": u(0, t0)}}
+        DK.absorb("4\n" + json.dumps(ix), t2)
+        v, _ = DK.update(hosts(t2), t2, cfg)
+        self.assertEqual(round(v["ours"]["projects"]["pa"]["d24"] / G), 3)   # 已列过的目录下新建的照常从 0 算
+
+        board()                                                          # 4：A 扫得勤、B 扫得慢；两个任务先后跑，最外侧时刻相同
+        T = [t0, t0 + 1000, t0 + 2000, t0 + 3000]
+        A, B = f"{pa}/a", f"{pa}/b"
+        ix = {"root": "/r", "host": "h", "t": T[0], "listed": T[0], "split": ["/r/alice/projects", pa], "units": {A: u(100, T[0]), B: u(50, T[0])}}
+        DK.absorb("1\n" + json.dumps(ix), T[0])
+        for i, (a, ub) in enumerate([(u(110, T[1]), u(50, T[0])), (u(130, T[2]), u(50, T[0])), (u(130, T[3]), u(55, T[3]))], 1):
+            ix = {**ix, "t": T[i], "listed": T[i], "units": {A: a, B: ub}}
+            DK.absorb(f"{i + 1}\n" + json.dumps(ix), T[i])
+        use("k1", T[0] + 100, T[1] - 100)
+        use("k2", T[1] + 100, T[2] - 100)
+        v, _ = DK.update(hosts(T[3]), T[3], cfg)
+        js = {j["name"]: j for j in v["ours"]["projects"]["pa"]["jobs"]}
+        self.assertEqual((round(js["k1"]["b"] / G), round(js["k2"]["b"] / G)), (15, 25))
+        snap = {"alerts": []}
+        C._storage({"id": "pa"}, snap, {"disk": v, "hosts": hosts(T[3])}, T[3])
+        bw = sorted(a["key"] for a in snap["alerts"] if a["key"].startswith("bigwrite:"))
+        self.assertEqual(bw, [f"bigwrite:k1:{T[1] - 100}", f"bigwrite:k2:{T[2] - 100}"])
+
     def test_rows_cache_sees_second_write_within_same_mtime(self):
         # #31：scans.jsonl 同一个修改时刻里续写一行也要读到（以前只比 st_mtime，漏读到下次写）；换了状态目录不拿另一个目录的缓存
         from labmon import disk as DK
