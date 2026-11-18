@@ -154,6 +154,9 @@ class ClassifyTest(unittest.TestCase):
         a = F.analyze(F.parse(probe_out(apps=[(500, 6748)], maps=[(9, 500, "/root/x")], ps=[(1, 0, "/bin/bash"), (9, 1, "python occupy_gpu.py", 100.0, 1024)])),
                       cfg(rules=[{"match": r"/root/x/occupy_gpu\.py", "kind": "keepalive"}]))
         self.assertEqual(a["state"], "keepalive")                                            # 规则同样比还原后的
+        a = F.analyze(F.parse(probe_out(apps=[(500, 6748)], maps=[(9, 500, "/root/x")], ps=[(1, 0, "/bin/bash"), (9, 1, "python train_keep_alive.py", 100.0, 1024)])),
+                      cfg(rules=[{"match": r"^python train_keep_alive\.py$", "kind": "job"}]))
+        self.assertEqual(a["state"], "job")                     # 原命令行上带锚点的规则照旧命中：还原路径只是另一个候选（PR #34 审查）
         self.assertEqual([F._abs_script(x, "/w") for x in ("python a.py", "python -W ignore ./d/../a.py", "python /a.py", "python -m a", "python -uc a.py",
                                                             "bash a.sh", "python")],
                          ["/w/a.py", "/w/a.py", None, None, None, None, None])
@@ -1086,12 +1089,14 @@ class GuardTest(unittest.TestCase):
         for pid, pgid in ((11, 9), (12, 9), (13, 30)):
             (d / "proc" / str(pid)).mkdir(parents=True)
             (d / "proc" / str(pid) / "stat").write_text(f"{pid} (python (x)) S 1 {pgid} {pgid} 0\n")
-        (d / "ka.sh").write_text('case "$1" in running) [ -s "$PID" ] || exit 1; cat "$PID" ;; esac\n')
-        env = {**self.shell_env(d), "PID": str(d / "pid")}
+        (d / "ka.sh").write_text('echo x >> "$CALLS"\ncase "$1" in running) [ -s "$PID" ] || exit 1; cat "$PID" ;; esac\n')
+        env = {**self.shell_env(d), "PID": str(d / "pid"), "CALLS": str(d / "calls")}
+        self.err = ""
 
         def run(ka, *pids):
             r = subprocess.run(["bash", "-s", "--", "kacheck", ka, *map(str, pids)], input=F.GUARD.read_text(), env=env,
                                capture_output=True, text=True, timeout=15)
+            self.err = r.stderr
             return r.stdout.strip().splitlines()[-1]
         ka = f"bash {d / 'ka.sh'}"
         (d / "pid").write_text("9\n")
@@ -1100,11 +1105,13 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(run(ka, 11, 99), "ok")                              # 已经没了的不算
         (d / "pid").write_text("")
         self.assertEqual(run(ka, 11, 13), "noka 11 13")                      # 没有在跑的保活：都不是 ka.sh 的
-        out = run(f"bash {d / 'nope.sh'}", 11)
-        self.assertTrue(out.startswith("fail ka.sh running 出错（退出码 127："), out)
-        self.assertIn("nope.sh", out)
+        self.assertEqual(run(f"bash {d / 'nope.sh'}", 11), "fail ka.sh running 出错（退出码 127）")
+        self.assertIn("nope.sh", self.err)                                    # ka.sh 的报错照传到标准错误，借用的提示带上它
         (d / "pid").write_text("9\noops\n")
-        self.assertEqual(run(ka, 11), "fail ka.sh running 的输出认不出（oops）")   # 输出认不出也不当成核对过
+        (d / "calls").write_text("")
+        self.assertEqual(run(ka, 11), "fail ka.sh running 的输出认不出")      # 输出认不出也不当成核对过
+        self.assertIn("oops", self.err)
+        self.assertEqual((d / "calls").read_text(), "x\n")                   # 只读一次（经 running_groups），不另跑一遍取原因（PR #34 审查）
         self.assertFalse((d / "guard.state.lock").exists())                  # 只读：不拿锁、不建锁文件
 
     def test_script(self):

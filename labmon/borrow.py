@@ -201,9 +201,10 @@ def _ka_miss(s: dict, kw: dict, res: str, err: str) -> list[str]:
             out.append(f"GPU 上的保活 {cmd[:120]}（PID {pids}{'，工作目录 ' + w['cwd'] if w.get('cwd') else ''}）不在 ka.sh 管的进程组里，"
                        f"借来后 worker 停不了它、那几张卡也用不上：请 {s['holder']} 先停掉它，要保活改用 ka.sh start 开")
         return out or [f"GPU 上有 ka.sh 停不了的保活（PID {rest}），请 {s['holder']} 先停掉它"]
+    tail = (err.strip().splitlines() or [""])[-1][:200]                # ka.sh 的报错（kacheck 照传到标准错误）
     if word == "fail":
-        return [f"核对保活时 {rest}，请先查 [fleet] keepalive_cmd 与共享盘上的 ka.sh"]
-    return [f"核对保活没拿到结果（{(err.strip().splitlines() or ['没有回话'])[-1][:200]}）"]
+        return [f"核对保活时 {rest}{'：' + tail if tail else ''}，请先查 [fleet] keepalive_cmd 与共享盘上的 ka.sh"]
+    return [f"核对保活没拿到结果（{tail or '没有回话'}）"]
 
 
 def using(a: dict) -> str:

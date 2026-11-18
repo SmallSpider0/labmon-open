@@ -555,7 +555,7 @@ def _script(args: str) -> tuple[str | None, list[str]]:
 def _abs_script(args: str, cwd: str | None) -> str | None:
     """python 跑的脚本写的是相对路径时，按进程工作目录还原的完整路径（只做 normpath：看板这边解不开对方的符号链接）；
     不是 python、-m 或 -c、没有脚本、已是绝对路径、不知道工作目录的为 None。取第一个不以 - 开头的参数，同 ka.sh 认保活（#29）。
-    认保活与规则（classify、mark_keepalive）拿它补在命令行后面：相对路径起的与写完整路径起的同一脚本归类一样。
+    认保活与规则（classify 另拿它比一遍、mark_keepalive 写它）：相对路径起的与写完整路径起的同一脚本归类一样。
     探针 fleet_probe.sh 的 script_abs 是同一条规则（探针在未必有 Python 的镜像里跑，各一份）。"""
     t = args.split()
     if not cwd or not t or not re.fullmatch(r"python[\d.]*", _exe(args)):
@@ -602,15 +602,17 @@ def _desc(ps: dict, tops: set[int]) -> set[int]:
     return out
 
 
-def classify(own: str, text: str, cfg: dict) -> tuple[str, str | None, str | None]:
-    """(类别, 规则给的名字, 命中的规则)。own 是 GPU 进程自己的命令行（相对路径的脚本另接上按工作目录还原的完整路径，_abs_script），text 再加上父进程链与目录。
+def classify(own: str, text: str, cfg: dict, alt: str | None = None) -> tuple[str, str | None, str | None]:
+    """(类别, 规则给的名字, 命中的规则)。own 是 GPU 进程自己的命令行，text 再加上父进程链与目录。alt：相对路径的脚本按工作目录还原的完整路径
+    （_abs_script）：规则与保活字样另拿它比一遍（原命令行照旧比，带锚点的规则不受影响），相对路径起的与写完整路径起的同一脚本归类一样（#29）。
     顺序：规则命中自己的命令行 → 自己的命令行含保活字样 → 规则命中父进程链或目录 → 其余都算实验（有人在用）。
     保活字样排在“规则按父进程命中”之前：实验守护脚本（如 demo_eval 的 keepalive_guard.sh）拉起的保活，父进程带着项目路径，
     按父进程算会把纯保活误判成实验。"""
+    mine = [own] + ([alt] if alt else [])
     for r in cfg["rules"]:
-        if r["re"].search(own):
+        if any(r["re"].search(x) for x in mine):
             return r["kind"], r.get("label"), r["match"]
-    if any(k in own for k in cfg["keepalive"]):
+    if any(k in x for k in cfg["keepalive"] for x in mine):
         return "keepalive", None, None
     for r in cfg["rules"]:
         if r["re"].search(text):
@@ -650,8 +652,7 @@ def analyze(smp: dict, cfg: dict) -> dict:
             continue
         top = next((p for p in reversed(ch) if not _shell(ps[p]["args"])), ch[0])
         name = next((p for p in ch if not _spawn(ps[p]["args"])), ch[0])
-        own = "\n".join(filter(None, [ps[pid]["args"], _abs_script(ps[pid]["args"], cwd)]))
-        kind, label, rule = classify(own, "\n".join([own] + [ps[p]["args"] for p in ch[1:]]) + "\n" + (cwd or ""), cfg)
+        kind, label, rule = classify(ps[pid]["args"], "\n".join(ps[p]["args"] for p in ch) + "\n" + (cwd or ""), cfg, _abs_script(ps[pid]["args"], cwd))
         if kind == "keepalive":
             ka_gpu.add(pid)
         g = groups.setdefault(top, {"kind": kind, "label": label, "rule": rule, "top": top, "mb": 0, "n": 0, "names": [], "cwd": cwd,

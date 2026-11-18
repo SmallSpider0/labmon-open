@@ -71,10 +71,10 @@ class Base(unittest.TestCase):
     def server(self) -> dict:
         return next(s for s in tomllib.loads((self.d / "hosts.toml").read_text())["fleet"]["servers"] if s["id"] == SID)
 
-    def begin(self, work=(), until=None, projects=None, ssh_out="", light=False, away=False, account=None, **a):
+    def begin(self, work=(), until=None, projects=None, ssh_out="", light=False, away=False, account=None, ssh_err="", **a):
         a, self.remote = {"work": list(work), **a}, []
         with mock.patch.object(F, "parse", lambda raw: raw), mock.patch.object(F, "analyze", lambda smp, cfg: a):
-            return B.begin(SID, until, projects, fetch=lambda s: ("raw", None), ssh=lambda s, cmd, input=None: self.remote.append((cmd, input)) or (0, ssh_out, ""),
+            return B.begin(SID, until, projects, fetch=lambda s: ("raw", None), ssh=lambda s, cmd, input=None: self.remote.append((cmd, input)) or (0, ssh_out, ssh_err),
                            start=lambda hid: (0, "ok\n"), ovr=self.ovr, light=light, away=away, account=account)
 
 
@@ -137,8 +137,8 @@ class BorrowTest(Base):
         self.assertTrue(cmd.endswith("; bash -s -- kacheck 'bash ka.sh' 9 10 21"), cmd)     # 只读动作，脚本经标准输入送去
         self.assertEqual(script, F.GUARD.read_text())
         with self.assertRaises(ConfigError) as c:
-            self.begin(work=[ours], ssh_out="fail ka.sh running 出错（退出码 127：bash: ka.sh: No such file or directory）\n")
-        self.assertIn("核对保活时 ka.sh running 出错（退出码 127：bash: ka.sh: No such file or directory），请先查 [fleet] keepalive_cmd", str(c.exception))
+            self.begin(work=[ours], ssh_out="fail ka.sh running 出错（退出码 127）\n", ssh_err="bash: ka.sh: No such file or directory\n")
+        self.assertIn("核对保活时 ka.sh running 出错（退出码 127）：bash: ka.sh: No such file or directory，请先查 [fleet] keepalive_cmd", str(c.exception))
         with self.assertRaises(ConfigError) as c:
             self.begin(work=[ours], ssh_out="nopy\n")                                       # 脚本没回结果：不当成核对过
         self.assertIn("核对保活没拿到结果", str(c.exception))
