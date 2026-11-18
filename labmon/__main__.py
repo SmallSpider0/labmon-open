@@ -24,7 +24,6 @@
     labmon project init <主机> [项目名]                     按共享盘目录规范建目录（给了项目名连 projects/<项目名>/ 一起建），列出可共用的环境与数据集
     labmon project push|pull [-c monitor.toml]               把项目目录里的配置推到看板上（第一次推就是登记）/ 拉回看板上的（页面上改的；见 projsync.py）
     labmon project push --admin [-c monitor.toml]            改了 [[hosts]]、[[queues]] 时：用 labmon login --admin 建的管理员令牌推
-    labmon pool --help                                      管理员在内网批准或运行一次固定算力池试点
     labmon project archive|restore <项目 id>                 项目做完了收起（要求暂时没实验；移除登记、撤权重与指令、看板不再采集，不删数据）/ 加回（见 projects.py）
 
 只在看板服务那台机器上用的（管的是那台机器上的状态与秘密，不经接口）：
@@ -529,109 +528,6 @@ def cmd_report(argv: list[str]) -> int:
                                                "host": a.host, "occurred": occurred}, ap=ap, timeout=30)
 
 
-def cmd_project_resources(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="labmon project " + argv[0], description="在项目内选择专属服务器或算力池")
-    ap.add_argument("--project", help="缺省使用当前目录 monitor.toml 的 id")
-    if argv[0] == "submit":
-        ap.add_argument("jobs", help="工作目录下的清单相对路径")
-        ap.add_argument("--destination", required=True, help="pool 或项目主人池外的专属服务器 id")
-        ap.add_argument("--root", help="专属服务器上的项目绝对目录；池使用已绑定工作区")
-        ap.add_argument("--request-id", required=True, help="断线重试沿用原编号")
-    args = ap.parse_args(argv[1:])
-    try:
-        pid = args.project or brief("monitor.toml")["id"]
-        path = f"/api/project/{quote(pid, safe='')}/"
-        result = client.call("POST", path + "queues", {"destination": args.destination, "root": args.root,
-                             "jobs": args.jobs, "request_id": args.request_id}, idem=True) if argv[0] == "submit" else client.call("GET", path + "resources")
-    except (OSError, ConfigError) as e:
-        ap.error(str(e))
-    except (client.Failed, client.Unreachable) as e:
-        print(f"[labmon] {e}", file=sys.stderr)
-        return 3
-    print(json.dumps(result, ensure_ascii=False, indent=2))
-    return 0
-
-
-def cmd_pool(argv: list[str]) -> int:
-    ap = argparse.ArgumentParser(prog="labmon pool", description="管理算力池清单和固定算子试点")
-    sub = ap.add_subparsers(dest="act", required=True)
-    approve = sub.add_parser("supply", help="记录持有人同意的单卡、试点账户和项目")
-    approve.add_argument("host")
-    approve.add_argument("device", metavar="GPU-UUID")
-    approve.add_argument("--holder", required=True)
-    approve.add_argument("--account", required=True)
-    approve.add_argument("--project", required=True)
-    approve.add_argument("--until", required=True, help="本轮授权的截止，例如 +15m，最长 30 分钟")
-    approve.add_argument("--agreed", action="store_true", required=True, help="持有人已同意这次试点")
-    daily = sub.add_parser("supply-daily", help="批准节点与整卡参与日常派单")
-    daily.add_argument("host")
-    daily.add_argument("devices", nargs="+", metavar="GPU-UUID")
-    daily.add_argument("--holder", required=True)
-    daily.add_argument("--until", required=True, help="日常供给截止，例如 +2h")
-    daily.add_argument("--agreed", action="store_true", required=True)
-    dispatch = sub.add_parser("dispatch", help="管理员开启或关闭日常派单")
-    dispatch.add_argument("switch", choices=("on", "off"))
-    start = sub.add_parser("run", help="由池选两台单卡节点分别运行固定 CUDA 算子")
-    start.add_argument("hosts", nargs=2)
-    sub.add_parser("revoke", help="撤回这台的试点供给").add_argument("host")
-    sub.add_parser("status", help="断线后核对并收尾同一次尝试").add_argument("host")
-    submit = sub.add_parser("submit", help="登记获准工作区下的清单")
-    submit.add_argument("jobs", help="工作区下相对 .txt 路径")
-    submit.add_argument("--project", help="项目 id，缺省取当前目录的 monitor.toml")
-    submit.add_argument("--request-id", required=True, help="提交编号，重试时沿用原编号")
-    sub.add_parser("list", help="列出本人的登记")
-    withdraw = sub.add_parser("withdraw", help="撤回尚未领取的登记")
-    withdraw.add_argument("id")
-    stop = sub.add_parser("stop", help="请求停止算力池清单当前尝试")
-    stop.add_argument("id")
-    stop.add_argument("attempt_id")
-    bind = sub.add_parser("bind", help="管理员在内网绑定项目工作区")
-    bind.add_argument("project")
-    bind.add_argument("root")
-    bind.add_argument("--host")
-    a = ap.parse_args(argv)
-    if a.act in ("supply", "supply-daily", "dispatch", "run", "revoke", "status"):
-        body = vars(a).copy()
-        action = body.pop("act")
-        if action in ("supply", "supply-daily"):
-            body["until"] = parse_until(body["until"])
-        elif action == "dispatch":
-            body["enabled"] = body.pop("switch") == "on"
-        result = _call("POST", f"/api/pool/{action}", body, admin=True, timeout=240)
-        if isinstance(result, int):
-            return result
-        print(json.dumps(result, ensure_ascii=False, indent=2))
-        if action == "run" and (not all(r.get("success") for r in result["attempts"]) or result["overlap_s"] <= 0):
-            return JOB_BAD_RC
-        if action == "status" and not result["finished"]:
-            return JOB_BAD_RC
-        return 0
-    path = "/api/pool/queues"
-    try:
-        if a.act == "submit":
-            project = a.project or brief("monitor.toml")["id"]
-            result = client.call("POST", path, {"project": project, "jobs": a.jobs, "request_id": a.request_id}, idem=True)
-        elif a.act in ("withdraw", "stop"):
-            body = {"id": a.id}
-            if a.act == "stop":
-                body["attempt_id"] = a.attempt_id
-            result = client.call("POST", path + "/" + a.act, body, idem=True)
-        elif a.act == "bind":
-            result = client.call("POST", "/api/pool/workspace", {"project": a.project, "root": a.root, "host": a.host}, admin=True)
-        else:
-            result = client.call("GET", path)
-    except (OSError, ConfigError) as e:
-        ap.error(str(e))
-    except client.Failed as e:
-        print(f"[labmon] {e.msg}", file=sys.stderr)
-        return 3
-    except client.Unreachable as e:
-        print(f"[labmon] {e}", file=sys.stderr)
-        return 2
-    print(json.dumps(result, ensure_ascii=False))
-    return 0
-
-
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] and argv[0] in OVR:
@@ -652,10 +548,6 @@ def main(argv: list[str] | None = None) -> int:
         lp.add_argument("--admin", action="store_true", help="另建 1 小时的 admin 令牌（admin.token）：借卡、归还主机、drain、worker start|stop|limit 用")
         la = lp.parse_args(argv[1:])
         return client.login(la.name, la.admin)
-    if argv[:1] == ["project"] and argv[1:2] in (["resources"], ["submit"]):
-        return cmd_project_resources(argv[1:])
-    if argv[:1] == ["pool"]:
-        return cmd_pool(argv[1:])
     if argv[:1] == ["report"]:
         return cmd_report(argv[1:])
     if argv[:1] == ["update"]:
@@ -675,7 +567,7 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     # pause 等临时指令、borrow、user、server、secret、backup、login、url、update 有自己的参数解析（上面先截走），列在这里只为 --help 能看到
     ap.add_argument("cmd", choices=["collect", "render", "check", "serve", "wait", "service", "host", "worker", "project", "fleet", "notify", "hostcheck", *OVR, "borrow", "user",
-                                    "server", "secret", "backup", "login", "url", "update", "report", "pool"],
+                                    "server", "secret", "backup", "login", "url", "update", "report"],
                     help="见下面的用法；pause / resume / focus / unfocus / drain / undrain / borrow / user / server / secret / backup / login 各有自己的 --help")
     ap.add_argument("sub", nargs="?", choices=["install", "add", "status", "restart", "stop", "list", "return", "restore", "start", "rm", "init", "limit", "probe", "boot", "import", "fit",
                                                "archive", "push", "pull", "test"],

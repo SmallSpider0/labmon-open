@@ -1824,102 +1824,6 @@ class DepsTest(UnitBase):
     """任务依赖（after= 跑成功、afterany= 跑完）：按 项目 + 任务名 认（dep_state），没满足的不放行（dep_block，同被临时指令挡住），
     推演里排在依赖满足的时刻，占位任务排上后结束取 dep_end。"""
 
-    def test_pool_requests_follow_original_dependency_state(self):
-        qs = self.hosts.queues({"a": ["a1|true # gpus=1"],
-                                "b": ["b1|true # after=a1 gpus=2 est_min=3"],
-                                "c": ["c1|true # afterany=a1 needs=cache.pt est_min=2"]}, "p")
-        for i, q in enumerate(qs):
-            q["pool"] = str(i + 1) * 32
-        self.w.tick(qs, True)
-        st = json.loads(Path(self.w.p.status).read_text())
-        rows = {r["task_name"]: r for r in st["pool_requests"]}
-        self.assertTrue(rows["a1"]["ready"])
-        self.assertFalse(rows["b1"]["ready"])
-        self.assertFalse(rows["c1"]["ready"])
-        self.assertEqual(self.w.running, {})
-        # 失败仍由原 dep_state 分辨 after 与 afterany；目标机缓存不会按来源机来判定。
-        Path(qs[0]["state"], "a1.failed").write_text("")
-        self.w.tick(qs, False)
-        rows = {r["task_name"]: r for r in self.w.pool_ready}
-        self.assertFalse(rows["b1"]["ready"])
-        self.assertTrue(rows["c1"]["ready"])
-        self.assertEqual(self.w.running, {})
-        Path(qs[0]["state"], "a1.failed").unlink()
-        Path(qs[0]["state"], "a1.done").write_text("")
-        # 来源机供给期仍可判断请求就绪，但绝不能从专属通道开跑。
-        with mock.patch.object(self.m, "pool_supply_hold", return_value=True):
-            self.w.tick(qs, False)
-        rows = {r["task_name"]: r for r in self.w.pool_ready}
-        self.assertTrue(rows["b1"]["ready"])
-        self.assertEqual(rows["b1"]["gpus"], 2)
-        self.assertEqual(self.w.running, {})
-
-    def test_source_worker_does_not_adopt_same_node_pool_current(self):
-        q, = self.hosts.queues({"pool": ["train|true # gpus=1 est_min=1"]}, "p")
-        q["pool"] = "a" * 32
-        Path(q["state"]).mkdir(parents=True)
-        Path(q["state"], "current").write_text("train 999999 %s t" % self.m.now_str())
-        Path(q["state"], "train.rc").write_text("0")
-        marker = self.m.pool_registration(q["root"], q["jobs"])
-        self.m.write(marker, "attempt")
-        for first in (True, False):
-            waiting, requests = self.w.requests([q], first)
-            self.assertEqual(requests, [])
-            self.assertIn("算力池", waiting[0]["why"])
-            self.assertEqual(self.w.running, {})
-            self.assertTrue(Path(q["state"], "train.rc").exists())
-            self.assertFalse(Path(q["state"], "train.done").exists())
-            self.assertFalse(Path(q["state"], "train.failed").exists())
-        self.assertFalse(Path(self.w.p.usage).exists())
-        # 只由原池执行端收尾，再解除占用；来源下一拍仅观察完成标记。
-        Path(q["state"], "current").unlink()
-        Path(q["state"], "train.rc").unlink()
-        Path(q["state"], "train.done").touch()
-        Path(marker).unlink()
-        self.w.requests([q], False)
-        self.assertFalse(Path(q["state"], "train.failed").exists())
-
-    def test_pool_forecast_only_predicts_source_cpu_prefix(self):
-        qs = self.hosts.queues({"pool": ["prepare|true # gpus=0 est_min=1", "train|true # gpus=1 est_min=2",
-                                       "after_train|true # gpus=0 est_min=1"],
-                                "private": ["private_gpu|true # gpus=1 est_min=1"]}, "p")
-        qs[0]["pool"] = "a" * 32
-        with mock.patch.dict(os.environ, {"LABMON_GPUS": "GPU-aaa:40000:40000"}), \
-             mock.patch.object(self.w, "launch", return_value=("测试暂不开跑", False)):
-            self.w.tick(qs, True)
-        predicted = {j["name"]: j for lane in self.w.plan["lanes"] for j in lane["jobs"]}
-        self.assertEqual(set(predicted), {"prepare", "private_gpu"})
-        self.assertEqual(predicted["prepare"]["gpus"], [])
-        self.assertTrue(predicted["private_gpu"]["gpus"])
-        self.assertEqual(next(row["held"] for row in self.w.todo if row["root"] == qs[0]["root"]), "pool")
-
-    def test_pool_cpu_uses_source_admission_without_opening_private_gpu(self):
-        qs = self.hosts.queues({"cpu": ["prepare|sleep 0.1 # gpus=0 ram=1", "train|true # gpus=1 after=prepare"],
-                                "private": ["private_gpu|true # gpus=1"]}, "p")
-        qs[0]["pool"] = "a" * 32
-        with mock.patch.object(self.m, "pool_supply_hold", return_value=True):
-            self.w.tick(qs, True)
-            self.assertEqual({j["name"] for j in self.w.running.values()}, {"prepare"})
-            for _ in range(40):
-                if not any(self.w.alive_job(j) for j in self.w.running.values()):
-                    break
-                time.sleep(0.05)
-            self.w.tick(qs, False)
-        self.assertEqual(self.w.running, {})
-        self.assertTrue(Path(qs[0]["state"], "prepare.done").exists())
-        self.assertEqual([(r["task_name"], r["ready"]) for r in self.w.pool_ready], [("train", True)])
-        # CPU 例外不绕过原准入：内存需求超过来源机总量时也不能开跑。
-        q, = self.hosts.queues({"large": ["large|true # gpus=0 ram=999999"]}, "p")
-        q["pool"] = "b" * 32
-        original_sample = self.w.sample
-        def sample(queues):
-            original_sample(queues)
-            self.w.info["mem"] = {"limit": 100.0, "used": 5.0, "anon": 5.0}
-        with mock.patch.object(self.m, "pool_supply_hold", return_value=True), mock.patch.object(self.w, "sample", sample):
-            self.w.tick([q], False)
-        self.assertEqual(self.w.running, {})
-        self.assertFalse(Path(q["state"], "large.done").exists())
-
     def test_dep_end(self):
         k, e = self.m.dep_keys, self.m.dep_end
         keys = k({"project": "p", "deps": ["x", "q/y"], "deps_any": ["z"]})
@@ -2691,7 +2595,7 @@ class OffersTest(UnitBase):
             d = self.m.dep_keys(dict(self.m.hints(cmd), project=project))
             if d:
                 deps[n] = [[x, y] for x, y, _ in d]
-        todo = [{"project": project, "root": q["root"], "queue": q["jobs"], "jobs": names, "deps": deps, "held": held if held in ("paused", "pause", "drain", "pool") else None}]
+        todo = [{"project": project, "root": q["root"], "queue": q["jobs"], "jobs": names, "deps": deps, "held": held if held in ("paused", "pause", "drain") else None}]
         self.hosts.status(host, age=age, stopped=stopped, overrides=list(overrides), running=running, waiting=waiting, plan={"t": self.now, "lanes": lanes},
                           todo=todo + list(extra_todo),
                           queues=[{"root": q["root"], "jobs": q["jobs"], "gpus": None, "project": project, "stop": "boundary", "empty": False, "dur": {}}])
@@ -2712,10 +2616,6 @@ class OffersTest(UnitBase):
 
     def rel(self, t):
         return None if t is None else round((t - self.now) / self.H, 2)
-
-    def test_pool_queue_is_not_a_private_rebalance_candidate(self):
-        self.origin(["train|true # gpus=1 vram=20 est_min=10"], held="pool")
-        self.assertEqual(self.offer(), {})
 
     def test_offer_numbers_and_suggestion(self):
         # o：a0 在跑还要 1 小时，a1–a5 各 2 小时，排到 11 小时后；t 空着。从 o 的队尾往前挑 a5、a4…，挪前 k 行后 t 在 2k 小时后跑完、

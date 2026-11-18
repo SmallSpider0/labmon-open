@@ -76,15 +76,6 @@ def _release(hid: str, ovr=_ovr) -> int:
 
 
 def reserve(hid: str, lease_end: float | None, auto: bool = False, ovr=_ovr) -> str:
-    from . import config, pool_supply
-
-    with config.HOSTS_LOCK:
-        if pool_supply.held(hid):
-            raise P.PlatformError(pool_supply.HELD)
-        return _reserve(hid, lease_end, auto, ovr)
-
-
-def _reserve(hid, lease_end, auto, ovr):
     if hid in state()["res"]:
         return "已经预备过了"
     until = lease_end + EXTRA_S if lease_end else None

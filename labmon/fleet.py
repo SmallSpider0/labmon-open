@@ -1016,8 +1016,6 @@ def ka_stop(s: dict, cfg: dict, why: str, ssh_fn=None) -> tuple[str, str]:
 
 def guard_act(s: dict, st: dict, cfg: dict, t: float, busy: bool, ssh_fn=None) -> tuple[str | None, list[str]]:
     """探完一台后按 guard_state 开、重开或让出。返回 (动作, 要弹的通知：只有没开成，连着失败只弹一次)。"""
-    from . import pool_supply
-
     g = guard_state(s, st, cfg, t, busy)
     label = f"{s['holder']}（{s['id']}）"
     act = g.get("act")
@@ -1046,8 +1044,6 @@ def guard_act(s: dict, st: dict, cfg: dict, t: float, busy: bool, ssh_fn=None) -
                 _event("guard_delay", s["id"], f"{label} 延后{'重开' if repair else '开'}保活：{why}，下次探测再看", t, s["holder"])
             return None, []
 
-        if pool_supply.held(s["id"]):
-            return delay("算力池正在占用或已获供给")
         manual = repair and g["identity"][1] == "manual"
         if repair:
             res, note = _guard_run(s, cfg, ["repair", int(cfg["guard_watch_min"] * 60), "守护", *g["identity"]], ssh_fn)

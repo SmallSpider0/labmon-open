@@ -614,10 +614,6 @@ def remove(name: str, by: str) -> str:
         if d["users"][k].get("role") == "admin" and _admins(d) == [k]:
             raise Denied(409, f"{k} 是最后一个管理员，删不掉：先把别人设为管理员")
         from .service import set_user_push
-        from .poolqueues import active_reason
-        for pid in PJ.registered():
-            if (PJ.owner(pid) or "").casefold() == k.casefold() and (reason := active_reason(pid)):
-                raise Denied(409, reason)
         set_host_users(k, [], by)
         for pid in PJ.registered():
             PJ._set_owner(pid, None, by, previous=k)
@@ -806,7 +802,6 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     out = dict(snap, fleet=None, notices=[], wake=[], hostcheck=None, host_notices=None,
                event_cats=[c for c in snap.get("event_cats") or EVENT_CATS if c[0] not in FLEET_CATS and c[0] != "report"],
                access={"own": sorted(acc.projects), "hosts": sorted(acc.allowed)})
-    out.pop("pool_observed", None)  # 派单器内部库存/回执；成员按项目接口看获准的记录。
     out["hosts"] = [h for h in snap.get("hosts") or [] if h.get("id") in acc.hosts]
     out["projects"] = [p for p in snap.get("projects") or [] if p.get("id") in acc.projects]
     out["archived"] = [a for a in snap.get("archived") or [] if a.get("id") in acc.projects]

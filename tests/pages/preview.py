@@ -36,8 +36,7 @@ KINDS = {"normal": ("overview", "project", "records", "project_events"),
          "evil": ("overview_evil", "project_evil", "records_evil", "project_events_evil"),
          "sparse": ("overview_sparse", "project_sparse", "records", "project_events"),
          "dense": ("overview_dense", "project_dense", "records", "project_events"),
-         "many": ("overview_dense", "project_many", "records", "project_events"),
-         "pool": ("overview", "project_pool", "records", "project_events")}
+         "many": ("overview_dense", "project_many", "records", "project_events")}
 
 
 AS = {"admin": ("boss", "lan"), "public": ("boss", "public"), "user": ("amy", "lan"), "empty": ("carol", "lan")}     # --as：用哪个假账号、从哪个入口来
@@ -106,10 +105,6 @@ def build(out: Path, kind: str = "normal", who=None) -> list[str]:
         me.update(commit="a1b2c3d000000000000000000000000000000000",
                   push={"set": True, "kind": "bark", "target": "Bark · abc…xyz"} if ident.name == "amy" else {"set": False})
         (out / "api").mkdir(exist_ok=True)
-        me["pool_access"] = ident.role == "admin" or ident.name == "amy"
-        if me["pool_access"]:
-            (out / "api" / "pool.json").write_text(json.dumps(S.pool_resources(ident.name), ensure_ascii=False))
-            (out / "api" / "pool-queues.json").write_text(json.dumps(S.pool_queues(ident.name), ensure_ascii=False))
         (out / "api" / "me.json").write_text(json.dumps(me, ensure_ascii=False))
         if listing:
             people = (snap.get("fleet") or {}).get("ops", {}).get("people", {})
@@ -130,12 +125,6 @@ def build(out: Path, kind: str = "normal", who=None) -> list[str]:
             for n in people:
                 if F.PERSON_RE.fullmatch(n):
                     (details / f"{n}.json").write_text(json.dumps(FV.person(n, t=snap["generated"]), ensure_ascii=False))
-    if kind == "pool":
-        for project in snap.get("projects", []):
-            project["pool_count"] = 1
-            endpoint = out / "api" / "project" / project["id"] / "pool"
-            endpoint.parent.mkdir(parents=True, exist_ok=True)
-            endpoint.write_text(json.dumps(pj()["pool"]))
     fill = (lambda f: f.write_text(C.fill(f.read_text(), "ME", me))) if me else (lambda f: None)
     C.write_page("overview.html", snap, out / "index.html", title="调度总览")
     fill(out / "index.html")
@@ -157,26 +146,18 @@ def build(out: Path, kind: str = "normal", who=None) -> list[str]:
         fill(d / "index.html")
         (d / "snapshot.json").write_text(json.dumps(ps, ensure_ascii=False))
         (d / "events.json").write_text(json.dumps(ev(), ensure_ascii=False))
-        resource_dir = out / "api" / "project" / p["id"]
-        resource_dir.mkdir(parents=True, exist_ok=True)
-        (resource_dir / "resources.json").write_text(json.dumps({"project": p["id"], "owner": p.get("owner", "amy"),
-            "private": [{"id": "srv-a", "available": True}, {"id": "srv-b", "available": False, "reason": "服务器正在供给算力池"}],
-            "pool": {"available": True, "root": "/data/projects/" + p["id"], "reason": None}, "queues": []}, ensure_ascii=False))
         ids.append(p["id"])
     return ids
 
 
 class Handler(SimpleHTTPRequestHandler):
     """静态目录，另把看板服务的几个无扩展名的路由对到文件上（/login、/api/me、/api/users）。"""
-    ALIAS = {"/login": "/login.html", "/api/me": "/api/me.json", "/api/users": "/api/users.json",
-             "/api/pool": "/api/pool.json", "/api/pool/queues": "/api/pool-queues.json"}
+    ALIAS = {"/login": "/login.html", "/api/me": "/api/me.json", "/api/users": "/api/users.json"}
     prefix = ""                                     # --prefix：上面几条也挂在前缀下
 
     def translate_path(self, path):
         p = urlsplit(path).path
         al = {self.prefix + k: self.prefix + v for k, v in self.ALIAS.items()}
-        if p.startswith(self.prefix + "/api/project/") and p.endswith("/resources"):
-            return super().translate_path(p + ".json")
         return super().translate_path(al.get(p, path))
 
 

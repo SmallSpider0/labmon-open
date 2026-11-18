@@ -13,9 +13,7 @@ import threading
 import time
 from pathlib import Path
 
-from . import poolqueues as PQ
 from . import projects as PJ
-from .collect import _qpath
 from .config import ConfigError, fmt_dur, fmt_time, stale_limit
 from .overview import USAGE_KEEP_S
 from .state import load_json, load_rows, save_json, snapshot, state_dir
@@ -212,7 +210,6 @@ class JobWatch:
         if self.voids0 is None:
             self.voids0 = set(voids)
         rows, cur, self.stale = None, {}, {}
-        pool_data = PQ.read()
         for k in self.keys:
             if k in self.final:
                 continue
@@ -229,29 +226,12 @@ class JobWatch:
                 files = sorted((state_dir() / "usage").glob("*.jsonl"))
                 rows = [(f.stem, r) for f in files for r in load_rows(f) if (r.get("t") or 0) >= time.time() - USAGE_KEEP_S]   # 文件只在追加时修剪
             st = cur[k] = job_state(snap, k[1], [(h, r) for h, r in rows or () if (r.get("p"), r.get("n")) == k])
-            pool_st = PQ.wait_status(*k, pool_data)
-            if pool_st and (pool_st["st"] in ("running", "queued") or st["st"] not in ("running", "queued")):
-                if pool_st["st"] in ("done", "failed"):
-                    self.final[k] = pool_st
-                else:
-                    cur[k] = pool_st
-                    self.live.add(k)
-                    self.streak.pop(k, None)
-                continue
             if st["st"] in ("running", "queued"):
                 self.live.add(k)
                 self.streak.pop(k, None)
                 continue
             if k in self.live and st["st"] in ("done", "failed"):
                 self.final[k] = st
-                continue
-            # 新登记还没有进入项目采集时，空快照不是任务不存在的证据。
-            # 只挡 missing；真实任务状态和已明确不存在的项目仍按原规则处理。
-            lanes = {_qpath(ln.get("root"), ln.get("queue")) for ln in (snap or {}).get("lanes", [])}
-            if st["st"] == "missing" and any(q["state"] in PQ.ACTIVE and
-                    _qpath(q.get("root"), q.get("jobs")) not in lanes for q in PQ.project_rows(k[0], pool_data)):
-                self.streak.pop(k, None)
-                cur[k] = dict(st, text="等待项目采集确认新登记的算力池清单")
                 continue
             gen = (snap or {}).get("generated") or 0
             old = self.streak.get(k)
@@ -286,7 +266,7 @@ def _sig(out: Path, w: JobWatch | None) -> tuple:
     """判告警要读的文件的修改时刻：项目快照、全局快照（wake、页面上的改动）、projects.json（归档）、被等的别的项目的快照。变了才再判。"""
     others = sorted({k[0] for k in w.keys if k[0] != w.pid}) if w else []
     return tuple(_mtime(p) for p in [out / "snapshot.json", state_dir() / "snapshot.json", state_dir() / "projects.json"]
-                 + ([PQ.state_file()] if w else []) + [PJ.out_dir(p) / "snapshot.json" for p in others if PJ.ID_RE.fullmatch(p)])
+                 + [PJ.out_dir(p) / "snapshot.json" for p in others if PJ.ID_RE.fullmatch(p)])
 
 
 def wait(pid: str, names: list[str] | None = None, watch: dict | None = None, hold: float = 0, extra: dict | None = None,

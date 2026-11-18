@@ -12,7 +12,6 @@ port = 22
 python = "/usr/bin/python3"
 data_root = "/data/me"             # 必填为你获授权的共享根目录；公共默认 /data/labmon
 # ka_bin = "/data/me/keepalive/bin"  # 可选：已有 ka.sh/ka.env 所在目录
-# pool_python = "/data/me/envs/torch/bin/python"  # 可选：一次性池试点所用、已安装 PyTorch 的解释器
 shared = ["/data"]                # 与其它主机共用的目录（NFS 等）：本机归还后，经共用该目录的在用主机代读队列状态
 # data_root = "/data/me"           # 共享盘上自己的根目录，按目录规范管理（缺省 /data/labmon；labmon project init）
 # worker_home = "/data/me/labmon"  # labmon worker 装在哪（缺省 <data_root>/labmon；放共享盘上一份供各主机共用）

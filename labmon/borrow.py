@@ -121,10 +121,7 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
     check_future(until, "约定时间")
     if away and not until:
         raise ConfigError("说好不用要有个时限：先选约定时间")
-    from . import pool_supply
     cfg, s = _server(sid)
-    if pool_supply.held(sid):
-        raise ConfigError(pool_supply.HELD)
     projects = _projects(projects)
     keys = {"borrow_until": fmt_time(until, year=True) if until else None, "borrow_for": projects,
             "borrow_away": fmt_time(until, year=True) if away else None}
@@ -169,8 +166,6 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
     step()
     with HOSTS_LOCK:
         _, current = _server(sid)
-        if pool_supply.held(sid):
-            raise ConfigError(pool_supply.HELD)
         if F.borrowed(current) or current["holder"] != s["holder"] or current["job"] != s["job"]:
             raise ConfigError(f"{label(s)} 的登记已变，请刷新后再试")
         set_fleet_keys({"borrow_since": fmt_time(time.time(), year=True), "borrow_returned": None, "borrow_by": person, "borrow_light": True if use else None, **keys},
@@ -405,12 +400,7 @@ def set_swap(hid: str, until: float | None, holder: str | None, ovr=_ovr) -> str
     check_future(until, "约定时间")
     keys = {"borrow_until": fmt_time(until, year=True) if until else None, "borrow_from": holder if until else None}
     msg = f"{hid} 约定 {fmt_time(until)} 换回给 {holder or '原使用人'}" if until else f"去掉 {hid} 的约定归还时间"
-    from . import pool_supply
-
-    with HOSTS_LOCK:
-        if pool_supply.held(hid):
-            raise ConfigError(pool_supply.HELD)
-        set_fleet_keys(keys, msg, host=hid)
+    set_fleet_keys(keys, msg, host=hid)
     log_events([{"kind": "borrow", "host": hid, "who": holder, "msg": msg}])
     if not until:                                    # 不约定了：check 不再管这台，截止指令在这里撤
         ovr("rm", "deadline", hid, "borrow")

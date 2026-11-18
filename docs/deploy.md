@@ -202,8 +202,6 @@ labmon server restore ~/Library/Application\ Support/labmon/backups/labmon-backu
 
 主机清单中的 `data_root` 指定获授权的共享目录，缺省 `/data/labmon`；`worker_home` 缺省为其下 `labmon/`。已有安装升级前，应显式写入实际使用的 `data_root` 与 `worker_home`，避免依赖曾经的站点默认值。
 
-可选 `ka_bin` 指定现有 `ka.sh` 与 `ka.env` 所在目录；它经 `KA_BIN` 同时传给普通 worker 和池命令。未配置时 worker 查找自身目录下的 `keepalive/bin`；不提供保活脚本时不会替部署方创建保活。既有 `ka.env` 的 `AGRI_ROOT`、`AGRI_KA_DIR`、`AGRI_KA_SCRIPT` 接口仍受支持。
-
-可选 `pool_python` 指定一次性算力池试点使用的 PyTorch 解释器，经 `LABMON_POOL_PYTHON` 传给 worker；缺省取 worker 自身的解释器。普通清单仍用清单中自己的命令与环境。借来的主机继承既有主机模板中的这两项。部署自己的适配环境后再开放试点。
+可选 `ka_bin` 指定现有 `ka.sh` 与 `ka.env` 所在目录；它经 `KA_BIN` 传给 worker，借来的主机继承既有主机模板中的这一项。未配置时 worker 查找自身目录下的 `keepalive/bin`；不提供保活脚本时不会替部署方创建保活。既有 `ka.env` 的 `AGRI_ROOT`、`AGRI_KA_DIR`、`AGRI_KA_SCRIPT` 接口仍受支持。
 
 仓库值守默认指向公开仓库，可用 `python3.11 -I tools/issue_watch.py --repo owner/name wait` 覆盖。各仓库的已见编号分别放在 `<状态根>/issue_watch/<owner>--<name>.json`，不会把旧库的同号 Issue 当成已见；新空库可直接启动值守。

@@ -382,9 +382,6 @@ svg text { font-size: 11px; fill: var(--muted); }
 .fc.off .fc-t b { color: var(--muted); }
 .fc-hd { display: flex; align-items: center; gap: 9px; min-width: 0; }
 .fc-hd > .ico { width: 15px; height: 15px; color: var(--faint); transform: rotate(-90deg); }
-.pool-card .fc-sub, .pool-card .pool-node-count { white-space: normal; overflow-wrap: anywhere; }
-.pool-summary { display: flex; flex-wrap: wrap; gap: 6px 20px; }
-.pool-queue-detail { overflow-wrap: anywhere; }
 .fav { position: relative; flex: none; width: 32px; height: 32px; border-radius: 8px; display: flex; align-items: center; justify-content: center;
        background: color-mix(in srgb, var(--pc, var(--accent)) 13%, var(--card)); color: var(--pc, var(--accent)); font-size: 11.5px; font-weight: 700; letter-spacing: -.02em; }
 .fc.off .fav { background: var(--line); color: var(--muted); }
@@ -834,47 +831,6 @@ body.more-open { overflow: hidden; }
 
 #tip { position: fixed; z-index: 9; pointer-events: none; background: var(--fg); color: var(--bg); border-radius: 6px; padding: 5px 8px;
        font-size: 12px; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-width: min(520px, calc(100vw - 32px)); display: none; }
-.pool-wall { margin: 12px 0; }
-.pool-insight { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; margin-top: 18px; }
-.pool-allocation { display: flex; height: 12px; border-radius: 6px; overflow: hidden; background: var(--line); margin: 12px 0 8px; }
-.pool-allocation i + i { border-left: 2px solid var(--card); }
-.pool-allocation .free, .pool-legend .free { background: var(--ok); }
-.pool-allocation .assigned, .pool-legend .assigned { background: var(--accent); }
-.pool-allocation .unavailable, .pool-legend .unavailable { background: var(--line); }
-.pool-legend { display: flex; flex-wrap: wrap; gap: 6px 14px; margin-bottom: 8px; color: var(--muted); }
-.pool-legend i { display: inline-block; width: 7px; height: 7px; border-radius: 2px; margin-right: 5px; }
-.pool-schedule-row { display: flex; align-items: start; gap: 10px; padding: 8px 0; border-bottom: 1px solid var(--line); overflow-wrap: anywhere; }
-.pool-schedule-row > .badge { flex-shrink: 0; }
-.pool-schedule-row > div { min-width: 0; }
-.pool-schedule > .pool-note { margin-top: 8px; }
-.pool-gpu { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 4px 0 10px; }
-.pool-gpu .gt { margin: 0; }
-.pool-gpu .gt i { width: 16px; height: 24px; }
-@media (max-width: 700px) { .pool-insight { grid-template-columns: minmax(0, 1fr); gap: 18px; } }
-.pool-card .fc-sub, .pool-note, .pool-server-row .u { overflow-wrap: anywhere; }
-.pool-card .fav { white-space: nowrap; }
-.pool-card .fc-t > b { white-space: normal; overflow-wrap: anywhere; }
-.pool-note { margin: 0; line-height: 1.5; }
-.pool-card .pool-note { font-size: 12px; color: var(--muted); }
-.pool-spec, .pool-projects { display: flex; flex-wrap: wrap; gap: 6px 12px; align-items: center; }
-.pool-devices { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
-.pool-field { display: block; margin: 12px 0; }
-.pool-field input[type=datetime-local] { max-width: 100%; }
-.pool-server-row .u { flex-wrap: wrap; min-width: 0; }
-.pool-server-row .pool-note { flex-basis: 100%; }
-.pool-overview { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; }
-.pool-overview .pool-summary { flex: 1; }
-.pool-projects { margin-top: 12px; }
-@media (max-width: 600px) {
-  .pool-overview > b { flex: 1; }
-  .pool-overview .pool-summary { order: 3; flex: 1 0 100%; gap: 6px 12px; }
-  .pool-projects > .mut { flex-basis: 100%; }
-  .pool-manage .urow .u { flex: 1 1 150px; }
-  .pool-manage .urow .acts { width: auto; }
-}
-
-
-.resource-summary{display:flex;align-items:center;justify-content:space-between;gap:16px}.resource-summary p{margin:6px 0}.resource-summary>div{min-width:0}.resource-choices{display:flex;flex-wrap:wrap;gap:8px}.resource-choice{display:flex;align-items:center;gap:6px;padding:8px 12px;border:1px solid var(--line);border-radius:8px;cursor:pointer}.resource-choice:has(input:checked){border-color:var(--accent);background:var(--bg)}.resource-choice.unavailable{opacity:.55;cursor:default}@media(max-width:600px){.resource-summary{align-items:flex-start;flex-direction:column}.resource-choices{gap:6px}}
 @media (max-width: 860px) {
   body { flex-direction: column; }
   #side { display: none; }                                               /* 侧栏换成底栏 + 「更多」 */
@@ -993,10 +949,6 @@ function route(h = location.hash) {
   if (h === "#/archived") return {kind: "home", drw: {k: "arch", id: ""}};
   const account = h.match(/^#\/me(?:\/(security|tokens|push))?$/);
   if (account) return {kind: "me", tab: account[1] || "overview"};
-  if (h === "#/pool/manage") return {kind: "pool", tab: "nodes", drw: {k: "poolManage"}};
-  if (h === "#/pool") return {kind: "pool", tab: "nodes"};
-  const poolNode = h.match(/^#\/pool\/node\/([^/]+)$/);
-  if (poolNode) return {kind: "pool", tab: "nodes", drw: {k: "poolNode", id: dec(poolNode[1])}};
   const user = h.match(/^#\/admin\/users(?:\/([^/]+)(?:\/(usage))?)?$/);
   if (user) return {kind: "fleet", tab: "people", oldAccount: user[1] ? dec(user[1]) : "", oldUsage: Boolean(user[2])};
   const m = h.match(/^#\/(host|p)\/(.+)$/);
@@ -1047,11 +999,11 @@ addEventListener("popstate", () => {
 addEventListener("hashchange", onRoute);              // 地址栏里改的
 function closeDrw() {
   const r = route();
-  if (r.drw) nav(r.kind === "p" ? "#/p/" + encodeURIComponent(r.id) : r.kind === "home" ? "#/" : r.kind === "pool" ? "#/pool" : r.tab === "slots" ? "#/fleet" : "#/fleet/" + r.tab);
+  if (r.drw) nav(r.kind === "p" ? "#/p/" + encodeURIComponent(r.id) : r.kind === "home" ? "#/" : r.tab === "slots" ? "#/fleet" : "#/fleet/" + r.tab);
 }
 function stepDrw(dir) {
   const d = route().drw;
-  if (!d || d.k === "new" || d.k === "guard" || d.k === "proj" || d.k === "arch" || d.k === "account" || d.k === "poolNode" || d.k === "poolManage" || d.id === "+") return;
+  if (!d || d.k === "new" || d.k === "guard" || d.k === "proj" || d.k === "arch" || d.k === "account" || d.id === "+") return;
   const ids = d.k === "srv" ? srvOrder() : peopleOrder(), k = ids.indexOf(d.id);
   if (k >= 0 && ids.length > 1) nav(DH[d.k](ids[(k + dir + ids.length) % ids.length]));
 }
@@ -1175,7 +1127,6 @@ function navModel(r) {
   const hostState = h => h.lan_off ? "本机不在内网" : h.error ? "连不上" : !h.status || !h.worker_up ? "worker 不在" : hal(h) ? "有告警" : "正常";
   const top = [{k: "home", href: "#/", ico: icon("dash"), label: "总览", on: r.kind === "home", bad: n, full: n ? `总览：${n} 条告警` : "总览"}];
   if (LIVE) top.push({k: "log", href: "#/log", ico: icon("clock"), label: "记录", on: r.kind === "log", full: "记录：事件、平台操作、配置改动", sub: "事件、平台操作、配置改动"});
-  if (LIVE && ME?.pool_access) top.push({k: "pool", href: "#/pool", ico: icon("server"), label: "算力池", ab: "算力", on: r.kind === "pool", full: "算力池试点"});
   const secs = [
     {id: "host", name: "主机", ct: D.hosts.length, empty: "没有在用的主机", items: D.hosts.map(h => ({href: `#/host/${encodeURIComponent(h.id)}`, on: r.kind === "host" && r.id === h.id,
       ico: `<span class="hico">${icon("server")}<span class="cdot" style="background:${hostDot(h)}"></span></span>`, label: h.label, bad: hal(h), ab: short(h.label),
@@ -1229,7 +1180,7 @@ function tabbar(r) {
     <span class="tbi">${x.ico}${x.bad ? `<span class="tbb">${x.bad > 99 ? "99+" : x.bad}</span>` : x.dot ? `<span class="tbb dot"></span>` : ""}</span><span>${esc(x.label)}</span></a>`;
   const tabs = [top[0], fleet && {...fleet, label: "组内"}, top.find(x => x.k === "log")].filter(Boolean)
     .map(x => tab({...x, on: x.on && !MORE}));
-  tabs.push(tab({ico: icon("dots"), label: "更多", on: MORE || rest.some(x => x.on) || !!me?.on || r.kind === "pool", dot: rest.some(x => x.bad)}, `href="#" data-more role="button" aria-expanded="${MORE}"`));
+  tabs.push(tab({ico: icon("dots"), label: "更多", on: MORE || rest.some(x => x.on) || !!me?.on, dot: rest.some(x => x.bad)}, `href="#" data-more role="button" aria-expanded="${MORE}"`));
   return tabs.join("");
 }
 function morePanel(r) {
@@ -1260,8 +1211,6 @@ function topbar(r) {
   } else if (r.kind === "me") {
     return `<div class="account-content account-top"><h1>我的账号</h1>${LIVE && ME?.account ? meTabs(r.tab) : ""}
       ${off ? `<div class="account-feedback" role="status">${offBadge(off)}</div>` : ""}</div>`;
-  } else if (r.kind === "pool") {
-    return `<h1>算力池</h1><span class="sp"></span>${offBadge(off)}`;
   }
   if (r.kind === "p") {
     const writable = canWrite(r.id), busy = BUSY || fs?.busy;
@@ -2991,285 +2940,6 @@ function fleetTabs(tab) {
 };
   return `<nav class="ftabs">${FTABS.map(([k, n]) => `<a class="ftab${k === tab ? " on" : ""}" href="#/fleet${k === "slots" ? "" : "/" + k}">${n}${ct[k]}</a>`).join("")}</nav>`;
 }
-let POOL_VIEW = null, POOL_LOADING = false, POOL_ERROR = "";
-let POOL_VISIT = 0;
-let POOL_QUEUES = null, POOL_QUEUE_ERROR = "", POOL_QUEUE_REQUEST = null, POOL_QUEUE_MESSAGE = "";
-const POOL_STOP_PENDING = new Set();
-async function poolLoad() {
-  if (!LIVE || !ME?.pool_access || POOL_LOADING) return;
-  const visit = POOL_VISIT;
-  POOL_LOADING = true;
-  try {
-    const r = await api("api/pool", {cache: "no-store"});
-    if (visit !== POOL_VISIT) return;
-    if (r.status === 403) ME = {...ME, pool_access: false};
-    if (!r.ok) throw new Error();
-    const data = await r.json();
-    if (visit !== POOL_VISIT) return;
-    POOL_VIEW = data;
-    POOL_ERROR = "";
-  } catch {
-    if (visit !== POOL_VISIT) return;
-    POOL_VIEW = null;
-    POOL_ERROR = "读不了资源状态，请稍后再看。";
-  } finally {
-    if (visit === POOL_VISIT) POOL_LOADING = false;
-  }
-  if (route().kind === "pool") render(false);
-}
-// 卡片、节点详情与管理列表共用真实供给阶段；offline 只表示没有通过本轮库存核验。
-function poolStatus(node) {
-  let status;
-  if (node.stage === "released" || node.state === "withdrawn") status = ["已收回", "mute", "已恢复专属接单。"];
-  else if (node.stage === "releasing" || node.state === "withdrawing") status = ["收回中", "warn", "等待任务收尾与系统恢复专属接单。"];
-  else if (node.stage === "preparing" || node.state === "preparing") status = ["准备供给", "warn", "等待系统关闭专属接单并核对资源。"];
-  else if (node.state === "offline") status = ["等待核验", "warn", "本轮未通过资源核验，等待系统重新核对。"];
-  else if (node.state === "ready" && POOL_VIEW?.inventory_fresh === false) status = ["等待更新", "warn", "库存等待更新，暂不计为可接单。已有分配仍保留。"];
-  else if (node.state === "ready") status = POOL_VIEW?.dispatch_enabled ? ["可接单", "ok", ""] : ["接单已暂停", "mute", "管理员开启接单后分配新任务。"];
-  else if (node.state === "running") status = ["使用中", "ok", ""];
-  else if (node.state === "paused") status = ["暂停接单", "warn", "当前资源暂停接单，等待系统更新状态。"];
-  else status = ["等待同步", "mute", "等待系统更新资源状态。"];
-  return {label: status[0], badge: status[1], note: [node.error, status[2]].filter(Boolean).join("；")};
-}
-function poolState(node) {
-  const status = poolStatus(node);
-  return `<span class="badge b-${status.badge}">${status.label}</span>`;
-}
-function poolNote(node) { const note = poolStatus(node).note; return note ? `<p class="pool-note">${esc(note)}</p>` : ""; }
-function poolRevoke(node) {
-  return canPoolManage() && !["released", "releasing"].includes(node.stage) && !["withdrawn", "withdrawing"].includes(node.state) ?
-    poolManageButton("收回服务器", "revoke", {host: node.node}, "revoke-" + node.node) : "";
-}
-// 库存的空卡和账本里的实际分配分开计；整机忙时其余卡只是暂不可用。
-function poolAllocation(node) {
-  if (node.state === "withdrawn" || node.stage === "released") return {total: 0, free: 0, assigned: 0, unavailable: 0};
-  const total = node.total, devices = new Set(node.devices || []);
-  const assigned = Math.min(total, new Set((POOL_VIEW.assignments || []).filter(a => a.node === node.node).flatMap(a => a.devices).filter(d => devices.has(d))).size);
-  const free = POOL_VIEW.dispatch_enabled && POOL_VIEW.inventory_fresh && node.state === "ready" && !["preparing", "releasing"].includes(node.stage) ? Math.min(node.free, total - assigned) : 0;
-  return {total, free, assigned, unavailable: total - assigned - free};
-}
-function poolAllocationBar(c) {
-  const parts = [["free", "可接单"], ["assigned", "已分配"], ["unavailable", "暂不可用"]];
-  const label = parts.map(([key, title]) => `${title} ${c[key]} 张`).join(" · ");
-  return `<div class="pool-allocation" role="img" aria-label="${esc(label)}">${c.total ? parts.map(([key, title]) => c[key] ? `<i class="${key}" style="flex:${c[key]}" ${tip(`${title} ${c[key]} 张`)}></i>` : "").join("") : ""}</div>
-    <div class="pool-legend sm">${parts.map(([key, title]) => `<span><i class="${key}"></i>${title} <b>${c[key]}</b></span>`).join("")}</div>`;
-}
-function poolGpuSample(node) {
-  const sample = node.sample;
-  return `<div class="pool-gpu"><span class="sm mut">GPU 利用率 · 含保活</span>${sample ? `${gpuTiles(sample.gpus, sample.state)}<span class="sm mut">${tsNear(sample.t)} 采样${sample.gpus.length < node.total ? ` · ${sample.gpus.length}/${node.total} 张有数据` : ""}</span>` : '<span class="sm mut">暂无新鲜采样</span>'}</div>`;
-}
-function poolSchedule() {
-  const d = POOL_VIEW, rows = [...(d.assignments || []), ...(d.waiting || [])];
-  const counts = new Map();
-  for (const r of rows) counts.set(r.phase, (counts.get(r.phase) || 0) + 1);
-  const summary = [...counts].map(([phase, count]) => { const [label, badge] = POOL_QUEUE_STATE[phase] || POOL_QUEUE_STATE.unknown; return `<span class="badge b-${badge}">${label} ${count}</span>`; }).join(" ");
-  return `<div class="pool-schedule"><div class="pool-overview"><b>当前调度</b><div class="pool-summary">${summary}</div></div>${rows.length ? rows.map(r => {
-    const [label, badge] = POOL_QUEUE_STATE[r.phase] || POOL_QUEUE_STATE.unknown;
-    const title = D.projects.find(p => p.id === r.project)?.title || r.project;
-    const reason = r.phase === "waiting" && !d.dispatch_enabled ? "接单已暂停" : r.reason;
-    return `<div class="pool-schedule-row"><span class="badge b-${badge}">${label}</span><div><div>${r.project ? `<a href="${esc(DH.proj(r.project))}">${esc(title)}</a>${r.task ? ` · ${esc(r.task)}` : ""}` : '<span class="mut">其他项目</span>'}</div>
-      <div class="sm mut">${r.node ? `${esc(r.node)} · ${r.devices.length} 张卡` : esc(reason || "等待系统核对队首")}</div></div></div>`;
-  }).join("") : '<p class="pool-note sm mut">暂无当前分配或可见的等待清单。</p>'}
-  <p class="pool-note sm mut">等待按清单队首计${ME?.admin ? "" : "，仅显示你有权限的项目"}。</p></div>`;
-}
-function poolCard(node) {
-  const href = DH.poolNode(node.node), x = srvById(node.node);
-  const tasks = (POOL_VIEW?.assignments || []).filter(a => a.node === node.node);
-  return `<div class="fc pool-card" data-drw="${esc(href)}" tabindex="0" role="button" aria-label="${esc(node.holder || node.node)}的服务器">
-    <div class="fc-hd"><span class="fav">${esc(/[^\x00-\x7F]/.test(node.holder || node.node) ? (node.holder || node.node).slice(0,2) : abbr(node.holder || node.node))}</span>
-      <div class="fc-t"><b>${esc(node.holder || node.node)}</b><span class="fc-sub sm mut">${esc(x ? fNode(x.ssh) + ':' + x.port : node.node)}</span></div>
-      <div class="fc-st">${poolState(node)}</div>${icon("chev")}</div>
-    <div class="pool-spec sm"><span>${esc(node.model || "规格等待采集")} · ${node.total} 张卡</span>${poolAllocation(node).free ? `<span class="mut">可接单 ${poolAllocation(node).free} 张</span>` : ""}</div>
-    ${poolAllocationBar(poolAllocation(node))}${poolGpuSample(node)}
-    ${tasks.length ? `<div class="pool-note sm">${tasks.map(t => esc(D.projects.find(p => p.id === t.project)?.title || t.project || "其他项目")).join("、")}</div>` : ""}
-    ${poolNote(node)}<div class="fc-ft sm mut">${node.until ? `供给到 ${tsNear(node.until)}` : "未设置供给截止"}</div></div>`;
-}
-function poolNodeDrawer(id) {
-  const node = POOL_VIEW?.nodes.find(n => n.node === id), x = srvById(id);
-  const tasks = (POOL_VIEW?.assignments || []).filter(a => a.node === id);
-  const supply = node ? dSec("算力池供给", `${poolState(node)}${poolNote(node)}
-    <p class="sm mut">${node.until ? "供给到 " + ts(node.until) : "未设置供给截止"}</p>
-    <div class="pool-devices">${(node.devices || []).map((device, i) => `<span class="chip" ${tip(device)}>GPU ${i+1} · ${tasks.some(t => (t.devices || []).includes(device)) ? "已分配" : "未分配"}</span>`).join("")}</div>
-    <div class="pool-projects">${poolRevoke(node)}${poolManageEntry()}</div>`) : "";
-  if (x) return srvDrawer(id).replace('<div class="db">', '<div class="db">' + supply);
-  return dHead(`<span class="fav">${icon("server")}</span>`, esc(node?.holder || id), esc(id)) + `<div class="db">${supply}${node ? dSec("共享资源", kvHtml([
-    ["GPU", esc(node.model || "规格等待采集")], ["可接单", `${poolAllocation(node).free} / ${node.total} 张`]])) : '<div class="card empty">资源信息尚未更新。</div>'}</div>`;
-}
-function poolQueueRoute(r = route()) {
-  return r.kind === "p" && r.drw?.k === "proj" && canWrite(r.id);
-}
-function poolQueueCanWithdraw(queue) {
-  return queue.can_withdraw === true;
-}
-function poolQueueCanStop(queue) {
-  const dispatch = queue?.dispatch;
-  return dispatch?.can_stop === true && typeof dispatch.attempt_id === "string" && dispatch.attempt_id.trim() !== "" &&
-    ["starting", "running", "unknown"].includes(dispatch.phase);
-}
-const poolStopKey = (id, attempt) => JSON.stringify([id, attempt]);
-async function poolQueuesLoad() {
-  if (!LIVE || !ME?.pool_access || POOL_QUEUE_REQUEST) return POOL_QUEUE_REQUEST;
-  const request = api("api/pool/queues", {cache: "no-store"}, {json: true});
-  POOL_QUEUE_REQUEST = request;
-  try {
-    const r = await request;
-    if (!poolQueueRoute()) return;
-    POOL_QUEUES = r.ok && Array.isArray(r.body?.queues) ? r.body : null;
-    POOL_QUEUE_ERROR = !POOL_QUEUES && ![403, 404].includes(r.status) ? "读不了提交记录，请稍后再看。" : "";
-  } catch {
-    POOL_QUEUES = null;
-    POOL_QUEUE_ERROR = "读不了提交记录，请稍后再看。";
-  } finally {
-    POOL_QUEUE_REQUEST = null;
-    if (poolQueueRoute()) render(false);
-  }
-}
-function poolQueueError(p) {
-  return p?.err ? `<div class="rn-err" role="status">${esc(p.err)}</div>` : "";
-}
-function poolQueueConfirm(queue, action, label, prompt) {
-  const open = popIs("pool-" + action, queue.id);
-  const changed = action === "stop" && open && (!poolQueueCanStop(queue) || queue.dispatch.attempt_id !== POP.attempt);
-  const pending = action === "stop" && POOL_STOP_PENDING.has(poolStopKey(queue.id, queue.dispatch?.attempt_id));
-  const btn = `<button class="btn mini-btn${action === "stop" ? " danger" : ""}" data-pool-act="${action}" data-id="${esc(queue.id)}" aria-haspopup="dialog" aria-expanded="${open}">${label}</button>`;
-  return popConfirm(btn, open, `<p class="rn-note">${prompt}</p>${poolQueueError(POP)}
-    ${changed ? '<div class="rn-state">当前尝试已变更或无法停止，请关闭后查看最新状态。</div>' : ""}`,
-    `<button class="btn ${action === "stop" ? "danger" : "pri"}" data-pool-act="${action}-go" ${changed || pending || open && POP.busy ? "disabled" : ""}>确认${action === "stop" ? "停止" : "撤回"}</button>`);
-}
-function poolQueueList(project = null, supplied = null, embedded = false) {
-  if (Array.isArray(supplied)) POOL_QUEUES = {...POOL_QUEUES, queues: supplied}; // 项目接口供给列表，停止/撤回复用同一行索引。
-  if (!POOL_QUEUES) return POOL_QUEUE_ERROR ? dSec("提交记录", `<div class="empty">${esc(POOL_QUEUE_ERROR)}</div>`) : "";
-  const rows = POOL_QUEUES.queues.filter(queue => !project || queue.project === project).map(queue => {
-    const dispatch = queue.dispatch, [label, badge] = POOL_QUEUE_STATE[dispatch?.phase || queue.state] || POOL_QUEUE_STATE.unknown;
-    const title = D.projects.find(p => p.id === queue.project)?.title || queue.project;
-    const h = DH.proj(queue.project);
-    const reason = dispatch?.wait_reason?.text;
-    const watch = dispatch?.wait_job ? `labmon wait --job '${String(dispatch.wait_job).replaceAll("'", "'\\''")}'` : "";
-    const action = poolQueueCanStop(queue) || popIs("pool-stop", queue.id) ?
-      poolQueueConfirm(queue, "stop", "停止任务", `停止当前任务 ${esc(dispatch?.task_name || queue.jobs)}？`) :
-      poolQueueCanWithdraw(queue) ? poolQueueConfirm(queue, "withdraw", queue.state === "completed" ? "解除登记" : "撤回提交", `${queue.state === "completed" ? "解除已结束清单的登记" : "撤回尚未启动的清单"} ${esc(queue.jobs)}？`) : "";
-    return `<div class="urow"><div class="u"><div class="t"><b><a href="${esc(h)}">${esc(title)}</a></b>
-      <span class="badge b-${badge}">${label}</span>
-      <div class="sm mut pool-queue-detail">${esc(queue.jobs)}${queue.gpus ? ` · ${esc(queue.gpus)} 张卡` : ""}${queue.t ? ` · ${tsNear(queue.t)} 提交` : ""}</div>
-      ${dispatch?.task_name ? `<div class="sm pool-queue-detail">${esc(dispatch.task_name)}${dispatch.node ? ` · ${esc(dispatch.node)}` : ""}</div>` : ""}
-      ${reason ? `<div class="sm mut pool-queue-detail">${esc(reason)}</div>` : ""}
-      ${watch ? `<div class="account-command"><code tabindex="0">${esc(watch)}</code><button class="btn mini-btn" data-copy="${esc(watch)}">复制</button></div>` : ""}
-      </div></div>
-      ${action ? `<div class="acts">${action}</div>` : ""}</div>`;
-  });
-  const content = `${POOL_QUEUE_MESSAGE ? `<div class="rn-state" role="status">${esc(POOL_QUEUE_MESSAGE)}</div>` : ""}
-    ${rows.length ? `<div class="ulist">${rows.join("")}</div>` : embedded ? '' : '<div class="empty">没有提交记录。</div>'}`;
-  return embedded ? content : dSec("提交记录", content);
-}
-async function poolQueueAct(act, id) {
-  if (act === "withdraw" || act === "stop") {
-    const queue = POOL_QUEUES?.queues.find(q => q.id === id);
-    if (POP?.busy || !queue || !(act === "stop" ? poolQueueCanStop(queue) : poolQueueCanWithdraw(queue))) return;
-    popToggle("pool-" + act, id, {route: location.hash, attempt: queue.dispatch?.attempt_id});
-    return render(false);
-  }
-  const p = POP, stop = act === "stop-go";
-  if (!p || p.busy) return;
-  const queue = POOL_QUEUES?.queues.find(q => q.id === p.id);
-  const stopKey = stop ? poolStopKey(p.id, p.attempt) : null;
-  if (stop && (p.k !== "pool-stop" || !poolQueueCanStop(queue) || queue.dispatch.attempt_id !== p.attempt || POOL_STOP_PENDING.has(stopKey))) return;
-  if (!stop && (act !== "withdraw-go" || p.k !== "pool-withdraw" || !queue || !poolQueueCanWithdraw(queue))) return;
-  const path = "api/pool/queues";
-  p.busy = true;
-  if (stop) POOL_STOP_PENDING.add(stopKey);
-  p.err = "";
-  render("keep");
-  try {
-    const r = await postJSON(path + (stop ? "/stop" : "/withdraw"), stop ? {id: p.id, attempt_id: p.attempt} : {id: p.id}, {json: true});
-    if (!r.ok) throw new Error(r.body?.error || "请求未成功，请稍后再试。");
-    if (POP === p) {
-      POOL_QUEUE_MESSAGE = stop ? "已请求停止，等待确认。" : "提交已撤回。";
-      popClose();
-    }
-    if (POOL_QUEUE_REQUEST) await POOL_QUEUE_REQUEST.catch(() => {});
-    await poolQueuesLoad();
-    if (stop && r.body?.queue?.id === p.id && r.body.queue.dispatch?.attempt_id === p.attempt) {
-      const index = POOL_QUEUES?.queues.findIndex(q => q.id === p.id && q.dispatch?.attempt_id === p.attempt && poolQueueCanStop(q));
-      if (index >= 0) POOL_QUEUES.queues[index] = r.body.queue;
-    }
-  } catch (e) {
-    if (POP === p) p.err = e.message;
-    if (stop) {
-      if (POOL_QUEUE_REQUEST) await POOL_QUEUE_REQUEST.catch(() => {});
-      await poolQueuesLoad();
-    }
-  } finally {
-    if (stop) POOL_STOP_PENDING.delete(stopKey);
-    if (queue?.project) PROJECT_ATTEMPTS.delete(queue.project);
-    p.busy = false;
-    if (poolQueueRoute()) render(false);
-  }
-}
-function poolSupplyButton(n) {
-  const key = "supply-" + n.host, open = popIs("pool-manage", key);
-  return popConfirm(`<button class="btn mini-btn" data-pm="supply-daily" data-key="${esc(key)}" data-body="${esc(JSON.stringify({host:n.host, holder:n.holder, devices:n.devices.map(d=>d.uuid)}))}">提供服务器</button>`, open, `<p>${esc(n.holder)} · ${esc(n.host)} · ${n.devices.length} 张卡</p>${whenPick("pool-until", "供给截止", POP?.until, "清空", "请选择供给截止", {fresh: POP?.wnow, cap:n.until})}<label class="pool-field"><input id="pool-agreed" type="checkbox" ${POP?.agreed ? "checked" : ""}>持有人已同意，专属任务收尾后通过池使用</label>${poolQueueError(POP)}`, `<button class="btn pri" data-pm="confirm" ${POP?.busy ? "disabled" : ""}>确认供给</button>`);
-}
-function poolManageButton(label, action, body, key) {
-  const open = popIs("pool-manage", key);
-  return popConfirm(`<button class="btn mini-btn" data-pm="${action}" data-key="${esc(key)}" data-body="${esc(JSON.stringify(body))}">${label}</button>`, open,
-    `<p class="rn-note">${action === "revoke" ? "停止接收新任务，已领取任务收尾后才释放服务器。" : action === "member" ? "更新这个账号的算力池使用资格。" : "仅改变是否派发新任务，已领取任务不受影响。"}</p>${poolQueueError(POP)}`,
-    `<button class="btn pri" data-pm="confirm" ${POP?.busy ? "disabled" : ""}>确认</button>`);
-}
-function poolManageEntry() { return canPoolManage() ? '<a class="btn mini-btn" href="#/pool/manage" data-drw="#/pool/manage">管理算力池</a>' : ""; }
-function canPoolManage() { return canOps() && ME?.entry === "lan"; }
-async function poolManageAct(button) {
-  if (!canPoolManage()) return;
-  const d = button.dataset;
-  if (d.pm !== "confirm") { popToggle("pool-manage", d.key, {action: d.pm, body: JSON.parse(d.body), until: dtLocal(Date.now()/1000+3600), wnow:false, agreed:false}); return render(false); }
-  const p = POP;
-  if (p?.k !== "pool-manage" || p.busy) return;
-  if (p.action === "supply-daily") {
-    if (whenStop("pool-until", p.until, p.wnow)) return;
-    const cap = (POOL_VIEW?.candidates || []).find(n => n.host === p.body.host)?.until;
-    p.body.until = Math.min(whenT(p.until), cap || Infinity);
-    p.body.agreed = document.getElementById("pool-agreed")?.checked === true;
-    if (!Number.isFinite(p.body.until) || !p.body.agreed) { p.err = "请填写截止时间并确认持有人同意。"; return render(false); }
-  }
-  p.busy = true; p.err = ""; render(false);
-  try {
-    const r = await postJSON("api/pool/" + p.action, p.body, {json: true});
-    if (!r.ok) throw new Error(r.body?.error || "操作未成功，请重试");
-    if (POP === p) popClose();
-    await poolLoad(); render(false);
-  } catch(e) { if (POP === p) p.err = e.message; } finally { p.busy = false; render(false); }
-}
-function poolManageDrawer() {
-  if (!canPoolManage()) return dHead(icon("server"), "算力池管理", "") + '<div class="db"><div class="card">请从内网管理员入口管理。</div></div>';
-  const d = POOL_VIEW || {};
-  const members = (d.members || []).map(m => {
-    const action = m.admin ? '<span class="badge b-mute">管理员</span>' : !m.included && m.eligible === false ? '<button class="btn mini-btn" disabled>加入成员</button>' : poolManageButton(m.included ? "移出成员" : "加入成员", "member", {name:m.name, included:!m.included}, "member-" + m.name);
-    return `<div class="urow"><div class="u"><div class="t"><b>${esc(m.person)}</b> <span class="sm mut">${esc(m.name)} · ${m.admin || m.included ? "已加入" : "未加入"}</span>${m.reason ? `<p class="pool-note sm mut">${esc(m.reason)}</p>` : ""}</div></div><div class="acts">${action}</div></div>`;
-  }).join("");
-  const candidates = new Map((d.candidates || []).map(n => [n.host, n]));
-  const nodes = new Map((d.nodes || []).map(n => [n.node, n]));
-  const servers = [...new Set([...nodes.keys(), ...candidates.keys()])].map(id => {
-    const n = nodes.get(id), candidate = candidates.get(id);
-    const released = !n || n.stage === "released" || n.state === "withdrawn";
-    return `<div class="urow pool-server-row"><div class="u"><div class="t"><b>${esc(n?.holder || candidate?.holder || id)}</b> <span class="sm mut">${esc(id)}</span>
-      ${n ? poolState(n) : '<span class="badge b-mute">未供给</span>'}${n ? poolNote(n) : `<p class="pool-note sm mut">${candidate.devices.length} 张卡可提供</p>`}
-      ${n?.until && !released ? `<span class="sm mut">供给到 ${tsNear(n.until)}</span>` : ""}</div></div><div class="acts">${released && candidate ? poolSupplyButton(candidate) : n ? poolRevoke(n) : ""}</div></div>`;
-  }).join("");
-  return dHead(icon("server"), "算力池管理", "") + `<div class="db pool-manage">${dSec("成员", members || '<div class="empty">暂无已关联人员的账号。<a href="#/fleet/people">前往人员管理</a></div>')}
-    ${dSec("服务器", servers || '<div class="empty">暂无可提供的服务器。<a href="#/fleet">查看组内服务器</a></div>')}
-    ${dSec("接单", `<div class="urow"><div class="u"><div class="t"><b>${d.dispatch_enabled ? "正在接收新任务" : "已暂停接收新任务"}</b><p class="pool-note sm mut">暂停后，已领取的任务继续运行。</p></div></div><div class="acts">${poolManageButton(d.dispatch_enabled ? "暂停接收新任务" : "接收新任务", "dispatch", {enabled: !d.dispatch_enabled}, "dispatch")}</div></div>`)}</div>`;
-}
-function poolPage() {
-  if (!LIVE || !ME?.pool_access) return '<div class="card empty">你的账号没有加入算力池，请联系管理员添加成员。</div>';
-  const d = POOL_VIEW;
-  if (!d) return `<div class="card empty" role="status">${esc(POOL_ERROR || "正在读取算力池状态")}</div>`;
-  const c = d.nodes.map(poolAllocation).reduce((sum, n) => { for (const key of Object.keys(sum)) sum[key] += n[key]; return sum; }, {total: 0, free: 0, assigned: 0, unavailable: 0});
-  const projects = D.projects.filter(p => canWrite(p.id));
-  return `<div class="card"><div class="pool-overview"><b>共享服务器</b><div class="pool-summary sm"><span>${d.nodes.filter(n => n.state !== "withdrawn").length} 台 · ${c.total} 张卡</span><span>${d.dispatch_enabled ? `可接单 ${c.free} 张` : "暂停接收新任务"}</span><span class="mut">${d.observed ? tsNear(d.observed) + " 更新" : "等待首次采集"}</span></div>${poolManageEntry()}</div>
-    <div class="pool-insight"><div><b>资源分配</b>${poolAllocationBar(c)}<p class="pool-note sm mut">按供给卡计，分配数不代表 GPU 利用率。${!d.inventory_fresh ? "库存等待更新。" : ""}</p></div>${poolSchedule()}</div>
-    ${projects.length ? `<div class="pool-projects sm"><span class="mut">进入项目「运行资源」提交清单</span>${projects.map(p => `<a class="btn mini-btn" href="${esc(DH.proj(p.id))}">${esc(p.title || p.id)}</a>`).join("")}</div>` : '<p class="pool-note sm mut">暂无可操作的项目。</p>'}</div>
-    <div class="fwall pool-wall">${d.nodes.map(poolCard).join("") || `<div class="card empty">暂无共享服务器。${canPoolManage() ? '打开「管理算力池」，加入成员并提供服务器。' : '等待管理员提供服务器。'}</div>`}</div>
-    `;
-}
 // 操作面板在某个抽屉里而那个抽屉没开着：页面顶上缩成一条，点「查看」打开它
 function opStrip(P, h) {
   const op = fops().op, x = P.sid ? srvById(P.sid) : null, st = op?.steps || [];
@@ -3302,8 +2972,6 @@ async function probeNow(id) {
 /* ---------- 详情抽屉：桌面从右侧滑出、窄屏从底部升起，背后的卡片墙不动。地址写在 hash 里
    （#/fleet/srv/<id>、#/fleet/people/<名字>、#/fleet/new/<池>，不记历史），Esc、点空白处、右上角 × 都能关 ---------- */
 const DH = {srv: id => "#/fleet/srv/" + encodeURIComponent(id), person: n => "#/fleet/people/" + encodeURIComponent(n), new: p => "#/fleet/new/" + encodeURIComponent(p), guard: () => "#/fleet/guard",
-  poolNode: id => "#/pool/node/" + encodeURIComponent(id),
-  poolManage: () => "#/pool/manage",
             proj: id => `#/p/${encodeURIComponent(id)}/manage`, arch: () => "#/archived"};
 let DKEY = null, DLAST = "";
 const dHead = (av, title, sub, right = "", mark = "", status = "") => { const b = dBack();
@@ -4574,118 +4242,12 @@ function projOwnerSec(p) {
   const edit = canWrite() && ME.account ? popConfirm(b, open, form, go, true) : "";
   return dSec("项目归属", `${permissionRow("归属", label, edit)}${PJMSG && PJMSG.pid === p.id ? `<div class="rn-state">${esc(PJMSG.msg)}</div>` : ""}`);
 }
-const PROJECT_ATTEMPTS = new Map();
-function projAttemptsSec(p) {
-  if (!LIVE) return "";
-  let entry = PROJECT_ATTEMPTS.get(p.id);
-  if (!entry || Date.now() - entry.at > 15000) {
-    entry = {...entry, at: Date.now(), loading: true}; PROJECT_ATTEMPTS.set(p.id, entry);
-    api(`api/project/${encodeURIComponent(p.id)}/pool`, {cache: "no-store"}, {json: true}).then(r => {
-      PROJECT_ATTEMPTS.set(p.id, {at: Date.now(), data: r.ok ? r.body : null, error: r.ok ? "" : "读取实验记录失败"});
-      if (DKEY === "proj:" + p.id) render(false);
-    }).catch(() => {
-      PROJECT_ATTEMPTS.set(p.id, {at: Date.now(), error: "读取实验记录失败"});
-      if (DKEY === "proj:" + p.id) render(false);
-    });
-  }
-  if (!entry.data) return entry.error ? dSec("池任务记录", `<p class="rn-err">${esc(entry.error)}</p>`) : "";
-  const attempts = entry.data.attempts || [], queues = entry.data.queues || [];
-  if (!attempts.length && !queues.length) return "";
-  // 在途尝试全部保留；历史按全项目时间排序后只展示最近 20 条。
-  const ongoing = a => ["starting", "running", "stopping", "unknown"].includes(a.phase);
-  const ordered = [...attempts].sort((a, b) => (b.reserved_at || b.started_at || 0) - (a.reserved_at || a.started_at || 0));
-  const shown = [...ordered.filter(ongoing), ...ordered.filter(a => !ongoing(a)).slice(0, 20)];
-  return dSec("池任务记录", poolQueueList(p.id, queues, true)
-    + shown.map(a => `<div class="card" style="margin-top:10px">
-      <div class="row wrap"><b>${esc(a.task_name)}</b><span class="badge ${a.requeued ? "mute" : POOL_QUEUE_STATE[a.phase]?.[1] || "mute"}">${esc(a.requeued ? "已重新排队" : POOL_QUEUE_STATE[a.phase]?.[0] || a.phase)}</span></div>
-      <p class="sm mut">${esc(a.node)} · GPU ${esc((a.devices || []).join(", "))}<br>开始 ${ts(a.started_at)}${a.finished_at ? " · 训练结束 " + ts(a.finished_at) : a.ended_at ? " · 确认清理 " + ts(a.ended_at) : " · 最后观测 " + ts(a.observed_at)}</p>
-      <p class="sm">项目输出目录 <code style="overflow-wrap:anywhere">${esc(a.output_root)}</code></p>
-      ${a.phase === "stopped" ? '<p class="sm mut">本条提交已结束，余项不会自动继续；修正清单后从项目重新提交。</p>' : ""}
-      <pre style="white-space:pre-wrap;overflow-wrap:anywhere;max-height:220px;overflow:auto">${esc((a.log_tail || []).join("\n") || "尚无日志回执")}</pre>
-    </div>`).join(""));
-}
 function projDrawer(id) {
   const p = D.projects.find(x => x.id === id);
   if (!p) return dHead(`<span class="fav">?</span>`, esc(id), "看板服务里没有这个项目") + `<div class="db"><div class="card empty">${(D.archived || []).some(e => e.id === id)
     ? `已经归档了：在<a href="${DH.arch()}" data-drw="${DH.arch()}">已归档</a>里恢复。` : "可能已从看板服务里摘掉。"}</div></div>`;
   return dHead(`<span class="fav">${esc((p.title || id).slice(0, 1))}<span class="cdot" style="background:${color(id)}"></span></span>`, esc(p.title || id), `${esc(id)} · 管理`)
-    + `<div class="db">${projOwnerSec(p)}${projRegSec(p)}${projSchedSec(p)}${projResourcesSec(p)}${projAttemptsSec(p)}${projCfgSec(p)}${projArchSec(p)}</div>`;
-}
-const PROJECT_RESOURCES = new Map();
-function projectWorkspaceMappings(pid) {
-  const unique = new Map();
-  for (const h of D.regs || []) for (const q of h.queues || []) {
-    if (h.state === "active" && q.project === pid && q.root) unique.set(h.host + "\n" + q.root, {host:h.host, root:q.root});
-  }
-  return [...unique.values()];
-}
-function workspaceBindEntry(p, resources) {
-  if (resources?.pool.root) return "";
-  if (!canPoolManage()) return '<p class="sm mut">首次使用算力池，请内网管理员在此绑定项目已有的共享工作目录。</p>';
-  const open = popIs("workspace-bind", p.id);
-  const button = `<button class="btn mini-btn" data-pj="workspace-bind" data-p="${esc(p.id)}">绑定工作目录</button>`;
-  const hints = projectWorkspaceMappings(p.id).map(x => `<p class="sm mut">已有登记：${esc(x.host)} · <code style="overflow-wrap:anywhere">${esc(x.root)}</code></p>`).join("");
-  const form = !open ? "" : `<form class="aform acc-pop-form" method="post" data-workspace-bind><b>绑定已有共享工作目录</b><p class="sm mut">只登记已有目录，不创建或上传文件。服务器端会核对共享盘范围与实际路径。</p>${hints}
-    <label>读盘服务器<input class="ain" name="host" required data-pop-field="host" value="${esc(POP.draft.host || "")}" placeholder="如 29"></label>
-    <label>共享工作目录<input class="ain" name="root" required data-pop-field="root" value="${esc(POP.draft.root || "")}" placeholder="项目现有的绝对路径"></label>
-    ${pjErr()}<div class="pop-b"><button class="btn pri" type="submit" ${POP.busy ? "disabled" : ""}>确认绑定</button>${popX}</div></form>`;
-  return popConfirm(button, open, form, null, true);
-}
-async function workspaceBindSubmit(form) {
-  const p = POP;
-  if (!canPoolManage() || p?.k !== "workspace-bind" || p.busy) return;
-  p.busy = true; p.err = ""; render("keep");
-  try {
-    const values = Object.fromEntries(new FormData(form));
-    const response = await postJSON("api/pool/workspace", {project:p.id, host:values.host, root:values.root}, {json:true});
-    if (!response.ok) throw new Error(response.body?.error || "未确认绑定成功，请重试。");
-    PROJECT_RESOURCES.delete(p.id);
-    const resources = await api(`api/project/${encodeURIComponent(p.id)}/resources`, {cache:"no-store"}, {json:true});
-    if (!resources.ok) throw new Error(resources.body?.error || "已绑定，请重新打开提交清单刷新资源。");
-    PROJECT_RESOURCES.set(p.id, resources.body);
-    if (POP === p) popClose();
-    POOL_QUEUE_MESSAGE = "工作目录已绑定，点击提交清单选择算力池。";
-  } catch (error) { if (POP === p) p.err = error.message; }
-  finally { p.busy = false; render("keep"); }
-}
-function projResourcesSec(p) {
-  if (!LIVE || !canWrite(p.id)) return "";
-  const resources = PROJECT_RESOURCES.get(p.id), open = popIs("resource-submit", p.id);
-  const button = `<button class="btn mini-btn" data-pj="resource-submit" data-p="${esc(p.id)}" aria-haspopup="dialog" aria-expanded="${open}">提交清单</button>`;
-  const targets = resources ? [...resources.private.map(h => ({id: h.id, label: h.id + " · 专属", ...h})),
-    {id: "pool", label: "算力池", ...resources.pool}] : [];
-  const choices = targets.map(h => `<label class="resource-choice${h.available ? "" : " unavailable"}"><input type="radio" name="destination" value="${esc(h.id)}" data-pop-field="destination"
-    ${POP?.draft?.destination === h.id ? "checked" : ""} ${h.available ? "" : "disabled"}><span>${esc(h.label)}</span></label>`).join("");
-  const form = !open ? "" : `<form class="aform acc-pop-form" method="post" data-resource-submit>
-    <b>这条清单使用</b><div class="resource-choices">${choices || '<span class="sm mut">正在读取项目资源</span>'}</div>
-    ${targets.filter(h => !h.available).map(h => `<p class="sm mut">${esc(h.label)}：${esc(h.reason)}</p>`).join("")}
-    <label>清单路径<input class="ain" name="jobs" required data-pop-field="jobs" value="${esc(POP.draft.jobs || "")}" placeholder="jobs/train.txt"></label>
-    <label>服务器工作目录<input class="ain" name="root" data-pop-field="root" value="${esc(POP.draft.root || resources?.pool.root || "")}" placeholder="共享盘上的项目绝对路径"></label>
-    <p class="sm mut">算力池使用绑定目录。同一项目可把不同清单安排到不同资源；正在运行的清单不能切换。</p>
-    ${pjErr()}<div class="pop-b"><button class="btn pri" type="submit" ${POP.busy || !targets.some(h => h.available) ? "disabled" : ""}>确认提交</button>${popX}</div></form>`;
-  return dSec("运行资源", `<div class="resource-summary"><div><b>按清单选择专属服务器或算力池</b>
-    <p class="sm mut">资源资格按项目主人核对；同一清单只在一个目的地运行。</p></div>${popConfirm(button, open, form, null, true)}</div>
-    ${resources ? `<div class="sm mut">专属服务器：${resources.private.filter(h => h.available).map(h => esc(h.id)).join("、") || esc(resources.private_reason || "暂无池外专属服务器")} · 算力池：${resources.pool.available ? "可以提交" : esc(resources.pool.reason)}</div>` : ""}
-    ${workspaceBindEntry(p, resources)}${POOL_QUEUE_MESSAGE ? `<p class="sm" role="status">${esc(POOL_QUEUE_MESSAGE)}</p>` : ""}`);
-}
-async function resourceSubmit(form) {
-  const p = POP;
-  if (!p || p.k !== "resource-submit" || p.busy) return;
-  const values = Object.fromEntries(new FormData(form)), signature = JSON.stringify(values);
-  if (!values.destination) { p.err = "请选择运行资源。"; return render("keep"); }
-  if (p.signature !== signature) {
-    p.signature = signature;
-    p.requestId = Array.from(crypto.getRandomValues(new Uint8Array(16)), n => n.toString(16).padStart(2, "0")).join("");
-  }
-  p.draft = values; p.busy = true; p.err = ""; render("keep");
-  try {
-    const response = await postJSON(`api/project/${encodeURIComponent(p.id)}/queues`, {...values, request_id: p.requestId}, {json: true});
-    if (!response.ok) throw new Error(response.body?.error || "未收到确认，请沿用当前表单重试。");
-    PROJECT_ATTEMPTS.delete(p.id);
-    POOL_QUEUE_MESSAGE = "清单已提交，可在本项目查看运行情况。";
-    if (POP === p) popClose();
-  } catch (error) { if (POP === p) p.err = error instanceof SyntaxError || error instanceof TypeError ? "未收到有效回执，请保留当前表单重试。" : error.message; }
-  finally { p.busy = false; render("keep"); }
+    + `<div class="db">${projOwnerSec(p)}${projRegSec(p)}${projSchedSec(p)}${projCfgSec(p)}${projArchSec(p)}</div>`;
 }
 // 「归档」与「已归档」抽屉（#97，projects.archive / restore）：做完的项目收起、要时加回。能不能归档由看板算好（项目的 archive_block：null 能，否则一句原因），
 // 页面只照它置灰与写原因。POST /project/archive|restore|delete，回执写在已归档的抽屉顶上（PJMSG），一分钟后收起
@@ -4731,27 +4293,6 @@ function archDrawer() {
 }
 async function pjAct(act, pid) {
   if (!canWrite(pid)) return;
-  if (act === "workspace-bind") {
-    if (!canPoolManage()) return;
-    const mappings = projectWorkspaceMappings(pid);
-    popToggle("workspace-bind", pid, {draft: mappings.length === 1 ? {...mappings[0]} : {}});
-    return render("keep");
-  }
-  if (act === "resource-submit") {
-    popToggle("resource-submit", pid, {route: location.hash, draft: {}});
-    const current = POP;
-    render("keep");
-    if (!current || current.k !== "resource-submit") return;
-    try {
-      const response = await api(`api/project/${encodeURIComponent(pid)}/resources`, {cache: "no-store"}, {json: true});
-      if (!response.ok) throw new Error(response.body?.error || "暂时读不了项目资源");
-      PROJECT_RESOURCES.set(pid, response.body);
-      if (POP === current) current.draft.destination = response.body.private.find(h => h.available)?.id || (response.body.pool.available ? "pool" : "");
-    } catch (error) { if (POP === current) current.err = error.message; }
-    render("keep");
-    return;
-  }
-
   if (act === "owner" && canWrite()) {
     const p = D.projects.find(x => x.id === pid);
     popToggle("owner", pid, {owner: p?.owner || ""});
@@ -4884,19 +4425,6 @@ function render(how) {
   PENDING = false;
   srvMoved();
   const r = route(), view = document.getElementById("view"), frames = document.getElementById("frames");
-  if (poolQueueRoute(r) && how && !POOL_QUEUES) void poolQueuesLoad();
-  if (!poolQueueRoute(r)) {
-    POOL_QUEUES = null;
-    POOL_QUEUE_MESSAGE = "";
-    POOL_QUEUE_ERROR = "";
-  }
-  if (r.kind === "pool" && how && !POOL_VIEW) void poolLoad();
-  if (r.kind !== "pool" && RKEY.startsWith("pool:")) {
-    POOL_VISIT++;
-    POOL_VIEW = null;
-    POOL_LOADING = false;
-    POOL_ERROR = "";
-  }
   if (r.oldAccount !== undefined && (!LIVE || ME)) {
     const L = r.oldAccount && r.oldAccount !== "+" ? directoryUsers() : null;
     if (L || !r.oldAccount || r.oldAccount === "+" || !ME?.scopes.includes("admin")) {
@@ -4935,7 +4463,7 @@ function render(how) {
   }
   FRAME = null; view.hidden = false; frames.hidden = true; TLH = null;
   const html = standbyBar() + lanBar() + (r.kind === "host" ? hostPage(r.id) : r.kind === "fleet" ? fleetPage() : r.kind === "log" ? logPage(r.f)
-    : r.kind === "me" ? `<div class="account-content">${mePage(r.tab)}</div>` : r.kind === "pool" ? poolPage(r.tab) : home());
+    : r.kind === "me" ? `<div class="account-content">${mePage(r.tab)}</div>` : home());
   if (how || html !== LAST) {
     const m = document.getElementById("main"), y = m.scrollTop;
     view.innerHTML = LAST = html;
@@ -5028,7 +4556,7 @@ async function gdSave() {
   render(false);
 }
 function drawer(r) {
-  const el = document.getElementById("drw"), pane = document.getElementById("drwp"), d = r.kind === "fleet" && (!LIVE || ME?.admin) && ((D.fleet && !D.fleet.error) || (r.drw?.k === "person" && ME?.scopes.includes("admin"))) || r.kind === "p" || r.kind === "home" || r.kind === "pool" && ME?.pool_access && POOL_VIEW ? r.drw : null;
+  const el = document.getElementById("drw"), pane = document.getElementById("drwp"), d = r.kind === "fleet" && (!LIVE || ME?.admin) && ((D.fleet && !D.fleet.error) || (r.drw?.k === "person" && ME?.scopes.includes("admin"))) || r.kind === "p" || r.kind === "home" ? r.drw : null;
   if (!d) {
     if (!DKEY) return;
     const k = DKEY, back = pane.contains(document.activeElement) || document.activeElement === document.body;
@@ -5045,7 +4573,7 @@ function drawer(r) {
   const key = `${d.k}:${d.id}`;
   if (DKEY && DKEY !== key && DKEY.startsWith("person:")) { FDK = {}; if (FPED && !FPED.isNew) FPED = null; }
   const html = d.k === "srv" ? srvDrawer(d.id) : d.k === "new" ? newDrawer(d.id) : d.k === "guard" ? guardDrawer() : d.k === "proj" ? projDrawer(d.id)
-    : d.k === "arch" ? archDrawer() : d.k === "poolManage" ? poolManageDrawer() : d.k === "poolNode" ? poolNodeDrawer(d.id) : directoryDrawer(d);
+    : d.k === "arch" ? archDrawer() : directoryDrawer(d);
   const section = d.section || "";
   const previous = pane.dataset.section;
   if (html !== DLAST || key !== DKEY) {
@@ -5096,7 +4624,6 @@ const FIN = {fwnew: ["W", "newp"], fpname: ["P", "name"], fpimg: ["P", "image"],
 const finOf = f => ({W: FWIZ, P: ["pdef", "pedit"].includes(POP?.k) ? POP.draft : FPED, G: popIs("guard-edit", "") ? POP.draft : null, K: FDK})[f[0]];     // 输入框的值记在哪个状态里
 document.addEventListener("input", e => {               // 输入框的值先记下：重画后照样填回去
   const id = e.target.id, f = FIN[id], o = f && finOf(f);
-  if (id === "pool-agreed" && POP?.k === "pool-manage") POP.agreed = e.target.checked;
   if (id === "fcapin" && FCAP) FCAP.input = e.target.value;
   if (id === "lgq") { LGQ = e.target.value; clearTimeout(LGT); LGT = setTimeout(() => logSet({q: LGQ.trim()}), 300); }    // 边打边筛：停手 0.3 秒再取
   if (o) o[f[1]] = e.target.value;
@@ -5212,10 +4739,6 @@ document.addEventListener("click", e => {
   if (wp && FWIZ) { FWIZ = {...FWIZ, person: wp.dataset.wp, err: null}; wizPreview(); return; }
   const ac = e.target.closest?.("[data-acc]");
   if (ac) { if (!ac.disabled && !ACC.busy) accAct(ac.dataset.acc, ac.dataset); return; }
-  const pm = e.target.closest?.("[data-pm]");
-  if (pm) { if (!pm.disabled) poolManageAct(pm); return; }
-  const poolAct = e.target.closest?.("[data-pool-act]");
-  if (poolAct) { if (!poolAct.disabled) poolQueueAct(poolAct.dataset.poolAct, poolAct.dataset.id); return; }
   const sc = e.target.closest?.("[data-sch]");
   if (sc) { if (!sc.disabled) schedAct(sc.dataset.sch, sc.dataset.p); return; }
   const pj = e.target.closest?.("[data-pj]");
@@ -5260,10 +4783,6 @@ document.addEventListener("click", e => {
   if (a && !e.defaultPrevented && !e.metaKey && !e.ctrlKey && !e.shiftKey && !e.altKey) { e.preventDefault(); nav(a.getAttribute("href"), !!a.closest("#side, #tabbar, #more")); }
 });
 document.addEventListener("submit", e => {                // 账号表单（回车也能提交；浏览器的口令管理认得出）
-  const workspace = e.target.closest?.("[data-workspace-bind]");
-  if (workspace) { e.preventDefault(); return workspaceBindSubmit(workspace); }
-  const resource = e.target.closest?.("[data-resource-submit]");
-  if (resource) { e.preventDefault(); return resourceSubmit(resource); }
   const f = e.target.closest?.("[data-accf]");
   if (!f) return;
   e.preventDefault();
@@ -5272,8 +4791,6 @@ document.addEventListener("submit", e => {                // 账号表单（回�
 
 async function poll() {
   if (TL.d) return;                                       // 正拖着时间线：这次不刷新
-  if (route().kind === "pool") void poolLoad();
-  if (poolQueueRoute()) void poolQueuesLoad();
   const gen = D.generated, was = OFFLINE, me = ME, archived = JSON.stringify(D.archived);
   try {
     const r = await api("overview.json", {cache: "no-store"});

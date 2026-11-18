@@ -51,16 +51,15 @@ class StartTest(unittest.TestCase):
             self.assertEqual((d / "alice" / "labmon" / "labmon_worker.py").read_text(), sent[0][1])
 
     def test_worker_environment_uses_explicit_host_paths(self):
-        """路径可含空格或 shell 字符，普通 worker 与池通道复用同一个转义入口。"""
+        """路径可含空格或 shell 字符，按 shell 参数转义。"""
         import shlex
-        h = {"ka_bin": "/data/me/keep alive/$x", "pool_python": "/data/me/envs/torch/bin/python"}
+        h = {"ka_bin": "/data/me/keep alive/$x"}
         args = shlex.split(workerctl.worker_env(h))
-        self.assertEqual(args, ["KA_BIN=" + h["ka_bin"], "LABMON_POOL_PYTHON=" + h["pool_python"]])
+        self.assertEqual(args, ["KA_BIN=" + h["ka_bin"]])
         self.assertEqual(workerctl.worker_env({}), "")
 
-    def test_start_receives_keepalive_and_trial_paths(self):
-        h = {"worker_home": "/worker", "python": "python3", "shared": [],
-             "ka_bin": "/shared/ka", "pool_python": "/shared/torch/python"}
+    def test_start_receives_keepalive_path(self):
+        h = {"worker_home": "/worker", "python": "python3", "shared": [], "ka_bin": "/shared/ka"}
         with mock.patch.object(workerctl, "host_conf", return_value=h), \
                 mock.patch.object(workerctl.LS, "need"), \
                 mock.patch.object(workerctl, "committed", return_value="worker"), \
@@ -68,23 +67,13 @@ class StartTest(unittest.TestCase):
                 mock.patch.object(workerctl.subprocess, "run", return_value=mock.Mock(returncode=0)):
             workerctl.run_out("start", "demo", [])
         command = ssh.call_args.args[1]
-        self.assertIn("setsid nohup env KA_BIN=/shared/ka LABMON_POOL_PYTHON=/shared/torch/python", command)
-
-    def test_pool_command_receives_same_explicit_paths(self):
-        h = {"id": "a", "worker_home": "/worker", "data_root": "/shared", "python": "python3",
-             "ka_bin": "/shared/ka", "pool_python": "/shared/torch/python"}
-        with mock.patch.object(workerctl.LS, "need"), mock.patch.object(workerctl.LS, "remote_sh", return_value=""), \
-                mock.patch.object(workerctl, "committed", return_value="worker"), \
-                mock.patch.object(workerctl, "ssh", return_value=(0, '{"ok": true}')) as ssh:
-            self.assertEqual(workerctl.pool_remote(h, "pool-probe", [], timeout=1), {"ok": True})
-        self.assertIn("KA_BIN=/shared/ka LABMON_POOL_PYTHON=/shared/torch/python", ssh.call_args.args[1])
+        self.assertIn("setsid nohup env KA_BIN=/shared/ka ", command)
 
     def test_guest_inherits_explicit_deployment_paths(self):
         from labmon import config
         h = config.guest_host({"id": "guest", "ssh": "user@host", "holder": "Bob"},
-                              [{"id": "a", "data_root": "/shared", "ka_bin": "/shared/ka", "pool_python": "/shared/torch/python"}])
-        self.assertEqual((h["data_root"], h["ka_bin"], h["pool_python"]),
-                         ("/shared", "/shared/ka", "/shared/torch/python"))
+                              [{"id": "a", "data_root": "/shared", "ka_bin": "/shared/ka"}])
+        self.assertEqual((h["data_root"], h["ka_bin"]), ("/shared", "/shared/ka"))
 
 
 class AddTest(unittest.TestCase):

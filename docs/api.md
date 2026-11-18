@@ -155,32 +155,6 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/push {"push", "bark" 或 "ntfy"}` | 保存自己的推送，回 `{msg, push}`；`push` 为空时移除。Bark 段填 `key`，可选 `server`、`encrypt_key`；ntfy 段填 `topic`，可选 `server`、`token`；服务地址限于渠道的官方地址或管理员在 `notify.toml` 配置的同渠道地址 |
 | `POST /api/push/test {}` | 用自己的推送配置试发一条，回 `{msg}` |
 
-## 算力池试算
-
-`GET /api/pool` 需要 `read` 权限，并须为试点成员或管理员。工作台身份数据的 `pool_access` 控制入口，接口仍独立鉴权。响应含 `mode: "shadow"`、试算快照时刻 `observed`（有数据时）、`capacity`（`total`、`free`、`max_same_node_free`）、`nodes` 和 `jobs`。节点只给试点标识、核实的物理机归属、型号、状态和卡数；实验仅给本人当前有权限的项目、申请卡数和试算结果。服务端在两种入口都过滤他人作业、路径、命令、设备标识和用量明细。
-
-试点负责人在服务状态目录 `overview/pool-shadow.json` 原子写入 `{"members": ["已有账号名"], "snapshot": {...}}`，`snapshot` 使用 [影子调度内核](scheduler.md) 的输入格式。用于页面的节点和物理机标识填写可向试点成员公开的名称。快照按自身时刻回放，页面标注该时刻。成员变动后同步更新名单和输入；不再维护试点时移除文件。未配置时管理员可见空态。此接口只读，页面加入与退出说明指向试点管理员，实验执行沿用现有流程。
-
-管理员可从内网调用 `POST /api/pool/supply`（`host, device, holder, account, project, until, agreed`）、`/api/pool/run`（`hosts` 为两个节点编号）、`/api/pool/revoke` 与 `/api/pool/status`（`host`）。试点固定命令无脚本或工作目录入参。主备和管理员鉴权与其他写入口共用，运行回包含 `attempts`、`same_node`、`overlap_s`。参见 [管理员固定算子试点](pool-execution.md#管理员固定算子试点252)。
-
-### 成员清单登记
-
-管理员在内网用短期 admin 令牌执行 `labmon pool bind <项目> <绝对目录> [--host <读盘主机>]`。目录必须是已登记项目的获准共享工作区，位于读盘主机的 `data_root/projects/` 下。存在多个匹配的在用非借用主机时，须指定一台。工作区绑定只授予该项目清单登记资格。管理员重新绑定时会撤回已失去资格的原成员留下的待派单清单，有已领取的清单时须等尝试结束才能更换绑定。
-
-本人用 project 令牌执行 `labmon pool submit <相对清单.txt> --request-id <本次编号> [--project <项目>]`。项目缺省取当前目录的 monitor.toml。编号由调用方取一个新的稳定值，网络重试沿用。相同账号、编号和请求会返回原登记。更改清单或同名 .env 后，撤回旧登记并换编号重交。用 `labmon pool list` 查看自己的清单和编号，用 `labmon pool withdraw <编号>` 撤回尚未领取的清单。
-
-- `GET /api/pool/queues` 需 read 和试点权限，返回 `queues` 及 `can_submit` 项目 id 数组。队列有 `id, project, jobs, state, t, can_withdraw`。只读令牌没有写操作标记。
-- `POST /api/pool/queues` 需 project，正文含 `project, jobs, request_id`；`POST /api/pool/queues/withdraw` 同权限，正文含 `id`。两者回 `{queue: ...}`。管理员绑定使用 `POST /api/pool/workspace`，正文含 `project, root` 与可选的 `host`。
-- 状态 `queued` 表示登记后待派单，`withdrawn` 表示已撤回，`claimed` 表示已被受信派单器领取。池执行接入前不会启动。成员看不到工作区绝对路径或内容指纹。
-
-读盘时验证清单与 .env 均在获准工作区，记录字节指纹。真正执行前须在目标节点再次验证，并使用核对过的内容。已有主机登记的清单应先排空移除。服务端按现有主机登记快照预检，派单前仍需在远端登记锁内核对不存在并行主机登记。
-
-### 日常派单与停止
-
-`GET /api/pool/queues` 带 `dispatch_enabled`。登记有尝试时带 `dispatch`，包含 `phase, node, task_name, wait_reason, wait_job, can_stop, attempt_id`。真实节点投影在开启后从 `GET /api/pool` 读取，`mode` 为 `live`。
-
-`POST /api/pool/queues/stop` 需要 project，正文为 `{id, attempt_id}`，仅本人或管理员可请求当前尝试停止。内网管理员用 `POST /api/pool/supply-daily` 批准 `{host, devices, holder, until, agreed}`，用 `POST /api/pool/dispatch` 设置 `{enabled}`。撤回供给仍用 `/api/pool/revoke`。详见 [日常派单](pool-execution.md#成员清单日常派单254)。
-
 ## 客户端分发
 
 - `GET /api/client/install.sh?base=<看板根地址>` 下载 `labmon-install.sh`。页面传自己的根地址（含公网路径前缀）；服务端检查协议和当前入口的 Host 白名单。脚本内有 wheel 和入口配置。内网 HTTPS 配有 `[server].ca_cert` 时随附 CA 公钥证书；未附时脚本说明私有 CA 的手动配置方式。
@@ -325,22 +299,3 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 ### 管理员公网平台操作（#275）
 
 账号详情「公网平台操作」可按管理员开启或关闭，设置本身从内网入口修改（POST `/api/users/public-ops`，`name`、布尔 `enabled`）。本机也可执行 `labmon user public-ops <账号> on|off`。其余账号默认关闭；降为普通用户会清除此许可，再升管理员仍需重新开启。旧会话及令牌下一次请求生效，令牌仍需 admin 作用域。公网获准操作包括续租、探测、开关机、换人、保活、借还；代码部署、worker代码推送和池管理仍沿原入口限制。维护者部署时按生产实际账号启用，不在代码中按名字自动赋权。
-
-### 算力池成员与资源管理
-
-`GET /api/pool` 返回真实资源概览，关闭派单时也不切回试算。`dispatch_enabled` 表示当前是否接新任务，`nodes` 含供给阶段、持有人、设备和截止，`assignments` 为当前占用摘要（`node, phase, project, task, devices`）；成员不能看到他人的项目或任务名称。`waiting` 为可见等待清单队首（`project, task, phase, reason`），只给管理员或仍拥有项目的提交者；已撤回、已结束清单不计。`inventory_fresh` 按 `observed` 与 `config.STALE_S` 判定。节点 `sample` 仅含现有服务器采样的 `t, state, gpus`，GPU 按供给 UUID 筛选并白名单输出 `i, uuid, name, util, used, total`；含保活负载，无进程、命令与路径。组内样本时刻取 `sample.t`；自用样本沿用采集已校正的 `age`，从看板 `generated` 换算采样时刻，避免将 worker 的远端时刻 `last` 与本机直接比较。过期、掉线、收回或无有效利用率时为 null。管理员额外取得已有绑定人员的账号与可供给服务器候选。
-
-`POST /api/pool/member`（内网管理员）接收 `name` 与布尔 `included`。只允许已绑定人员且拥有个人服务器的账号加入；有待位或未收尾尝试时移出返回 409。此操作与清单提交共用事务锁，防止检查后出现新的提交。它不删除人员、账号、实验产物或历史。
-
-### 项目的运行资源（#267）
-
-- `GET /api/project/<id>/resources`：read + 项目权限。返回 `owner`、本人专属 `private[{id,available,reason}]`、`pool{available,reason,root}` 与项目清单目的地。管理员查看的也是项目主人资源。
-- `GET /api/project/<id>/pool`：read + 项目权限。返回这个项目的清单与尝试记录；管理员代管读取项目主人的记录，普通用户只能读自己的项目。写作用域决定撤回/停止按钮，不依赖当前账号的池成员列表。
-- `POST /api/project/<id>/queues`：project + 项目权限。正文 `{destination, jobs, request_id, root?}`；`destination` 为 `pool` 或本人池外专属主机 id，专属需绝对 `root`。同编号重试保持同一目的地，不自动回退。
-- 日常供给新增 `supply_id` 与 `stage: preparing|ready|releasing|released`；`gate_error` 为需要核对的原因。`ready` 前不计可派资源，`released` 前不解除借用互斥。新看板需配合支持 `pool_supply_gate` 的 worker。
-
-本阶段池成员须有个人服务器与既有共享盘；入池或暂时离线不影响拥有资格，借入不算。资源入口仅登记已有清单，不负责文件传输或环境准备，实验会话沿用 Skill 的共享目录与 tar/SSH 约定。清单切换、供给期间排他与升级步骤见 [项目资源与供给闸门](pool-execution.md#项目资源与供给闸门267)。
-
-### 项目池任务记录（#268）
-
-`GET /api/project/<id>/pool` 复用项目读取权限，返回 `queues`、`active` 与按尝试编号去重的 `attempts`。尝试包含真实节点、GPU UUID、领取/启动/训练结束/清理结束/最后观测时刻和最近30行日志。这些时刻是执行回执，不是预计结束；不通过此接口传代码、结果或配置环境。

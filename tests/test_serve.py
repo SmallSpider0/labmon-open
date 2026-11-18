@@ -700,7 +700,7 @@ class AuthTest(unittest.TestCase):
         with mock.patch.object(Handler, "_fleet_op", fake):
             self.assertEqual(self.call(self.wan + "/fleet/op/sync", {}, tok=admin)[0], 200)
             self.assertTrue(json.loads(self.call(self.wan + "/api/me", tok=admin)[2])["ops"])
-            for path in ("/api/admin/deploy", "/api/worker/start", "/api/pool/dispatch"):
+            for path in ("/api/admin/deploy", "/api/worker/start"):
                 self.assertEqual(self.call(self.wan + path, {}, tok=admin)[0], 404)
             self.call(self.lan + "/api/users/public-ops", {**body, "enabled": False}, tok=admin)
             self.assertEqual(self.call(self.wan + "/fleet/op/sync", {}, tok=admin)[0], 403)
@@ -949,139 +949,6 @@ class AuthTest(unittest.TestCase):
             self.assertEqual(self.call(self.lan + "/p/old/", tok=amy)[0], 403)
             self.assertEqual(self.call(self.wan + "/login")[0], 200)
             self.assertEqual(self.call(self.wan + "/api/logout", {})[0], 200)
-
-    @mock.patch("labmon.poolview.personal_servers", return_value=([{"id": "reader"}], None))
-    def test_pool_member_queue_workflow(self, _personal):
-        root = Path(self.tmp.name).resolve() / "projects" / "mine"
-        (root / "jobs").mkdir(parents=True)
-        (root / "jobs" / "main.txt").write_text("a|true\n")
-        (root / "jobs" / "main.env").write_text("X=1\n")
-        outside = Path(self.tmp.name) / "outside.txt"
-        outside.write_text("outside")
-        (root / "jobs" / "escape.txt").symlink_to(outside)
-        K.hosts_file().write_text(f'[[hosts]]\nid="reader"\ndata_root="{root.parent.parent}"\n')
-        # 假共享盘在本机，远端调用用同样的只读命令做离线验证。
-        patcher = mock.patch.object(S.PQ.config, "share_host", return_value=True)
-        patcher.start()
-        self.addCleanup(patcher.stop)
-        route = mock.patch.object(S.PQ, "route_remote", return_value={"claimed": True, "released": True})
-        route_mock = route.start()
-        self.addCleanup(route.stop)
-        amy = make_token("amy", role="user", scopes=("project",))
-        amy_read = make_token("amy", role="user", scopes=("read",))
-        bob = make_token("bob", role="user", scopes=("project",))
-        admin = make_token("boss", role="admin", scopes=("admin",))
-        PJ.put_config("mine", 'id="mine"\n', owner="amy")
-        save_json(state_dir() / "pool-shadow.json", {"members": ["amy", "bob"]})
-        workspace = {"project": "mine", "root": str(root)}
-        url = self.lan + "/api/pool"
-        self.assertEqual(self.call(url + "/workspace", workspace, tok=amy)[0], 403)
-        self.assertEqual(self.call(self.wan + "/api/pool/workspace", workspace, tok=admin)[0], 404)
-        self.assertEqual(self.call(url + "/workspace", workspace, tok=admin)[0], 200)
-        data = {"project": "mine", "jobs": "jobs/main.txt", "request_id": "try-1"}
-        self.assertEqual(self.call(url + "/queues", data, tok=bob)[0], 403)
-        self.assertEqual(self.call(url + "/queues", data, tok=amy_read)[0], 403)
-        self.assertEqual(self.call(url + "/queues", dict(data, jobs="../outside.txt"), tok=amy)[0], 400)
-        self.assertEqual(self.call(url + "/queues", dict(data, jobs="jobs/escape.txt"), tok=amy)[0], 409)
-        snap = state_dir() / "snapshot.json"
-        save_json(snap, {"regs": [{"queues": [{"root": None, "jobs": None},
-                                               {"root": str(root), "jobs": "jobs/./main.txt"}]}]})
-        route_mock.side_effect = U.Denied(409, "清单还有普通任务在跑")
-        self.assertEqual(self.call(url + "/queues", data, tok=amy)[0], 409)
-        route_mock.side_effect = None
-        save_json(snap, {"regs": [{"queues": [{"root": None, "jobs": None}]}]})
-        resource_url = self.lan + "/api/project/mine/resources"
-        self.assertEqual(self.call(resource_url, tok=bob)[0], 403)
-        got = self.call(resource_url, tok=amy)
-        self.assertEqual(got[0], 200, got)
-        self.assertEqual(json.loads(got[2])["owner"], "amy")
-        response = self.call(self.lan + "/api/project/mine/queues", {**data, "destination": "pool"}, tok=amy)
-        self.assertEqual(response[0], 200, response)
-        row = json.loads(response[2])["queue"]
-        self.assertEqual(row["state"], "queued")
-        self.assertNotIn("root", row)
-        self.assertEqual(json.loads(self.call(url + "/queues", data, tok=amy)[2])["queue"], row)
-        self.assertEqual(self.call(url + "/queues", dict(data, request_id="try-2"), tok=amy)[0], 409)
-        self.assertEqual(self.call(url + "/queues", dict(data, jobs="jobs/different.txt"), tok=amy)[0], 409)
-        self.assertEqual(json.loads(self.call(url + "/queues", tok=bob)[2])["queues"], [])
-        read = json.loads(self.call(url + "/queues", tok=amy_read)[2])
-        self.assertFalse(read["queues"][0]["can_withdraw"])
-        self.assertEqual(read["can_submit"], [])
-        self.assertEqual(self.call(url + "/queues/withdraw", {"id": row["id"]}, tok=bob)[0], 404)
-        body = self.call(url + "/queues/withdraw", {"id": row["id"]}, tok=amy)[2]
-        self.assertEqual(json.loads(body)["queue"]["state"], "withdrawn")
-        self.assertEqual(json.loads(self.call(url + "/queues", data, tok=amy)[2])["queue"]["state"], "withdrawn")
-        next_row = json.loads(self.call(url + "/queues", dict(data, request_id="try-2"), tok=amy)[2])["queue"]
-        with self.assertRaises(U.Denied):
-            U.remove("amy", "boss")
-        self.assertEqual(self.call(url + "/queues/withdraw", {"id": next_row["id"]}, tok=amy)[0], 200)
-        U.remove("amy", "boss")
-        PJ.set_owner("mine", "bob", "boss")
-        self.assertEqual(self.call(url + "/workspace", workspace, tok=admin)[0], 200)
-        self.assertEqual(S.PQ.find(S.PQ.read(), next_row["id"])["state"], "withdrawn")
-        self.assertEqual(json.loads(self.call(url + "/queues", tok=bob)[2])["can_submit"], ["mine"])
-        response = self.call(url + "/queues", data, tok=bob)
-        self.assertEqual(response[0], 200, response)
-        next_row = json.loads(response[2])["queue"]
-        got = S.PQ.claim(next_row["id"], "attempt")
-        self.assertEqual(len(got["fingerprint"]), 2)
-        self.assertTrue(all(len(x) == 64 for x in got["fingerprint"]))
-        with self.assertRaises(U.Denied):
-            S.PQ.claim(next_row["id"], "other-attempt")
-        self.assertEqual(self.call(url + "/queues/withdraw", {"id": next_row["id"]}, tok=bob)[0], 409)
-        with self.assertRaises(S.ConfigError):
-            PJ.set_owner("mine", "boss", "boss")
-        self.assertEqual(PJ.owner("mine"), "bob")
-        self.assertEqual(S.PQ.find(S.PQ.read(), next_row["id"])["state"], "claimed")
-
-    def test_project_pool_records_require_project_read_access(self):
-        boss = make_token()
-        amy = make_token("amy", role="user", scopes=("read",))
-        bob = make_token("bob", role="user", scopes=("read",))
-        PJ.put_config("records", 'id="records"\n', owner="amy")
-        save_json(S.PQ.state_file(), {"queues": {"q": {"id": "q", "project": "records", "account": "amy",
-            "jobs": "jobs.txt", "root": "/data/projects/records", "state": "completed", "t": 1,
-            "dispatch": {"id": "a", "task_name": "train", "phase": "done", "node": "n", "log_tail": ["private-log"]}}}})
-        for entry in (self.lan, self.wan):
-            endpoint = entry + "/api/project/records/pool"
-            status, _, body = self.call(endpoint, tok=amy)
-            self.assertEqual(status, 200, body)
-            self.assertEqual(json.loads(body)["attempts"][0]["log_tail"], ["private-log"])
-            self.assertEqual(self.call(endpoint, tok=bob)[0], 403)
-            code, _, raw = self.call(endpoint, tok=boss)
-            self.assertEqual(code, 200, raw)
-            self.assertEqual(json.loads(raw)["queues"][0]["id"], "q")
-
-    def test_pool_endpoint_only_projects_own_trial_jobs(self):
-        boss = make_token()
-        amy = make_token("amy", role="user", scopes=("read",))
-        bob = make_token("bob", role="user", scopes=("read",))
-        for project, owner in (("amy-trial", "amy"), ("bob-trial", "bob")):
-            PJ.put_config(project, f'id = "{project}"\n', owner=owner)
-        self.assertEqual(401, self.call(self.lan + "/api/pool")[0])
-        self.assertEqual(403, self.call(self.lan + "/api/pool", tok=amy)[0])
-        code, _, body = self.call(self.lan + "/api/pool", tok=boss)
-        self.assertEqual(200, code)
-        self.assertEqual([], json.loads(body)["nodes"])
-        save_json(state_dir() / "pool-shadow.json", {"members": ["amy"], "snapshot": {"now": 100}})
-        from labmon import poolqueues as PQ
-        save_json(state_dir() / "pool-live.json", {"nodes": [{"node": "n1", "model": "GPU", "state": "running", "total": 1, "free": 0, "path": "PRIVATE-PATH"}], "capacity": {"total": 1, "free": 0, "max_same_node_free": 0}})
-        save_json(S.F.state_file(PQ.FILE), {"queues": {
-            "a": {"account": "amy", "project": "amy-trial", "dispatch": {"phase": "running", "node": "n1", "task_name": "train", "devices": ["GPU-a"]}},
-            "b": {"account": "bob", "project": "bob-trial", "dispatch": {"phase": "running", "node": "n1", "task_name": "PRIVATE-TASK", "devices": ["GPU-b"]}}}})
-        self.assertEqual(403, self.call(self.lan + "/api/pool/member", {"name":"amy","included":False}, tok=amy)[0])
-        self.assertEqual(404, self.call(self.wan + "/api/pool/member", {"name":"amy","included":False}, tok=boss)[0])
-        for entry in (self.lan, self.wan):
-            self.assertEqual(403, self.call(entry + "/api/pool", tok=bob)[0])
-            code, _, body = self.call(entry + "/api/pool", tok=amy)
-            self.assertEqual(200, code, body)
-            view = json.loads(body)
-            self.assertEqual("live", view["mode"])
-            self.assertFalse(view["dispatch_enabled"])
-            self.assertEqual(["amy-trial", None], [a["project"] for a in view["assignments"]])
-            self.assertNotIn(b"PRIVATE", body)
-            self.assertNotIn(b"bob-trial", body)
-            self.assertNotIn("members", view)
 
     def test_download_uses_running_commit_and_entry(self):
         tok = make_token("amy", role="user", scopes=("read",))
@@ -1407,7 +1274,7 @@ class RegsTest(unittest.TestCase):
         self.assertIsNone(dict(calls)["b"])
         a = regs["a"]
         self.assertEqual((a["state"], a["stale"], a["queues"]),
-                         ("active", False, [{"root": "/r/p1", "jobs": "jobs/a.txt", "project": "p1", "stop": "boundary", "gpus": [0], "pool": None, "empty": True, "added_t": None}]))
+                         ("active", False, [{"root": "/r/p1", "jobs": "jobs/a.txt", "project": "p1", "stop": "boundary", "gpus": [0], "empty": True, "added_t": None}]))
         self.assertEqual([(q["jobs"], q["added"], q["key"]) for q in regs["b"]["queues"]], [("jobs/b.txt", "2026-11-10 09:00", "b1")])
         self.assertEqual(regs["c"]["queues"], [])                          # c 的 worker_home 读到了、没有登记
         g = regs["gone"]
