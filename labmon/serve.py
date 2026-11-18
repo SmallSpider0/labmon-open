@@ -21,7 +21,7 @@
     POST /api/login {"name", "password"}、/api/setup {"name", "code", "password"}（用设置码设口令）、/api/logout：成功种、清会话 Cookie
     GET  /api/me            我是谁：名字、角色、作用域、入口、能不能做平台操作（ops）与写操作（write）；浏览器会话另有自己的会话与令牌
     POST /api/password {"old", "new"}、/api/tokens/add {"name", "scopes"}（回原文，只这一次）、/api/revoke {"id"}（自己的会话或令牌）：只认浏览器会话
-    GET  /api/users、POST /api/users/add {"name", "admin"}（回设置码）、role {"name", "admin"}、reset {"name"}（回设置码）、revoke {"name", "id"?}、remove {"name"}：管理员
+    GET  /api/users、POST /api/users/add {"name", "admin"}（回设置码）、role {"name", "admin"}、reset {"name"}（回设置码）、revoke {"name", "id"?}、remove {"name"}：管理员，只在内网入口（#17）
 
 部署（#164，deploy.py；管理员的 deploy 作用域）：
     GET  /api/admin/deploy  在跑的提交（commit）、checkout 现在的（head）、启动时刻、正在做的平台操作（busy）、这次启动以来日志里的 Traceback
@@ -640,10 +640,11 @@ class Handler(BaseHTTPRequestHandler):
         minimum = self.board.min_client_commit
         commit = self.headers.get(CLIENT_HEADER, "")
         recovery = path in ("/api/client/wheel", "/api/me", "/api/users", "/api/reports", "/collect", "/api/worker/start") or path.startswith("/api/admin/")
+        # 只拦确认低于最低版本的；比不出先后的（比看板新、分支上跑、冷备回退后：unknown）放行，账号详情与 wait 只提示（#17）
         if minimum and who.via == "token" and commit and not recovery:
-            if DI.client_status(commit, DP.RUNNING["commit"], minimum) in ("below_minimum", "unknown"):
-                self._json(CL.CLIENT_OUTDATED, {"error": f"客户端太旧或版本无法确认：跑 labmon update（最低版本 {minimum[:7]}）",
-                                               "reason": CL.CLIENT_OUTDATED_REASON, "minimum": minimum})
+            if DI.client_status(commit, DP.RUNNING["commit"], minimum) == "below_minimum":
+                self._json(CL.CLIENT_OUTDATED, {"error": f"客户端低于最低版本 {minimum[:7]}：跑 labmon update",
+                                               "reason": CL.CLIENT_OUTDATED_REASON, "minimum": minimum, "commit": DP.RUNNING["commit"]})
                 return False
         if path == "/api/report":
             try:
@@ -1648,7 +1649,7 @@ ROUTES = [
     _R("GET", r"/api/reports", "reports", admin=True),
     _R("POST", r"/api/report", "project", own="report"),
     _R("GET", r"/api/admin/deploy", "deploy", admin=True),             # 部署（#164）：在跑哪个提交、平台操作、日志里的 Traceback
-    _R("GET", r"/api/admin/backup", "backup", admin=True),             # 冷备（#163）：笔记本每天来取一份（backup pull），不含秘密
+    _R("GET", r"/api/admin/backup", "backup", admin=True, lan=True),   # 冷备（#163）：笔记本每天经内网入口来取一份（backup pull），不含秘密；公网入口不给（#17）
     _R("POST", r"/api/admin/deploy", "deploy", admin=True, lan=True),  # 收 git bundle 快进、重启：等于在这台上跑新代码，只在内网入口
     _R("POST", r"/api/worker/start", "deploy", admin=True, lan=True),  # 拉起 worker（部署后、labmon worker start）：要连服务器、推代码，仍只在内网入口
     # 命令行（#162，api.py）：会改整台主机、借卡、改主机清单在用不在用的要 admin 令牌（实验会话的 project 令牌做不了，交给用户）
@@ -1666,8 +1667,8 @@ ROUTES = [
     _R("PUT", PROJECT_CONFIG_PATH.pattern, "project", own="new"),     # 推项目配置（#161）：第一次推的人是主人（#167）
     _R("POST", r"/api/(password|tokens/add|revoke|push|push/test)", U.ACCOUNT, own="self"),   # 自己的口令、令牌、推送（#167）：只认浏览器会话
     _R("GET", r"/api/client/(install\.sh|wheel)", "read"),             # 由看板发客户端（#167，dist.py）：登录了就能取
-    _R("GET", r"/api/users", "admin", admin=True),
-    _R("POST", r"/api/users/(add|role|reset|revoke|remove|hosts)", "admin", admin=True),
+    _R("GET", r"/api/users", "admin", admin=True, lan=True),          # 账号管理只在内网入口（#17）；自己的口令、令牌照常
+    _R("POST", r"/api/users/(add|role|reset|revoke|remove|hosts)", "admin", admin=True, lan=True),
     _R("GET", r"/|/index\.html|/overview\.json|/records\.json", "read"),   # 普通用户只看到自己的（users.view、users.visible）
     _R("GET", r"/p/.*", "read", own="path"),                           # 项目页：普通用户只看自己的项目（#167）
     _R("GET", r"/fleet/.*", "read", admin=True),                       # 组内服务器的数据只给管理员（维护者 2026-11-10 定）

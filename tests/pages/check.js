@@ -1921,6 +1921,11 @@ t("auth", "算力池入口已删除：侧栏、路由与项目管理抽屉都不
 t("auth", "普通用户：侧栏没有组内服务器与「管理」，有「我」；没有立即采集、调度按钮与平台操作；组内页只说要管理员；记录没有平台操作这类", () => {
   ok(OVU.fleet === null && !OVU.notices.length, "users.view 没去掉组内");
   ok(OV.hostcheck && OVU.hostcheck === null, "users.view 没去掉看板服务所在机的体检（#166）");
+  // #17：普通用户的快照按白名单取：别的项目的配色、正在扫的路径、别人的目录、主备细节都不给，页面照常画
+  ok(Object.keys(OVU.colors).every(k => OVU.access.own.includes(k)), "配色里还有别人的项目：" + Object.keys(OVU.colors));
+  ok(!("now" in (OVU.disk || {})) && !("colors" in (OVU.disk || {})) && (OVU.disk?.ours?.dirs || []).every(d => OVU.access.own.includes(d.p)), "共享盘给多了");
+  ok(!OVU.server || Object.keys(OVU.server).every(k => ["role", "say"].includes(k)), "主备给多了");
+  ok(!("pool_observed" in OVU) && !("host_notices" in OVU), "派单库存或主机提醒给了普通用户");
   ok(!page(accCtx(OVU, USER_ME), "#/").includes("svc-t"), "普通用户的总览不该有「看板服务」小卡");
   const U = accCtx(OVU, USER_ME);
   for (const r of ["#/", "#/host/srv-a", "#/host/srv-b", "#/p/proj-a/manage", "#/fleet", "#/fleet/srv/srv-a", "#/log", "#/me", "#/admin/users"]) {
@@ -2063,6 +2068,21 @@ t("auth", "管理员从公网入口来：平台操作的按钮换成一句「请
   has(page(Pb, "#/fleet"), "请从内网入口操作，或为此管理员开启公网平台操作"); has(page(Pb, "#/fleet/srv/srv-a"), "请从内网入口操作，或为此管理员开启公网平台操作");
   has(page(A, "#/fleet"), 'data-fop="sync"', "内网入口的核对按钮");
   ok(!side(A).includes("#/admin/users"), "管理员侧栏仍有独立账号入口"); has(side(A), 'href="#/me"');
+});
+
+t("auth", "管理员从公网入口来：账号管理只在内网入口，人员页不取账号列表、说一句不标红（#17）", () => {
+  for (const [me, lan] of [[PUB_ME, false], [{...PUB_ME, ops: true}, false], [ADMIN_ME, true]]) {
+    const O = accCtx(OV, me);
+    run(O, `SF = []; fetch = (u, o) => { SF.push(u); return new Promise(() => {}); }`);
+    const people = page(O, "#/fleet/people"), drawer = page(O, "#/fleet/people/OWNER/account");
+    const got = run(O, "SF.filter(u => String(u).includes('api/users')).length");
+    ok(lan ? got > 0 : got === 0, `${me.entry}：取了 ${got} 次 /api/users`);
+    for (const h of [people, drawer]) {
+      ok(h.includes("账号管理只在内网入口") === !lan, me.entry + "：提示不对");
+      ok(lan || !h.includes('data-acc="reload"'), "公网入口还给了重试");
+    }
+    ok(lan || !people.includes("未开通") && people.includes("在内网入口查看"), "没取账号列表却说未开通");
+  }
 });
 
 ta("overview", "与平台核对的验证码在原按钮旁，取消后不接收旧请求", async () => {

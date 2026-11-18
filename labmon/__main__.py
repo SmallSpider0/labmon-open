@@ -342,24 +342,36 @@ def _wait_resume(cfg_path: str, jobs: list[str]) -> dict:
     return saved
 
 
-def _wait_update(commit: str, cfg_path: str, jobs: list[str], watch: dict | None) -> None:
-    """装好才 exec。状态太大或更新失败时，当前进程继续等。"""
+def _wait_update(commit: str | None, cfg_path: str, jobs: list[str], watch: dict | None) -> str | None:
+    """装好才 exec（不返回）。commit：要装的版本（刚收到的看板回话给的；None 时取看板发的那份）。
+    已是看板的版本返回 None；更新失败返回原因，由调用处决定继续等（可更新时）还是退出（426）。"""
     try:
-        _, fixed, _ = client.install_update(commit)
+        got, fixed, _ = client.install_update(commit)
         if fixed is None:
-            return
+            return None
         executable = fixed.resolve()
-        if executable.parent.parent.name != commit:
+        if executable.parent.parent.name != got:
             raise dist.Unavailable("另一条命令已换了客户端版本，等下一轮再试")
         env = dict(os.environ)
         env[WAIT_RESUME] = json.dumps({"config": cfg_path, "jobs": jobs, "watch": watch}, separators=(",", ":"))
         args = [str(fixed), "wait", "-c", cfg_path]
         for job in jobs:
             args.append(f"--job={job}")
-        print(f"[labmon] 已安装 {dist.short(commit)}，准备继续等待", flush=True)
+        print(f"[labmon] 已安装 {dist.short(got)}，准备继续等待", flush=True)
         os.execve(executable, args, env)
     except (client.Failed, client.Unreachable, dist.Unavailable, OSError, subprocess.SubprocessError) as e:
-        print(f"[labmon] 暂时更新不了，继续等待：{e}", file=sys.stderr, flush=True)
+        return str(getattr(e, "msg", None) or e)
+    return None
+
+
+def _wait_outdated(msg: str, commit: str | None, cfg_path: str, jobs: list[str], watch: dict | None) -> int:
+    """wait 被拦下（426，低于最低版本）：看板安装的客户端先自动更新一次（装好就 exec 接着等），装不成或不是看板装的以 5 退出（#17）。"""
+    print(f"[labmon] [{client.CLIENT_OUTDATED_REASON}] {msg}", file=sys.stderr, flush=True)
+    if dist.installed():
+        err = _wait_update(commit if isinstance(commit, str) else None, cfg_path, jobs, watch)
+        if err:
+            print(f"[labmon] 自动更新不成：{err}；跑 labmon update 后再挂等待", file=sys.stderr, flush=True)
+    return client.CLIENT_OUTDATED_RC
 
 
 def cmd_wait(cfg_path: str, jobs: list[str] | None = None) -> int:
@@ -381,13 +393,12 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None) -> int:
         print(f"[labmon] 等告警：每轮先同步一次 {cfg_path}，再问看板 {b['id']} 有没有告警（看板那边最多挂 {HOLD_MAX}s）", flush=True)
     first, synced, watch = not saved, bool(saved), saved.get("watch")
     rid, down, back = uuid.uuid4().hex, None, 1.0
-    retry_commit, retry_at = None, 0.0
+    retry_commit, retry_at, hinted = None, 0.0, False
     while True:
         try:
             r = _sync(cfg_path)
             if r.get("code") == client.CLIENT_OUTDATED:
-                print(f"[labmon] [{client.CLIENT_OUTDATED_REASON}] {r['msg']}", file=sys.stderr)
-                return client.CLIENT_OUTDATED_RC
+                return _wait_outdated(r["msg"], None, cfg_path, jobs, watch)
             if r["act"] in ("unregistered", "denied"):
                 print(f"[labmon] {r['msg']}", file=sys.stderr)
                 return 3
@@ -404,8 +415,7 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None) -> int:
                                                     "extra": extra, "rid": rid}, timeout=HOLD_MAX + 20, patience=0, idem=True)
         except client.Failed as e:
             if e.code == client.CLIENT_OUTDATED:
-                print(f"[labmon] [{client.CLIENT_OUTDATED_REASON}] {e.msg}", file=sys.stderr)
-                return client.CLIENT_OUTDATED_RC
+                return _wait_outdated(e.msg, e.data.get("commit"), cfg_path, jobs, watch)
             print(f"[labmon] {e.msg}", file=sys.stderr)
             return 3
         except client.Unreachable as e:
@@ -421,6 +431,10 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None) -> int:
             continue
         down, back, rid = None, 1.0, uuid.uuid4().hex
         watch, new, st, done = res.get("watch"), res.get("new") or {}, res.get("jobs") or [], bool(res.get("done"))
+        if res.get("client_status") == "unknown" and not hinted:       # 比不出先后（比看板新、分支上跑）：不拦、不换包，提示一次（#17）
+            hinted = True
+            print(f"[labmon] 看板认不出这个命令行的版本（{dist.short(dist.version())}，看板在跑 {dist.short(res.get('commit'))}）："
+                  "照常等；要与看板一致就跑 labmon update", file=sys.stderr, flush=True)
         if jobs and first:
             print(f"[labmon] 同时等 {len(st)} 个任务跑完（问看板）：", flush=True)
             for x in st:
@@ -430,7 +444,8 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None) -> int:
             commit = res.get("commit")
             if res.get("client_status") == "outdated" and isinstance(commit, str) and dist.installed():
                 if commit != retry_commit or time.monotonic() >= retry_at:
-                    _wait_update(commit, cfg_path, jobs, watch)
+                    if err := _wait_update(commit, cfg_path, jobs, watch):
+                        print(f"[labmon] 暂时更新不了，继续等待：{err}", file=sys.stderr, flush=True)
                     retry_commit, retry_at = commit, time.monotonic() + WAIT_UPDATE_RETRY_S
             time.sleep(GAP)
             continue

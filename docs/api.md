@@ -49,7 +49,7 @@ public_hosts = ["203.0.113.7"]            # 公网入口另认的 Host：nginx �
 
 | 角色 | 能做的 |
 |---|---|
-| 管理员 | 全部：项目的写操作、调度权重、组内服务器的一切（数据与平台操作，平台操作按账号允许公网）、账号管理 |
+| 管理员 | 全部：项目的写操作、调度权重、组内服务器的一切（数据与平台操作，平台操作按账号允许公网）、账号管理（只在内网入口） |
 | 普通用户 | 看自己的项目、获准使用的主机及自己项目所在的主机；能管理自己的项目与登记；组内服务器接口 `/fleet/*` 回 403 |
 
 - 账号存在状态根目录下的 `users.json`（权限 600）：口令只存 PBKDF2-SHA256 加盐的哈希（`pbkdf2_sha256$轮数$盐$哈希`，60 万轮，比对用常数时间），设置码、会话、令牌只存 SHA-256。原文不落盘、不打印、不进日志与记录。
@@ -102,7 +102,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /sched/…`、`/project/…`、`/reg/…`、`/p/<id>/collect`；`PUT /api/project/<id>/config` | `project` |
 | `POST /collect` | `project` 或 `deploy` |
 | `GET /api/admin/deploy` | `deploy`，只给管理员 |
-| `GET /api/admin/backup`（冷备，回 `.tar.gz`） | `backup`，只给管理员 |
+| `GET /api/admin/backup`（冷备，回 `.tar.gz`） | `backup`，只给管理员，只在内网入口（#17） |
 | `POST /api/admin/deploy`、`/api/worker/start` | `deploy`，只给管理员，只在内网入口 |
 | `GET /api/hosts`、`GET /api/client/install.sh`、`GET /api/client/wheel` | `read` |
 | `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
@@ -110,7 +110,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/worker/(stop\|limit)`、`/api/override/(drain\|undrain)` | `admin`，只给管理员 |
 | `POST /api/borrow`、`/api/host/(return\|restore)` | `admin`，只给管理员；公网须开启账号许可 |
 | `POST /api/password`、`/api/tokens/add`、`POST /api/revoke`、`/api/push`、`/api/push/test` | 浏览器会话（`account`） |
-| `GET /api/users`、`POST /api/users/…` | `admin`，只给管理员 |
+| `GET /api/users`、`POST /api/users/…`（账号管理） | `admin`，只给管理员，只在内网入口（#17）；管理员从公网入口来时，人员页的「账号与权限」只说一句要从内网入口管理 |
 | 没登记的路径 | GET 按 `read`，POST、PUT 按 `admin` 且只给管理员（新写路由忘了登记时从严） |
 
 备用的看板服务（[服务租约](deploy.md#主与备用服务租约)）上，除登录、账号（`/api/login|setup|logout|password|tokens/add|revoke`、`/api/users/…`）与部署（`POST /api/admin/deploy`）外的写请求一律回 409，原因写主是谁、何时能接管，带 `"standby": true`（命令行据此接着试 `client.toml` 里的下一个地址，`serve.standby_ok`）；GET 照答（命令行读的 `GET /api/hosts`、`GET /api/project/<id>/config`、`GET /api/client/wheel` 除外：同样回 409 `standby`，备用上的登记是旧的，`serve.CLI_READS`），`/` 与 `/overview.json` 的 `server` 换成此刻的主备。
@@ -119,7 +119,8 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 
 ## 普通用户看到的
 
-- `/` 与 `/overview.json`：去掉 `fleet`（组内服务器）、共享盘的按人明细与按人告警（`burst:`、`over:`）、给系统通知的提醒（`notices`）、给实验会话的消息（`wake`）与看板服务所在机的体检（`hostcheck`，总览的「看板服务」小卡，#166）；`/` 现渲染（`collect.render_page`），不发磁盘上带全量数据的 `index.html`（`users.view`）。
+- `/` 与 `/overview.json`：按白名单取（`users.view`，#17），快照以后新加的字段默认不给普通用户。原样给 `generated`、`lan`、`event_kinds`、`sched`；`hosts`、`projects`、`archived`、`rebalance`、`regs`、`occ` 按可见范围过滤；`colors` 只留自己的项目；`server` 只给 `role` 和一句通用的备用提示；`disk` 只给主机页共享盘条要的总量、剩余、历史、提醒线、扫描进度与整块盘的告警（`low`、`soon`），`ours` 只留自己项目的目录，扫盘的主机可见时才给 `scanner`。`fleet`（组内服务器）、`notices`（给系统通知的提醒）、`wake`（给实验会话的消息）、`hostcheck`（看板服务所在机的体检，#166）给空值。`/` 现渲染（`collect.render_page`），不发磁盘上带全量数据的 `index.html`。
+- 可见主机的主机项整项照给，包括这台上别人任务的命令行、日志末尾与资源用量。同一台主机上的任务用共享的系统账号跑，能在这台上跑任务的人本来就能看到这些；所以开一台主机给谁，就等于让谁看到这台上所有任务的命令行与日志。不想让人看到的任务，不要放在开给这人的主机上。
 - `/records.json`：去掉平台操作、保活、借用、共享盘、账号、看板服务体检这几类，组内服务器的掉线与恢复，以及与组内某人有关（`who`）的（`users.visible`）。
 - 工作台只列自己的项目（含已归档的项目）和获准使用或自己的项目有车道的主机。登记视图只列自己的清单。调度卡保留各项目的份额行，按钮和项目链接只在自己的行上；可见主机上别人的任务照常显示。
 - 记录再按相关项目或主机过滤。两样都未标记的全局记录仅供管理员查看。
@@ -149,7 +150,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/users/role {"name", "admin"}` | 设为或撤销管理员 |
 | `POST /api/users/reset {"name"}` | `{"code", "msg"}`：原口令与这人的会话立即失效，令牌不动 |
 | `POST /api/users/revoke {"name", "id"?}` | 吊销这人的一个会话或令牌；不给 `id` 是全部 |
-| `POST /api/users/remove {"name"}` | 删账号，连同它的会话、令牌与推送配置 |
+| `POST /api/users/remove {"name"}` | 删账号，连同它的会话、令牌、推送配置与主机清单 `[fleet.account_people]` 里它的对应（同名新账号不继承，#17）；`account_people` 写成 `[fleet]` 里的内联表且含这个账号时回 409，改成段落写法再删 |
 | `POST /api/users/hosts {"name", "hosts": [...]}` | 更新这名普通用户可用的主机 |
 | `POST /project/owner {"project", "owner"}` | 换项目主人；`owner` 为空时归管理员 |
 | `POST /api/push {"push", "bark" 或 "ntfy"}` | 保存自己的推送，回 `{msg, push}`；`push` 为空时移除。Bark 段填 `key`，可选 `server`、`encrypt_key`；ntfy 段填 `topic`，可选 `server`、`token`；服务地址限于渠道的官方地址或管理员在 `notify.toml` 配置的同渠道地址 |
@@ -160,8 +161,8 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 - `GET /api/client/install.sh?base=<看板根地址>` 下载 `labmon-install.sh`。页面传自己的根地址（含公网路径前缀）；服务端检查协议和当前入口的 Host 白名单。脚本内有 wheel 和入口配置。内网 HTTPS 配有 `[server].ca_cert` 时随附 CA 公钥证书；未附时脚本说明私有 CA 的手动配置方式。
 - `GET /api/client/wheel` 返回同版本的 wheel，响应头 `X-Labmon-Commit` 是完整提交号。`labmon update` 用命令行令牌取包并安装。包从看板启动时运行的 main 提交构建，版本带提交号。备用入口回 409，客户端接着试下一个入口。更新先验证新版本，再切换命令入口。
 - 已认证的命令行可用 `X-Labmon-Client` 报告完整的 40 位小写 Git 提交号。服务按令牌保存最近一次报告的 `client_commit` 与 `client_seen`，同版本的报告最多每小时落盘一次。账号详情的令牌摘要还带 `client_status`（`current`、`outdated`、`below_minimum`、`unknown`、`inactive` 或空）。
-- `[server].min_client_commit` 可选，取运行版本或其祖先的完整提交号。配置后，带版本头的命令行若低于最低版本或版本无法确认，操作前回 426，正文含 `reason: "client_outdated"`、`minimum` 和更新提示。浏览器与没有版本头的旧脚本照常。登录、账号、更新包、部署与备份入口仍可用。主备切换先于最低版本判定。
-- `POST /api/wait` 成功时追加 `commit` 与 `client_status`。用看板安装的客户端发现自己在运行版本的祖先链上且可更新时，会在两次轮询间下载、安装并接着等。该轮有新告警或任务已有终态时，先照原规则退出。收到 426 时，支持此契约的 `labmon wait` 以 5 退出，原因 `client_outdated`。
+- `[server].min_client_commit` 可选，取运行版本或其祖先的完整提交号。配置后，带版本头的命令行确认低于最低版本时，操作前回 426，正文含 `reason: "client_outdated"`、`minimum`、在跑的提交 `commit` 和更新提示。比不出先后的（`unknown`：不在运行版本的祖先链上，如比看板新、从分支跑、冷备回退后）不拦，只在账号详情标“版本待确认”，`labmon wait` 在 stderr 提示一次（#17）。浏览器与没有版本头的旧脚本照常。登录、账号、更新包、部署与备份入口仍可用。主备切换先于最低版本判定。
+- `POST /api/wait` 成功时追加 `commit` 与 `client_status`。用看板安装的客户端发现自己在运行版本的祖先链上且可更新时，会在两次轮询间下载、安装并接着等。该轮有新告警或任务已有终态时，先照原规则退出。收到 426 时，用看板安装的 `labmon wait` 也先下载、安装一次（按 426 给的 `commit` 核对版本），装好接着等；装不成或不是看板安装的，以 5 退出，原因 `client_outdated`（#17）。
 - 接口演进优先新增字段和路由。已有接口的删改留到各客户端都更新后进行，客户端应容忍附加字段。
 - 命令行请求带 `X-Labmon-Client`，值为客户端提交号。`labmon login` 和 `labmon check` 发现版本不同时提示运行 `labmon update`。
 

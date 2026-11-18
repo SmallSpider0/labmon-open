@@ -339,6 +339,36 @@ class AdminTest(UsersBase):
             U.remove("amy", "boss")
         self.assertEqual(e.exception.code, 404)
 
+    def test_remove_drops_account_people(self):
+        """#17：删账号时连同主机清单 [fleet.account_people] 里这个账号的对应（大小写不敏感）一起删，同名新账号不继承；别的行、别的段不动。"""
+        import tomllib
+        hosts = Path(os.environ["LABMON_HOSTS"])
+        hosts.write_text('[fleet]\nme = "BOSS"   # 旧写法\n\n[fleet.account_people]\nboss = "BOSS"\nAmy = "AMY"   # 这人\n"bob" = "BOB"\n\n[[hosts]]\nid = "a"\nssh = "remote-a"\n')
+        self.admin()
+        fixtures.add_account("amy", "user", "boss", t=T0)
+        U.remove("amy", "boss")
+        text = hosts.read_text()
+        self.assertEqual(tomllib.loads(text)["fleet"]["account_people"], {"boss": "BOSS", "bob": "BOB"})
+        self.assertIn('me = "BOSS"   # 旧写法', text)
+        self.assertIn('[[hosts]]\nid = "a"', text)
+        fixtures.add_account("bob", "user", "boss", t=T0)
+        hosts.write_text('[fleet]\naccount_people = {bob = "BOB"}\n')               # 写成内联表的：不删账号，说清楚怎么改
+        with self.assertRaises(U.Denied) as e:
+            U.remove("bob", "boss")
+        self.assertEqual(e.exception.code, 409)
+        self.assertIn("[fleet.account_people]", e.exception.msg)
+        self.assertIn("bob", [u["name"] for u in U.listing(t=T0)["users"]])
+        multi = '[fleet.account_people]\nbob = """\nBOB"""\n'
+        hosts.write_text(multi)                                                      # 跨行的值逐行删不掉（Codex 审查）：不删账号，主机清单不动
+        with self.assertRaises(U.Denied) as e:
+            U.remove("bob", "boss")
+        self.assertEqual(e.exception.code, 409)
+        self.assertEqual(hosts.read_text(), multi)
+        self.assertIn("bob", [u["name"] for u in U.listing(t=T0)["users"]])
+        hosts.write_text('[fleet]\naccount_people = {boss = "BOSS"}\n')              # 没有这个账号的对应：照常删，主机清单不动
+        U.remove("bob", "boss")
+        self.assertEqual(hosts.read_text(), '[fleet]\naccount_people = {boss = "BOSS"}\n')
+
     def test_first_account_must_be_admin(self):
         with self.assertRaises(U.Denied) as e:
             fixtures.add_account("amy", "user", "本机命令行", t=T0)
@@ -447,6 +477,36 @@ class ViewTest(UsersBase):
         snap = {"hosts": [{"id": "h"}], "pool_observed": {"hosts": {"x": {"tail": "别人的日志"}}}}
         v = U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))
         self.assertNotIn("pool_observed", v)
+
+    def test_user_view_is_allowlist(self):
+        # #17：普通用户的快照只取列出的字段，新加的字段默认不给；colors 只留自己的项目，server 不给主是谁，disk 不给正在扫的路径、别人的目录
+        amy = U.Ident("amy", "user", frozenset({"read"}), "session", "k")
+        snap = {"generated": T0, "lan": {"ok": True}, "event_kinds": {"done": "跑完"}, "sched": {"rows": []}, "future_secret": {"x": 1},
+                "pool_observed": {"x": 1}, "host_notices": {"h": ["掉线"]}, "cached": True,
+                "hosts": [{"id": "h", "status": {"running": [{"project": "q", "cmd": "python train.py"}]}}, {"id": "z"}],
+                "projects": [{"id": "p"}, {"id": "q"}], "archived": [{"id": "p"}, {"id": "q"}], "rebalance": {"p": 1, "q": 2},
+                "colors": {"p": "#111", "q": "#222", "某人": "#333"},
+                "server": {"role": "standby", "id": "srv-main", "holder": "srv-other", "renew": T0, "until": T0, "bad": None, "home": "/h", "say": "主是 srv-other"},
+                "disk": {"root": "/data", "df": {"free": 1}, "eta": 3, "hist": [[T0, 1]], "warn_gb": 9, "at": T0, "units": 4, "pending": 1, "yield": None,
+                         "scanner": "z", "now": "/data/别人/私有目录", "colors": {"某人": "#000"}, "unscanned": 5, "new_field": 1,
+                         "ours": {"base": "/data/mine", "dirs": [{"u": "/data/mine/a", "name": "a", "b": 1, "p": "p"}, {"u": "/data/mine/b", "name": "b", "b": 2, "p": "q"},
+                                                                 {"u": "/data/mine/c", "name": "c", "b": 3, "p": None}]},
+                         "alerts": [{"key": "low"}, {"key": "soon"}, {"key": "burst:zz"}, {"key": "x"}]}}
+        v = U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))
+        self.assertEqual(set(v), {"generated", "lan", "event_kinds", "event_cats", "sched", "hosts", "projects", "archived", "rebalance", "regs", "occ",
+                                  "colors", "server", "disk", "fleet", "notices", "wake", "hostcheck", "access"})
+        self.assertEqual(v["hosts"], [snap["hosts"][0]])                     # 可见主机照整项给：别人任务的命令行照常显示（docs/api.md）
+        self.assertEqual(v["colors"], {"p": "#111"})
+        self.assertEqual(v["server"], {"role": "standby", "say": U.STANDBY_SAY})
+        self.assertEqual(set(v["disk"]), {"root", "df", "eta", "hist", "warn_gb", "at", "units", "pending", "yield", "ours", "alerts"})
+        self.assertEqual(v["disk"]["ours"], {"dirs": [snap["disk"]["ours"]["dirs"][0]]})
+        self.assertEqual(v["disk"]["alerts"], [{"key": "low"}, {"key": "soon"}])
+        snap["disk"]["scanner"] = "h"
+        self.assertEqual(U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))["disk"]["scanner"], "h")   # 扫盘的主机他看得见时才给
+        snap["server"] = None
+        self.assertIsNone(U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))["server"])
+        snap["server"] = {"role": "primary", "id": "srv-main", "say": ""}
+        self.assertEqual(U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))["server"], {"role": "primary", "say": ""})
 
 
 if __name__ == "__main__":

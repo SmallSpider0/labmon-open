@@ -643,6 +643,7 @@ class AuthTest(unittest.TestCase):
             status, _, body = self.call(self.lan + "/api/hosts", tok=raw, headers=version)
             self.assertEqual(status, 426)
             self.assertEqual(json.loads(body)["reason"], "client_outdated")
+            self.assertEqual(json.loads(body)["commit"], S.DP.RUNNING["commit"])     # 在跑的提交：wait 自动更新时核对下载的版本（#17）
             self.assertEqual(self.call(self.lan + "/api/hosts", tok=raw)[0], 200)
             self.assertEqual(self.call(self.lan + "/api/hosts", cookie=sid, headers=version)[0], 200)
             self.assertEqual(self.call(self.lan + "/api/me", tok=raw, headers=version)[0], 200)
@@ -655,6 +656,13 @@ class AuthTest(unittest.TestCase):
                 status, _, body = self.call(self.lan + "/api/hosts", tok=raw, headers=version)
                 self.assertEqual(status, 409)
                 self.assertTrue(json.loads(body)["standby"])
+
+    def test_unknown_client_version_is_not_refused(self):
+        # #17：比看板新、分支上跑、冷备回退后的客户端不在运行版本的祖先链上（unknown）：只提示，不当太旧拒绝
+        raw = make_token(scopes=("project",))
+        self.srv.min_client_commit = "a" * 40
+        with mock.patch("labmon.serve.DI.client_status", return_value="unknown"):
+            self.assertEqual(self.call(self.lan + "/api/hosts", tok=raw, headers={"X-Labmon-Client": "c" * 40})[0], 200)
 
     def test_login_required_even_from_localhost(self):
         # 以前本机来的请求一律放行（trust_local）：现在两个入口都要登录
@@ -704,6 +712,18 @@ class AuthTest(unittest.TestCase):
                 self.assertEqual(self.call(self.wan + path, {}, tok=admin)[0], 404)
             self.call(self.lan + "/api/users/public-ops", {**body, "enabled": False}, tok=admin)
             self.assertEqual(self.call(self.wan + "/fleet/op/sync", {}, tok=admin)[0], 403)
+
+    def test_backup_and_accounts_only_on_lan(self):
+        # #17：冷备与账号管理只在内网入口（公网入口当没这条路由，开了公网平台许可也一样）；冷备拉取本来就走内网入口（docs/deploy.md）
+        admin, backup = make_token(), make_token(scopes=("backup",))
+        self.call(self.lan + "/api/users/public-ops", {"name": "boss", "enabled": True}, tok=admin)
+        self.assertEqual(self.call(self.wan + "/api/admin/backup", tok=backup)[0], 404)
+        self.assertEqual(self.call(self.wan + "/api/users", tok=admin)[0], 404)
+        for act in ("add", "role", "reset", "revoke", "remove", "hosts"):
+            self.assertEqual(self.call(self.wan + "/api/users/" + act, {"name": "amy"}, tok=admin)[0], 404, act)
+        self.assertEqual(self.call(self.lan + "/api/users", tok=admin)[0], 200)
+        with mock.patch("labmon.serve.BK.make_bytes", return_value=("b.tar.gz", b"x")):
+            self.assertEqual(self.call(self.lan + "/api/admin/backup", tok=backup)[0], 200)
 
     def test_public_entry_has_no_platform_ops(self):
         hit = []
@@ -1058,8 +1078,8 @@ class AuthTest(unittest.TestCase):
         K.hosts_file().write_text('[fleet]\n[fleet.account_people]\nlegacy = "Reserved"\n')
         save_json(F.state_file("people.json"), {"Amy": {}, "Bob": {}, "Reserved": {}})
         boss, ordinary = make_token(), make_token("reader", role="user", scopes=("project",))
-        add = self.wan + "/api/users/add"
-        listing = lambda: json.loads(self.call(self.wan + "/api/users", tok=boss)[2])  # noqa: E731
+        add = self.lan + "/api/users/add"
+        listing = lambda: json.loads(self.call(self.lan + "/api/users", tok=boss)[2])  # noqa: E731
         self.assertEqual(listing()["person_choices"], ["Amy", "Bob"])
         for body in ({"name": "amy"}, {"name": "amy", "person": None}, {"name": "amy", "person": "未知"}):
             rc, _, raw = self.call(add, body, tok=boss)
@@ -1127,7 +1147,7 @@ class AuthTest(unittest.TestCase):
         self.assertEqual(route_of("GET", "/whatever").scope, "read")
         for path in ("/fleet/op/renew", "/fleet/probe/x", "/renew/a/cancel"):
             self.assertTrue(route_of("POST", path).ops, path)
-        self.assertFalse(any(r.lan for r in ROUTES if r.method == "GET"))
+        self.assertEqual({r.path.pattern for r in ROUTES if r.method == "GET" and r.lan}, {r"/api/admin/backup", r"/api/users"})   # 只在内网入口的读：冷备与账号管理（#17）
         self.assertEqual((login_url("/"), login_url("/p/a/"), login_url("/p/a")), ("login?next=", "../../login?next=p/a/", "../login?next=p/a"))
         for bad in ("//evil.example", "https://evil.example", "/abs", "../x", "a\\b", "p/../../x"):
             self.assertEqual(safe_next(bad), "", bad)
