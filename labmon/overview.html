@@ -1483,8 +1483,10 @@ function accStatus(u, brief = false) {
   return `<span class="badge b-bad">设置码已过期</span>`;
 }
 // 人员卡上「看板账号」那一行（#15）：账号的角色与要处理的状态单独一行、带标签，不与下面服务器那一行（人员在组内的状态）混在一起
-function accountCardStatus(u, roles) {
+function accountCardStatus(u, roles, known = true) {
   const k = '<span class="pk">看板账号</span>';
+  // 账号列表没取到（公网入口不取、只读令牌、正在读或读不了）：不说“未开通”（#17）
+  if (!known) return `<div class="people-meta sm">${k}<span class="mut">${accLan() ? "—" : "在内网入口查看"}</span></div>`;
   if (!u) return `<div class="people-meta sm">${k}<span class="mut">未开通</span></div>`;
   const lagging = u.tokens.filter(t => t.client_commit && ["outdated", "below_minimum"].includes(t.client_status)).length;
   const status = accStatus(u, true);
@@ -3664,7 +3666,7 @@ function personCard(n, p, h, u) {
   const isMe = u ? u.name === ME?.name : n === ME?.fleet_person;
   const href = DH.person(n);
   const selected = d?.k === "person" && d.id === n;
-  const account = ACC.users ? accountCardStatus(u, ACC.users.roles) : "";     // 账号列表没取到（公网入口、只读令牌、读不了）：不说“未开通”
+  const account = accountCardStatus(u, ACC.users?.roles, !!ACC.users);
   const slots = n ? [...(p?.slots || []).map(slotChip), ...borrowChips(n)] : [];
   const servers = '<span class="pk sm">服务器</span>' + (slots[0] || '<span class="sm mut">暂无</span>');
   const more = slots.length > 1 ? `<span class="sm mut nw">+${slots.length - 1} 台</span>` : "";

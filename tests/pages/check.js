@@ -2081,7 +2081,7 @@ t("auth", "管理员从公网入口来：账号管理只在内网入口，人员
       ok(h.includes("账号管理只在内网入口") === !lan, me.entry + "：提示不对");
       ok(lan || !h.includes('data-acc="reload"'), "公网入口还给了重试");
     }
-    ok(lan || !people.includes("未开通账号"), "没取账号列表却说未开通");
+    ok(lan || !people.includes("未开通") && people.includes("在内网入口查看"), "没取账号列表却说未开通");
   }
 });
 
