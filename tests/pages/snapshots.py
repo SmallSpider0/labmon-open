@@ -415,7 +415,10 @@ def overview() -> dict:
                                                   "why": "池里借着的服务器都放不下（srv-h：显存不够）；没有能借的入池服务器（srv-g 不在入池时段）"},
                 "/data/me/proj-b/pq2|jobs/p2.txt": {"project": "proj-b", "root": "/data/me/proj-b/pq2", "jobs": "jobs/p2.txt", "host": "srv-h", "since": NOW,
                                                     "why": "池里借着的服务器都放不下（srv-h：内存不够）"},
-                "/data/me/proj-a/pq3|jobs/p3.txt": {"project": "proj-a", "root": "/data/me/proj-a/pq3", "jobs": "jobs/p3.txt", "host": "pool", "since": NOW - 5 * 60}},
+                "/data/me/proj-a/pq3|jobs/p3.txt": {"project": "proj-a", "root": "/data/me/proj-a/pq3", "jobs": "jobs/p3.txt", "host": "pool", "since": NOW - 5 * 60},
+                # 池里跑完了的（#86）：不算在等，抽屉里收在后面
+                "/data/me/proj-a/pq4|jobs/cpu.txt": {"project": "proj-a", "root": "/data/me/proj-a/pq4", "jobs": "jobs/cpu.txt", "host": "pool", "since": NOW - 3 * H,
+                                                     "why": "清单里的行都跑完了：不用了就 labmon worker rm pool 撤掉，往清单里加了行会接着放", "done": True}},
                 "gone": []},
             "rebalance": {"proj-a": dict(REBAL), "proj-b": {"why": ["srv-a 上本项目 11-10 22:59 后没活，接不了：srv-b 上 jobs/b3.txt 的队尾 hold_b 是占位任务，不挪"], "from": NOW + 9 * H}},
             "sched": {"cap_min": 30.0, "hl_h": 24.0, "use_sum": 22.1, "projects": [

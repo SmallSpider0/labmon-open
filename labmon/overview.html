@@ -3141,7 +3141,7 @@ function poolCount() {
   const ls = D.fleet.servers.map(x => x.lend || {}), own = poolSelf().map(x => x.lend), lent = ls.filter(L => L.lent);
   const on = [...ls.filter(L => L.on || L.lent), ...own.filter(L => L.on)];
   return {on: on.length, open: on.filter(L => L.lent || L.open && !L.rest && !L.bar).length, rest: on.filter(L => !L.lent && L.rest).length,
-          lent: lent.length, back: lent.filter(L => L.returning).length, wait: poolLists().length,
+          lent: lent.length, back: lent.filter(L => L.returning).length, wait: poolLists().filter(v => !v.done).length,
           self: own.filter(L => L.on).length, placed: own.reduce((n, L) => n + (L.placed || 0), 0)};
 }
 function poolStat() {
@@ -3152,7 +3152,7 @@ function poolStat() {
   return `<a class="fs fs-l" href="${DH.pool()}" data-drw="${DH.pool()}" ${tip(t)}><span class="mut">算力池</span><b>${esc(v)}</b></a>`;
 }
 function poolDrawer() {
-  const F = D.fleet, c = poolCount(), now = D.generated, ls = poolLists();
+  const F = D.fleet, c = poolCount(), now = D.generated, all = poolLists(), ls = all.filter(v => !v.done), done = all.filter(v => v.done);   // 跑完了的（#86）收在后面
   const rank = x => x.lend?.lent ? 0 : x.lend?.on ? 1 : 2;
   const own = new Set(poolSelf().map(x => x.id));
   const sv = srvOrder().map(srvById).filter(x => x && (!x.mine || own.has(x.id))).sort((a, b) => rank(a) - rank(b));
@@ -3165,14 +3165,15 @@ function poolDrawer() {
   const item = v => { const pj = v.project, ph = "#/p/" + encodeURIComponent(pj || "");
     const name = pj && D.projects.some(p => p.id === pj) ? `<a href="${esc(ph)}">${projName(pj, {always: true})}</a>` : esc(pj || "—");
     return `<div class="gd-row pl-row"><div class="fc-t"><span>${name}</span><code>${esc(nrm(v.root || ""))}/<b>${esc(v.jobs)}</b></code>
-      <span class="sm mut">${where(v)}${v.host === "pool" && v.since ? ` · 等了 ${dur(now - v.since)}` : ""}</span>
+      <span class="sm mut">${where(v)}${v.host === "pool" && v.since && !v.done ? ` · 等了 ${dur(now - v.since)}` : ""}</span>
       <span class="sm">${v.why ? esc(v.why) : "这一轮正放到入池的主机上"}</span></div></div>`; };
   const head = c.on ? `${c.on} 台入池 · 时段内 ${c.open} · 借着 ${c.lent}${c.back ? `（${c.back} 要还）` : ""}` : "还没有服务器入池";
   return dHead(`<span class="fav">${icon("dash")}</span>`, "算力池", "组内服务器空着时借给算力池，跑组里别人交给池的清单；入池的自用主机不用借，池里的清单直接放上来")
     + `<div class="db">${dSec("服务器", sv.map(row).join("") || `<div class="empty">[fleet] 里还没有服务器。</div>`,
         `<span class="sm mut">${head}</span>${opsNote()}`)}
       ${dSec("池里等着的清单", ls.map(item).join("") || `<div class="empty">池里没有等着放的清单。入池的人或管理员用 <code>labmon worker add pool ROOT JOBS --project P</code> 交清单，放到哪台由看板定。</div>`,
-        `<span class="sm mut">${ls.length} 条 · 约 ${Math.round(F.interval / 60)} 分钟探一次各台，工作台每轮看放不放得下、要不要借</span>`)}</div>`;
+        `<span class="sm mut">${ls.length} 条 · 约 ${Math.round(F.interval / 60)} 分钟探一次各台，工作台每轮看放不放得下、要不要借</span>`)}
+      ${done.length ? dSec("池里跑完的清单", done.map(item).join(""), `<span class="sm mut">${done.length} 条 · 不算在等</span>`) : ""}</div>`;
 }
 // 选项卡放在顶栏里（顶栏吸顶，滚下去也能切）；数字：台数、人数、核对对不上的、最近 24 小时的事件
 function fleetTabs(tab) {
