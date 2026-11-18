@@ -2967,6 +2967,41 @@ class RegDupTest(UnitBase):
     def why(self):
         return [w["why"] for w in json.loads(Path(self.w.p.status).read_text())["waiting"]]
 
+    def test_pool_head_running_elsewhere(self):
+        # #80：清单从 o 交给池（worker add pool）时 o 正在跑 j1（那格由 o 跑完）。池里这条的队首不算 j1、记 elsewhere [o, j1]，看板等它跑完再放；
+        # 别处 after=j1 的原因照 j1 实际在哪写（在 o 上跑），不写“在算力池里等着放到某台”。o 跑完后 elsewhere 没了、队首是 j2。
+        # 登记在 t 上（看板放过来）的这条清单在 t 的等待项也带 elsewhere，看板据此把它收回池里
+        self.ft.unlink()
+        extra = {"project": "pa", "root": None, "queue": None, "jobs": ["j1"], "deps": {}, "gang": {}, "held": None}   # o 的登记搬走后在跑的那格（list_state 的 extra）
+        self.o_runs(who="o", todo=[extra])
+        rc, out = self.add("pool")
+        self.assertEqual(rc, 0, out)
+        qb, = self.hosts.queues({"b": ["B|true   # gpus=0 after=j1"]}, "pa")
+        self.w.tick([qb], True)
+        st = json.loads(Path(self.w.p.status).read_text())
+        k = "%s|jobs/q.txt" % os.path.normpath(self.q["root"])
+        h = st["pool_heads"][k]
+        self.assertEqual((h["head"], h["n"], h.get("elsewhere"), h["dep"]), ("j2", 1, ["o", "j1"], None))
+        (x,) = [x for x in st["waiting"] if x["name"] == "B"]
+        self.assertIn("等 j1 跑完", x["why"])
+        self.assertNotIn("在算力池里等着放到某台", x["why"])
+        self.assertEqual(self.add("t")[0], 0)            # 看板（旧代码）照样放到了 t：t 一行也开不了，等待项带 elsewhere
+        self.w.peer_t = 0
+        self.w.tick(self.w.registry() + [qb], False)
+        (x,) = [x for x in json.loads(Path(self.w.p.status).read_text())["waiting"] if x["queue"] == "jobs/q.txt" and x["root"] == self.q["root"]]
+        self.assertEqual(x["elsewhere"], ["o", "j1"])
+        self.assertEqual(self.w.running, {})
+        for f in (self.hosts.home / "hosts" / "t" / "queues").glob("*.json"):
+            self.newer(f, -10)                        # 同一秒里搬两次：t 那份比这次旧，worker add 才搬得回池里（按修改时间认先后）
+        rc, out = self.add("pool")
+        self.assertEqual(rc, 0, out)
+        Path(self.q["state"], "j1.done").write_text("")
+        Path(self.q["state"], "current").unlink()
+        self.hosts.status("o", running=[], todo=[])
+        self.w.tick([qb], False)
+        h = json.loads(Path(self.w.p.status).read_text())["pool_heads"][k]
+        self.assertEqual((h["head"], h["n"], h["elsewhere"]), ("j2", 1, None))
+
     def test_comeback_does_not_rerun_job_running_elsewhere(self):
         # 旧格式的 current（没写主机）、o 的状态里列着 j1：t 第一轮不当 j1 中断、不删 current、不重跑；o 跑完（j1.done、current 收掉）后 t 接着放 j2
         self.o_runs()

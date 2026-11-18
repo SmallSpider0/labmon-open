@@ -55,7 +55,7 @@ worker 装在主机的 `worker_home`（缺省 `<data_root>/labmon`，`data_root`
 - 同名 `.env` 在 ROOT 下用 bash 读入，读入时 `set -a`，赋值即导出（`PY=…` 不必再写 `export`）。worker 另外导出 `QUEUE_ROOT`、`PYTHONUNBUFFERED=1`，并清掉 `PYTHONPATH`（需要就在 `.env` 里设）。
 - 状态目录（`.env` 的 `QUEUE_STATE`）里有 `lock`、`current`（`名称 PID 开始日期 开始时刻 放行的主机`；旧 `gpu_queue.sh` 与 11-10 前的 worker 不写主机）、`<名称>.done` / `.failed` / `.rc`、`queue.log`；`paused` 存在时不启动新任务。日志目录是 `QUEUE_LOGS`。
 - 同一条清单登记在两台时（借来的主机还了再借回、自用主机恢复时旧登记还在，#88），`current` 是别的主机放行的、看板又没说那台已归还，这台一概不动它（`run_elsewhere`）：不接管、不收尾、不放行这条清单，
-  等那台的 worker 自己收尾；那台 worker 不在也一样（判断不了就不动），等待原因写明，事件记一条。那台已不在、任务确定没了时删掉 `current`，这台下一轮接着跑。
+  等那台的 worker 自己收尾；那台 worker 不在也一样（判断不了就不动），等待原因写明、状态里等待项带 `elsewhere`（`[主机, 任务]`），事件记一条。那台已不在、任务确定没了时删掉 `current`，这台下一轮接着跑。
   旧格式的 `current`（没写主机）按别的主机状态里的 `running` 认。看板标成已归还的主机上放的，照旧当容器没了：有 `.rc` 的按它记账，没有的记中断、重排。
   开跑前再看一次 `current`，已有（别的主机刚放了）就这次不放。
 - **一条清单只归一台**（#95）：`worker add` 把同一 worker_home 下别的主机（含已归还的、主机清单里已没有的）上同一条清单的登记搬过来，两边的事件里各记一条；

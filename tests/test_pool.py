@@ -638,6 +638,69 @@ class PoolReturnTest(TickBase):
         self.assertEqual(P.lend_view(self.server("a"), NOW)["say"], "算力池借着，要还了（在跑的跑完就还）")
 
 
+class PoolStuckTest(TickBase):
+    """#80 真机试用卡住的现场（已脱敏）：池借来 a、冒烟清单跑完；项目从手动借来的 o 把清单交给池，队首那一格还在 o 上跑。
+    放上来后不能马上空闲还；队首在别处跑的不放、已放过去的回池里；还掉以后池自己的旧登记不挡再借。"""
+
+    def setUp(self):
+        super().setUp()
+        self.setup_tick()
+        self.q = self.pool_list()
+        self.k = P.key(self.q["root"], self.q["jobs"])
+
+    def test_placed_resets_idle_clock(self):
+        # 冒烟 14 分钟前跑完（busy），这一轮把清单放到 a：之后 15 分钟内（队首还没开跑）不还；满了一个也没跑起来才还
+        self.mem("a", busy=round(NOW - 14 * 60))
+        e = self.lent("a", {"running": []}, since=NOW - 3600)
+        self.tick(self.snap([e], [self.q]))
+        self.assertEqual([m[0] for m in self.moves], ["a"])
+        a_regs = [{"host": "a", "state": "active", "queues": [dict(self.q)]}]
+        self.tick(self.snap([self.lent("a", {"running": []}, since=NOW - 3600)], [], regs=a_regs), t=NOW + 120)
+        self.assertEqual(self.rets, [])                   # 旧代码：从冒烟跑完算已 16 分钟，放完马上还
+        self.assertEqual(P.load_json(P.state_dir() / "borrow.json", {})["a"]["pool"]["placed"], round(NOW))
+        self.tick(self.snap([self.lent("a", {"running": []}, since=NOW - 3600)], [], regs=a_regs), t=NOW + P.POOL_IDLE_S + 1)
+        self.assertEqual(self.rets, ["a"])
+
+    def test_head_running_elsewhere_not_placed(self):
+        # 池里的清单交给池之前在 o 上放行的那一格还没收尾（worker 的 pool_heads 带 elsewhere）：不问 fit、不放、不为它借，原因照实写
+        e = self.lent("a", {"room": {"gpus": {"GPU-a": 40000.0}}})
+        heads = {self.k: {"head": "j2", "n": 3, "dep": None, "held": None, "elsewhere": ["o", "j1"]}}
+        out = self.tick(self.snap([e], [self.q], heads=heads))
+        self.assertEqual((self.moves, self.fits, self.starts), ([], [], []))
+        self.assertEqual(out["lists"][self.k]["why"], "j1 还在 o 上跑（交给池之前在那台放行的），跑完再放")
+        out = self.tick(self.snap([], [self.q], heads=heads), t=NOW + 1)     # 没有借着的：也不借
+        self.assertEqual(self.starts, [])
+
+    def test_placed_list_waiting_on_other_host_goes_back(self):
+        # 已放到 a 的清单，a 的 worker 说它在等 o 放行的那一格收尾（等待项的 elsewhere）：回池里等，不当“等满 10 分钟”挪到别的池主机
+        (self.d / "hosts.toml").write_text(HOSTS.format(extra="lend = true\n") + "lend = true\n")      # b 也入池
+        wa = {"kind": "queue", "root": self.q["root"], "queue": self.q["jobs"], "project": "pa", "name": None, "elsewhere": ["o", "j1"],
+              "since": NOW - P.POOL_WAIT_S - 5}
+        a, b = self.lent("a", {"waiting": [wa]}), self.lent("b")
+        self.tick(self.snap([a, b], [], regs=[{"host": "a", "state": "active", "queues": [dict(self.q)]}]))
+        self.assertEqual(self.moves, [("pool", ["jobs/x.txt"], "j1 还在 o 上跑（交给池之前在那台放行的），跑完再放")])
+        self.moves.clear()
+        self.tick(self.snap([a, b], [], regs=[{"host": "a", "state": "active", "queues": [dict(self.q)]}]), t=NOW + 1)   # a 要还了也一样：不放到 b
+        self.assertTrue(all(m[0] == "pool" for m in self.moves), self.moves)
+
+    def test_reborrow_after_return(self):
+        # a 刚还（主机清单写了 borrow_returned），这一轮的 regs 还是还之前读的（active），目录里留着池自己放的、已跑完的冒烟清单：
+        # 当轮收回池里，同一轮就能再借 a；收不成的（池自己的）也不挡再借，手动借时留下的别人的清单照旧挡
+        self.lent("a")
+        CF.set_fleet_keys({"borrow_returned": CF.fmt_time(NOW - 60, year=True)}, "测试", sid="a")
+        smoke = dict(self.pool_list("/r/smoke", "queues/smoke.txt"), empty=True)
+        regs = [{"host": "a", "state": "active", "queues": [smoke]}]
+        out = self.tick(self.snap([], [self.q], regs=regs))
+        self.assertEqual(self.moves, [("pool", ["queues/smoke.txt"], "a 已还")])
+        self.assertEqual(len(self.starts), 1, out["lists"][self.k]["why"])
+        self.assertEqual(self.starts[0][1]["ids"], ["a"])
+        self.starts.clear()
+        P._FIT.clear()
+        self.assertIsNone(P.want_borrow({"ngpu": 1, "vram": 20.0}, F.conf(), F._load_state(), {}, NOW, (),
+                                        {"a": {"queues": [dict(smoke, stop="boundary")]}})[0])
+        self.assertEqual(P.want_borrow({"ngpu": 1, "vram": 20.0}, F.conf(), F._load_state(), {}, NOW, (), {"a": {"queues": [smoke]}})[0], "a")
+
+
 class PoolGuardTest(Base):
     """手动借与池借互斥、按人统计不把「算力池」当人、借着期间 last_job 不刷新、路由与权限、拒往池借的主机上直接加清单。"""
 

@@ -884,7 +884,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <li><b>归还</b>（<code>borrow.finish</code>）：一条 ssh 停 worker、停占位任务、清 <code>/tmp/labmon</code> 与临时指令；借来时没有保活的顺手停掉 worker 开的保活；再按守护的方式开保活、恢复看门狗、探一次，通知“可以告诉这人了”。“跑完就还”在还掉之前可以撤销。</li>
         <li>借用中这台的续租、换人、关机、开保活都收起，后端也拒绝。</li>
         <li><b>算力池借的</b>（<code>pool.tick</code>）：持有人开了入池，看板就能在时段内自动借，不用再说好；只在 GPU 上除保活外没有进程、主人空闲够久（<code>guard_idle_min</code>）、离截止（时段结束与租期前 1 小时取早）还有 2 小时以上时借，一轮最多借一台。
-          放哪条清单按放行顺序同一口径排先后，先问目标 worker 的 <code>fit --list --json</code> 放不放得下再搬登记。主人回来（worker 判出对方超出预留，只因停不了的保活超出的不算）、关了入池、出了时段、15 分钟没有池任务就“跑完就还”；换了容器直接还、不在主人的新容器里拉起 worker。
+          放哪条清单按放行顺序同一口径排先后，先问目标 worker 的 <code>fit --list --json</code> 放不放得下再搬登记。主人回来（worker 判出对方超出预留，只因停不了的保活超出的不算）、关了入池、出了时段、15 分钟没有池任务（从最近一次有池任务在跑或放上清单起算）就“跑完就还”；交给池时队首那一格还在原主机上跑的，等它跑完再放；还掉后目录里剩的池清单收回池里，不挡再借；换了容器直接还、不在主人的新容器里拉起 worker。
           持有人或管理员点「收回」时按停法停下池任务、清单回池里重排。主人回来、收回之后这台休息 3 小时。</li>
       </ul>
       <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/fleet.md#借用">fleet.md「借用」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/worker.md#借来的主机给对方留余量">worker.md「借来的主机给对方留余量」</a></p>
