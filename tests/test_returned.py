@@ -411,6 +411,21 @@ class RegLanesTest(Base):
         self.assertTrue(done["start_ts"] and done["end_ts"])
         self.assertEqual(WT.job_state(snap, "a_done", [])["st"], "done")
 
+    def test_pool_returned_old_list_alerts(self):
+        # #88 E：算力池借过的主机还掉后，池的清单（带停法，pool._ours）由 pool.tick 搬回池里、不叫会话；借给池之前就登记在上面的旧清单（停法没写）池不收，
+        # 照报 returned_unfinished 叫会话自己搬（旧代码对池借过的主机一律不报，会话收不到）
+        from labmon.config import fmt_time
+        from labmon.state import save_json, state_dir
+        hf = self.d / "hosts.toml"
+        hf.write_text(hf.read_text() + ('\n[fleet]\ninterval = 600\n\n[[fleet.servers]]\nid = "a"\nholder = "AA"\nssh = "root@h"\nport = 1\npool = "P"\nlend = true\n'
+                                        f'borrow_since = "{fmt_time(time.time() - 3600, year=True)}"\nborrow_pool = true\nborrow_returned = "2026-11-18 10:00"\n'))
+        for stop, want in ((None, True), ("boundary", True), ("term", False)):
+            q = {"root": str(self.root), "jobs": "jobs/q.txt", "project": "p1", "stop": stop, "gpus": None}
+            save_json(state_dir() / "snapshot.json", {"regs": [{"host": "here", "state": "active", "queues": []}, {"host": "a", "state": "returned", "queues": [q]}]})
+            snap = C.collect(self.cfg())
+            self.assertEqual([ln["host"] for ln in snap["lanes"]], ["a"], stop)
+            self.assertEqual(any(a["key"].startswith("returned_unfinished:") for a in snap["alerts"]), want, stop)
+
     def test_pool_lane_why_and_wait(self):
         # #25：池车道的等待原因接上 pool.tick 写的为什么还没放；待放满 POOL_TELL_S 给实验会话一条 pool_wait:（只给会话、key 带开始等的时刻）
         import time
@@ -430,8 +445,12 @@ class RegLanesTest(Base):
         save_json(state_dir() / "snapshot.json", snap)
         out = C.collect(self.cfg())
         a, = out["alerts"]
-        self.assertEqual((a["key"], a["to"]), ("pool_wait:proj/jobs/q.txt:%d" % (since - PO.POOL_TELL_S), "agent"))
-        self.assertIn("在算力池里等了", a["msg"])
+        # #88：每个项目一条（key 只带项目），消息列出在等的各条清单；清单回池重新计时（since 变了）key 不变，不再叫醒。旧代码 key 带车道与起点
+        self.assertEqual((a["key"], a["to"]), ("pool_wait:p1", "agent"))
+        self.assertIn("在算力池里等了 2 小时以上：jobs/q.txt 等了", a["msg"])
+        snap["pool"]["lists"][k]["since"] = since - 2 * PO.POOL_TELL_S
+        save_json(state_dir() / "snapshot.json", snap)
+        self.assertEqual([a["key"] for a in C.collect(self.cfg())["alerts"]], ["pool_wait:p1"])
 
     def test_registration_overrides_returned_host(self):
         # monitor.toml 写着 host = 已还的 gone，清单已登记到 here：车道在 here 上、id 与用途沿用 monitor.toml 的，不报 returned_unfinished（旧代码会报）
