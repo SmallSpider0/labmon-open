@@ -242,4 +242,4 @@ worker 在共享盘上本机状态目录 `hosts/<主机>/press.jsonl` 每 5 分�
 
 ### 问题报告
 
-在 `overview/events.jsonl` 中记为 `kind=report`，沿用事件保留期。字段包括唯一 `report_id`、登录账号 `reporter`、提交时间 `t`、现象 `msg`、证据 `detail`，以及可选的项目 `project`、主机 `host`、发生时刻 `occurred`。只有管理员可以读原文。值守本机在 `issue_watch-reports.json` 记已上报的编号。
+在 `overview/events.jsonl` 中记为 `kind=report`，沿用事件保留期。字段包括唯一 `report_id`、登录账号 `reporter`、提交时间 `t`、现象 `msg`、证据 `detail`，以及可选的项目 `project`、主机 `host`、发生时刻 `occurred`。只有管理员可以读原文。总控本机在 `issue_watch-reports.json` 记已上报的编号。

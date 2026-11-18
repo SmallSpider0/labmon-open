@@ -61,7 +61,7 @@ def report(name: str, title: str, evidence: str, project: str | None, host: str 
 
 
 def report_headers() -> list[dict]:
-    """值守只读报告编号、报告人和提交时间。原文从记录页查看。"""
+    """等待只读报告编号、报告人和提交时间。原文从记录页查看。"""
     return [{k: e[k] for k in ("report_id", "reporter", "t")}
             for e in records(cat="report", since=time.time() - EVENT_KEEP_S)
             if e.get("kind") == "report" and e.get("report_id") and e.get("reporter")]

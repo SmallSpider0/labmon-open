@@ -52,7 +52,7 @@ PW_MIN = 8
 COOKIE = "labmon_s"
 SCOPES = {"read": "只读", "project": "项目", "deploy": "部署", "backup": "备份", "reports": "问题报告", "admin": "管理员"}
 SCOPE_HELP = {"read": "看页面与数据（GET）", "project": "项目的写操作：立即采集、调度的优先与暂停、搬与移除登记、项目配置、归档与恢复、提交问题报告",
-              "deploy": "部署脚本：读数据、立即采集", "backup": "备份脚本：读数据、取冷备（GET /api/admin/backup，#163）", "reports": "值守：只读报告编号、报告人和提交时间", "admin": "全部，含账号与平台操作；1 小时过期"}
+              "deploy": "部署脚本：读数据、立即采集", "backup": "备份脚本：读数据、取冷备（GET /api/admin/backup，#163）", "reports": "总控的等待：只读报告编号、报告人和提交时间", "admin": "全部，含账号与平台操作；1 小时过期"}
 IMPLIES = {"read": {"read"}, "project": {"project", "read"}, "deploy": {"deploy", "read"}, "backup": {"backup", "read"}, "reports": {"reports"}, "admin": set(SCOPES)}
 ACCOUNT = "account"
 ROLES = {"admin": "管理员", "user": "普通用户"}

@@ -296,14 +296,13 @@ html { scroll-behavior: smooth; }
   <h2>角色、子 agent 分工与强度档</h2>
   <p class="prose"><b>总控会话</b>是仓库主目录里和维护者对话的那个会话：开 Issue、定档与合批、派子 agent、转达维护者的决定、读几行的报告，PR 合并后把它从会话的 PR 栏关掉，不自己读整份代码与日志，不改代码，不部署。例外只有第 0 档急修。worktree 里另起的会话与派出的子 agent 照自己 brief 的分工做。</p>
   <p class="prose"><b>部署 agent 不在 worktree 里派</b>（Agent 工具不加 <code>isolation: worktree</code>）：worktree 里的 agent 对主 checkout 执行不了 git，拉不了代码、重启不了看板。直接提交 main 的改动也一样，在 worktree 里改完推到 <code>origin main</code>，随下一批由部署 agent 在主 checkout 收尾。</p>
-  <p class="prose"><b>值守会话</b>在主 checkout 后台挂 <code>python3 -I tools/issue_watch.py wait --reports-token ~/.config/labmon/reports.token</code>。每 5 分钟查 GitHub Issue 和看板报告，发现新条目先重挂再转告总控。报告只输出编号、报告人和时刻。异常退出或出现 Traceback 时把最后几行报给总控。</p>
+  <p class="prose"><b>总控的等待</b>：总控自己在主 checkout 后台挂 <code>python3 -I tools/issue_watch.py wait --reports-token ~/.config/labmon/reports.token</code>，输出不重定向。每 5 分钟查 GitHub Issue 和看板报告；退出码 0 先重挂再处理新条目，报告只输出编号、报告人和时刻。非 0 或出现 Traceback 时不重挂，看最后几行查原因。续接、应用重启后总控重新挂上。</p>
   <p class="prose"><b>自己开的 Issue 不报</b>（Issue #50）：总控或子 agent 用 <code>gh issue create</code> 开了 Issue，紧接着跑一次 <code>python3 -I tools/issue_watch.py mark N</code> 把它记为已见。脚本每轮查之前重读已见列表、与内存里的取并集，中途 mark 的号不报、也不会被覆盖掉；还没有已见列表时 mark 不写，首次 wait 会把现有的全记为已见。</p>
   <p class="prose">总控按派工环境选择对应列，两边共用分档、分工和检查点。GitHub 上的 Codex PR 主审仍在 PR 上单独触发。</p>
   <div class="tbl">
     <table class="role-table">
       <thead><tr><th>做什么</th><th>Claude 模型 / 强度</th><th>Codex 模型 / 推理强度</th></tr></thead>
       <tbody>
-        <tr><td>值守：只挂 <code>issue_watch.py wait</code>，报新 Issue 和报告</td><td>Sonnet low 或 Haiku</td><td><code>gpt-6-luna</code> low</td></tr>
         <tr><td>机械活、查状态</td><td>Sonnet medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
         <tr><td>部署，每批一个；脚本跑不了才手工走七步</td><td>Sonnet low；手工 Sonnet medium</td><td><code>gpt-6.1-sol</code> low；手工 medium</td></tr>
         <tr><td>修小阻塞：已知修法、一两处改动；用新 agent</td><td>Sonnet medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
@@ -417,7 +416,7 @@ html { scroll-behavior: smooth; }
   <p class="prose">放行、推演、告警、页面、命令报错不对时，实验会话不改 labmon 的代码、不提交它的 main，也不绕开。</p>
   <ol class="chain" aria-label="报问题的四步">
     <li>实验会话向看板报告<small>写现象、证据、主机、时刻；原因写成“猜测”</small></li>
-    <li>值守会话转给总控<small>转告报告编号与报告人</small></li>
+    <li>总控的等待发现报告<small>只读报告编号与报告人</small></li>
     <li>总控转单，开发 agent 核实<small>标 <code>from-experiment</code>，只写脱敏摘要或合成复现；原报告与关联留私有</small></li>
     <li>按档修<small>总控定档：单点小修直接提交 main，局部 bug 走小改，改行为的走设计说明</small></li>
   </ol>

@@ -1,4 +1,4 @@
-"""值守会话的常驻等待（tools/issue_watch.py，Issue #44）：gh 打桩，不连网。
+"""总控的常驻等待（tools/issue_watch.py，Issue #44）：gh 打桩，不连网。
 
     python -m unittest tests.test_issue_watch -v
 """
@@ -120,7 +120,7 @@ class WaitTest(unittest.TestCase):
         self.assertIn("网络不通", err)
 
     def test_first_run_empty_repository_reports_first_issue(self):
-        """新公开库初始无 Issue，第一条新增 Issue 仍会唤醒值守。"""
+        """新公开库初始无 Issue，第一条新增 Issue 仍会唤醒等待。"""
         rc, out, err, n = self.run_wait([[], [issue(1)]])
         self.assertEqual(rc, 0)
         self.assertIn("#1", out)

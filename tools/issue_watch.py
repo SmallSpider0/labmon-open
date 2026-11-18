@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""issue_watch：值守会话的常驻等待，本仓库出现新 Issue 或看板有新问题报告才退出（Issue #44）。
+"""issue_watch：总控的常驻等待，本仓库出现新 Issue 或看板有新问题报告才退出（Issue #44）。
 
     python3 -I tools/issue_watch.py wait [--every 300] [--reports-token 文件]   # 后台跑；有新 Issue 时打印每条并退出（退出码 0）
     python3 -I tools/issue_watch.py mark 48 49           # 把这几个号记为已见（自己 gh issue create 开的，紧接着跑）
@@ -177,12 +177,12 @@ def wait(every: float, path: Path, report_token: Path | None = None) -> int:
 
 def main(argv=None) -> int:
     global REPO
-    ap = argparse.ArgumentParser(description="值守会话的常驻等待：出现新 Issue 才退出")
-    ap.add_argument("--repo", default=REPO, help="值守仓库，格式 owner/name；默认公开 labmon 仓库")
+    ap = argparse.ArgumentParser(description="总控的常驻等待：出现新 Issue 才退出")
+    ap.add_argument("--repo", default=REPO, help="等待的仓库，格式 owner/name；默认公开 labmon 仓库")
     ap.add_argument("--state", type=Path, help="已见列表的文件（缺省按仓库隔离）")
     sub = ap.add_subparsers(dest="cmd", required=True)
     w = sub.add_parser("wait", help="等到出现新 Issue，打印后退出")
-    w.add_argument("--reports-token", type=Path, help="值守读取问题报告的令牌文件")
+    w.add_argument("--reports-token", type=Path, help="读取问题报告的令牌文件")
     w.add_argument("--every", type=float, default=EVERY, help=f"多久查一次（秒，缺省 {EVERY}）")
     m = sub.add_parser("mark", help="把这几个号记为已见（自己开的 Issue，开完紧接着跑）；"
                                     "还没有已见列表时不写、退出码 0：首次 wait 会把现有的全记为已见")

@@ -69,7 +69,7 @@ jobs:
           python --version
           python -m py_compile labmon_worker.py probe.py
           python -c "import labmon_worker, probe"
-      # 值守会话的 tools/issue_watch.py 在本机的系统 Python（3.8）上跑，经 labmon.state 读写状态
+      # 总控后台挂的 tools/issue_watch.py 在本机的系统 Python（3.8）上跑，经 labmon.state 读写状态
       - name: Python 3.8 编译并跑 tools/issue_watch.py
         run: |
           python -m py_compile tools/issue_watch.py labmon/state.py

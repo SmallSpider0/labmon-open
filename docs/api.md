@@ -298,7 +298,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 - 管理员在「记录 → 问题报告」按报告编号查询原文。记录保留一年，随冷备保存。报告里的文字用于核实问题，提交前去掉口令、令牌及其他秘密。
 - `GET /api/reports` 需要管理员的 `reports` 作用域，回 `{"reports":[{"report_id":"R-…","reporter":"账号","t":1794551400}]}`。这个作用域只读报告元数据，可长期使用；`admin` 令牌也可访问。备用看板回 409 standby。
 
-值守用已安装的 `labmon`，沿用本机的 `client.toml`。在看板以服务账号为维护者生成独立令牌，例如 `labmon user token <管理员> --scope reports --name 值守 --out ~/.config/labmon/reports.token`，或从「我的账号」生成同作用域的令牌。在值守所在电脑保存为权限 600 的 `~/.config/labmon/reports.token`，然后在仓库主 checkout 运行 `python3 -I tools/issue_watch.py wait --reports-token ~/.config/labmon/reports.token`。可用 `labmon report --list --token-file ~/.config/labmon/reports.token` 核对配置。未传令牌文件的值守只查 GitHub Issue。
+总控的等待用已安装的 `labmon`，沿用本机的 `client.toml`。在看板以服务账号为维护者生成独立令牌，例如 `labmon user token <管理员> --scope reports --name 等待 --out ~/.config/labmon/reports.token`，或从「我的账号」生成同作用域的令牌。在总控所在电脑保存为权限 600 的 `~/.config/labmon/reports.token`，然后在仓库主 checkout 运行 `python3 -I tools/issue_watch.py wait --reports-token ~/.config/labmon/reports.token`。可用 `labmon report --list --token-file ~/.config/labmon/reports.token` 核对配置。未传令牌文件时只查 GitHub Issue。
 
 ### 管理员公网平台操作（#275）
 

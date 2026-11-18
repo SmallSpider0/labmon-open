@@ -149,7 +149,7 @@ labmon/platform.py      SCM 平台的接口（登录、作业列表、克隆、�
 labmon/disk.py          共享盘：取回 worker 的扫描索引，按人汇总用量、增量、冷数据，快满与暴涨告警；GPU 负载按归属表归人 whose
 labmon/fleet_probe.sh   组内服务器的只读探针（bash，经标准输入送去）
 labmon/fleet_guard.sh   在组内服务器上开、停、重开看板登记的保活；用户空转保活经配置脚本核实归属后换成看板保活
-tools/issue_watch.py    值守会话的常驻等待：本仓库出现新 Issue 才退出并打印（见 AGENTS.md「谁做什么、子 agent 怎么派」）
+tools/issue_watch.py    总控的常驻等待：本仓库出现新 Issue 才退出并打印（见 AGENTS.md「谁做什么、子 agent 怎么派」）
 tools/tx/               TX 上的看门狗 labmon-watch.py（探 /healthz，异常 15 分钟推到手机）与它的 systemd 单元、nginx、sshd、fail2ban 模板（装法见 docs/deploy.md）
 tools/wsl/              dashboard-host 的 WSL 里到 TX 的反向隧道单元 labmon-tunnel.service
 tools/deploy.py         部署到看板并核对（本机模式 pull；远端模式经 POST /api/admin/deploy 传 git bundle，docs/deploy.md）：等平台操作做完、pull、重启前再等一次、按改动重启与拉起 worker、核对日志、worker 与页面（页面用 tests/pages/smoke.js；见 AGENTS.md「部署到本机看板」）

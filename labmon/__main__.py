@@ -521,8 +521,8 @@ def cmd_report(argv: list[str]) -> int:
     ap.add_argument("--project", help="项目 id，缺省取当前目录的 monitor.toml")
     ap.add_argument("--host", help="主机 id")
     ap.add_argument("--at", help="发生时刻，缺省只记录提交时间")
-    ap.add_argument("--list", action="store_true", help="供值守读取报告编号、报告人和时间（JSON）")
-    ap.add_argument("--token-file", type=Path, help="值守专用令牌文件，仅用于 --list")
+    ap.add_argument("--list", action="store_true", help="供总控的等待读取报告编号、报告人和时间（JSON）")
+    ap.add_argument("--token-file", type=Path, help="等待专用令牌文件，仅用于 --list")
     a = ap.parse_args(argv)
     if a.token_file and not a.list:
         ap.error("--token-file 只用于 --list")

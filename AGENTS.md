@@ -93,7 +93,7 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | PID 文件（lock、worker.pid、保活登记；没有或写坏了当作没有）；状态目录的 `current`（名称、PID、开始时刻、放行的主机（11-10 起，#88）；接管、旁观旧 `gpu_queue.sh` 共用）；别的主机放的这台不动（#88） | worker 的 `read_pid`、`read_current`；`run_elsewhere`（`requests` 调）；看板探针（probe.py，不 import worker）另读一份 `current`，放行的主机不是这台时不查 PID、按在跑算（#95） |
 | overrides.json、events.jsonl 读改写的互斥（锁在旁边的 `.lock` 上） | worker 的 `flock` |
 | 告警给谁看（#142：`user` 要用户处理、`agent` 只给实验会话、`both` 两边都要；产出处必须定，写错报错）与给谁的那份文字（`msg` 给会话写操作，`page` 是 `both` 给用户的人话）；页面上显眼列哪些（红框、告警数、侧栏红点、主机圆点、标签页图标只算给用户的；只给会话的收在默认折叠的「给实验会话的提示」里；工作台项目摘要的告警数与列表同一口径）；`labmon wait` 照报全部项目告警 | `collect.alert`（`AUDIENCE`）、`collect.user_alerts`（`serve.proj_info` 用）；页面上 `forUser`、`forAgent`、`alertBox`（common.js；JS 与 Python 各一份，口径相同）；工作台主机告警 `alertsOf` 返回 `{to, msg}`（overview.html） |
-| 问题报告（#200）：实验会话提交，看板管理员在记录页查原文，值守只读报告元数据 | `__main__.cmd_report`、`records.report`、`records.report_headers`、`tools/issue_watch.py` |
+| 问题报告（#200）：实验会话提交，看板管理员在记录页查原文，总控的等待只读报告元数据 | `__main__.cmd_report`、`records.report`、`records.report_headers`、`tools/issue_watch.py` |
 | 记录（事件、平台操作、配置改动：写入与按条件读，页面经 `/records.json` 取）；事件种类与分类表；从暂停与优先记录取项目 id | `records.log_events`、`records.records`（`records.EVENT_KINDS`、`records.EVENT_CATS`）、`records.schedule_project`；页面上 `recSlice`、`recList`（合成事：`recGroup`）、`logPage`（overview.html） |
 | 主机缺省值；缺省端口；worker 多久没写状态算不在（工作台与项目页探针同一口径） | `config.host_defaults`；`config.PORT`；`config.STALE_S`（部署路径 `ka_bin` 由 `workerctl.worker_env` 传给 worker，借来的主机经 `config.guest_host` 继承） |
 | 用户级主机清单里的主机（自用的与借来的组内服务器）；其中在用的（去掉已归还的，已补缺省值） | `config.user_hosts`（借来的长什么样：`config.guest_host`）；`config.active_hosts`；在用的在前、已归还的在后的全部 `config.all_hosts`（自用主机都关了时取平台账号、自己的名字、开回来沿用的端口） |
@@ -347,11 +347,11 @@ Issue、PR、评论、源码、测试夹具和 CI 输出均可公开阅读。只
 定档、合批也由主会话做（[「怎么开发」](#怎么开发)）。例外只有[第 0 档急修](#怎么开发)：维护者在场明说当场修时，主会话自己在 worktree 里改、测、推到 main，再按[部署步骤](#部署到本机看板)部署，事后在 Issue 上记一笔。
 PR 合并后，由总控把它从会话的 PR 栏关掉（`unbind_pr`），栏里只留没合并的。
 
-**值守会话**（2026-11-09 维护者定，Issue #44）：一个低档模型的会话，只挂一个常驻等待，让总控不靠转告也知道有新 Issue（如实验会话开的 `from-experiment`）。由总控启动；它没了（被归档、应用重启后后台命令断了）时总控按同样的要求重开。
+**总控的等待**（2026-11-09 维护者定，Issue #44；Issue #58 改成总控自己挂，不再另起值守会话）：总控在后台挂一个常驻等待，不靠转告也知道有新 Issue（如实验会话开的 `from-experiment`）与新报告。续接、应用重启后后台命令断了，总控重新挂上。
 
-- 在主 checkout 里后台跑 `python3 -I tools/issue_watch.py wait --reports-token ~/.config/labmon/reports.token`，用安装好的 `labmon` 和 [值守令牌](docs/api.md#问题报告)。输出不重定向。脚本每 5 分钟查仓库 Issue 与看板报告，任一路失败不影响另一条，连续失败满 1 小时才往 stderr 提示。首次运行把现有 Issue 记为已见，首次看到的报告照报。两路的已见列表分别落盘。
-- 脚本退出码 0 时，先用相同命令重新挂上，再把新 Issue 的号、标题、标签与作者，以及新报告的编号、报告人和时刻转告总控。脚本非 0 或打出 Traceback 时**不重挂**，把最后几行报给总控。
-- 值守只读报告元数据、转告总控。总控在看板「记录 → 问题报告」按编号查原文，核实后用 `from-experiment` 标签开单，公开 Issue 只写脱敏后的现象摘要和合成复现；原报告、报告人、报告编号与 Issue 的关联只留在受权看板或私有维护记录，不贴到公开仓库。转单前在私有记录核对关联以免重复，再按[「怎么开发」](#怎么开发)派人。
+- 在主 checkout 里后台跑 `python3 -I tools/issue_watch.py wait --reports-token ~/.config/labmon/reports.token`，用安装好的 `labmon` 和 [报告令牌](docs/api.md#问题报告)。输出不重定向。脚本每 5 分钟查仓库 Issue 与看板报告，任一路失败不影响另一条，连续失败满 1 小时才往 stderr 提示。首次运行把现有 Issue 记为已见，首次看到的报告照报。两路的已见列表分别落盘。
+- 脚本退出码 0 时，总控先用相同命令重新挂上，再处理新 Issue（号、标题、标签与作者）与新报告（编号、报告人和时刻）。脚本非 0 或打出 Traceback 时**不重挂**，总控看最后几行查原因。
+- 等待只读报告元数据。总控在看板「记录 → 问题报告」按编号查原文，核实后用 `from-experiment` 标签开单，公开 Issue 只写脱敏后的现象摘要和合成复现；原报告、报告人、报告编号与 Issue 的关联只留在受权看板或私有维护记录，不贴到公开仓库。转单前在私有记录核对关联以免重复，再按[「怎么开发」](#怎么开发)派人。
 - **自己开的 Issue 不报**（Issue #50）：总控或子 agent 用 `gh issue create` 开了 Issue，紧接着跑一次 `python3 -I tools/issue_watch.py mark N`（在哪个 worktree 跑都行，已见列表在状态根目录）。`wait` 每轮查之前重读已见列表、与内存里的取并集，所以中途 mark 的号它不报、也不会被它覆盖掉。还没有已见列表时（首次 `wait` 之前）`mark` 什么都不写：首次 `wait` 会把现有的全记为已见。
 - 小工具：`issue_watch.py mark N…` 把这几个号记为已见；`issue_watch.py seen` 列出已见的号；`issue_watch.py forget N…` 把某几个号标回未见（试脚本用，只对下一次启动的 `wait` 生效）；`wait --every 秒` 改查询间隔。
 
@@ -359,7 +359,6 @@ PR 合并后，由总控把它从会话的 PR 栏关掉（`unbind_pr`），栏�
 
 | 角色 | Claude 模型 / 强度 | Codex 模型 / 推理强度（默认选择） |
 |---|---|---|
-| 值守会话（只挂 `issue_watch.py wait`，报新 Issue 与报告） | Sonnet low 或 Haiku | `gpt-6-luna` low |
 | 机械活、查状态 | Sonnet medium | `gpt-6.1-sol` medium |
 | 部署（每批一个） | Sonnet low 跑 [部署脚本](#部署到本机看板)；脚本跑不了时 Sonnet medium 手工走七步 | `gpt-6.1-sol` low 跑脚本；手工走七步用 `gpt-6.1-sol` medium |
 | 修小阻塞（审查已给出修法，只是一两处改动） | 新的 Sonnet medium，只带审查意见与 PR 号 | 新的 `gpt-6.1-sol` medium，同样只带审查意见与 PR 号 |
@@ -372,7 +371,7 @@ PR 合并后，由总控把它从会话的 PR 栏关掉（`unbind_pr`），栏�
 Codex 派工时由总控自动选型（#281）：
 
 1. 维护者指定了本任务的模型或推理档，该项优先；未指定项按角色表选。只使用当前派工工具支持的模型与推理档组合，表中名称是推荐值。
-2. 表里的模型不可用时，从工具列出的模型中选同用途的替代（轻量值守、通用编码、深度推理）；没有合适替代就用环境默认模型。推理档不可用时，在所选模型支持的档里选最接近的一档，等距取低；不知道支持哪些档就不覆盖强度。
+2. 表里的模型不可用时，从工具列出的模型中选同用途的替代（轻量、通用编码、深度推理）；没有合适替代就用环境默认模型。推理档不可用时，在所选模型支持的档里选最接近的一档，等距取低；不知道支持哪些档就不覆盖强度。
 3. 在工具允许时传实际选择的模型和推理档（如 `spawn_agent` 的 `model`、`reasoning_effort`）。缺少覆盖参数时省略对应项，沿用环境的默认或继承设置；工具要求不继承对话时，用独立上下文并在 brief 补齐任务信息。兜底审查也要隔离实现会话的上下文，交给全新的审查者。
 4. brief 写实际选择或「环境默认」及回退原因。维护者指定的组合无法使用时，说明限制和替代；明确要求必须用指定组合时，等维护者定替代。
 
@@ -382,7 +381,7 @@ Codex 派工时由总控自动选型（#281）：
   - 实际模型与强度（使用环境默认或回退时注明）；“用中文回复与汇报，先读 AGENTS.md「沟通与主动推进」，追查连带影响并做到验收，核查是否重复平台化实验会话职责”。
   - 总控已知、已排除的东西（有才写）。
   - 一句[事先同意的事](#事先同意的事与要等维护者的事)，子 agent 不再请示；安排页面验收时，提醒[用内置浏览器并清理本任务开的标签](#怎么测)；
-    用 `gh issue create` 开了 Issue 后紧接着跑 `python3 -I tools/issue_watch.py mark N`，免得值守会话把它当新 Issue 报给总控（Issue #50）。
+    用 `gh issue create` 开了 Issue 后紧接着跑 `python3 -I tools/issue_watch.py mark N`，免得总控的等待把它当新 Issue 报出来（Issue #50）。
   - Issue 号、PR 号、提交号从 `gh` 的输出复制，不凭记忆写（#57 的 brief 把号写成了 56）；子 agent 用到 PR 号、提交号时自己用 `gh` 查，不照抄 brief。
   - 其余照 AGENTS.md（已自动加载）与 Issue 原文：brief 不复述 Issue 内容、不加实现方案。
 - **负责部署的 agent 不在 worktree 里派**（Agent 工具不加 `isolation: worktree`）：worktree 里的 agent 对主 checkout 执行不了 git，拉不了代码、重启不了看板（11-08 介绍页与 #28 措辞两次卡在这里）。直接提交 main 的改动同理：在 worktree 里改完推到 `origin main`，由不在 worktree 里的部署 agent 在主 checkout 收尾（2026-11-08 维护者定）。
@@ -453,7 +452,7 @@ LABMON_STATE=$(mktemp -d) LABMON_NO_NOTIFY=1 LABMON_NO_KEYCHAIN=1 LABMON_LAN=off
 ```
 
 - 本机整套测试约 1 分钟。子 agent 开 PR 或推了新提交后，在前台 `gh pr checks <N> --watch` 等 CI 跑完再收尾，失败就修；
-  不挂后台轮询、不开值守会话。
+  不挂后台轮询。
 - CI（`.github/workflows/checks.yml`）在每个 PR 与推到 main 的提交上用 Linux 跑同样两条，另用 Python 3.8 编译并导入 `labmon_worker.py` 与 `probe.py`（服务器上用 3.8 跑）。
   测试不依赖跑它的机器：worker 的测试经 `fixtures.no_host` 不读本机的 `/proc` 与 cgroup，launchctl、systemctl、钥匙串、通知都打桩。
   确实只能在 macOS 上跑的个别用例用 `skipUnless(sys.platform == "darwin")` 并在注释里写原因，不整套跳过。
