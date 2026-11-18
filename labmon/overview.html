@@ -3636,19 +3636,20 @@ function renewWarn(x, {local = true, risk = true} = {}) {
   return w;
 }
 // 批量续租的抽屉（#14；#/fleet/renew，从提醒条点的 #/fleet/renew/<id> 只勾那一台）：一台一行，勾选、状态、租期，下一行要注意的；
-// 勾上了又有风险的（FRISKY）在本行勾「已说好」。勾选记在 RPICK（按抽屉地址建、关抽屉清掉）；没登录时验证码出在底部（FCAP.pop = "renew"），开始后进度在顶上
+// 勾上了又有风险的（FRISKY）在本行勾「已说好」。勾选记在 RPICK（按抽屉地址建、关抽屉清掉）；没登录时验证码出在底部（FCAP.pop = "renew"），开始后进度在顶上；
+// 输验证码、提交中勾选锁住（lock）：要提交的已记进 FCAP.next，改了也不会跟着变
 let RPICK = null;          // {key: 抽屉地址, sel: 勾了要续的, ack: 勾了「已说好」的, busy}
 const rpList = () => [...D.fleet.servers, ...D.fleet.mine];
 const rpBody = R => { const ids = rpList().filter(x => R.sel.has(x.id) && !x.off).map(x => x.id); return {ids, ack: ids.filter(i => R.ack.has(i))}; };
 function renewDrawer(id) {
   const key = DH.renew(id), op = fops().op, sv = rpList(), ops = canOps();
   if (RPICK?.key !== key) RPICK = {key, sel: new Set(id ? [id] : fleetDue().filter(x => !FRISKY(x)).map(x => x.id)), ack: new Set()};   // 缺省勾上 24 小时内到期、没在跑实验的
-  const R = RPICK, {ids} = rpBody(R), need = sv.filter(x => ids.includes(x.id) && FRISKY(x) && !R.ack.has(x.id));
+  const R = RPICK, lock = !ops || FCAP?.pop === "renew" || R.busy, {ids} = rpBody(R), need = sv.filter(x => ids.includes(x.id) && FRISKY(x) && !R.ack.has(x.id));
   const row = x => { const on = R.sel.has(x.id) && !x.off, w = x.off ? ["已关机：要用就开机"] : renewWarn(x), nm = x.mine ? x.label : x.holder;
-    return `<div class="rp-row"><input type="checkbox" data-rsel="${esc(x.id)}" ${on ? "checked" : ""} ${x.off || !ops ? "disabled" : ""} aria-label="续租 ${esc(nm)}">
+    return `<div class="rp-row"><input type="checkbox" data-rsel="${esc(x.id)}" ${on ? "checked" : ""} ${x.off || lock ? "disabled" : ""} aria-label="续租 ${esc(nm)}">
       <div class="rp-m"><div class="rp-h"><b>${esc(nm)}</b><span class="sm mut">${esc(x.id)} · ${fKind(x)}</span>${fState(x)}<span class="sp"></span><span class="sm nw">${x.lease_end ? leaseHtml(x.lease_end) : "—"}</span></div>
       ${w.length ? `<div class="sm rp-w">${esc(w.join("；"))}</div>` : ""}
-      ${on && FRISKY(x) ? `<label class="sm rp-ack"><input type="checkbox" data-rack="${esc(x.id)}" ${R.ack.has(x.id) ? "checked" : ""}> ${ackText(x)}</label>` : ""}</div></div>`; };
+      ${on && FRISKY(x) ? `<label class="sm rp-ack"><input type="checkbox" data-rack="${esc(x.id)}" ${R.ack.has(x.id) ? "checked" : ""} ${lock ? "disabled" : ""}> ${ackText(x)}</label>` : ""}</div></div>`; };
   const why = !ids.length ? "先勾要续租的服务器" : need.length ? `${need.map(x => x.mine ? x.label : x.holder).join("、")} 在跑实验或本地盘写得多：先勾选确认` : "";
   const foot = !ops ? `<div class="rn">${opsNote()}</div>` : FCAP?.pop === "renew" ? capBox()
     : `<div class="rn"><button class="btn pri" data-fop="renewgo" ${!ids.length || need.length || R.busy || op?.active ? "disabled" : ""}>续租所选（${ids.length} 台）</button>
@@ -4664,7 +4665,7 @@ document.addEventListener("change", e => {               // 批量续租的勾�
   if ("regto" in d && POP) { POP.to = d.regto; POP.err = null; return render(false); }   // 换到哪台
   if ("adopt" in d && ADOPT) { ADOPT.sel[d.adopt] = t.checked; return render(false); }    // 接上卡的勾选
   const sel = d.rsel, ack = d.rack;
-  if (!RPICK || (!sel && !ack)) return;
+  if (!RPICK || (!sel && !ack) || FCAP?.pop === "renew" || RPICK.busy) return;      // 输验证码、提交中不改（同 renewDrawer 的 lock）
   const set = sel ? RPICK.sel : RPICK.ack, id = sel || ack;
   t.checked ? set.add(id) : set.delete(id);
   render(false);

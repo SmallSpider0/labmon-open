@@ -364,7 +364,11 @@ t("overview", "本地盘开机以来的新写入（#149）：主机页的资源�
   r = run(O, 'FWIZ = {kind: "swap", sid: "srv-d", pv: {}, ack: false}; wizForm()'); has(r, LD("换人")); has(r, "已和 PERSON3 说好，本地盘可以清空"); run(O, "FWIZ = null");
   r = run(O, 'RPICK = {key: DH.renew(""), sel: new Set(["srv-d"]), ack: new Set()}; renewDrawer("")'); has(r, LD("续租")); has(r, 'data-rack="srv-d"'); has(r, "在跑实验或本地盘写得多：先勾选确认");
   ok(/data-fop="renewgo" disabled/.test(r), "没勾就能批量续租");
-  ok(!/data-fop="renewgo" disabled/.test(run(O, 'RPICK.ack.add("srv-d"); renewDrawer("")')), "勾了确认还是不能批量续租"); run(O, "RPICK = null");
+  ok(!/data-fop="renewgo" disabled/.test(run(O, 'RPICK.ack.add("srv-d"); renewDrawer("")')), "勾了确认还是不能批量续租");
+  // 输验证码时勾选锁住：要提交的 ids、ack 已记进 FCAP.next，再改勾选只改了页面、提交的还是旧的（Codex 审查 #20）
+  r = run(O, 'FCAP = {code: "ab12", tok: "t", input: "", t: Date.now(), next: {act: "renew", body: rpBody(RPICK)}, pop: "renew"}; renewDrawer("")');
+  ok(/data-rsel="srv-d" checked\s+disabled/.test(r) && /data-rack="srv-d" checked\s+disabled/.test(r), "输验证码时还能改勾选");
+  run(O, "FCAP = null; RPICK = null");
   // 预备续租的确认也提一句
   has(run(O, 'POP = {k: "reserve", id: "srv-a"}; renewBtns(D.hosts[0])'), LA); run(O, "POP = null");
 });
