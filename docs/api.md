@@ -163,6 +163,8 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 
 - `GET /api/client/install.sh?base=<看板根地址>` 下载 `labmon-install.sh`。页面传自己的根地址（含公网路径前缀）；服务端检查协议和当前入口的 Host 白名单。脚本内有 wheel 和入口配置。内网 HTTPS 配有 `[server].ca_cert` 时随附 CA 公钥证书；未附时脚本说明私有 CA 的手动配置方式。
 - `GET /api/client/wheel` 返回同版本的 wheel，响应头 `X-Labmon-Commit` 是完整提交号。`labmon update` 用命令行令牌取包并安装。包从看板启动时运行的 main 提交构建，版本带提交号。备用入口回 409，客户端接着试下一个入口。更新先验证新版本，再切换命令入口。
+- 包里带着配套 skill（`skills/lab-experiments`），以及它链接到的 `README.md`、`docs/*.md`、`examples/`。这些文件按仓库里的相对位置放在包目录下（#57）。安装与更新时，skill 的固定入口跟着命令入口一起切换，智能体的 skill 入口只在没有时才建（[README「配套 skill」](../README.md#安装)）。
+  `labmon wait` 换了版本时，旧进程把自己那份 skill 的位置交给新进程；新进程逐节比对两份，有改动就报一条 `skill_updated` 并退出 1，没改动就接着等。`labmon update` 也会打出同样一句。
 - 已认证的命令行可用 `X-Labmon-Client` 报告完整的 40 位小写 Git 提交号。服务按令牌保存最近一次报告的 `client_commit` 与 `client_seen`，同版本的报告最多每小时落盘一次。账号详情的令牌摘要还带 `client_status`（`current`、`outdated`、`below_minimum`、`unknown`、`inactive` 或空）。
 - `[server].min_client_commit` 可选，取运行版本或其祖先的完整提交号。配置后，带版本头的命令行确认低于最低版本时，操作前回 426，正文含 `reason: "client_outdated"`、`minimum`、在跑的提交 `commit` 和更新提示。比不出先后的（`unknown`：不在运行版本的祖先链上，如比看板新、从分支跑、冷备回退后）不拦，只在账号详情标“版本待确认”，`labmon wait` 在 stderr 提示一次（#17）。浏览器与没有版本头的旧脚本照常。登录、账号、更新包、部署与备份入口仍可用。主备切换先于最低版本判定。
 - `POST /api/wait` 成功时追加 `commit` 与 `client_status`。用看板安装的客户端发现自己在运行版本的祖先链上且可更新时，会在两次轮询间下载、安装并接着等。该轮有新告警或任务已有终态时，先照原规则退出。收到 426 时，用看板安装的 `labmon wait` 也先下载、安装一次（按 426 给的 `commit` 核对版本），装好接着等；装不成或不是看板安装的，以 5 退出，原因 `client_outdated`（#17）。

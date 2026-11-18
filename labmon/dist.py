@@ -8,10 +8,14 @@
   不要 setuptools；版本 <pyproject 的版本>+g<提交前 7 位>，另放 labmon/_build.py（COMMIT 是完整提交号）。按提交缓存在内存里。
 - 客户端的版本（version）：装的 wheel 里 _build.COMMIT；从仓库直接跑的是那个 checkout 的 HEAD。命令行每个请求带 X-Labmon-Client: <version>（client.HEADER），
   给 #199（看板认最低客户端版本、wait 自动更新）用；看板的版本是 /api/me 的 commit（在跑的代码）。
+- skill 随客户端分发（#57）：wheel 里照仓库的相对位置带上 skills/lab-experiments，连同它链接到的 README.md、docs/*.md、examples/（MIRROR，放在包目录下，
+  SKILL 里的 ../../docs/… 在装好的那份里也打得开）。装好后固定入口 <数据目录>/skills/lab-experiments（skill_entry）指到这一版的那份、跟着命令一起切换；
+  ~/.claude/skills、~/.agents/skills 下的入口指着固定入口、只建一次，已有的不覆盖（_link_skill）。wait 换版本时比两版的 skill（skill_changes），改了就叫醒会话一次。
 """
 from __future__ import annotations
 
 import base64
+import contextlib
 import fcntl
 import functools
 import hashlib
@@ -28,6 +32,7 @@ import time
 import tomllib
 import zipfile
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlsplit
 
 from .config import COMMIT_RE
@@ -35,6 +40,8 @@ from .workerctl import DEPLOY_REF
 
 HERE = Path(__file__).resolve().parent
 NAME = "labmon"
+SKILL = "lab-experiments"
+MIRROR = ("README.md", "docs", "examples", f"skills/{SKILL}")   # 照仓库的相对位置放进包目录；docs 只取一级的 .md
 _CACHE: dict = {}
 _LOCK = threading.Lock()
 
@@ -127,6 +134,12 @@ def _hash(data: bytes) -> str:
     return "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
 
 
+def _tar_files(tar: bytes) -> list[tuple[str, bytes]]:
+    with tarfile.open(fileobj=io.BytesIO(tar)) as tf:
+        return [(f"{NAME}/{m.name.removeprefix('./')}", tf.extractfile(m).read())
+                for m in tf.getmembers() if m.isfile() and "__pycache__" not in m.name]
+
+
 def wheel(commit: str | None) -> tuple[str, bytes, str]:
     """从服务启动的同一个已提交版本打包。该提交必须在 main 上。"""
     if not commit or not COMMIT_RE.fullmatch(commit):
@@ -143,11 +156,11 @@ def wheel(commit: str | None) -> tuple[str, bytes, str]:
         tar = _git("archive", "--format=tar", f"{commit}:{prefix}", binary=True, cwd=top)
         ver = _dist_version(commit)
         di = f"{NAME}-{ver}.dist-info"
-        files: list[tuple[str, bytes]] = []
-        with tarfile.open(fileobj=io.BytesIO(tar)) as tf:
-            for m in tf.getmembers():
-                if m.isfile() and "__pycache__" not in m.name:
-                    files.append((f"{NAME}/{m.name.removeprefix('./')}", tf.extractfile(m).read()))
+        files = _tar_files(tar)
+        names = [n for n in _git("ls-tree", "-rz", "--name-only", commit, "--", *MIRROR, cwd=top).split("\0")
+                 if n and (not n.startswith("docs/") or (n.endswith(".md") and n.count("/") == 1))]
+        if names:
+            files += _tar_files(_git("archive", "--format=tar", commit, "--", *names, binary=True, cwd=top))
         files.append((f"{NAME}/_build.py", f'"""看板发的客户端是哪个提交（dist.wheel 写的）。"""\nCOMMIT = "{commit}"\n'.encode()))
         files += [(f"{di}/METADATA", f"Metadata-Version: 2.1\nName: {NAME}\nVersion: {ver}\nSummary: labmon 命令行（看板发的）\nRequires-Python: >=3.11\n".encode()),
                   (f"{di}/WHEEL", b"Wheel-Version: 1.0\nGenerator: labmon.dist\nRoot-Is-Purelib: true\nTag: py3-none-any\n"),
@@ -210,21 +223,107 @@ def _heredoc(tag: str, data: bytes) -> str:
     return "\n".join(b[i:i + 76] for i in range(0, len(b), 76)) + f"\n{tag}\n"
 
 
-def install_wheel(wheel_path: Path, commit: str) -> tuple[Path, Path]:
-    """把 wheel 装进独立环境，验证通过后原子切换命令。返回固定入口及可选的 PATH 入口。"""
+class Installed(NamedTuple):
+    fixed: Path                 # 固定的命令入口
+    path_entry: Path            # PATH 里的入口（~/.local/bin/labmon，可能是别的安装）
+    skill: Path | None          # 这一版的 skill 目录（包里没带的旧版本是 None）
+    notes: list[str]            # skill 入口的提示（已有的没改、新建了哪个）
+
+
+def _data_root() -> Path:
+    return Path(os.environ.get("XDG_DATA_HOME") or Path.home() / ".local/share") / NAME
+
+
+def skill_entry() -> Path:
+    """skill 的固定入口：软链，指着当前版本里的那份（随命令一起切换）。"""
+    return _data_root() / "skills" / SKILL
+
+
+def skill_of(pkg: Path) -> Path:
+    return pkg / "skills" / SKILL
+
+
+@contextlib.contextmanager
+def _install_lock(root: Path):
+    root.mkdir(parents=True, exist_ok=True)
+    with (root / "install.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def _swap(link: Path, target: Path) -> None:
+    """先建好再改名：别的进程看到的入口要么是旧的、要么是新的。"""
+    pending = link.with_name(f".{link.name}.next")
+    pending.unlink(missing_ok=True)
+    pending.symlink_to(target)
+    pending.replace(link)
+
+
+def _agent_entries() -> list[Path]:
+    """给智能体的 skill 入口：装了 Claude Code（有 ~/.claude）、Codex（有 ~/.agents 或 ~/.codex）的才建；已有 ~/.codex/skills 下的就只认那个。"""
+    home = Path.home()
+    out = [home / ".claude/skills" / SKILL] if (home / ".claude").is_dir() else []
+    codex = home / ".codex/skills" / SKILL
+    if os.path.lexists(codex):
+        out.append(codex)
+    elif (home / ".agents").is_dir() or (home / ".codex").is_dir():
+        out.append(home / ".agents/skills" / SKILL)
+    return out
+
+
+def _link_skill(src: Path) -> list[str]:
+    """固定入口指到 src；智能体的入口没有就建（指着固定入口），已有同名目录或指向别处（如仓库）的不覆盖、只提示。持 install.lock 调。"""
+    if not (src / "SKILL.md").is_file():
+        return []
+    fixed = skill_entry()
+    if os.path.lexists(fixed) and not fixed.is_symlink():
+        return [f"skill 入口 {fixed} 已被占用，没有更新；移开后跑 labmon update"]
+    fixed.parent.mkdir(parents=True, exist_ok=True)
+    _swap(fixed, src)
+    entries, notes = _agent_entries(), []
+    for e in entries:
+        if e.is_symlink() and e.readlink() == fixed:
+            continue
+        if os.path.lexists(e):
+            now = f"指向 {e.readlink()}" if e.is_symlink() else "是目录或文件"
+            notes.append(f"{e} 已有（{now}），没改；要用随命令行更新的 skill，移开它再跑 labmon update")
+        else:
+            e.parent.mkdir(parents=True, exist_ok=True)
+            e.symlink_to(fixed)
+            notes.append(f"已把 skill 装到 {e}（指向 {fixed}，随命令行更新）")
+    if not entries:
+        notes.append(f"skill 在 {fixed}（随命令行更新）：没找到 ~/.claude 或 ~/.agents，把它软链到所用客户端的 skills 目录")
+    return notes
+
+
+def ensure_skill() -> list[str]:
+    """命令入口指着这一版时，把 skill 入口也指到这一版：旧版本换过来的那次是旧代码装的、没建 skill 入口（labmon update、wait 换版本后调）。"""
+    if not installed():
+        return []
+    root = _data_root()
+    try:
+        with _install_lock(root):
+            if (root / "bin" / NAME).resolve().parent.parent != HERE.parents[3]:     # HERE = versions/<提交>/lib/pythonX.Y/site-packages/labmon
+                return []
+            return _link_skill(skill_of(HERE))
+    except (OSError, IndexError):
+        return []
+
+
+def install_wheel(wheel_path: Path, commit: str) -> Installed:
+    """把 wheel 装进独立环境，验证通过后原子切换命令与 skill 的固定入口。"""
     wheel_path = wheel_path.resolve()
     if not wheel_name_ok(wheel_path.name, commit):
         raise Unavailable("安装包文件名或版本不对")
     home = Path.home()
-    root = Path(os.environ.get("XDG_DATA_HOME") or home / ".local/share") / NAME
+    root = _data_root()
     versions = root / "versions"
     versions.mkdir(parents=True, exist_ok=True)
     fixed = root / "bin" / NAME
     short_path = home / ".local/bin" / NAME
     fixed.parent.mkdir(parents=True, exist_ok=True)
     short_path.parent.mkdir(parents=True, exist_ok=True)
-    with (root / "install.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    with _install_lock(root):
         if fixed.exists() and not fixed.is_symlink():
             raise Unavailable(f"命令入口 {fixed} 已被占用，请先移开原文件")
         venv = versions / commit
@@ -246,15 +345,63 @@ def install_wheel(wheel_path: Path, commit: str) -> tuple[Path, Path]:
             except (OSError, subprocess.SubprocessError, Unavailable):
                 shutil.rmtree(venv, ignore_errors=True)
                 raise
-        pending = fixed.with_name(".labmon.next")
-        pending.unlink(missing_ok=True)
-        pending.symlink_to(cmd)
-        pending.replace(fixed)
+        _swap(fixed, cmd)
+        pkg = next(venv.glob(f"lib/python*/site-packages/{NAME}"), None)
+        skill = skill_of(pkg) if pkg and (skill_of(pkg) / "SKILL.md").is_file() else None
+        notes = _link_skill(skill) if skill else []
         try:
             short_path.symlink_to(fixed)
         except FileExistsError:
             pass
-    return fixed, short_path
+    return Installed(fixed, short_path, skill, notes)
+
+
+HEAD_RE = re.compile(r"#{1,6}\s+(.+?)\s*")
+
+
+def _sections(text: str) -> dict[str, str]:
+    """按 Markdown 标题切成节（代码块里的 # 不算）：{节名: 正文}，标题前的叫“开头”，同名的接在一起。"""
+    out: dict[str, list[str]] = {}
+    name, fence = "开头", False
+    for line in text.splitlines():
+        if line.startswith("```"):
+            fence = not fence
+        m = None if fence else HEAD_RE.fullmatch(line)
+        if m:
+            name = m[1]
+            out.setdefault(name, [])
+        else:
+            out.setdefault(name, []).append(line)
+    return {k: "\n".join(v).strip() for k, v in out.items()}
+
+
+def skill_changes(old: Path, new: Path) -> list[str]:
+    """两版 skill 哪里不同：每个文件一项，.md 列出改了、新增、删了的节（「节名」），SKILL.md 排第一。"""
+    def files(d: Path) -> dict[str, Path]:
+        return {p.relative_to(d).as_posix(): p for p in d.rglob("*") if p.is_file()} if d.is_dir() else {}
+    a, b = files(old), files(new)
+    out = []
+    for name in sorted(a.keys() | b.keys(), key=lambda n: (n != "SKILL.md", n)):
+        if name not in a or name not in b:
+            out.append(f"{'新增' if name in b else '删了'} {name}")
+            continue
+        x, y = a[name].read_bytes(), b[name].read_bytes()
+        if x == y:
+            continue
+        if not name.endswith(".md"):
+            out.append(name)
+            continue
+        sx, sy = _sections(x.decode(errors="replace")), _sections(y.decode(errors="replace"))
+        changed = "".join(f"「{k}」" for k in sy if sx.get(k) != sy[k])
+        gone = "".join(f"「{k}」" for k in sx if k not in sy)
+        out.append(name + changed + (f"（删了{gone}）" if gone else ""))
+    return out
+
+
+def skill_note(changes: list[str], old: str, new: str, then: str) -> str:
+    """skill 改了的那一句（wait 叫醒会话、labmon update 都打它）。"""
+    shown = "、".join(changes[:12]) + (f" 等 {len(changes)} 处" if len(changes) > 12 else "")
+    return f"skill 已更新（{short(old)} → {short(new)}）：改了 {shown}；{then}，重读 {skill_entry()}/ 里的这几处"
 
 
 def install_sh(base: str, ca_pem: bytes | None, public: bool, commit: str | None, *, t: float | None = None) -> tuple[str, str]:
@@ -298,7 +445,10 @@ from labmon.dist import Unavailable, install_wheel
 from labmon.state import write_atomic
 
 try:
-    fixed, path_entry = install_wheel(wheel, sys.argv[2])
+    got = install_wheel(wheel, sys.argv[2])
+    fixed, path_entry = got.fixed, got.path_entry
+    for note in got.notes:
+        print(f"[labmon] {{note}}")
     c = Path.home() / ".config/labmon"
     c.mkdir(parents=True, exist_ok=True)
     with (c / ".client-install.lock").open("a") as lock:

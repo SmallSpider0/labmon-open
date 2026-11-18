@@ -17,6 +17,20 @@ from unittest.mock import patch
 from labmon import dist
 
 
+SKILL_MD = """---
+name: lab-experiments
+---
+# 实验
+## 红线
+不扫盘。
+## 跑和盯
+挂 wait。
+```sh
+# 不是标题
+```
+"""
+
+
 class ClientDistTest(unittest.TestCase):
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -33,6 +47,18 @@ class ClientDistTest(unittest.TestCase):
         source = dist.HERE
         for p in source.glob("*.py"):
             shutil.copy(p, self.package / p.name)
+        self.skill = self.repo / "skills/lab-experiments"
+        self.skill.mkdir(parents=True)
+        (self.skill / "SKILL.md").write_text(SKILL_MD)
+        (self.repo / "docs/sub").mkdir(parents=True)
+        (self.repo / "docs/api.md").write_text("# 接口\n")
+        (self.repo / "docs/intro.html").write_text("<p>页面</p>")
+        (self.repo / "docs/sub/deep.md").write_text("# 子目录\n")
+        (self.repo / "README.md").write_text("# labmon\n")
+        (self.repo / "examples").mkdir()
+        (self.repo / "examples/monitor.toml").write_text('title = "例子"\n')
+        (self.repo / "skills/other").mkdir()
+        (self.repo / "skills/other/SKILL.md").write_text("别的 skill\n")
         self.commit = self.save("初版")
         loc = patch.object(dist, "HERE", self.package)
         loc.start()
@@ -57,6 +83,13 @@ class ClientDistTest(unittest.TestCase):
         self.assertEqual(self.commit, commit)
         self.assertTrue(dist.wheel_name_ok(name, commit))
         with zipfile.ZipFile(io.BytesIO(data)) as z:
+            # #57：skill 与它链接到的文档照仓库的相对位置放进包目录（../../docs/… 打得开），别的 skill、网页、子目录不带
+            names = set(z.namelist())
+            self.assertLessEqual({"labmon/skills/lab-experiments/SKILL.md", "labmon/docs/api.md", "labmon/README.md",
+                                  "labmon/examples/monitor.toml"}, names)
+            self.assertFalse({"labmon/docs/intro.html", "labmon/docs/sub/deep.md", "labmon/skills/other/SKILL.md"} & names)
+            self.assertEqual(SKILL_MD.encode(), z.read("labmon/skills/lab-experiments/SKILL.md"))
+            self.assertIn("labmon/skills/lab-experiments/SKILL.md,sha256=", z.read(next(n for n in names if n.endswith("RECORD"))).decode())
             self.assertNotIn("labmon/later.txt", z.namelist())
             self.assertNotIn("labmon/uncommitted.txt", z.namelist())
             self.assertIn(commit.encode(), z.read("labmon/_build.py"))
@@ -88,10 +121,23 @@ class ClientDistTest(unittest.TestCase):
         old = home / ".local/bin/labmon"
         old.parent.mkdir(parents=True)
         old.write_text("旧安装")
+        (home / ".claude").mkdir()                     # 装了 Claude Code：建 skill 入口
+        codex = home / ".agents/skills/lab-experiments"
+        codex.parent.mkdir(parents=True)
+        codex.symlink_to(self.skill)                   # 指向仓库的软链：不覆盖、只提示
         name, script = dist.install_sh("https://tx.example/labmon/", b"private", True, self.commit)
         f = self.root / name
         f.write_text(script)
-        subprocess.run(["sh", str(f)], env=env, capture_output=True, check=True)
+        out = subprocess.run(["sh", str(f)], env=env, capture_output=True, check=True, text=True).stdout
+        claude = home / ".claude/skills/lab-experiments"
+        entry = home / "data/labmon/skills/lab-experiments"
+        self.assertEqual(entry, claude.readlink())
+        self.assertEqual(SKILL_MD, (claude / "SKILL.md").read_text())
+        self.assertTrue(str(entry.resolve()).startswith(str(home / "data/labmon/versions" / self.commit)))
+        self.assertTrue((claude / "../../docs/api.md").resolve().is_file())   # SKILL 里的相对链接打得开
+        self.assertEqual(self.skill, codex.readlink())
+        self.assertIn(f"已把 skill 装到 {claude}", out)
+        self.assertIn(f"{codex} 已有（指向 {self.skill}），没改", out)
         self.assertEqual("# 保留\n", (config / "client.toml").read_text())
         new_config = (config / "client.toml.new").read_text()
         self.assertIn('url = "https://tx.example/labmon"', new_config)
@@ -102,6 +148,8 @@ class ClientDistTest(unittest.TestCase):
         original = fixed.resolve()
 
         (self.package / "next.txt").touch()
+        (self.skill / "SKILL.md").write_text(SKILL_MD.replace("挂 wait。", "挂 wait，换版本后重读。"))
+        (self.skill / "alerts.md").write_text("# 告警\n")
         next_commit = self.save("下一版")
         wheel_name, wheel, _ = dist.wheel(next_commit)
         wheel_file = self.root / wheel_name
@@ -144,13 +192,63 @@ class ClientDistTest(unittest.TestCase):
                 self.assertEqual(3, failed.returncode, failed.stderr)
                 self.assertEqual(original, fixed.resolve())
                 response["data"] = wheel
+                self.assertEqual(SKILL_MD, (claude / "SKILL.md").read_text())    # 没装成：skill 也留在原来那版
                 succeeded = update()
                 self.assertEqual(0, succeeded.returncode, succeeded.stderr)
+                self.assertIn("skill 已更新", succeeded.stdout)
+                self.assertIn("改了 SKILL.md「跑和盯」、新增 alerts.md", succeeded.stdout)
+                self.assertNotIn("「红线」", succeeded.stdout)
+                self.assertIn("换版本后重读", (claude / "SKILL.md").read_text())
             finally:
                 server.shutdown()
                 thread.join()
         self.assertIn(next_commit, str(fixed.resolve()))
+        self.assertIn(next_commit, str(entry.resolve()))
+        self.assertEqual(entry, claude.readlink())
         self.assertTrue(original.is_file())
+
+    def test_skill_changes_by_section(self):
+        old, new = self.root / "old", self.root / "new"
+        for d in (old, new):
+            d.mkdir()
+        (old / "SKILL.md").write_text(SKILL_MD + "## 结束\n归档。\n")
+        (new / "SKILL.md").write_text(SKILL_MD.replace("# 不是标题", "# 代码块里的改动") + "## 新节\n新的。\n")
+        (old / "lists.md").write_text("# 清单\n")
+        (new / "lists.md").write_text("# 清单\n")
+        (old / "gone.md").write_text("# 删掉的\n")
+        (new / "alerts.md").write_text("# 告警\n")
+        self.assertEqual(["SKILL.md「跑和盯」「新节」（删了「结束」）", "新增 alerts.md", "删了 gone.md"], dist.skill_changes(old, new))
+        self.assertEqual([], dist.skill_changes(old, old))
+        note = dist.skill_note(["SKILL.md「跑和盯」"], "a" * 40, "b" * 40, "先重挂 labmon wait")
+        self.assertIn("skill 已更新（aaaaaaa → bbbbbbb）：改了 SKILL.md「跑和盯」；先重挂 labmon wait，重读", note)
+
+    def test_ensure_skill_only_for_current_version(self):
+        # 旧版本的代码换上这一版时没建 skill 入口：这一版的命令补上；固定命令已指着别的版本时不动（skill 与命令不分家）
+        home, data = self.root / "home", self.root / "data"
+        (home / ".claude").mkdir(parents=True)
+        def version(c):
+            venv = data / "labmon/versions" / c
+            pkg = venv / "lib/python3.11/site-packages/labmon"
+            (pkg / "skills/lab-experiments").mkdir(parents=True)
+            (pkg / "_build.py").write_text(f'COMMIT = "{c}"\n')
+            (pkg / "skills/lab-experiments/SKILL.md").write_text(SKILL_MD)
+            (venv / "bin").mkdir()
+            (venv / "bin/labmon").touch()
+            return venv, pkg
+        mine, pkg = version("a" * 40)
+        other, _ = version("b" * 40)
+        fixed = data / "labmon/bin/labmon"
+        fixed.parent.mkdir(parents=True)
+        fixed.symlink_to(other / "bin/labmon")
+        entry = data / "labmon/skills/lab-experiments"
+        with patch.dict(os.environ, {"HOME": str(home), "XDG_DATA_HOME": str(data)}), patch.object(dist, "HERE", pkg):
+            self.assertEqual([], dist.ensure_skill())
+            self.assertFalse(os.path.lexists(entry))
+            fixed.unlink()
+            fixed.symlink_to(mine / "bin/labmon")
+            self.assertEqual([f"已把 skill 装到 {home / '.claude/skills/lab-experiments'}（指向 {entry}，随命令行更新）"], dist.ensure_skill())
+            self.assertEqual(pkg / "skills/lab-experiments", entry.readlink())
+            self.assertEqual([], dist.ensure_skill())       # 第二次：都已就位，不再提示
 
     def test_install_address_and_secret(self):
         for base in ("https://user@example.com/", "https://example.com/a/../b", "https://example.com/?a=b",

@@ -226,7 +226,7 @@ class CmdWaitJobTest(_Base):
         polls = [{"watch": watch, "commit": commit, "client_status": "outdated", "jobs": [{"name": "x", "text": "运行中"}]},
                  {"done": True, "jobs": [{"name": "x", "st": "done", "text": "完成"}]}]
         with mock.patch.object(M, "_sync", return_value={"act": "same"}), mock.patch.object(M.client, "call", side_effect=polls) as http, \
-             mock.patch.object(M.dist, "installed", return_value=True), mock.patch.object(M.client, "install_update", return_value=(commit, bin_path, None)), \
+             mock.patch.object(M.dist, "installed", return_value=True), mock.patch.object(M.client, "install_update", return_value=(commit, M.dist.Installed(bin_path, bin_path, None, []))), \
              mock.patch.object(M.os, "execve", side_effect=InterruptedError) as execute, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             self.assertEqual(M.cmd_wait(config, ["x"]), 0)
             _, args, env = execute.call_args.args
@@ -236,6 +236,35 @@ class CmdWaitJobTest(_Base):
             with mock.patch.dict(os.environ, {M.WAIT_RESUME: env[M.WAIT_RESUME]}):
                 self.assertEqual(M._wait_resume(config, ["x"])["watch"], watch)
                 self.assertNotIn(M.WAIT_RESUME, os.environ)
+
+    def test_skill_change_wakes_once_after_update(self):
+        # #57：wait 换了版本时，上一版把自己那份 skill 带给新进程；新进程比出改了哪几节就当告警叫醒一次（退出 1），没改就接着等
+        commit, config = "b" * 40, str(self.d / "m.toml")
+        old, new = self.d / "old", self.d / "new"
+        for pkg, text in ((old, "# 实验\n## 跑和盯\n挂 wait。\n"), (new, "# 实验\n## 跑和盯\n挂 wait，换版本后重读。\n")):
+            (pkg / "skills/lab-experiments").mkdir(parents=True)
+            (pkg / "skills/lab-experiments/SKILL.md").write_text(text)
+        bin_path = self.d / commit / "bin" / "labmon"
+        polls = [{"commit": commit, "client_status": "outdated"}, {"done": True, "jobs": []}]
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), mock.patch.object(M.client, "call", side_effect=polls), \
+             mock.patch.object(M.dist, "HERE", old), mock.patch.object(M.dist, "version", return_value="a" * 40), \
+             mock.patch.object(M.dist, "installed", return_value=True), mock.patch.object(M.client, "install_update", return_value=(commit, M.dist.Installed(bin_path, bin_path, None, []))), \
+             mock.patch.object(M.os, "execve", side_effect=InterruptedError) as execute, mock.patch.object(M.time, "sleep"), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            M.cmd_wait(config)                         # execve 打桩成失败：接着等到下一轮结束
+        env = execute.call_args.args[2]
+        self.assertEqual(json.loads(env[M.WAIT_RESUME])["skill"], [str(old / "skills/lab-experiments"), "a" * 40])
+        for here, want_rc in ((new, 1), (old, 0)):
+            polls = [{"done": True, "jobs": []}]
+            with mock.patch.dict(os.environ, {M.WAIT_RESUME: env[M.WAIT_RESUME]}), mock.patch.object(M.dist, "HERE", here), \
+                 mock.patch.object(M.dist, "version", return_value=commit), mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+                 mock.patch.object(M.client, "call", side_effect=polls) as http, contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(M.cmd_wait(config), want_rc)
+            if want_rc == 1:
+                http.assert_not_called()               # 先叫醒会话：会话重挂 wait 后再问看板
+                self.assertIn("[skill_updated] skill 已更新（aaaaaaa → bbbbbbb）：改了 SKILL.md「跑和盯」；先重挂 labmon wait", out.getvalue())
+            else:
+                self.assertNotIn("skill_updated", out.getvalue())
 
     def test_does_not_update_before_reporting_alert(self):
         poll = {"new": {"gpu_idle": "GPU 空着"}, "client_status": "outdated", "commit": "b" * 40}

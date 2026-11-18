@@ -5,7 +5,7 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 
 # 实验室服务器实验
 
-工具是 labmon，shell 里直接敲 `labmon`。仓库在 `/path/to/labmon`（别的机器上是用户装的那份，`pip show labmon` 看位置），下文的 `docs/…` 都在这个目录下，按「」里的节名找。
+工具是 labmon，shell 里直接敲 `labmon`。仓库在 `/path/to/labmon`；用安装脚本装的，这份 skill 随命令行一起装、一起更新，`docs/…`、`README.md` 和 `examples/` 也随包带着，都在 skill 目录往上两级。按「」里的节名找。
 看板服务可部署在常驻机或本机：命令行经看板接口做事，连哪个看板写在 `~/.config/labmon/client.toml`。这台机器第一次用 labmon 先看下面「这台机器第一次用 labmon」。
 细则在同目录：清单写法 [lists.md](lists.md)，告警逐条怎么办 [alerts.md](alerts.md)。项目自己的 `AGENTS.md` 比这里优先。
 
@@ -87,6 +87,7 @@ Codex 与 Claude 共用这份流程。首次使用或接续等待时读 [session
 2. 登记队列：`labmon worker add <主机> <目录> <清单> --project <id>`。
 3. 按 [sessions.md](sessions.md) 在会话里持续运行 `labmon wait -c monitor.toml`：每轮先与看板同步配置，出现新告警或采集停了就退出；看板上没登记的退出 3（先 `labmon project push`）；没令牌、令牌不认的也退出 3，照上面第 3 步交给用户，有了令牌再挂。看板回 403 时，按提示请管理员确认项目主人、开放的主机和令牌权限。出现版本更新提示时，请用户跑 `labmon update`。收到输出先按 [sessions.md](sessions.md) 分辨退出原因；`archived` 表示项目已归档、结束监听，其余一般告警**先按会话工具重新挂上 wait，再处理**输出里的**每一条**（一次可能好几条），逐条怎么办见 [alerts.md](alerts.md)。
 - `labmon wait` 在两次轮询之间会自动更新看板安装的命令行，并接着等任务；低于看板的最低版本时也先自动更新一次。若仍以 5 退出并报 `client_outdated`，交给用户运行 `labmon update`，更新后再挂等待。
+   这次更新若改了 skill，wait 会以告警 `skill_updated` 退出一次，并写明改了哪几节：先重挂 wait，再重读那几节（会话里记着的是旧版 skill）。
    报过的不会再报，马上重挂不会立刻退出；忘了重挂就再也没人报。一个项目只让一个会话挂 wait。
 4. 取回结果：tar 回本机约定的位置，放新目录，不覆盖已有结果。
 

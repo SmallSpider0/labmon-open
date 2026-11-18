@@ -353,15 +353,18 @@ def _wait_update(commit: str | None, cfg_path: str, jobs: list[str], watch: dict
     """装好才 exec（不返回）。commit：要装的版本（刚收到的看板回话给的；None 时取看板发的那份）。
     已是看板的版本返回 None；更新失败返回原因，由调用处决定继续等（可更新时）还是退出（426）。"""
     try:
-        got, fixed, _ = client.install_update(commit)
-        if fixed is None:
+        got, inst = client.install_update(commit)
+        if inst is None:
             return None
-        executable = fixed.resolve()
+        executable = inst.fixed.resolve()
         if executable.parent.parent.name != got:
             raise dist.Unavailable("另一条命令已换了客户端版本，等下一轮再试")
         env = dict(os.environ)
-        env[WAIT_RESUME] = json.dumps({"config": cfg_path, "jobs": jobs, "watch": watch}, separators=(",", ":"))
-        args = [str(fixed), "wait", "-c", cfg_path]
+        resume = {"config": cfg_path, "jobs": jobs, "watch": watch}
+        if (dist.skill_of(dist.HERE) / "SKILL.md").is_file():         # 新版本拿它与自己那份比，skill 改了就叫醒会话（_skill_woke，#57）
+            resume["skill"] = [str(dist.skill_of(dist.HERE)), dist.version()]
+        env[WAIT_RESUME] = json.dumps(resume, separators=(",", ":"))
+        args = [str(inst.fixed), "wait", "-c", cfg_path]
         for job in jobs:
             args.append(f"--job={job}")
         print(f"[labmon] 已安装 {dist.short(got)}，准备继续等待", flush=True)
@@ -369,6 +372,15 @@ def _wait_update(commit: str | None, cfg_path: str, jobs: list[str], watch: dict
     except (client.Failed, client.Unreachable, dist.Unavailable, OSError, subprocess.SubprocessError) as e:
         return str(getattr(e, "msg", None) or e)
     return None
+
+
+def _skill_woke(saved: dict) -> str | None:
+    """wait 换了版本、exec 起来的这一轮：上一版带来的 skill 与这一版的不同时回那一句（叫醒会话一次，#57）。"""
+    old = saved.get("skill")
+    if not (isinstance(old, list) and len(old) == 2 and all(isinstance(x, str) for x in old)):
+        return None
+    changes = dist.skill_changes(Path(old[0]), dist.skill_of(dist.HERE))
+    return dist.skill_note(changes, old[1], dist.version(), "先重挂 labmon wait") if changes else None
 
 
 def _wait_outdated(msg: str, commit: str | None, cfg_path: str, jobs: list[str], watch: dict | None) -> int:
@@ -396,7 +408,13 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None) -> int:
     limit = stale_limit(b["interval"], b["stale_min"])
     jobs = jobs or []
     saved = _wait_resume(cfg_path, jobs)
-    if not saved:
+    if saved:
+        dist.ensure_skill()                            # 旧版本换过来的那次没建 skill 入口：补上
+        if msg := _skill_woke(saved):
+            print(f"[labmon] {fmt_time(time.time())} 新告警 1 条", flush=True)
+            print(f"  - [skill_updated] {msg}", flush=True)
+            return 1
+    else:
         print(f"[labmon] 等告警：每轮先同步一次 {cfg_path}，再问看板 {b['id']} 有没有告警（看板那边最多挂 {HOLD_MAX}s）", flush=True)
     first, synced, watch = not saved, bool(saved), saved.get("watch")
     rid, down, back = uuid.uuid4().hex, None, 1.0
