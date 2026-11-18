@@ -113,6 +113,11 @@ class ReadsTest(unittest.TestCase):
         rc, out, _ = run(["status", "p1"])
         self.assertIn("看板没在采集，告诉用户", out)
         self.assertIn("别的主机接不了本项目的任务：h4 放不下", out)
+        self.snap(rebalance={"key": "rebalance:p1:est", "est": True, "text": "有主机有空，但推演算不出", "why": ["h4 放不下"]})
+        rc, out, _ = run(["status", "p1"])          # 时长不明（#43）：不当成挪法建议，挪不了的原因照列
+        self.assertIn("可能可以提前：有主机有空，但推演算不出", out)
+        self.assertNotIn("挪法建议：", out)
+        self.assertIn("别的主机接不了本项目的任务：h4 放不下", out)
         (PJ.out_dir("p1") / "snapshot.json").unlink()
         rc, out, _ = run(["status", "p1"])
         self.assertEqual(rc, 0)

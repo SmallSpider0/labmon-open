@@ -767,15 +767,26 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                                 f"worker 不在就 labmon worker start {hd['id']}；保活由 worker 管，不自己 ka.sh start", idle_say))
 
 
+NO_WORK_WAKE_S = 86400   # 项目跑空后这么久内给实验会话那条 no_work:（只给会话，#43）
+
+
 def _no_work(cfg: dict, snap: dict, glob_snap: dict, quiet: float, t: float) -> None:
     """暂时没实验：清单里没有待办，worker 上也没有本项目在跑、在等的（单元不进车道，经工作台快照看）。往清单里加任务就接着跑，不用做什么。
     起点取跑完的任务与收起的车道（quiet：_lane_specs 给的最后一次活动）里最晚的。
     这时主机的事（连不上、磁盘余量、空闲关机风险）不归它报：主机仍由工作台和在用它的项目盯着，没在用这台的会话不被叫醒。"""
     wjobs = [j for e in glob_snap.get("hosts", []) for k in ("running", "waiting") for j in (e.get("status") or {}).get(k) or []
              if j.get("project") == cfg["id"]]
-    snap["no_work_since"] = None if wjobs or any(ln.get("unfinished") for ln in snap["lanes"]) else max([j.get("end_ts") or 0 for j in snap["jobs"]] + [quiet]) or t
+    last = max([j.get("end_ts") or 0 for j in snap["jobs"]] + [quiet])
+    snap["no_work_since"] = None if wjobs or any(ln.get("unfinished") for ln in snap["lanes"]) else last or t
     if snap["no_work_since"]:
         snap["alerts"] = [a for a in snap["alerts"] if a["key"].split(":")[0] not in ("ssh_fail", "disk_low", "idle")]
+        # 跑空了叫醒实验会话一次（#43；维护者 2026-11-18 定只给会话、不推给用户）：key 带起点，这一段空着只报一次，加了任务再跑空才再报
+        since = snap["no_work_since"]
+        # 从没跑过任务的（刚登记）不算跑空：起点每轮都是现在，不报；空了一天以上的不再报（快照里的旧任务过了保留期，起点会往前挪）
+        if last and t - since < NO_WORK_WAKE_S:
+            snap["alerts"].append(alert(f"no_work:{round(since)}", "agent",
+                                        f"项目从 {fmt_time(since)} 起没有活了：各车道跑空，也没有在等的任务。要接着跑就把下一批追加到各台的长期清单"
+                                        f"（先 labmon worker fit <主机> <目录> <清单> --list --project {cfg['id']} 看能开几条车道）；确实做完了不用管"))
 
 
 def dir_name(name: str) -> str:

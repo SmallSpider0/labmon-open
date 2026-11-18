@@ -169,6 +169,9 @@ t("overview", "总览：项目表的挪法建议（快照的 rebalance，rebalMa
   has(tp, run(O, "esc(\"可以挪：\" + D.rebalance[\"proj-a\"].text)"), "proj-a 悬停");
   has(tp, "别的主机接不了本项目的任务：", "proj-b 悬停");
   ok(run(O, "rebalTip(undefined)") === "" && run(O, "rebalMark(null)") === "" && run(O, "rebalMark({why: []})") === "");
+  // #43：时长不明（est）同样是灰「⇄」、不写「可提前」，悬停写那句
+  const est = run(O, 'rebalMark({key: "rebalance:p:est", est: true, text: "写 est_min=", why: []})');
+  ok(est.includes("b-mute") && !est.includes("可提前") && est.includes("可能可以提前：写 est_min="), "est 灰图标：" + est);
 });
 t("overview", "顶栏：更新时刻 = tsMD + tsHM 两段（窄屏只留时分）", () => {
   const top = el(O, "top").innerHTML;

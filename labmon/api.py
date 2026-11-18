@@ -358,10 +358,13 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
             + (f"，失败 {g['failed']}" if g.get("failed") else "") + (f"；预计 {fmt_time(g['eta_ts'])}" if g.get("eta_ts") and g.get("status") != "完成" else "")
             + (f"；{ratio}" if ratio else ""))
     rb = snap.get("rebalance") or {}
-    if rb.get("text"):
+    if rb.get("text") and not rb.get("est"):
         o.p(f"挪法建议：{rb['text']}")
-    elif rb.get("why"):
-        o.p("别的主机接不了本项目的任务：" + "；".join(rb["why"]))
+    else:                                # 时长不明（est，#43）：有主机有空、推演算不出挪过去能提前多少；与挪不了的原因可以同时有
+        if rb.get("est"):
+            o.p(f"可能可以提前：{rb['text']}")
+        if rb.get("why"):
+            o.p("别的主机接不了本项目的任务：" + "；".join(rb["why"]))
     alerts = snap.get("alerts") or []
     o.p(f"告警（{len(alerts)} 条）" + ("：" if alerts else ""))
     for a in alerts:

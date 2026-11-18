@@ -46,6 +46,7 @@ MARGIN_S = 3600                  # 对方租期到期前这么久截止：续租
 DUE_WARN_S = 2 * 3600            # 约定时间前这么久提醒一次
 OVER_S = 3600                    # 过了约定时间这么久还没跑完，提醒一次
 DONE_KEEP_S = 86400              # 还了以后这么久内，wait 还报“已归还”（登记在上面没跑完的队列要换主机）
+IDLE_S = 1800                    # 借来的主机上没有 labmon 任务在跑、也没有在等的连着这么久，给 labmon wait 一条 borrow_idle（只给会话，#43）
 RESERVE_HALF_S = 86400           # 给对方留的量：样本按时间衰减加权的半衰期
 RESERVE_Q, RESERVE_X = 0.95, 1.15   # 取加权 95 分位再乘这么多（同 Kubernetes VPA recommender 的做法）
 RESERVE_MIN = {"vram": 2.0, "ram": 4.0, "cpu": 1.0}   # 下限：显存 GiB、内存 GiB、CPU 核（VS Code、小实验起步就要这些）
@@ -586,6 +587,12 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
                          + (f"，只给 {'、'.join(ps)} 用" if ps else "")
                          + (f"；{keep_text(kp)}" + ("" if kp.get("away") else "，对方超出的部分不放新任务，正在跑的照常跑完") if kp else "")
                          + f"。登记队列：labmon worker add {hid} ROOT JOBS --project <项目>；独占的等对方用完才跑，被对方打扰会作废重排"})
+            if ws:                                   # 借来却空着（只有保活）：没有在跑的（占位任务不算）、也没有在等的，连着 IDLE_S 才报；worker 不在的轮次不动起点
+                st["idle"] = None if run or ws.get("waiting") else st.get("idle") or round(t)
+            if st.get("idle") and t - st["idle"] >= IDLE_S:      # 维护者 2026-11-18 定：只给实验会话，不推给用户；key 带起点，这一段空着只报一次
+                wake.append({"key": f"borrow_idle:{hid}:{st['idle']}", "projects": ps,
+                             "msg": f"借来的 {hid} 从 {fmt_time(st['idle'])} 起空着（没有任务在跑、也没有在等的，卡上只有保活）："
+                             f"有活就追加到它上面的长期清单或 labmon worker add {hid} ROOT JOBS --project <项目>；用不上了告诉用户，可以早点还给 {who}"})
         if back and not away_on:
             wake.append({"key": f"borrow_back:{hid}", "projects": ps, "host": hid, "msg": f"{who} 在用 {hid}（{'；'.join(back[:3])}）：这部分不再放新任务"})
         ab = st.get("away_back")                     # 说好不用被对方作废：一小时内 wait 都报（back 可能为空：hold 为真且在预留以内、因 OOM 作废）
@@ -596,7 +603,7 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
     def merge(cur):                                  # 只并本轮改的几项：命令行、页面可能同时在改 returning（要还、撤销）
         for hid, st in sts.items():
             c = cur.setdefault(hid, {})
-            c.update(warned=st.get("warned", [])[-20:], back=st.get("back"), tight=st.get("tight"), last=st.get("last"), **{k: st[k] for k in ("bump", "seen", "away_back") if st.get(k)})
+            c.update(warned=st.get("warned", [])[-20:], back=st.get("back"), tight=st.get("tight"), last=st.get("last"), idle=st.get("idle"), **{k: st[k] for k in ("bump", "seen", "away_back") if st.get(k)})
             if st.get("done"):
                 c.update(returning=None, done=st["done"])
             elif st.get("returning") and not c.get("returning") and st["returning"] > (c.get("kept") or 0):   # 本轮中途撤销了的不写回

@@ -282,8 +282,10 @@ const noWorkTip = since => `${ts(since)} 起清单里没有待办，worker 上�
 // 多主机负载均衡的提示（快照的 rebalance，看板的 rebalance.suggest 算的）：建议的那句话由看板写好（与 rebalance: 告警同一句），
 // 整句是给实验会话的（rebalance: 告警），页面上只摆一个图标 rebalMark：有建议「⇄ 可提前」，只有挪不了的原因（why，不叫醒）同样的徽章换灰色「⇄」，
 // 悬停（触屏点一下）看 rebalTip。项目页放在「全部完成」的时刻旁，工作台放在项目表「预计全部跑完」旁；窄屏只留「⇄」（#40）
-const rebalTip = r => r?.text ? "可以挪：" + r.text : r?.why?.length ? "别的主机接不了本项目的任务：\n" + r.why.join("\n") : "";
-const rebalMark = r => r?.text ? ` <span class="badge b-warn" ${tip(rebalTip(r))}>⇄<span class="hide-sm"> 可提前</span></span>`
+// 时长不明（est：挪来的行没有估时，推演算不出能提前多少，#43）同样的灰色「⇄」，悬停看那一句
+const rebalTip = r => r?.est ? "可能可以提前：" + r.text : r?.text ? "可以挪：" + r.text : r?.why?.length ? "别的主机接不了本项目的任务：\n" + r.why.join("\n") : "";
+const rebalMark = r => r?.text && !r.est ? ` <span class="badge b-warn" ${tip(rebalTip(r))}>⇄<span class="hide-sm"> 可提前</span></span>`
+  : r?.est ? ` <span class="badge b-mute" ${tip(rebalTip(r))}>⇄</span>`
   : r?.why?.length ? ` <span class="badge b-mute" ${tip(rebalTip(r))}>⇄</span>` : "";
 const noWorkBadge = since => since ? `<span class="badge b-mute" ${tip(noWorkTip(since))}>${NO_WORK}</span>` : "";
 // GPU 利用率（#51）：页面上的利用率文字只从 utilText 出（项目页、工作台、组内页共用）。b 是一张卡的「吃满程度」，或 utilAvg 合起来的几张卡：

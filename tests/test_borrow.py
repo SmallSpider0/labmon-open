@@ -330,6 +330,25 @@ class BorrowTest(Base):
 
     KEEP = {"vram": 2.0, "ram": 4.0, "cpu": 1.0, "hold": False}
 
+    def test_idle_borrowed_host_wakes_session(self):
+        # #43（维护者 2026-11-18 定只给会话）：借来的主机上没有任务在跑、也没有在等的，连着 IDLE_S 才给 wait 一条 borrow_idle（key 带起点，只报一次）；
+        # 有任务在跑就清掉起点
+        t = time.time()
+        self.begin(projects="a1")
+        ov = [{"kind": "guest", "target": "a1", "keep": self.KEEP}]
+        fin = lambda hid, wrote=None, kill=(): "已还"
+        keys = lambda wake: [w["key"] for w in wake if w["key"].startswith("borrow_idle:")]
+        _, wake = B.check([self.host_entry(overrides=ov)], t, finish_fn=fin, ovr=self.ovr)
+        self.assertEqual(keys(wake), [])
+        _, wake = B.check([self.host_entry(overrides=ov)], t + B.IDLE_S + 1, finish_fn=fin, ovr=self.ovr)
+        w = next(w for w in wake if w["key"].startswith("borrow_idle:"))
+        self.assertEqual((w["key"], w["projects"]), (f"borrow_idle:{SID}:{round(t)}", ["a1"]))
+        self.assertIn("空着", w["msg"])
+        _, wake = B.check([self.host_entry(running=[("x1", 5)], overrides=ov)], t + B.IDLE_S + 2, finish_fn=fin, ovr=self.ovr)
+        self.assertEqual(keys(wake), [])
+        _, wake = B.check([self.host_entry(overrides=ov)], t + B.IDLE_S + 3, finish_fn=fin, ovr=self.ovr)
+        self.assertEqual(keys(wake), [])                                     # 新的起点，还不到 IDLE_S
+
     def test_check_due_then_return(self):
         t = time.time()
         self.begin(until=t + 600, projects="a1")

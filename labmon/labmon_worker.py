@@ -138,6 +138,7 @@ BUSY_WIN_S = 3600        # 各卡「吃满程度」（只有保活时按 0）留
 UTIL_LOW = 50            # 卡近 UTIL_WIN_S 的利用率低于这个 %，且上面在跑的被 CPU 卡住时，先加核、不在这张卡上开新车道（gpu_slack，#35、#37）
 CPU_BOUND_FRAC = 0.9     # 在跑任务近 CPU_WARM_S 各 1 分钟窗口核数的平均不少于给它的核数的这么多，算被 CPU 卡住、可能给少了（cpu_fit 的 low）
 CPU_SPARE_FRAC, CPU_SPARE_MIN = 0.5, 1.0   # 写了 cpus= 的在跑任务整段 1 分钟峰值不到给的核数的这么多、且少至少这么多核，算给多了（cpu_fit 的 high，#46）
+UTIL_FULL = 90           # 卡近 UTIL_WIN_S 的利用率不低于这个 % 算吃满：offers 的同机多开车道不往它上面放（Worker.local_cards，#43；同卡 1 条车道常只到六七成，3–4 条才近满）
 CONC_MAX = 12            # 按同卡并行数挑同类记录（duration 的 k）时封顶到这么多（推演里查表、缓存用）
 FORECAST_S = 7 * 86400   # 推演（simulate）往后排多远
 FORECAST_EVERY = 120     # 推演的输入没变时多久重算一次（在跑的超了预计，后面的跟着往后挪）
@@ -3513,12 +3514,53 @@ class Worker:
                           and self.list_env(info[q["key"]]["root"], info[q["key"]]["queue"]) == env),
                          key=lambda q: ends.get((info[q["key"]]["root"], info[q["key"]]["queue"])) or now)[:1]
             o["lane"] = [info[tgt[0]["key"]]["root"], info[tgt[0]["key"]]["queue"]] if tgt and cands else None
+            # 接在后面的清单里有写了 after= 的行：挪来的插在它前面（它要等别的任务，清单顺序也算依赖，接在它后面会被它堵住，#43）
+            o["before"] = next((x["name"] for x in tgt[0]["jobs"] if x["deps"] or x["deps_any"]), None) if o["lane"] else None
             for k in range(1, len(cands) + 1):
-                got = self.try_move(p, cands[:k], tgt[0]["key"] if tgt else None, cx)
+                got = self.try_move(p, cands[:k], tgt[0]["key"] if tgt else None, cx, before=o["before"])
                 if isinstance(got, dict):
                     o.update(got)
                     break
-                o["jobs"].append(dict({x: v for x, v in cands[k - 1].items() if x not in ("h", "i", "lane")}, end=got[0], own=got[1]))
+                o["jobs"].append(dict({x: v for x, v in cands[k - 1].items() if x not in ("h", "i", "lane")}, end=got[0], own=got[1],
+                                      dep=bool(cands[k - 1]["h"]["deps"] or cands[k - 1]["h"]["deps_any"])))
+        out += self.local_offers(own, others, now, waiters, renew, cx)
+        return out
+
+    def local_offers(self, own, others, now, waiters, renew, cx):
+        """同机多开一条车道（#43）：本机这个项目排得最晚的清单队尾几行剪到这台新开的一条车道，整批能提前多少。挑行（move_cands：从队尾往前、
+        占位、成组、有人 after= 等着、MOVE_LEAD_S 内开跑、缺本地文件的都停）、推演（try_move，同一份 simulate）、看板那头的门槛与挑法都同跨主机的，
+        只多两条：卡要有真余量（local_cards：限流、卡都吃满了、利用率低的卡上在跑的被 CPU 卡住都不出），估计只有提示值的 GPU 行不挪
+        （没有实测，同卡并行怕 OOM，同 fit）。每项同 offers 的形状，另带 local: true；lane 恒为 None（新开一条）；ends 是别的主机上这个项目各清单的，
+        free 是本机这个项目原推演里何时跑完；jobs 的 rest 是挪完后本机原清单何时跑完（新推演里，同卡变慢也算进去）。不出的不列（原因不叫醒、页面上也不写：fit 会说）。"""
+        out = []
+        if renew:
+            return out
+        for p in sorted({ln["project"] for ln in own if ln["pend"]}):
+            if self.override_hit({"project": p, "name": ""}, ("drain", "guest", "pause"), lasting=True):
+                continue
+            lns = [ln for ln in own if ln["project"] == p and ln["state"] != "trapped"]
+            mine_p = [ln for ln in own if ln["project"] == p]
+            free = None if None in [ln["end"] for ln in mine_p] else max([now] + [ln["end"] for ln in mine_p])
+            cards, why = self.local_cards()
+            if why or free is None:
+                continue
+            cands, why = self.move_cands(lns, now, now, waiters)
+            for i, c in enumerate(cands):           # 只有提示值的 GPU 行不挪：没有实测，同卡并行怕 OOM（同 fit）
+                e = estimate(self.hist, dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]))
+                if c["h"]["ngpu"] and e["src"] == "提示值":
+                    cands, why = cands[:i], "%s 的显存只有清单提示值、还没有实测，不与别的任务同卡" % c["name"]
+                    break
+            o = {"project": p, "local": True, "lane": None, "free": round(free), "jobs": [], "why": why, "stop": None,
+                 "ends": {"%s|%s|%s" % (ln["host"], ln["root"], ln["queue"]): ln["end"] and round(ln["end"]) for ln in others if ln["project"] == p}}
+            for k in range(1, len(cands) + 1):
+                got = self.try_move(p, cands[:k], None, cx, local=cards)
+                if isinstance(got, dict):
+                    o.update(got)
+                    break
+                o["jobs"].append(dict({x: v for x, v in cands[k - 1].items() if x not in ("h", "i", "lane")}, end=got[0], own=got[1],
+                                      dep=bool(cands[k - 1]["h"]["deps"] or cands[k - 1]["h"]["deps_any"]), rest=got[2].get((cands[k - 1]["root"], cands[k - 1]["queue"]), round(now))))   # 整条剪空、也没在跑的：现在就跑完了
+            if o["jobs"] or o["stop"]:
+                out.append(o)
         return out
 
     def move_cands(self, lns, free, now, waiters):
@@ -3572,32 +3614,55 @@ class Worker:
                         "rest": end[i] and round(end[i]), "h": h, "i": len(left[i]), "lane": i})
         return out, None
 
-    def try_move(self, p, cs, tgt, cx):
+    def try_move(self, p, cs, tgt, cx, local=False, before=None):
         """假设把项目 p 的候选 cs 挪到这台推演一遍（同一份 simulate，本机的快照、截止、公平份额与依赖都照真推演）：
-        返回 (它们都跑完的时刻, 这时本机这个项目自己的清单何时都跑完)；有排不上的返回 {stop 那一行, why 推演里的原因}。
+        返回 (它们都跑完的时刻, 这时本机这个项目自己的清单何时都跑完, 本机原清单何时跑完 {(目录, 清单): 时刻}（同机挪时才有）)；
+        有排不上的返回 {stop 那一行, why 推演里的原因, nodur 是不是因为那一行没有估时（看板据此提醒会话写 est_min，#43）}。
         tgt：接在后面的本机清单的 key（None：当新的一条）；cx：forecast 这一遍的输入（qs、base、info…）。
-        挪来的几行按在那条车道里的位置认（接在原有的行后面，车道按顺序放），不按名字：同项目几条清单可能有同名的行。"""
-        jobs = []
-        for c in sorted(cs, key=lambda c: (c["lane"], c["i"])):
+        挪来的几行按在那条车道里的位置认（接在原有的行后面，车道按顺序放），不按名字：同项目几条清单可能有同名的行。
+        local（同机多开车道，local_offers）：候选是本机清单的队尾，从原队列里拿掉（原样搬过去，估计与时长不另算）、放进只许用这几张卡的新车道
+        （local 是卡号列表；None 不限）；队尾与候选对不上（清单刚变过）就不挪。
+        挪来的几行里没写 after=/afterany= 的排在写了的前面（清单顺序也算依赖：独立的行排在等别的任务的行后面会被它堵住，#43）；
+        接在本机清单后面时插在那条清单里第一条写了依赖的行 before 前面（offers 定，文字里写明）。"""
+        jobs, qs, cut = [], [], {}
+        if local is not False:
+            keys = {(v["root"], v["queue"]): k for k, v in cx["info"].items() if v.get("kind") == "queue"}
+            for c in cs:
+                cut.setdefault(keys.get((c["root"], c["queue"])), []).append(c["name"])
+        for q in cx["qs"]:
+            ns = cut.get(q["key"])
+            if ns:
+                if [x["name"] for x in q["jobs"][-len(ns):]] != ns[::-1]:
+                    return {"stop": ns[0], "why": "%s 的队尾刚变过" % cx["info"][q["key"]]["queue"], "nodur": False}
+                jobs, q = q["jobs"][-len(ns):] + jobs, dict(q, jobs=q["jobs"][:-len(ns)])
+            qs.append(q)
+        if None in cut:
+            return {"stop": cut[None][0], "why": "推演里没有它所在的清单", "nodur": False}
+        for c in sorted(cs, key=lambda c: (c["lane"], c["i"])) if local is False else ():
             f = self.dur_k(p, c["name"], c["h"]["est_min"])         # 与 forecast 拼本机清单行同口径：dur 取此刻的 k，durk 给推演按开跑时同卡的条数取
             jobs.append(self.job_spec(c["name"], c["h"], estimate(self.hist, dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"])),
                                       (f(self.k_now()) or {}).get("min"), f))
-        key, n0, qs = tgt or "offer:" + p, 0, []
-        for q in cx["qs"]:
+        jobs = [x for x in jobs if not (x["deps"] or x["deps_any"])] + [x for x in jobs if x["deps"] or x["deps_any"]]
+        key, n0 = tgt or "offer:" + p, 0
+        for i, q in enumerate(qs):
             if q["key"] == key:
-                n0, q = len(q["jobs"]), dict(q, jobs=q["jobs"] + jobs)
-            qs.append(q)
+                n0 = next((n for n, x in enumerate(q["jobs"]) if x["name"] == before), len(q["jobs"]))
+                qs[i] = dict(q, jobs=q["jobs"][:n0] + jobs + q["jobs"][n0:])
         if not tgt:
-            qs.append({"key": key, "kind": "queue", "project": p, "allowed": None, "since": cx["now"], "jobs": jobs})
+            qs.append({"key": key, "kind": "queue", "project": p, "allowed": None if local is False else local, "since": cx["now"], "jobs": jobs})
         out, stuck = simulate(cx["now"], cx["base"], qs, cx["focus"], self.cutoff(), pol=cx["pol"], use=cx["use"], ends=self.ends, dead=self.dead, gangs=self.gsim)
-        moved = [e for e in out if e["key"] == key][n0:]
+        moved = [e for e in out if e["key"] == key][n0:n0 + len(jobs)]
         bad = next((i for i, e in enumerate(moved) if e["t1"] is None), len(moved) if len(moved) < len(jobs) else None)
         if bad is not None:
-            return {"stop": jobs[bad]["name"], "why": stuck.get(key) or "挪来后不知道何时跑完"}
+            return {"stop": jobs[bad]["name"], "why": stuck.get(key) or "挪来后不知道何时跑完", "nodur": jobs[bad]["dur"] is None}
         ids = {id(e) for e in moved}
         lanes = self.plan_lanes(cx["base"]["jobs"], [e for e in out if e["key"] in cx["info"] and id(e) not in ids], {}, cx["info"], {})
-        own = [ln["end"] for ln in self.proj_lanes(self.host, [ln for ln in self.todo if ln["project"] == p], {"lanes": lanes}, cx["mine"], cx["held"])]
-        return round(max(e["t1"] for e in moved)), None if None in own else round(max([cx["now"]] + own))
+        gone = {(cx["info"][k]["root"], cx["info"][k]["queue"]): set(ns) for k, ns in cut.items()}
+        todo = [dict(ln, jobs=[n for n in ln["jobs"] if n not in gone.get((ln["root"], ln["queue"]), ())]) for ln in self.todo if ln["project"] == p]
+        own = self.proj_lanes(self.host, todo, {"lanes": lanes}, cx["mine"], cx["held"])
+        ends = [ln["end"] for ln in own]
+        return (round(max(e["t1"] for e in moved)), None if None in ends else round(max([cx["now"]] + ends)),
+                {(ln["root"], ln["queue"]): ln["end"] and round(ln["end"]) for ln in own if (ln["root"], ln["queue"]) in gone})
 
     def override_hit(self, r, kinds=None, lasting=False):
         """挡住这个请求的临时指令：(指令种类, 原因)，没有为 None。看板据种类把车道标成暂停（drain 另报给同机各项目）。
@@ -4163,6 +4228,26 @@ class Worker:
                                          "project": q["project"], "excl": None, "cmd": job_cmd(q, cur[0]) or ""}
         return ext
 
+    def util10(self, t):
+        """各卡近 UTIL_WIN_S 的「在用时多高」{UUID: %}（不算保活在的那几轮；样本少于 3 个的不列，win_mean）：状态的 util10（fit 读它）、同机多开车道的门槛（local_cards）共用。"""
+        return {k: round(v) for k, w in self.uwin.items() for v in [win_mean(w, t, UTIL_WIN_S)] if v is not None}
+
+    def local_cards(self):
+        """offers 的同机多开车道能往哪几张卡放（#43）：(卡号列表, None)，或 (None, 不出的原因)。与 fit 同一条规则（gpu_slack）：容器在限流不出；
+        近 10 分钟利用率不低于 UTIL_FULL 的卡（吃满了）、利用率低于 UTIL_LOW 而上面在跑的被 CPU 卡住的卡（先加核）不放；还没有利用率样本的卡照放。"""
+        now = time.time()
+        u10, gs = self.util10(now), self.info.get("gpus") or []
+        cards = [{"i": g["i"], "uuid": g["uuid"], "util": u10.get(g["uuid"])} for g in gs]
+        sl = gpu_slack(cards, list(self.running.values()), self.throttle(now), cpu_cap(self.info.get("cpu_quota")))
+        if sl["throttle"] is not None:
+            return None, sl["throttle"] + "：先减线程，不在这台多开车道"
+        ok = [c["i"] for c in cards if (c["util"] is None or c["util"] < UTIL_FULL) and c["uuid"] not in sl["bound"]]
+        if ok or not cards:
+            return ok or None, None
+        if sl["bound"]:
+            return None, "利用率低的卡上在跑的任务跑满了给它的核：先给它们加核（cpus=），不在这台多开车道"
+        return None, "各卡近 10 分钟利用率都不低于 %d%%，不在这台多开车道" % UTIL_FULL
+
     def util_window(self, gpus, gp, t):
         """各卡利用率的两个窗口（#51），都按 win_mean 取平均：
         uwin「在用时多高」近 UTIL_WIN_S 秒，卡上有保活的那几轮不记（它只是占着卡；util10，fit 列出来看）；
@@ -4651,7 +4736,7 @@ class Worker:
     def write_status(self, queues, waiting, limits, pol, use, now):
         """写 status.json（看板探针读；字段是看板 ↔ worker 的契约，tests/test_contract.py 守着）。"""
         S = self.snapshot(limits)
-        u10 = {k: round(v) for k, w in self.uwin.items() for v in [win_mean(w, now, UTIL_WIN_S)] if v is not None}   # 各卡「在用时多高」：fit 与 cpu_fit 用
+        u10 = self.util10(now)                # 各卡「在用时多高」：fit、cpu_fit 与同机多开车道（local_cards）用
         self.cpu_hints(S["cpu_cap"], u10)
         hits = [round(t) for t in self.ka_hits if t > now - FIGHT_S]   # 近 FIGHT_S 秒保活被拉起的时刻（kafight，重启后 load_prev 找回）
         write(self.p.status, json.dumps({
