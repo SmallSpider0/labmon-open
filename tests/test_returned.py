@@ -417,6 +417,53 @@ class RegLanesTest(Base):
         self.assertEqual([ln["id"] for ln in snap["lanes"]], ["kept"])        # gone 上的登记没了：留 24 小时，但跑完久了照样收起
         self.assertAlmostEqual(snap["no_work_since"], now - 2 * 86400, delta=5)
 
+    def test_idle_registrations_hint_worker_rm(self):
+        # #47：只在登记里有的车道空了 2 天以上，给实验会话一条 idle_regs:（只给会话），列出清单与 worker rm 的写法；只提示、不删登记。
+        # 收起了但没满 2 天的、monitor.toml 写明的、还有待办的不列；同一批只叫醒一次，出现没报过的才换 key，会话删掉一部分不再叫醒。旧代码没有这条
+        from labmon.state import save_json, state_dir
+        (self.d / "hosts.toml").write_text(f'[[hosts]]\nid = "here"\ndata_root = "{self.d / "data"}"\nshared = ["{self.d}"]\n')
+        old, old2, recent, kept = (self.done_list("old", 3 * 86400), self.done_list("old2", 4 * 86400), self.done_list("recent", 30 * 3600),
+                                   self.done_list("kept", 5 * 86400))
+        now = time.time()
+        q = lambda r, **kw: {"root": str(r), "jobs": f"jobs/{r.name}.txt", "project": "p1", "stop": None, "gpus": None, "added_t": now - 9 * 86400, **kw}   # noqa: E731
+
+        def regs(*rs):
+            save_json(state_dir() / "snapshot.json", {"regs": [{"host": "here", "state": "active", "stale": False, "t": 0,
+                                                               "queues": [q(self.root, jobs="jobs/q.txt")] + [q(r, empty=True) for r in rs]}]})
+        regs(old, old2, recent, kept)
+        cfg = self.cfg(f'[[queues]]\nid = "kept"\nhost = "here"\nroot = "{kept}"\njobs = "jobs/kept.txt"\n')
+        snap = C.collect(cfg)
+        idle = [a for a in snap["alerts"] if a["key"].startswith("idle_regs:")]
+        self.assertEqual([(a["key"], a["to"]) for a in idle], [("idle_regs:p1:1", "agent")])
+        msg = idle[0]["msg"]
+        for r in (old, old2):
+            self.assertIn(f"{r}：jobs/{r.name}.txt", msg)
+        self.assertIn("here 上 ", msg)
+        self.assertIn("labmon worker rm <主机> <目录> <清单>", msg)
+        for r in (recent, kept, self.root):                     # 收起了但没满 2 天、monitor.toml 写明的、还有待办的
+            self.assertNotIn(str(r) + "：", msg)
+        self.assertEqual(sorted((x["queue"], x["idle"]) for x in snap["quiet"]), [("jobs/old.txt", True), ("jobs/old2.txt", True), ("jobs/recent.txt", False)])
+        self.assertNotIn("idle_regs:p1:1", [k for k, _ in C.user_alerts(snap["alerts"], keys=True)])   # 只给会话：不算告警数、不进红框
+        self.assertTrue(all(d.exists() for d in (old, old2)))  # 只提示，不动清单
+        # 再采一轮：同一批，key 不变（labmon wait 不再叫醒）
+        self.assertIn("idle_regs:p1:1", [a["key"] for a in C.collect(cfg)["alerts"]])
+        # recent 也空满 2 天了：出现没报过的，换 key 再叫醒一次，列全部
+        for f in (recent / "state").iterdir():
+            os.utime(f, (now - 3 * 86400, now - 3 * 86400))
+        snap = C.collect(cfg)
+        a = next(a for a in snap["alerts"] if a["key"].startswith("idle_regs:"))
+        self.assertEqual(a["key"], "idle_regs:p1:2")
+        self.assertIn(f"{recent}：jobs/recent.txt", a["msg"])
+        # 会话删了 old、old2，留着 recent（长期清单）：key 不变，不再叫醒
+        regs(recent, kept)
+        snap = C.collect(cfg)
+        a = next(a for a in snap["alerts"] if a["key"].startswith("idle_regs:"))
+        self.assertEqual(a["key"], "idle_regs:p1:2")
+        self.assertNotIn(f"{old}：", a["msg"])                  # 删了的不再列（车道按 REG_KEEP_S 还留着）
+        # 都删了：告警消失
+        regs(kept)
+        self.assertFalse([a for a in C.collect(cfg)["alerts"] if a["key"].startswith("idle_regs:")])
+
     def test_wait_targets_hosts_with_lanes(self):
         # labmon wait 的主机定向按项目快照的主机（登记带来的主机也算），不看 monitor.toml
         from labmon.waits import wait_check

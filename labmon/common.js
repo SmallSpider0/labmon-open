@@ -339,8 +339,10 @@ function alertBox(al, open = false) {
 // 主机的名字只有三种写法：短名 hostShort（表格的主机列、小图与时间线的行名、车道名、KPI 的注；直接借来的叫「借 EVA」，其余用 id）；
 // 全名 h.label（主机清单里写的，借来的是「节点（借 EVA）」：告警、标题、悬停里的整句话）；组内服务器 fName「使用人（id）」（overview.html）
 const hostShort = h => h.pool ? h.label || "算力池" : h.borrow && !h.borrow.swap ? `借 ${h.borrow.holder}` : h.id;   // pool：项目快照里的算力池（#24）
-// 车道名：车道的 label（采集时按主机编号的“车道 N”，接可选的用途），页面上有几台主机时前面加主机短名。lane {host: 主机 id, label}，hosts 是页面上的主机表
-const laneName = (lane, hosts) => (hosts.length > 1 ? hostShort(hosts.find(h => h.id === lane.host) || {id: lane.host}) + " " : "") + lane.label;
+// 车道名：车道的 label（采集时按主机编号的“车道 N”，接可选的用途），后面接清单名（清单文件名去掉扩展名，#47：登记多了好认），
+// 页面上有几台主机时前面加主机短名。lane {host: 主机 id, label, queue?: 清单路径}，hosts 是页面上的主机表；laneLabel 不带主机（时间线行挂在主机表头下面）
+const laneLabel = lane => lane.label + (lane.queue ? " · " + lane.queue.replace(/^.*\//, "").replace(/(.)\.[^.]*$/, "$1") : "");
+const laneName = (lane, hosts) => (hosts.length > 1 ? hostShort(hosts.find(h => h.id === lane.host) || {id: lane.host}) + " " : "") + laneLabel(lane);
 // 按估计字宽截断（中文约 12px，其余约 6.6px），超出加省略号。mid 时头尾各留一半、省略中间（任务名能区分的种子、变体常在结尾）；
 // mid 是字符串时它是原样留着的前缀（如“⏸ ”、项目名），后面的再省略中间
 function fit(s, px, mid = false) {

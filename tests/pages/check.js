@@ -477,7 +477,7 @@ t("overview", "alertsOf：可续租时有 [fleet] 段说到主机页点，没有
   const dw = run(O, "alertsOf(D.hosts[0]).map(a => a.msg)").join("\n"); ok(dw.includes("的 beta_eval_s3 等的 beta_prep 跑失败了"), "依赖等不来：" + dw);
   ok(!run(O, "alertsOf(D.hosts[0]).map(a => a.msg)").join("\n").includes("beta_eval_s2"), "被临时指令挡住的不报警");
   const bc = run(O, "alertsOf(D.hosts[1]).map(a => a.msg)").join("\n");                 // 借来的主机上约定归还挡住、不会再放的清单（borrow.late_jobs）
-  has(bc, "srv-b：Beta 实验 的 车道 3 还有 2 个任务不会在这台放行：约定归还 11-14 09:00 前跑不完（估 330 分钟）；截止取的是 OWNER 的租期到期，提前 1 小时，延长约定推不迟它，由实验会话换到别的在用主机");
+  has(bc, "srv-b：Beta 实验 的 车道 3 · b3 还有 2 个任务不会在这台放行：约定归还 11-14 09:00 前跑不完（估 330 分钟）；截止取的是 OWNER 的租期到期，提前 1 小时，延长约定推不迟它，由实验会话换到别的在用主机");
   ok(!bc.includes("改约定"), "截止取对方租期时不写改约定");                 // 车道名取 laneOf + laneName，文字取 borrow.late_say
   has(run(O, `alertsOf({...D.hosts[1], borrow: {...D.hosts[1].borrow, late: [{...D.hosts[1].borrow.late[0], queue: "jobs/zz.txt"}]}}).map(a => a.msg)`).join("\n"), "的 jobs/zz.txt 还有", "对不上快照车道的用队列名");
   ok(!run(O, "alertsOf({...D.hosts[1], borrow: {...D.hosts[1].borrow, late: []}}).map(a => a.msg)").join("\n").includes("不会在这台放行"), "没有 late 也报了约定挡住");
@@ -886,6 +886,7 @@ t("manage", "主机与队列：每台主机一行（清单数按状态分），�
   const a = grp("srv-a");
   has(a, 'href="#/host/srv-a"'); has(a, "2 条清单"); has(a, "1 在跑"); has(a, "1 跑完"); has(a, "展开 1 条"); has(a, "<b>车道 2</b>"); has(a, "限定卡 0");
   has(a, "另有 1 条跑完、久没动，不列"); ok(!a.includes("jobs/bd.txt"), "项目页收起的清单不该列出");
+  has(tips(a), "其中 1 条空得更久，已提示实验会话：不再用的摘掉登记（worker rm）", "空了很久的登记（quiet 的 idle，#47）");
   ok(/<details class="dfold rg-q"><summary/.test(a), "逐条清单该折起来");
   // srv-b（借来的，短名“借 OWNER”）：jobs/b2.txt 在跑、jobs/b4.txt 刚登记（下一轮采集后显示）；停法 file:STOP
   const bb = grp("srv-b");
@@ -1553,7 +1554,7 @@ t("project", "运行中的条上百分比是现在线在条上的位置，不是
 t("project", "时间线按主机分组：主机一行表头（利用率、事件都在里面），车道单行缩进，条上去掉自动分组的前缀", () => {
   const A = pjCtx(PJ, EVN); run(A, `TL.v = {a: ${-3 * H}, b: ${12 * H}}; drawTimeline()`);     // 固定 15 小时的视图：条宽与下面省略的写法对得上
   const tl = el(A, "tlbox").innerHTML, labs = [...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
-  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1", "车道 2", "借 OWNER", "车道 1", "算力池", "车道 1"]), JSON.stringify(labs));   // 算力池（#24）同一台主机那样分组
+  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1 · q1", "车道 2 · q2", "借 OWNER", "车道 1 · b2", "算力池", "车道 1 · p"]), JSON.stringify(labs));   // 算力池（#24）同一台主机那样分组
   ok(!tl.includes("GPU 利用率") && !tl.includes(" 事件<") && !tl.includes("同机别的项目<"), "还有单独的利用率、事件行或主机前缀");
   ok((tl.match(/stroke-opacity="\.4"/g) || []).length === 2, "三组之间该各有一条分隔线");
   has(tl, ">train_s1 · 44%<", "条上去掉 alpha_"); has(tl, ">⏸ unt…ata<", "占位任务"); has(tips(tl), "alpha_train_s1", "悬停是全名");
@@ -1685,7 +1686,7 @@ t("compact", "在跑的多：运行中按计划项分组、一个任务一行，
   has(r, `6 个在跑 · 最早 ${run(A, `tsNear(${NOW + 4 * 60})`)} 结束`, "组头");
   has(r, '<span class="mono ell">s0</span>', "任务名去掉计划项前缀"); has(r, "超估时 +6 分钟"); has(r, "⏸ 已等 20 分钟", "占位任务");
   has(tips(r), "速度 现在 1.5 · 近 4 分钟 均 1.4 步/分", "速度放悬停");
-  has(r, "另有 2 条车道没在跑：等待 1 · 暂停 1"); has(tips(r), "车道 13：已暂停：临时指令 pause", "悬停逐条列车道状态");
+  has(r, "另有 2 条车道没在跑：等待 1 · 暂停 1"); has(tips(r), "车道 13 · m12：已暂停：临时指令 pause", "悬停逐条列车道状态");
 });
 t("compact", "没在跑那一行的车道类别与悬停同一个判断（laneKind）：队列进程在、又在等资源的算排队（#86）", () => {
   const A = pjCtx(PJM, EVN);
@@ -1905,18 +1906,21 @@ t("common", "主机名只有三种：短名 hostShort（表格的主机列、时
   has(r[4], `<td class="nw">借 OWNER</td>`, "ovrTable 主机列");
   has(page(O, "#/"), `${run(O, "esc(hostShort(D.hosts.filter(h => h.lease_end).sort((a, b) => a.lease_end - b.lease_end)[0]))")} · `, "KPI 的注");
 });
-t("common", "车道名只有 common.js 的 laneName(车道, 主机表)：几台主机时加主机短名；工作台的车道标签取快照里 projects[].lanes 的 label", () => {
-  once("laneName");
+t("common", "车道名只有 common.js 的 laneName(车道, 主机表)：几台主机时加主机短名、后面接清单名（laneLabel）；工作台的车道标签取快照里 projects[].lanes 的 label", () => {
+  once("laneName"); once("laneLabel");
   ok(!/\blname\b/.test(ovSrc) && !/const laneName = l =>/.test(pgSrc), "旧的 lname / 单参数 laneName 还在");
   ok(!/\blaneName\((?![^)]*D\.hosts\))/.test(pgSrc.replace(/^const laneName = .*$/m, "")), "项目页有没带主机表的 laneName 调用：" + (/laneName\([^)]*\)/.exec(pgSrc.replace(/^const laneName = .*$/m, "")) || [])[0]);
   ok(run(O, 'laneName({host: "srv-b", label: "车道 1"}, D.hosts)') === "借 OWNER 车道 1");
   ok(run(O, 'laneName({host: "srv-a", label: "车道 1"}, D.hosts)') === "srv-a 车道 1");
   ok(run(O, 'laneName({host: "srv-a", label: "车道 1"}, [D.hosts[0]])') === "车道 1", "只有一台主机还加了前缀");
   ok(run(O, 'laneName({host: "没有的", label: "车道 9"}, D.hosts)') === "没有的 车道 9", "主机表里没有的按 id");
-  // 任务卡头部「推演里排不上」的提示：车道按快照的 label 写（proj-b 在 srv-a 的车道 2），不再写队列文件名
-  const h = page(O, "#/"); has(h, "srv-a 车道 2：推演到 7 天后还没轮到", "stuck 文字");
-  has(page(O, "#/host/srv-a"), "车道 2：推演到 7 天后还没轮到", "主机页只有一台：不加主机名");
-  ok(run(P, "D.lanes.map(l => laneName(l, D.hosts) === (D.hosts.length > 1 ? hostShort(D.hosts.find(h => h.id === l.host) || {id: l.host}) + ' ' : '') + l.label).every(Boolean)"));
+  // 车道名后面接清单名（清单文件名去掉扩展名，#47）；没有清单路径的（对不上快照的、自动发现还没读到的）只写 label
+  ok(run(O, 'laneName({host: "srv-a", label: "车道 2 训练", queue: "jobs/a6000.txt"}, D.hosts)') === "srv-a 车道 2 训练 · a6000");
+  ok(run(O, 'laneLabel({host: "srv-a", label: "车道 2", queue: "q.v2.txt"})') === "车道 2 · q.v2", "laneLabel 不带主机、只去最后一个扩展名");
+  // 任务卡头部「推演里排不上」的提示：车道按快照的 label 加清单名写（proj-b 在 srv-a 的车道 2）
+  const h = page(O, "#/"); has(h, "srv-a 车道 2 · b：推演到 7 天后还没轮到", "stuck 文字");
+  has(page(O, "#/host/srv-a"), "车道 2 · b：推演到 7 天后还没轮到", "主机页只有一台：不加主机名");
+  ok(run(P, "D.lanes.map(l => laneName(l, D.hosts) === (D.hosts.length > 1 ? hostShort(D.hosts.find(h => h.id === l.host) || {id: l.host}) + ' ' : '') + laneLabel(l)).every(Boolean)"));
   has(app(P), run(P, "esc(laneName(D.lanes[0], D.hosts))"), "项目页车道名");
 });
 t("common", "本机存的设置只有 common.js 的 mkStore；两页的键名不变（labmon:… 与 labmon:<标题>…），sessionStorage 与 localStorage 分开", () => {

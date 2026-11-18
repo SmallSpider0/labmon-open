@@ -903,7 +903,11 @@ class LaneSpecsTest(unittest.TestCase):
                                  "r/jobs/s.txt": {"lock_alive": False, "worker": {"wait": None}, "activity": None, "jobs": []}}}}
         out, last, hid = C._lane_specs(reg, raw, t)
         self.assertEqual(([x["id"] for x in out], last), (["r/jobs/s.txt"], t - 30 * 3600))     # 刚登记的空清单留着
-        self.assertEqual(hid, [{"host": "h1", "root": "/d/r", "queue": "jobs/r.txt"}])          # 收起的登记车道进快照的 quiet：管理抽屉不列（#121）
+        self.assertEqual(hid, [{"host": "h1", "root": "/d/r", "queue": "jobs/r.txt", "last": t - 30 * 3600, "idle": False}])   # 收起的登记车道进快照的 quiet：管理抽屉不列（#121）
+        # idle（#47）：登记这一轮还在（reg_live）、空了 IDLE_REG_S 以上才算；登记没了、按 REG_KEEP_S 留着的不算（已经 worker rm 了）
+        for live, age, idle in ((True, 3 * 86400, True), (True, 30 * 3600, False), (False, 3 * 86400, False)):
+            reg["queues"][0].update(reg_live=live, reg_t=t - age)
+            self.assertEqual(C._lane_specs(reg, raw, t)[2][0]["idle"], idle, (live, age))
 
 
 class ConfigTest(unittest.TestCase):
