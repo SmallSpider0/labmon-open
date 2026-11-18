@@ -73,4 +73,5 @@
 ## 看板自己
 
 - `collector_stale`：看板没在采集。`labmon service status`，必要时 `labmon service restart`。
+- `skill_updated`：wait 换成了看板的新版本，这份 skill 也改了（消息里列出改了的文件与「节」）。先重挂 wait，再重读那几节，照新写法做；会话里记着的旧说法作废。只报一次。
 - `server_unreachable`：`labmon wait` 连不上看板服务太久（网络、TX 隧道或看板那台机器）。告诉用户，过一会儿再挂 wait；别绕开看板直接 ssh 改服务器上的状态。

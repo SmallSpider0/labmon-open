@@ -324,18 +324,17 @@ def _download_wheel() -> tuple[str, bytes, str]:
     raise Unreachable("取不到客户端（试过 " + "；".join(why) + "）")
 
 
-def install_update(expected: str | None = None) -> tuple[str, Path | None, Path | None]:
-    """从看板安装更新包。自动更新时下载必须与刚收到的主看板响应同一版本。"""
+def install_update(expected: str | None = None) -> tuple[str, dist.Installed | None]:
+    """从看板安装更新包。自动更新时下载必须与刚收到的主看板响应同一版本。已是这一版时回 None（labmon update、wait 共用）。"""
     name, data, commit = _download_wheel()
     if expected and commit != expected:
         raise dist.Unavailable("下载的版本与刚收到的看板版本不同，等下一轮再试")
     if commit == dist.version():
-        return commit, None, None
+        return commit, None
     with tempfile.TemporaryDirectory() as d:
         wheel_path = Path(d) / name
         wheel_path.write_bytes(data)
-        fixed, path_entry = dist.install_wheel(wheel_path, commit)
-    return commit, fixed, path_entry
+        return commit, dist.install_wheel(wheel_path, commit)
 
 
 def update() -> int:
@@ -344,7 +343,7 @@ def update() -> int:
         print("[labmon] 请先在看板的「我的账号 → 命令行」下载安装脚本。仓库里的版本用 git 更新。", file=sys.stderr)
         return 3
     try:
-        commit, fixed, path_entry = install_update()
+        commit, got = install_update()
     except Unreachable as e:
         print(f"[labmon] {e}", file=sys.stderr)
         return 2
@@ -354,12 +353,19 @@ def update() -> int:
     except (OSError, subprocess.SubprocessError, dist.Unavailable) as e:
         print(f"[labmon] 安装更新失败：{e}", file=sys.stderr)
         return 3
-    if fixed is None:
+    if got is None:
         print(f"[labmon] 已是看板的版本（{dist.short(commit)}）")
+        for note in dist.ensure_skill():               # 旧版本换过来的那次没建 skill 入口：补上
+            print(f"[labmon] {note}")
         return 0
     print(f"[labmon] 已安装看板的版本 {dist.short(commit)}")
-    if not path_entry.is_symlink() or path_entry.readlink() != fixed:
-        print(f"[labmon] 请使用 {fixed}，{path_entry} 仍指向原来的安装")
+    for note in got.notes:
+        print(f"[labmon] {note}")
+    mine = dist.skill_of(dist.HERE)
+    if got.skill and mine.is_dir() and (changes := dist.skill_changes(mine, got.skill)):
+        print(f"[labmon] {dist.skill_note(changes, dist.version(), commit, '在跑的会话请先重挂 labmon wait')}")
+    if not got.path_entry.is_symlink() or got.path_entry.readlink() != got.fixed:
+        print(f"[labmon] 请使用 {got.fixed}，{got.path_entry} 仍指向原来的安装")
     return 0
 
 

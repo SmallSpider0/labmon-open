@@ -48,11 +48,19 @@
 2. 跑 `labmon login`，输入看板账号和口令，给这台机器创建一个 `project` 令牌。随后用 `labmon host list` 检查能否连接。普通用户的列表由管理员给这人开放的主机决定。
 3. 看到版本提示时跑 `labmon update`，从看板取新版。
 
+安装与更新会一并装好配套 skill（见下面「配套 skill」）。
+
 安装默认提供 `~/.local/bin/labmon`。如果那里已有其他安装，脚本会提示新命令的固定路径，默认是 `~/.local/share/labmon/bin/labmon`，也可移开旧命令后重新运行安装脚本。各版本的虚拟环境默认在 `~/.local/share/labmon/versions/` 下（设置 `XDG_DATA_HOME` 时改用它）。更新后可以等旧版的 `labmon wait` 等进程退出，再手动清理固定入口已不再指向的旧环境。
 
 维护者要在本机运行看板服务或开发时，可在仓库里运行 `python3 -m pip install -e .`。
 
-**配套 skill**：[skills/lab-experiments](skills/lab-experiments/SKILL.md) 是给编码智能体的统一操作规程。用软链接安装，仓库更新即生效：
+**配套 skill**：[skills/lab-experiments](skills/lab-experiments/SKILL.md) 是给编码智能体的统一操作规程。
+
+- **用安装脚本装的**：skill 随命令行一起装，一起更新。包里带着 skill，以及它链接到的 `README.md`、`docs/*.md` 和 `examples/`。固定入口 `~/.local/share/labmon/skills/lab-experiments`（设了 `XDG_DATA_HOME` 时在它下面）指向当前版本里的那份，随命令一起切换。
+  有 `~/.claude` 的，安装时建 `~/.claude/skills/lab-experiments`；有 `~/.agents` 或 `~/.codex` 的，建 `~/.agents/skills/lab-experiments`。已有 `~/.codex/skills/lab-experiments` 的，只认那一个。这些入口都指向固定入口，只建一次。
+  已有同名目录、或软链指向别处（比如仓库）的，不覆盖，只提示一句；要改用随命令行更新的那份，先把它移开，再跑 `labmon update`。
+  `labmon wait` 换版本时，如果两版之间 skill 有改动，会叫醒会话一次（`skill_updated`），说改了哪几节。
+- **从仓库直接跑的**：用软链安装，仓库更新即生效：
 
 ```bash
 # 按使用的客户端选择；同一份skill，无需复制内容
@@ -62,7 +70,7 @@ mkdir -p ~/.claude/skills    # Claude Code
 ln -s /path/to/labmon/skills/lab-experiments ~/.claude/skills/lab-experiments
 ```
 
-已有同名目录或链接时先检查指向，不覆盖用户修改。当前安装若已从 `~/.codex/skills` 发现该技能，继续使用该入口即可，避免重复安装。新会话确认技能列表中出现 `lab-experiments`，Codex 可用 `$lab-experiments` 显式调用；未发现时先直接读取上述 `SKILL.md` 并检查安装目录。持续监听方式见 [sessions.md](skills/lab-experiments/sessions.md)。
+已有同名目录或链接时，先检查它指向哪里，不覆盖用户的修改。当前安装如果已经从 `~/.codex/skills` 发现了这个技能，就继续用那个入口，避免重复安装。新会话确认技能列表中出现 `lab-experiments`，Codex 可用 `$lab-experiments` 显式调用；未发现时先直接读取上述 `SKILL.md` 并检查安装目录。持续监听方式见 [sessions.md](skills/lab-experiments/sessions.md)。
 
 ## 用法
 
