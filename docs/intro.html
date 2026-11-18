@@ -346,7 +346,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
       <thead><tr><th>告警</th><th>给谁</th><th>意思</th><th>该怎么办</th></tr></thead>
       <tbody>
         <tr><td><code>failed:</code></td><td>会话</td><td>任务失败或被终止</td><td>看日志末尾；修好后删 <code>.failed</code> 重跑</td></tr>
-        <tr><td><code>gpu_idle:</code></td><td>会话</td><td>有未完成任务，GPU 却持续空着（看近 10 分钟的平均利用率，只有保活时按 0）</td><td>先看消息里各车道的原因（挂起、暂停、日志多久没更新）</td></tr>
+        <tr><td><code>gpu_idle:</code></td><td>会话</td><td>有要用卡的未完成任务，GPU 却持续空着（看近 10 分钟的平均利用率，只有保活时按 0；<code>gpus=0</code> 的纯 CPU 任务不算）</td><td>先看消息里各车道的原因（挂起、暂停、日志多久没更新）</td></tr>
         <tr><td><code>ssh_fail:</code></td><td>你</td><td>连不上这台主机：至少 2 次、持续 150 秒（<a href="#a-down">掉线判定</a>）</td><td>看消息里的原因（租期到了、平台打不开、作业多半被平台停了）；续租、换主机由你在工作台定，会话不碰</td></tr>
         <tr><td><code>lock_dead:</code></td><td>会话</td><td>车道还有任务，队列进程不在</td><td>多半是容器重启；看记录页有没有“拉起”，没有就 <code>labmon worker start</code></td></tr>
         <tr><td><code>dep:</code></td><td>会话</td><td>队首的依赖等不来：等的失败了、找不到、成环</td><td>重跑被等的、改对名字、改清单顺序或删 <code>after=</code></td></tr>

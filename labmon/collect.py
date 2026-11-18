@@ -518,12 +518,15 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     snap["jobs"].extend(jobs)
     work["running"] |= {f"{q['id']}/{j['id']}" for j in jobs if j["status"] == "running"}
     unfinished = sum(j["status"] in ("running", "queued") for j in jobs)
+    # 未完成里不用卡的（#73）：worker 推演里这一条用哪几张卡写的是 []（在跑的是开跑时分到的卡，排队的是推演里 place 选的；gpus=0 的不给卡）。
+    # 推演里没有的（排不上、不归 worker 管、worker 不在）不算，照旧当要卡；gpu_idle 只数要卡的
+    no_gpu = sum(j["status"] in ("running", "queued") and (plans.get(j["id"]) or {}).get("gpus") == [] for j in jobs)
     ends = [j.get("eta_ts") for j in jobs if j["status"] in ("running", "queued")]
     lane["holding"] = any((j["hold"] or j.get("suspended")) and j["status"] == "running" for j in jobs)
     lane["has_hold"] = any(j["hold"] and j["status"] in ("running", "queued") for j in jobs)
     lane["overrun"] = any(j.get("overrun_min") for j in jobs)     # 当前任务已超估时：本车道完成时间偏早
     lane.update(total=len(jobs), done=sum(j["status"] == "done" for j in jobs),
-                failed=sum(j["status"] == "failed" for j in jobs), unfinished=unfinished,
+                failed=sum(j["status"] == "failed" for j in jobs), unfinished=unfinished, no_gpu=no_gpu,
                 eta_ts=max(ends) if unfinished and None not in ends and not lane.get("paused") else None)   # 有推演不出的（stuck）就不写
     snap["lanes"].append(lane)
     if returned:
@@ -691,8 +694,9 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
         if not hd["ok"]:
             continue
         lanes = [ln for ln in snap["lanes"] if ln["host"] == hd["id"]]
-        # 占位、暂停、队首在等依赖的车道不算：卡空着是在等别的任务（依赖等不来另有 dep 告警）
-        unfinished = sum(ln.get("unfinished", 0) for ln in lanes if not ln.get("holding") and not ln.get("paused") and not ln.get("dep"))
+        # 占位、暂停、队首在等依赖的车道不算：卡空着是在等别的任务（依赖等不来另有 dep 告警）；不用卡的任务（车道的 no_gpu，#73）不算：卡本来就不用
+        gpu_left = {ln["id"]: ln.get("unfinished", 0) - ln.get("no_gpu", 0) for ln in lanes}
+        unfinished = sum(gpu_left[ln["id"]] for ln in lanes if not ln.get("holding") and not ln.get("paused") and not ln.get("dep"))
         win = al_cfg["gpu_idle_min"] * 60
         recent = [x for x in hist if x.get("host") == hd["id"] and t - x["t"] <= win + 60 and x.get("ok")]
         # 每次采样看各卡近 10 分钟的吃满程度（busy：只有保活时按 0，#51），不看瞬时值：数据加载的空档不会误报，保活也挡不住；
@@ -702,6 +706,8 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
             # 写明各车道当前在做什么，便于判断是有意让出 GPU 还是卡住了
             why = []
             for ln in lanes:
+                if ln.get("unfinished") and not gpu_left[ln["id"]]:
+                    continue                      # 只剩不用卡的任务的车道与 GPU 空着无关，不列
                 j = next((x for x in snap["jobs"] if x["lane"] == ln["id"] and x["status"] == "running"), None)
                 if ln.get("paused"):
                     why.append(f"{ln['label']} 已暂停")
@@ -715,7 +721,7 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                 elif j.get("log_mtime"):
                     why.append(f"{j['id']} 日志 {(t - j['log_mtime']) / 60:.0f} 分钟前更新")
             why = [w for w in why if w]
-            alerts.append(alert(f"gpu_idle:{hd['id']}", "agent", f"{hd['label']}：还有 {unfinished} 个任务未完成，"
+            alerts.append(alert(f"gpu_idle:{hd['id']}", "agent", f"{hd['label']}：还有 {unfinished} 个{'要用卡的' if any(ln.get('no_gpu') for ln in lanes) else ''}任务未完成，"
                                 f"GPU 利用率（近 10 分钟平均，只有保活时按 0）已 {al_cfg['gpu_idle_min']} 分钟低于 {al_cfg['gpu_idle_util']:.0f}%"
                                 + (f"（{'；'.join(why)}）" if why else "")))
         # CPU 被配额限流（#39）：worker 判的（Worker.throttle，门槛只在那边），持续满时本项目有超核的任务才报；key 带这一段的起点，同一段只叫醒一次

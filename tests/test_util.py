@@ -112,10 +112,10 @@ class CollectTest(Tmp):
     def cfg(self):
         return {"id": "p", "alerts": {"gpu_idle_util": 5.0, "gpu_idle_min": 15}, "hosts": [{"id": "h", "checks": []}]}
 
-    def idle(self, recs):
+    def idle(self, recs, lanes=None, jobs=()):
         t = time.time()
-        snap = {"hosts": [{"id": "h", "label": "h", "ok": True, "gpus": [{}]}], "lanes": [{"id": "l", "host": "h", "label": "车道 1", "unfinished": 1}],
-                "jobs": [], "alerts": []}
+        snap = {"hosts": [{"id": "h", "label": "h", "ok": True, "gpus": [{}]}], "lanes": lanes or [{"id": "l", "host": "h", "label": "车道 1", "unfinished": 1}],
+                "jobs": list(jobs), "alerts": []}
         hist = [dict(r, t=t - 900 + 120 * k, host="h", ok=True) for k, r in enumerate(recs)]
         C._host_alerts(self.cfg(), snap, {}, hist, {"hosts": []}, t)
         return [a for a in snap["alerts"] if a["key"] == "gpu_idle:h"]
@@ -127,6 +127,20 @@ class CollectTest(Tmp):
         self.assertIn("近 10 分钟平均，只有保活时按 0", a[0]["msg"])
         self.assertEqual(self.idle([{"util": [0], "busy": [60.0]}] * 8), [])
         self.assertEqual(len(self.idle([{"util": [0]}] * 8)), 1)
+
+    def test_idle_skips_cpu_only(self):
+        """不用卡的任务（车道的 no_gpu，#73）不算 gpu_idle 的未完成：只有纯 CPU 任务在跑、卡上只有保活时不报；
+        同机还有要卡的任务时照报，只数要卡的、只列那条车道。"""
+        rec = [{"util": [98], "busy": [0.0]}] * 8
+        cpu = {"id": "c", "host": "h", "label": "车道 1", "unfinished": 1, "no_gpu": 1}
+        run = [{"id": "cj", "lane": "c", "status": "running", "hold": False, "log_mtime": time.time() - 60}]
+        self.assertEqual(self.idle(rec, [cpu], run), [])
+        gpu = {"id": "g", "host": "h", "label": "车道 2", "unfinished": 2, "no_gpu": 0}
+        a = self.idle(rec, [cpu, gpu], run + [{"id": "gj", "lane": "g", "status": "running", "hold": False, "log_mtime": time.time() - 60}])
+        self.assertEqual(len(a), 1)
+        self.assertIn("还有 2 个要用卡的任务未完成", a[0]["msg"])
+        self.assertIn("gj 日志", a[0]["msg"])
+        self.assertNotIn("cj", a[0]["msg"])
 
     def test_gpu_mine(self):
         """本项目近 24 小时的平均利用率：跑完的取用量记录的 u、在跑的取 use.util_mean，按 卡数 × 落在窗口里的秒数 加权；别的项目、窗口外、没有 u 的不算。"""
