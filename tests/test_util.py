@@ -94,6 +94,20 @@ class GpuBusyTest(Tmp):
         self.assertEqual(O.gpu_busy(st, rows), [{"i": 0, "now": 0, "m10": 10.0, "h1": 20.0, "cov": 3600, "ka": 99, "d1": 20.0, "d1cov": 3600}])
 
 
+class StaleWorkerTest(Tmp):
+    def test_stale_status_no_busy(self):
+        """worker 停了、状态还读得到（Codex 在 #54 指出）：停机前的平均值不出 busy、不记进曲线，页面与 gpu_idle 退回探针此刻值。"""
+        t = time.time()
+        for age, up in ((5, True), (3600, False)):
+            st = fake_status(t=t - age, info={"gpus": [{"i": 0, "uuid": "GPU-a", "used": 1, "total": 2, "util": 99}]},
+                             gpu_busy={"GPU-a": {"now": 50, "m10": 50.0, "h1": 50.0, "cov": 3600}})
+            e = {"id": "h" + str(age), "status": st, "done": [], "lan_off": False}
+            O._annotate(e, {"id": e["id"]}, [], {}, {}, t)
+            self.assertEqual(e["worker_up"], up)
+            self.assertEqual("busy" in e, up)
+            self.assertEqual(e["series"][-1]["gpu"][0][3], 50.0 if up else None)
+
+
 class CollectTest(Tmp):
     def cfg(self):
         return {"id": "p", "alerts": {"gpu_idle_util": 5.0, "gpu_idle_min": 15}, "hosts": [{"id": "h", "checks": []}]}

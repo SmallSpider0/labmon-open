@@ -160,7 +160,7 @@
   主机项另有看板算的 `lw`（`fleet.local_writes`，GiB）：`{used, total, own, user labmon 之外的, shm, ok, risk 续租、关机、换人要先勾确认, scan {since, t, b, n, top [[路径, GiB, 最近写入]], more [几处, GiB], partial, pending, err} 或 null}`；
   GPU 利用率两种口径（#51，worker 每 10 秒一个样本，`win_mean` 取窗口平均）：`util10 {UUID: %}` 是「在用时多高」，近 10 分钟、卡上有保活的那几轮不记（fit 列出来看）；
   `gpu_busy {UUID: {now 此刻, m10 近 10 分钟, h1 近 1 小时, cov 1 小时窗口实际覆盖的秒数（worker 刚起时不满）, ka 此刻只有保活时保活顶出来的原值}}` 是「吃满程度」，卡上只有保活的那几轮记 0（页面上的利用率）；样本不到 3 个的平均为 null。
-  主机项另有看板算的 `busy`（`overview.gpu_busy`）：按 `info.gpus` 的顺序每卡一项 `{i, …gpu_busy 那几项, d1 近 24 小时平均, d1cov 它覆盖的秒数}`，`d1` 是 `series` 各行 `m10` 的平均；离线沿用旧状态时没有。
+  主机项另有看板算的 `busy`（`overview.gpu_busy`）：按 `info.gpus` 的顺序每卡一项 `{i, …gpu_busy 那几项, d1 近 24 小时平均, d1cov 它覆盖的秒数}`，`d1` 是 `series` 各行 `m10` 的平均；离线沿用旧状态、worker 不在（`worker_up` 为假）时没有，曲线那一行的 `m10` 也记 null。
   `room` 是按记账还能放多少：`{ram, margin, gpus {UUID: MB}, cpu 核, cpu_cap 记账上限（配额向下取整）, other_cpu, keep, owner}`，读不到配额时 `cpu`、`cpu_cap` 为 null；`other_cpu` 是认得准的 labmon 之外的核数（容器给 2 核以上时才有，否则 null），`keep` 是各卡给对方留着、对方还没用上的显存 `{UUID: MB}`（只列非 0 的），`owner` 是不放的卡（对方超出预留或刚回落、有停不了的保活），`worker fit` 按这几项判整机独占、整卡封顶与卡；借来的主机上 `guest.block` 是整台不放新任务的原因（对方内存或 CPU 超出预留、刚回落：`guest_block`，没有为 null）；
   `running[]` 的 `est` 是资源估计（`estimate`）：`vram`（每卡 GiB）与来源 `src`、`ram`（GiB）与来源 `ram_src`（#61 起 `src` 只指显存；之前放行、被接管的任务没有 `ram_src`，与 `src` 同一来源）、`util`，带 `cpus`（估计核数）、`cpu_src`（来源），`acct` 带 `cpu`（记账核数 = max(估计封顶到 `cpu_cap`, 实测)，开跑满 10 分钟后估计那份换成近 10 分钟窗口核数的最大值、不超过给的核数、不低于 1（#65），占位任务 0），`io_sus` 是记了“读写拥塞嫌疑”的时刻（没记为 null）；
   `waiting[]` 的 `est` 同样带 `ram_src`、`cpus`、`cpu_src`，`cpu_wait` 是一直因 CPU 被挡满 10 分钟后已挡的秒数（不到为 null）；`disk`（共享盘扫描，`mine` 为真的那台在扫）的 `yield` 是共享盘慢、推迟中的说明（没推迟为 null）；

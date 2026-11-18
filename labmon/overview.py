@@ -387,8 +387,11 @@ def _annotate(e: dict, h: dict, projects: list[dict], prog: dict, colors: dict, 
     for p in list((sg.get("projects") or {}).values()) + list(sg.get("local") or {}):
         pick_color(colors, p)
     if st.get("info") and not e["lan_off"]:   # 离线时沿用的旧状态不写进曲线，也不出平均利用率
-        rows = _series(h, st, t)
-        e["busy"], e["series"] = gpu_busy(st, rows), _thin(rows)
+        # worker 不在（状态过期，与 worker_up 同一门槛）：状态里的平均值是停机前的，不记进曲线、不出 busy（页面与 gpu_idle 退回探针此刻值，#54 审查）
+        rows = _series(h, st if e["worker_up"] else dict(st, gpu_busy={}), t)
+        e["series"] = _thin(rows)
+        if e["worker_up"]:
+            e["busy"] = gpu_busy(st, rows)
 
 
 def _voided(hosts: list[dict], t: float) -> list[dict]:
