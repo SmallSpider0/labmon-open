@@ -41,7 +41,7 @@ from . import pool_dispatch as PD
 from .projects import archived_rows
 from .labmon_worker import qslug
 from .collect import write_page
-from .config import STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, parse_time, pick_color, sched, user_hosts
+from .config import STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, parse_time, pause_by, pick_color, sched, user_hosts
 from .health import container_step, lease_due, lease_end, link_step
 from .records import EVENT_CATS, EVENT_KINDS, log_events, told
 from .state import append_row, load_json, load_rows, parse_rows, save_json, snapshot, state_dir, usage_file, write_atomic
@@ -501,7 +501,8 @@ def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | Non
     """工作台的调度卡：生效的设置与各项目的用量取最新一份 worker 状态的 share（各 worker 都按所有主机算，缺省值只在 worker）；
     各项目此刻占几张卡（各主机 share.run 加起来）、排队几个（推演里还没开始的）、在等几个（有排位的）、
     近 1 天平均等多久（放行时记的 wait，按开始时刻取窗口：跑完的取本机存的用量记录 _keep_usage，在跑的取状态）、
-    优先、暂停：null 或 {until（None 为无期限）, hosts}：项目级的（sw，主机清单 [sched.focus]、[sched.pause]，缺省现读）hosts 为 None；
+    优先、暂停：null 或 {until（None 为无期限）, hosts}：项目级的（sw，主机清单 [sched.focus]、[sched.pause]，缺省现读）hosts 为 None，
+    项目级的暂停另带 by（谁下的，config.pause_by；没记的为 None，当管理员下的，#16）；
     没有项目级的、只在几台单独下的（worker 状态 overrides 里不带 global 的）hosts 列出这几台，until 取最晚的。
     项目取看板上的，另加此刻在跑、在等的别的项目名；没有 worker 状态带 share 时为 None。"""
     sts = [h["status"] for h in hosts if (h.get("status") or {}).get("share")]
@@ -517,9 +518,10 @@ def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | Non
     recent = [(r.get("p"), r.get("wait")) for h in hosts for r in load_rows(usage_file(h["id"])) if r["s"] >= t - WAIT_WINDOW_S]
     recent += [(r.get("project"), r.get("wait")) for st in allst for r in st.get("running") or [] if (r.get("t0") or 0) >= t - WAIT_WINDOW_S]
     sw = sched(t) if sw is None else sw
+    by = pause_by()
     def flag(kind, pid):
         if pid in (sw.get(kind) or {}):
-            return {"until": sw[kind][pid], "hosts": None}
+            return {"until": sw[kind][pid], "hosts": None, **({"by": by.get(pid)} if kind == "pause" else {})}
         on = [(h["id"], o.get("until")) for h in hosts for o in (h.get("status") or {}).get("overrides") or []
               if o["kind"] == kind and o.get("target") == pid and not o.get("global")]
         return {"until": max((u for _, u in on), key=lambda u: u or float("inf")), "hosts": sorted({h for h, _ in on})} if on else None

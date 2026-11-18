@@ -36,7 +36,7 @@ from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 
 from . import projects as PJ
-from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, host_users, set_host_users, share_host, user_hosts
+from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, host_users, pause_by, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
 from .state import snapshot, state_root, write_atomic
 
@@ -743,6 +743,14 @@ def need_host(who: Ident, hid: str) -> None:
         raise Denied(403, f"主机 {hid} 没开给你用：找管理员在「组内服务器 → 人员」里给你开（主机清单这台的 users）")
 
 
+def need_pause(who: Ident, pid: str) -> None:
+    """要加、改或撤项目 pid 的项目级暂停（主机清单 [sched.pause]，#16）：普通用户只能动自己下的；已有别人下的（管理员、没记是谁的）还没到期的暂停时抛 Denied(403)，
+    免得重下一次把管理员的暂停改成自己的再撤。项目是不是他的另由 need_project 核；调用方持 HOSTS_LOCK，判断与写入之间别人改不了。"""
+    if who.role == "admin" or pid not in (sched().get("pause") or {}) or _is(pause_by().get(pid), who.name):
+        return
+    raise Denied(403, f"{pid} 的暂停不是你下的（管理员或之前的主人下的）：恢复、改到期都找管理员")
+
+
 def _nrm(root: str) -> str:
     return posixpath.normpath(str(root or ""))
 
@@ -799,7 +807,7 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     """看的人能看到的全局快照：普通用户去掉组内服务器（fleet）、共享盘的按人明细与按人告警、给系统通知的提醒（notices）、
     给实验会话的消息（wake）与看板服务所在机的体检（hostcheck，#166），记录的分类也去掉组内的那几类；
     主机只留给他看的（他能用的、他的项目有车道的），项目、已归档的、挪法建议只留他的，登记只留那些主机上他项目的清单（#167）。
-    调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上）。管理员原样。"""
+    调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上），别人项目的暂停去掉谁下的（by）。管理员原样。"""
     if who.role == "admin" or not snap:
         return snap
     acc = acc or access(who, snap)
@@ -815,6 +823,10 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
                    for x in snap.get("regs") or [] if x.get("host") in acc.hosts or any(q.get("project") in acc.projects for q in x.get("queues") or [])]
     if isinstance(snap.get("occ"), dict):
         out["occ"] = {k: v for k, v in snap["occ"].items() if k in acc.hosts}
+    sc = snap.get("sched")
+    if isinstance(sc, dict):                          # 调度卡各项目的行照留；别人项目的暂停不给看是谁下的（#16）
+        out["sched"] = {**sc, "projects": [p if p.get("id") in acc.projects or "by" not in (p.get("paused") or {})
+                                           else {**p, "paused": {k: v for k, v in p["paused"].items() if k != "by"}} for p in sc.get("projects") or []]}
     dk = snap.get("disk")
     if isinstance(dk, dict):
         out["disk"] = {k: v for k, v in dk.items() if k not in ("owners", "names", "owners_set", "colors")}

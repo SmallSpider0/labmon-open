@@ -695,7 +695,7 @@ class Handler(BaseHTTPRequestHandler):
             U.need_project(who, s("project"))
             for j in _strings(body, "jobs"):
                 U.need_project(who, WT.job_key(j, s("project"))[0])
-        elif r.own == "override":                      # 项目级的暂停、优先：项目是他的，--host 只许他能用的
+        elif r.own == "override":                      # 暂停：项目是他的，--host 只许他能用的（项目级的谁下的在写的时候核，users.need_pause）
             U.need_project(who, s("target"))
             hosts = _strings(body, "hosts")
             for h in hosts:
@@ -981,7 +981,7 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/fleet/op/"):
             return self._fleet_op(path[len("/fleet/op/"):], who)
         if path.startswith("/sched/"):
-            return self._sched(path[len("/sched/"):])
+            return self._sched(path[len("/sched/"):], who)
         if path.startswith("/project/"):
             return self._project(path[len("/project/"):], who)
         if path.startswith("/reg/"):
@@ -1166,7 +1166,8 @@ class Handler(BaseHTTPRequestHandler):
             return 200, {**r, "commit": running, "client_status": status}
         m = re.fullmatch(r"project/([^/]+)/check", act)
         if m:
-            return 200, {**A.check(unquote(m[1]), s("text")), "commit": DP.RUNNING["commit"]}   # 在跑的提交：命令行与自己的不同时提示 labmon update（#167）
+            may = None if who.role == "admin" else lambda hid: U.may_host(who, hid)
+            return 200, {**A.check(unquote(m[1]), s("text"), may), "commit": DP.RUNNING["commit"]}   # 在跑的提交：命令行与自己的不同时提示 labmon update（#167）
         if act.startswith("worker/"):
             sub = act[len("worker/"):]
             args = _worker_args(sub, body)
@@ -1184,7 +1185,8 @@ class Handler(BaseHTTPRequestHandler):
                 allowed = [str(h["id"]) for h in active_hosts()]
                 for hid in allowed:
                     U.need_host(who, hid)
-            r, what = A.override(verb, s("target"), hosts or None, num("until"), now, immediate_hosts=allowed), f"{verb} {s('target')}"
+            r, what = A.override(verb, s("target"), hosts or None, num("until"), now, immediate_hosts=allowed,
+                                 by=who.name, check=lambda: U.need_pause(who, s("target"))), f"{verb} {s('target')}"
         elif act == "project/init":
             name = body.get("name") or None
             if name is not None and (not isinstance(name, str) or "/" in name or name in (".", "..") or "\x00" in name):
@@ -1346,9 +1348,9 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, {"msg": msg})
 
 
-    def _sched(self, act: str):
+    def _sched(self, act: str, who: U.Ident):
         """调度卡：改项目的权重（主机清单的 [sched.weight]）、加撤优先与暂停（[sched.focus]、[sched.pause]，所有主机，含之后加入的，#96）；
-        都只改主机清单，看板下一轮随 sched.json 写给各 worker。"""
+        都只改主机清单，看板下一轮随 sched.json 写给各 worker。权重、优先只给管理员（路由表）；暂停记谁下的，普通用户只动自己下的（users.need_pause，#16）。"""
         body = self._body()
         if body is None:
             return
@@ -1365,7 +1367,9 @@ class Handler(BaseHTTPRequestHandler):
                 elif act in SCHED_ACTS:
                     kind, on = SCHED_ACTS[act]
                     until = _number(body, "until") if on else None
-                    msg = set_sched_ovr(kind, pid, on, until)
+                    if kind == "pause":
+                        U.need_pause(who, pid)
+                    msg = set_sched_ovr(kind, pid, on, until, by=who.name)
                     if kind == "pause" and "本来就没有" not in msg:   # 暂停、恢复会让会话以为卡住或要接着加任务：告诉它（权重、优先只改排序，不叫醒）
                         tell(pid, act, f"{sched_ovr_text(kind, pid, until)}（所有主机）：不再放行它的新任务，正在跑的跑完，排着的等恢复" if on
                              else f"恢复 {pid}（所有主机）：照常放行它的任务")
@@ -1396,7 +1400,7 @@ class Handler(BaseHTTPRequestHandler):
                 if p is None:
                     return self._json(404, {"error": f"看板服务里没有项目 {pid}"})
                 msg = PJ.archive(pid, p.snapshot(), snapshot(), p.interval, by="看板页面上" if who.via == "session" else f"经命令行（{who.name}）",
-                                 check_owner=lambda: U.need_project(who, pid), own=who.role != "admin")
+                                 check_owner=lambda: U.need_project(who, pid), own=who.role != "admin", user=None if who.role == "admin" else who.name)
             elif act == "config":
                 p = self.board.projects.get(pid)
                 if p is None:
@@ -1709,7 +1713,8 @@ ROUTES = [
     # 命令行（#162，api.py）：会改整台主机、借卡、改主机清单在用不在用的要 admin 令牌（实验会话的 project 令牌做不了，交给用户）
     _R("POST", r"/api/worker/(stop|limit)", "admin", admin=True),
     _R("POST", r"/api/worker/(add|rm|status|fit)", "project", own="worker"),
-    _R("POST", r"/api/override/(pause|resume|focus|unfocus)", "project", own="override"),
+    _R("POST", r"/api/override/(focus|unfocus)", "project", admin=True),   # 优先只给管理员（#16），带不带 --host 都一样
+    _R("POST", r"/api/override/(pause|resume)", "project", own="override"),
     _R("POST", r"/api/override/(drain|undrain)", "admin", admin=True),
     _R("POST", r"/api/(borrow|host/return|host/restore)", "admin", admin=True, ops=True),   # 借用与借来的还：会 ssh 到组内服务器
     _R("POST", r"/api/wait", "project", own="wait"),                   # labmon wait 的长轮询（waits.wait）
@@ -1729,7 +1734,7 @@ ROUTES = [
     _R("GET", r"/p/.*", "read", own="path"),                           # 项目页：普通用户只看自己的项目（#167）
     _R("GET", r"/fleet/.*", "read", admin=True),                       # 组内服务器的数据只给管理员（维护者 2026-11-10 定）
     _R("POST", r"/(fleet/op|fleet/probe|renew)/.*", "admin", admin=True, ops=True),
-    _R("POST", r"/sched/weight", "project", admin=True),               # 调度权重只给管理员（#157 E 节的表）
+    _R("POST", r"/sched/(weight|focus|unfocus)", "project", admin=True),   # 调度权重（#157 E 节的表）与优先（#16）只给管理员
     _R("POST", r"/project/(owner|delete)", "admin", admin=True),                # 换项目主人（#167）：只给管理员
     _R("POST", r"/(sched|project)/[^/]+", "project", own="body"),
     _R("POST", r"/reg/(move|rm)", "project", own="reg"),

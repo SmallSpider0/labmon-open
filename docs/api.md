@@ -98,7 +98,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `GET /`、`/overview.json`、`/records.json`、`/p/…`、`/api/me`、`/api/project/<id>/config` | `read` |
 | `GET /fleet/…`（组内服务器的数据） | `read`，只给管理员 |
 | `POST /fleet/op/…`、`/fleet/probe/…`、`/renew/…`（平台操作） | `admin`，只给管理员；公网须开启账号许可 |
-| `POST /sched/weight` | `project`，只给管理员 |
+| `POST /sched/(weight\|focus\|unfocus)`、`/api/override/(focus\|unfocus)`（调度权重与优先，#16） | `project`，只给管理员 |
 | `POST /sched/…`、`/project/…`、`/reg/…`、`/p/<id>/collect`；`PUT /api/project/<id>/config` | `project` |
 | `POST /collect` | `project` 或 `deploy` |
 | `GET /api/admin/deploy` | `deploy`，只给管理员 |
@@ -106,7 +106,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/admin/deploy`、`/api/worker/start` | `deploy`，只给管理员，只在内网入口 |
 | `GET /api/hosts`、`GET /api/client/install.sh`、`GET /api/client/wheel` | `read` |
 | `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
-| `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit)`、`/api/override/(pause\|resume\|focus\|unfocus)`（[命令行](#命令行162)） | `project` |
+| `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit)`、`/api/override/(pause\|resume)`（[命令行](#命令行162)） | `project`；普通用户只改自己下的项目级暂停（`users.need_pause`，#16） |
 | `POST /api/worker/(stop\|limit)`、`/api/override/(drain\|undrain)` | `admin`，只给管理员 |
 | `POST /api/borrow`、`/api/host/(return\|restore)` | `admin`，只给管理员；公网须开启账号许可 |
 | `POST /api/password`、`/api/tokens/add`、`POST /api/revoke`、`/api/push`、`/api/push/test` | 浏览器会话（`account`） |
@@ -287,7 +287,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 | 请求 | 回 |
 |---|---|
 | `POST /api/wait {"project", "jobs", "watch", "hold", "extra", "rid"}` | `{"new": {键: 文字}, "jobs": [{"name", "st", "text", "final"}], "watch", "done"}`（`waits.wait`） |
-| `POST /api/project/<id>/check {"text"}` | `{"rc", "out"（各主机的探针规格）, "err", "after"（同步状态那行之后的几行）}`；配置不对 400 |
+| `POST /api/project/<id>/check {"text"}` | `{"rc", "out"（各主机的探针规格）, "err", "after"（同步状态那行之后的几行）}`；配置不对 400。普通用户看到的 `out` 里，没开给他的主机只有一行“没开给你用”，不列连接信息与探针规格（#16） |
 | `POST /api/project/init {"host", "name"}` | `{"rc", "out", "err"}`（`api.project_init`） |
 | `POST /api/worker/<动作> {"host", "args", "gpus", "project", "stop"}` | `{"rc", "out", "err"}`；`usage` 是参数错（如 `--project` 不是看板上的项目） |
 | `POST /api/override/<动作> {"target", "hosts", "until", "now"}` | `{"rc", "out", "err"}`；`until` 是 epoch 秒（相对写法在命令行那台机器上解析） |

@@ -301,7 +301,7 @@ def parse_until(s: str | None) -> float | None:
 
 
 def cmd_override(argv: list[str]) -> int:
-    """临时指令经 POST /api/override/<动作>（api.override）；drain、undrain 要 admin 令牌。"""
+    """临时指令经 POST /api/override/<动作>（api.override）；drain、undrain 要 admin 令牌；focus、unfocus 只给管理员，普通用户的 resume 只撤自己下的暂停（#16）。"""
     ap = argparse.ArgumentParser(prog=f"labmon {argv[0]}")
     ap.add_argument("target", help="项目名（与 worker 里的项目名一致，见工作台）或主机 id（drain）")
     ap.add_argument("--host", action="append", help="只对这台主机（缺省：所有主机，含之后加入的：记在主机清单的 [sched.pause] / [sched.focus]）")
