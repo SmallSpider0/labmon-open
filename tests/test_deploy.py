@@ -25,6 +25,13 @@ ROOT = Path(__file__).resolve().parent.parent
 _spec = importlib.util.spec_from_file_location("deploy", ROOT / "tools" / "deploy.py")
 DP = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(DP)
+sys.path.insert(0, str(ROOT / "tests"))
+from fixtures import no_git_env  # noqa: E402
+
+
+def setUpModule():
+    """临时仓库上的 git（sh_git 与被测的部署代码）不认继承来的 GIT_DIR 之类：整个模块都去掉。"""
+    unittest.addModuleCleanup(no_git_env().stop)
 
 
 def real_env():

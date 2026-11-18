@@ -13,6 +13,7 @@ from unittest import mock
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fixtures import no_git_env  # noqa: E402
 from labmon import workerctl  # noqa: E402
 
 
@@ -137,6 +138,7 @@ class OverrideCliTest(unittest.TestCase):
 class CommittedTest(unittest.TestCase):
     def test_takes_main_not_branch(self):
         """在分支的 worktree 里跑：部署取 main 上已提交的版本，不取分支上提交了的、也不取工作区改了的；路径相对包目录，不相对仓库根。"""
+        no_git_env(self)
         with tempfile.TemporaryDirectory() as td:
             repo = Path(td).resolve()
             pkg = repo / "labmon"

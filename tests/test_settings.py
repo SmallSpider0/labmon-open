@@ -7,10 +7,13 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import sys
 import unittest
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "tests"))
+from fixtures import no_git_env  # noqa: E402
 
 
 class SettingsTest(unittest.TestCase):
@@ -26,6 +29,7 @@ class SettingsTest(unittest.TestCase):
     @unittest.skipUnless(shutil.which("git") and (ROOT / ".git").exists(), "不在 git 检出里")
     def test_not_ignored(self):
         """settings.json 要进仓库；worktree 目录要忽略。按 git 自己的判断（git check-ignore），不按 .gitignore 的字面。"""
+        no_git_env(self)
         ign = lambda p: subprocess.run(["git", "check-ignore", "-q", p], cwd=ROOT).returncode == 0  # noqa: E731
         self.assertFalse(ign(".claude/settings.json"))
         self.assertTrue(ign(".claude/worktrees/x"))

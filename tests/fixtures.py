@@ -291,6 +291,21 @@ esac
 """
 
 
+def no_git_env(case=None):
+    """去掉继承来的 GIT_* 环境变量（GIT_DIR、GIT_WORK_TREE、GIT_INDEX_FILE、GIT_CONFIG* 等），直到用例收尾：
+    测试里建临时仓库的 git、被测代码自己调的 git 都只认 -C 给的目录。会话里 export 过 GIT_DIR 再跑测试时，
+    不去掉的话 init、config、commit 会改到那个真仓库（写进 core.worktree 与测试身份、把没跟踪的文件提交掉）。
+    给了 case 就随它的 addCleanup 复原；不给时返回补丁，调用方自己 stop（setUpModule 用）。"""
+    from unittest import mock
+    p = mock.patch.dict(os.environ)
+    p.start()
+    for k in [k for k in os.environ if k.startswith("GIT_")]:
+        del os.environ[k]
+    if case is not None:
+        case.addCleanup(p.stop)
+    return p
+
+
 def no_host(d: Path) -> dict:
     """worker 读主机现状的三处（/proc 的用量与内存、cgroup 的上限、容器根盘）指到 d 下不存在的目录：测试不读跑测试的这台机器
     （Linux 上 CI 机器的 /proc 与 cgroup 是真的，内存上限只有几 GiB，任务全都放不下；macOS 上本来就没有；根盘不指走的话 LocalDisk 会扫这台的 /）。

@@ -14,7 +14,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from labmon import dist
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from fixtures import no_git_env  # noqa: E402
+from labmon import dist  # noqa: E402
 
 
 SKILL_MD = """---
@@ -31,8 +33,35 @@ name: lab-experiments
 """
 
 
+class GitEnvTest(unittest.TestCase):
+    def test_setup_ignores_inherited_git_env(self):
+        """带着 GIT_DIR、GIT_WORK_TREE 跑整套测试（在 worktree 里 export 过）：建临时仓库的 git 不能改到那个仓库。诱饵是临时仓库，不拿真仓库试。"""
+        with tempfile.TemporaryDirectory() as td:
+            decoy = Path(td) / "decoy"
+            decoy.mkdir()
+            clean = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+            git = lambda *a: subprocess.run(["git", "-C", str(decoy), "-c", "user.name=d", "-c", "user.email=d@x", *a],  # noqa: E731
+                                            env=clean, capture_output=True, text=True, check=True).stdout.strip()
+            git("init", "-q", "-b", "main")
+            (decoy / "a.txt").write_text("诱饵\n")
+            git("add", ".")
+            git("commit", "-qm", "诱饵")
+            (decoy / "untracked.txt").write_text("没跟踪\n")
+            before = ((decoy / ".git/config").read_text(), git("rev-parse", "HEAD"), git("status", "--porcelain"))
+            case = ClientDistTest("test_client_status_uses_history")
+            with patch.dict(os.environ, {"GIT_DIR": str(decoy / ".git"), "GIT_WORK_TREE": str(decoy)}):
+                try:
+                    case.setUp()
+                    log = subprocess.run(["git", "-C", str(case.repo), "log", "--format=%s"], env=clean, capture_output=True, text=True).stdout
+                    self.assertEqual(log.strip(), "初版")
+                finally:
+                    case.doCleanups()
+            self.assertEqual(before, ((decoy / ".git/config").read_text(), git("rev-parse", "HEAD"), git("status", "--porcelain")))
+
+
 class ClientDistTest(unittest.TestCase):
     def setUp(self):
+        no_git_env(self)
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
         self.root = Path(tmp.name)
