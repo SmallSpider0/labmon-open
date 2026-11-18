@@ -16,13 +16,13 @@ Codex 与 Claude 共用这份流程。首次使用或接续等待时读 [session
 ## 红线
 
 - **先核对持久盘挂载**：下文以 `/data` 为共享盘示例，按主机清单的 `data_root` 和 `shared` 使用；容器盘可能在重启、续租时重置。自己的 `data_root` 下 `projects/<项目>/` 放项目自己的；`envs/`、`datasets/`、`weights/` 共享、只读引用、不另存副本（规范见服务器上的 `README.md`）。各类文件放哪见 [lists.md](lists.md)「文件放哪」。
-- **不扫盘**：du、find 会和别的任务抢 NFS 的 IO。用量去看板看（见「跑和盯」）。
-- **ssh 不轮询**：短时间多连会被限流约 10 分钟。本机 `~/.ssh/config` 让裸 ssh 复用 labmon 的长连接，但仍不许定时 ssh 查状态；能看看板就不 ssh。
+- **不扫盘**：du、find 会和别的任务抢 NFS 的 IO。用量用 `labmon disk` 看（见「跑和盯」）。
+- **ssh 不轮询**：短时间多连会被限流约 10 分钟。本机 `~/.ssh/config` 让裸 ssh 复用 labmon 的长连接，但仍不许定时 ssh 查状态；能用 labmon 命令查的就不 ssh。
   多个文件一条连接 tar：上传 `tar czf - 文件… | ssh … "tar xzf - -C 目标"`，取回 `ssh … 'cd 目录 && tar cf - 文件' | tar xf -`。经 ssh 起后台进程：先 `cd`，再单独一句 `setsid nohup … > /dev/null 2>&1 < /dev/null &`。
 - **不自己 kill 正在跑的任务**（会记成失败），停法见「暂停与让路」。
 - **GPU 保活不碰**：由 worker 与看板管，不自己 `ka.sh start / stop`，更不 kill 保活进程。
 - **租期、续租、借卡、权重与优先由用户定**：续租在看板上点、验证码由用户输入，实验会话不碰平台、不自己借卡、不改 `[sched]`。
-- **服务器重启就是容器重启**：标了 `worker = "auto"` 的主机看板自动拉起 worker，中断的任务从头重跑；没标的手动 `labmon worker start <主机>`。
+- **服务器重启就是容器重启**：标了 `worker = "auto"` 的主机看板自动拉起 worker，中断的任务从头重跑；没标的请用户 `labmon worker start <主机>`（要管理员令牌）。
 
 ## 这台机器第一次用 labmon
 
@@ -54,7 +54,7 @@ Codex 与 Claude 共用这份流程。首次使用或接续等待时读 [session
 2. 项目根目录写 `monitor.toml`（模板 `examples/monitor.toml`）：`title`、`id`，截止写 `[[markers]]`（北京时间，`date = "2026-11-11 20:00"`）。
    **不写 `[[queues]]`**（车道按 `worker add --project` 的登记生成，登记在哪台车道就在哪台），更不写带通配符的车道（会把借来主机上的队列重复吃进来）。`[[groups]]` 可不写（按名字前缀自动归组）；不写 `out_dir`（输出目录固定在看板的登记目录里）。
    主机设置在用户级 `~/.config/labmon/hosts.toml`（各项目共用），项目里只写本项目特有的 `[[hosts]] id = "…"` 字段。
-3. `labmon check -c monitor.toml` 校验，`labmon project push -c monitor.toml` 登记到看板上（看板服务一分钟内开始采集）。看板上的项目页 `/p/<id>/`（地址以 `client.toml` 或用户给的为准，`labmon url <id>` 打出各入口的链接）要登录、是给用户看的（[api.md](../../docs/api.md)）；会话用命令行。命令行经看板接口（[api.md「命令行」](../../docs/api.md#命令行162)），要令牌：没有或不认（报“要先登录”“令牌无效…”、退出 3，后面那句写着怎么办）就把那句转给用户：用户 `labmon login` 一次，或在看板那台机器上 `labmon user token <看板账号> --scope project --out ~/.config/labmon/client.token`；会话不自己输口令、不建账号；`project` 令牌做不了借卡、归还主机、drain、`worker start|stop|limit`、推改了 `[[hosts]]`/`[[queues]]` 的配置（用户 `labmon login --admin` 后 `labmon project push --admin`），这些交给用户。
+3. `labmon check -c monitor.toml` 校验，`labmon project push -c monitor.toml` 登记到看板上（看板服务一分钟内开始采集）。看板上的项目页 `/p/<id>/`（地址以 `client.toml` 或用户给的为准，`labmon url <id>` 打出各入口的链接）要登录、是给用户看的（[api.md](../../docs/api.md)）；会话不开浏览器、不自己拿证书和令牌直接请求看板，要读的都用命令（`labmon status`、`labmon disk`、`labmon records`，见「跑和盯」）。命令行经看板接口（[api.md「命令行」](../../docs/api.md#命令行162)），要令牌：没有或不认（报“要先登录”“令牌无效…”、退出 3，后面那句写着怎么办）就把那句转给用户：用户 `labmon login` 一次，或在看板那台机器上 `labmon user token <看板账号> --scope project --out ~/.config/labmon/client.token`；会话不自己输口令、不建账号；`project` 令牌做不了借卡、归还主机、drain、`worker start|stop|limit`、推改了 `[[hosts]]`/`[[queues]]` 的配置（用户 `labmon login --admin` 后 `labmon project push --admin`），这些交给用户。
 
 **改 monitor.toml**：看板上登记的那份为准，项目目录里这份是工作副本（随项目提交）。`labmon wait` 每轮自动同步：本地改了推上去、页面上改了拉回来（打一行“已拉回”，随项目提交，不要回滚）。
 没挂 wait 时改了就 `labmon project push -c monitor.toml`。报 `sync_conflict:`（两边都改了）或 push 说“先 labmon project pull”时：`labmon project pull -c monitor.toml` 拉回看板上的（本地那份存到 `.labmon/monitor.toml.mine`），把要的改动再改一遍，wait 会推上去。
@@ -67,6 +67,7 @@ Codex 与 Claude 共用这份流程。首次使用或接续等待时读 [session
 - **删已登记的 `[[queues]]`**：`labmon worker status <主机>` 里登记着的清单不用再写，删掉；通配车道一律删。趁车道上没有任务在跑时删（删了车道 id 会变，在跑任务的速度曲线从头记）。只留确实要起用途名（`label`）的。
 - **删重复或过时的主机检查**：保活由 worker 管、主机检查写在用户级主机清单里；项目 `monitor.toml` 里旧的保活 `[[hosts.checks]]`、已归还主机的 `[[hosts]]` 段与它的 `when_idle` 删掉（不然误报 `idle:`）。
 - **清项目 AGENTS.md 里旧的服务器规则**：`gpu_queue.sh`、手写的 ssh 轮询、自己停启保活、du 看用量之类，换成一句“跑实验按 lab-experiments skill”。
+- **查项目 AGENTS.md 里缓存放哪的写法**：项目 AGENTS.md 比这里优先，像“数据、缓存、代码与输出各台都能读，都放共享盘”这类话会盖过下面「最容易错的」那条缓存规矩。有就改成分开说：数据集、代码和结果放共享盘，能重算的缓存放 `$LABMON_CACHE`。
 - 截止写进了 `[[markers]]`、换成了北京时间；每个任务有进度行。
 
 ## 写清单要点
@@ -74,6 +75,8 @@ Codex 与 Claude 共用这份流程。首次使用或接续等待时读 [session
 细则、例子与命令全在 [lists.md](lists.md)，写之前读一遍。最容易错的：
 
 - 每个任务必须打 `PROGRESS k/N` 进度行；多阶段打一个贯穿全程、只增不减的计数。
+- **能重算的缓存放本地**：“共享盘各台可读”只适用于数据集、代码和结果。能重算的缓存放 `$LABMON_CACHE`，行尾用 `needs=` 声明；重建不到 10 分钟的不在共享盘留主副本（[lists.md](lists.md)「文件放哪」）。
+- **只给下游用的中间产物**（如 E1 的权重留给 E3、E4 读）用完要清：在清单里加一行 `after=<下游任务们>` 的收尾任务删掉它（下游都跑成功才放行），或定期 `labmon disk` 看哪些占得多再清。
 - 插队、追加就改清单（整体替换）；同一张卡上的串行写进一份清单。
 - 一条清单只归一台：`worker add` 到另一台是**搬走**，两台都跑就新建清单或从原清单剪行。
 - 每台按资源类开固定的长期清单（GPU 槽几条、显存重的一条、CPU 一条），登记在项目的固定目录（不用代码目录），新任务往里追加；不再用的 `worker rm`（[lists.md](lists.md)「排到哪台、开不开并行」）。
@@ -94,11 +97,13 @@ Codex 与 Claude 共用这份流程。首次使用或接续等待时读 [session
 
 **等一个任务跑完**：给上面那个 wait 加上 `--job <任务名>`（别的项目的写 `项目/任务名`，可写几个）：`labmon wait -c monitor.toml --job <任务名>`。它问看板（长轮询）、不连服务器，告警照常报（退出 1）；任务都有结果时退出（全成功 0，其余 4），写成功或失败与日志位置，找不到或不会再跑的也直接说（`docs/workbench.md`「看板服务」的“等任务跑完”）。没等完就被告警叫醒的，重挂时照样带上 `--job`。不要写 `until ssh …; do sleep 30; done` 这类定时 ssh。
 
-**何时跑完**：以 labmon 的推演为准，不拿 `est_min` 自己外推：项目页「全部完成」与时间线（快照里 `all_done_ts`、任务的 `eta_ts`），`labmon worker status` 的预计开始。推演排不出的（车道写“推演不出…：原因”）就照实说排不出和原因。
+**看现状**：`labmon status`（项目缺省取当前目录的 monitor.toml）打出各主机与卡、各车道（几个跑完、预计何时跑完、为什么不跑）、运行中的进度与预计结束、排队的预计开始、最近失败与日志位置、计划项的 实际/估时、挪法建议、此刻的告警；`--json` 给原始数据（`docs/api.md`「只读命令」）。与本项目有关的记录（拉起、掉线、续租、失败、临时指令）用 `labmon records [--host <主机>]`。
 
-**有哪些卡、谁在用**：`labmon host list`（在用、借来的、已归还；末尾“共用 worker 目录”那行列出同一块共享盘上的几台，放在那里的数据与代码各台都读得到，不用 ssh 去确认；`labmon worker status <主机>` 末尾也有一句）；看板工作台（`client.toml` 里那个地址的根）的总览与主机页；`labmon fleet`（组内服务器各台现状与使用人；只在看板那台机器上能跑）。
+**何时跑完**：以 labmon 的推演为准，不拿 `est_min` 自己外推：`labmon status` 的“预计全部跑完”、各车道与排队任务的预计时间，`labmon worker status` 的预计开始。推演排不出的（车道写“推演排不上：原因”、排队任务写“推演不出何时开始”）就照实说排不出和原因。
 
-**磁盘用量**：共享盘看项目页「资源」里本项目的存储、主机页“共享盘”一行、组内服务器页「共享盘」（按人、按目录、几天后满）；本地盘看主机页“本地盘”一行与记录卡的“本地盘”（开机以来新写的各目录，续租会清空：要留的先挪到共享盘）。不跑 du、find。
+**有哪些卡、谁在用**：`labmon host list`（在用、借来的、已归还；末尾“共用 worker 目录”那行列出同一块共享盘上的几台，放在那里的数据与代码各台都读得到，不用 ssh 去确认；`labmon worker status <主机>` 末尾也有一句）；`labmon status` 的主机行（每张卡的利用率与显存）；`labmon worker status <主机>`（这台上各项目在跑、在等的与临时指令）。组里别人的服务器只有用户能看。
+
+**磁盘用量**：`labmon disk`：本项目在共享盘上各目录的大小、近 24 小时与 7 天的增量、最大的几项，整块盘剩多少、按近来的速度几天满；各台本地盘上本项目的缓存与单格临时、本地盘余量（续租会清空：要留的先挪到共享盘）。不跑 du、find。别人的、组里的用量明细只有用户能看。
 
 ### 暂停与让路
 
@@ -127,7 +132,7 @@ Codex 与 Claude 共用这份流程。首次使用或接续等待时读 [session
 
 ## 结束一个项目
 
-项目彻底结束：`labmon project archive <id>`（或看板项目页「管理」里点「归档」）：移除各主机上的登记、撤权重与指令、看板不再采集，不删数据；之后 `labmon wait` 直接退出说“已归档”。
+项目彻底结束：`labmon project archive <id>`（用户也可以在看板页面上归档）：移除各主机上的登记、撤权重与指令、看板不再采集，不删数据；之后 `labmon wait` 直接退出说“已归档”。
 要再用先 `labmon project restore <id>` 再 `worker add`（`docs/workbench.md`「项目的归档与恢复」）。计划项配了 `done_when` 的，汇总完在那个文件里勾上。
 
 ## 发现 labmon 的问题
@@ -142,4 +147,4 @@ labmon report "一句话现象" --host "主机 id" --at "11-13 14:30" --evidence
 
 提交成功会返回报告编号。总控的等待会收到编号，由总控核实后以脱敏摘要和合成复现转为公开仓库 Issue；原文、报告人、报告编号与 Issue 的关联只留私有记录，不上传公开仓库。接着跑不受影响的实验，受影响的任务留在队列里，在报告里写清它卡在哪。截止前等不起的，告诉用户，由用户定要不要临时绕开。不改 labmon 代码，不碰别的项目的队列、清单与临时指令，不靠改任务名、换 tag 或改清单绕开问题。主机归还或借用到期后换主机是正常操作。共享盘记录出现「读写拥塞嫌疑」且实验确实被拖慢时，附上该记录与日志更新速度。
 
-看板连不上、报告提交失败时，保留证据并告诉用户。响应中断时先请维护者在记录页确认是否已经收到。
+看板连不上、报告提交失败时，保留证据并告诉用户。响应中断时先请维护者在看板上确认是否已经收到。
