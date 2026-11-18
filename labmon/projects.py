@@ -163,9 +163,6 @@ def _set_owner(pid, who, by, *, previous=None):
         return ""
     if (old or "").lower() == (who or "").lower():
         return f"{pid} 的主人本来就是 {who or '管理员'}"
-    from .poolqueues import active_reason
-    if reason := active_reason(pid):
-        raise ConfigError(reason)
     save_json(f, {**m, "owner": who or None})
     msg = f"{by} 把项目 {pid} 的主人从 {old or '管理员'} 换成 {who or '管理员'}"
     log_events([{"kind": "config", "project": pid, "msg": msg}])
@@ -305,7 +302,7 @@ def put_config(pid: str, text: str, files: dict | None = None, base: str | None 
 
 def set_config(pid: str, changes: dict, check_owner=None) -> list[str]:
     """页面上改看板上这份配置（config.set_project）：与推在同一把锁里，谁也不盖掉谁；推的一方随后按版本对不上处理。"""
-    # 和派单、删账号同序：先主机配置锁，再项目登记锁。
+    # 和删账号同序：先主机配置锁，再项目登记锁。
     with HOSTS_LOCK, _reg_locked():
         if check_owner is not None:
             check_owner()
@@ -358,10 +355,7 @@ def archive_block(pid: str, psnap: dict | None, glob: dict | None, interval: flo
     """这个项目现在能不能归档：能返回 None，不能返回一句原因（页面上按钮旁写的、命令行与页面拒绝时报的都是它）。
     psnap 是项目看板的快照，glob 是工作台的全局快照。口径同 collect._no_work：清单里没有待办（车道的 unfinished），
     worker 上也没有本项目在跑、在等的（含单元与占位任务），且项目快照说暂时没实验（no_work_since）。"""
-    from . import poolqueues
     t = time.time() if t is None else t
-    if reason := poolqueues.active_reason(pid):
-        return reason
     if pid in archived():
         return "已经归档了"
     glob, lim = glob or {}, max(FRESH_S, 3 * interval)
@@ -388,7 +382,7 @@ def _regs_of(pid: str, glob: dict) -> tuple[list[dict], list[str]]:
         if x.get("queues") is None:
             unread.append(x["host"])
             continue
-        out += [{"host": x["host"], "home": x.get("home"), "root": q["root"], "jobs": q["jobs"], **({"pool": q["pool"]} if q.get("pool") else {})} for q in x["queues"] if q.get("project") == pid]
+        out += [{"host": x["host"], "home": x.get("home"), "root": q["root"], "jobs": q["jobs"]} for q in x["queues"] if q.get("project") == pid]
     return out, unread
 
 
@@ -419,16 +413,8 @@ def archive(pid: str, psnap: dict | None, glob: dict | None, interval: float = 6
         ovr = _host_ovr(pid, glob)
         if (regs or ovr) and not L.check(force=True)["ok"]:
             raise ConfigError("本机不在内网：移除登记要连服务器，回到内网再归档")
-        from . import poolqueues, users
-        try:
-            released, withdrawn = poolqueues.release_project(pid)
-        except (users.Denied, ConfigError) as e:
-            raise ConfigError(f"归档 {pid} 没做完：{e}。算力池通道尚未释放，连上后再归档") from e
         done, bad, skip = [], [], []
         for r in regs:
-            if (r["root"], r["jobs"]) in released or r.get("pool") in withdrawn:
-                done.append({k: r[k] for k in ("host", "root", "jobs")})
-                continue
             name = f"{r['host']} {r['root'].rstrip('/')}/{r['jobs']}"
             try:
                 rc, out = W.run_out("rm", r["host"], [r["root"], r["jobs"]], home=r.get("home"),
@@ -497,7 +483,7 @@ def restore(pid: str, check_owner=None) -> str:
 def delete(pid: str, revision: str, by: str, check_collector) -> str:
     """永久删除看板上的归档项目。持登记与归档锁核对状态；清理失败时保留归档条目供重试。"""
     _valid(pid)
-    from . import overview, poolqueues, pool_supply
+    from . import overview
     with HOSTS_LOCK, _reg_locked(), _locked():
         a = archived()
         entry = a.get(pid)
@@ -509,10 +495,6 @@ def delete(pid: str, revision: str, by: str, check_collector) -> str:
         schedule = sched()
         if any(pid in schedule.get(kind, {}) for kind in ("weight", "pause", "focus")):
             raise ConfigError("项目仍有调度权重、暂停或优先设置，请先撤销")
-        pool_data = poolqueues.read()
-        if reason := poolqueues.delete_block(pid, pool_data) or pool_supply.project_hold(pid):
-            raise ConfigError(reason)
-
         project = cfg_file(pid).parent
         # 核对目录项的原名，避免大小写不敏感的盘把另一个项目当作目标。
         if any(p.is_symlink() for p in (root(), project)) or (
@@ -524,14 +506,11 @@ def delete(pid: str, revision: str, by: str, check_collector) -> str:
             raise ConfigError("项目配置或输出目录经符号链接，请先核对路径")
         cfg = load_cfg(pid) if config.is_file() else {}
         local = load_json(out_dir(pid) / "snapshot.json", {})
-        # 已完成的旧账本未必记过通道交接，直接核对实际标记。
-        legacy = [row for row in poolqueues.project_rows(pid, pool_data) if row["state"] == "completed"]
-        overview.check_project_idle(pid, entry, cfg, local, snapshot(), legacy)
+        overview.check_project_idle(pid, entry, cfg, local, snapshot())
 
         try:
             if project.exists():
                 shutil.rmtree(project)
-            poolqueues.unbind_project(pid)
             del a[pid]
             _save(a)
         except OSError as e:

@@ -120,7 +120,7 @@ class PagesTest(unittest.TestCase):
             for m in re.finditer(r"<form\b[^>]*>", s):
                 self.assertIn('method="post"', m[0], f)
                 self.assertNotIn("action=", m[0], f)
-            self.assertEqual(len(re.findall(r"<form\b", s)), {"overview.html": 4, "login.html": 1}.get(f, 0), f)
+            self.assertEqual(len(re.findall(r"<form\b", s)), {"overview.html": 2, "login.html": 1}.get(f, 0), f)
             if f == "common.js":
                 self.assertRegex(s, r'const postJSON = \(url, body = \{\}, how\) => api\(url, \{method: "POST", headers: \{"Content-Type": "application/json"\}')
             # 请求都经 api（连不上时说人话、按需重试，#177）：模板里不另写 fetch；“看板服务连不上”的说法只在 common.js 的 netText

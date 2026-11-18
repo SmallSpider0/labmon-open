@@ -71,69 +71,6 @@ class ArchiveTest(unittest.TestCase):
     def psnap(self, **kw) -> dict:
         return {"generated": time.time(), "title": "项目一", "no_work_since": time.time() - 100, "lanes": [{"unfinished": 0}], **kw}
 
-    def test_archive_releases_completed_pool_route_before_restore(self):
-        self._archive_pool_route_from_snapshot(False)
-
-    def test_archive_releases_pool_route_from_registration_files(self):
-        self._archive_pool_route_from_snapshot(True)
-
-    def _archive_pool_route_from_snapshot(self, from_file):
-        from labmon import poolqueues as Q, users
-        from labmon.state import save_json
-        from tests.fixtures import worker_module
-        w = worker_module(self.wh); w.DATA_ROOT = str(self.d / "alice")
-        root = self.d / "alice/projects/p1"; root.mkdir(parents=True)
-        (root / "jobs.txt").write_text("train|true\n")
-        source = Path(w.Paths("a").dir); source.mkdir(parents=True)
-        (source / "status.json").write_text('{"pool_ready_protocol":1}')
-        spec = dict(root=str(root), jobs="jobs.txt", project="p1", queue_id="a"*32, source_host="a", action="claim")
-        w.pool_queue_route(spec)
-        row = dict(id="a"*32, root=str(root), jobs="jobs.txt", project="p1", account="alice", host="a", state="completed", t=1,
-                   route_protocol=1, history={"old": {"id": "old", "phase": "done", "task_name": "train"}})
-        save_json(Q.state_file(), {"queues": {row["id"]: row}})
-        route = Path(w.pool_registration(str(root), "jobs.txt") + ".route")
-        def remote(row, action):
-            return w.pool_queue_route(dict(spec, action=action))
-        with mock.patch.object(Q, "route_remote", side_effect=users.Denied(409, "离线")):
-            with self.assertRaisesRegex(ConfigError, "尚未释放"):
-                PJ.archive("p1", self.psnap(), self.glob())
-        self.assertNotIn("p1", PJ.archived())
-        self.assertTrue(route.exists())
-        from labmon import overview as O
-        queue = {"root": str(root), "jobs": "jobs.txt", "project": "p1", "pool": row["id"]}
-        host = {"id": "a", "label": "a"}
-        by = {"a": {"id": "a", "worker_home": str(self.wh), "regs": []}}
-        raw = (O.SEP + "\n").join([""] * 7 + [O.REG + " a q.json\n" + json.dumps(queue)])
-        if not from_file:
-            host["status"] = {"t": time.time(), "queues": [queue]}
-        glob = self.glob(regs=O._regs([host], by, {"a": (raw, None)}, {}, time.time()))
-        # 远端释放成功后本地归档落盘中断，用同一份旧快照重试也不重复删除。
-        with mock.patch.object(Q, "route_remote", side_effect=remote), mock.patch.object(PJ.W, "run_out") as rm, \
-             mock.patch.object(PJ, "set_weight", side_effect=ConfigError("模拟归档中断")):
-            with self.assertRaisesRegex(ConfigError, "模拟归档中断"):
-                PJ.archive("p1", self.psnap(), glob, own=True)
-        rm.assert_not_called()
-        with mock.patch.object(Q, "route_remote", side_effect=AssertionError("已释放不重复连接")), mock.patch.object(PJ.W, "run_out") as rm:
-            PJ.archive("p1", self.psnap(), glob, own=True)
-        rm.assert_not_called()
-        self.assertEqual(PJ.archived()["p1"]["regs"], [{"host": "a", "root": str(root), "jobs": "jobs.txt"}])
-        self.assertFalse(route.exists())
-        self.assertEqual(Q.find(Q.read(), row["id"])["state"], "withdrawn")
-        self.assertEqual(Q.find(Q.read(), row["id"])["history"], row["history"])
-        PJ.restore("p1")
-        self.assertEqual(w.main(["add", str(root), "jobs.txt", "--host", "a", "--project", "p1"]), 0)
-
-    def test_archive_refuses_active_pool_before_any_release(self):
-        from labmon import poolqueues as Q
-        from labmon.state import save_json
-        for state, phase in (("queued", None), ("claimed", "starting"), ("completed", "unknown")):
-            with self.subTest(state=state, phase=phase), mock.patch.object(Q, "route_remote") as remote:
-                save_json(Q.state_file(), {"queues": {"q": dict(id="a"*32, project="p1", state=state, dispatch={"phase": phase})}})
-                with self.assertRaisesRegex(ConfigError, "算力池仍有"):
-                    PJ.archive("p1", self.psnap(), self.glob())
-                remote.assert_not_called()
-                self.assertNotIn("p1", PJ.archived())
-
     def test_block_reasons(self):
         # 前提同 collect._no_work：在跑、在等（单元也算）、清单没跑完、看板没说暂时没实验、快照旧了，各写原因；都没有才能归档
         g = self.glob(hosts=[{"id": "a", "status": fake_status(running=[running_job("r1", "p1")], waiting=[waiting_job("w1", "p1"), waiting_job("w2", "p2")])}])
@@ -242,7 +179,7 @@ class ArchiveTest(unittest.TestCase):
         self.assertIn("没有与它共用 worker 目录", str(e.exception))
 
     def test_permanent_delete_checks_worker_and_preserves_other_data(self):
-        from labmon import overview, poolqueues
+        from labmon import overview
         from labmon.records import log_events
         from labmon.state import save_json, state_dir, usage_file
         self.hosts_toml(sched="")
@@ -250,10 +187,6 @@ class ArchiveTest(unittest.TestCase):
         shared.write_text("实验文件")
         PJ.put_config("p2", 'id = "p2"\n')
         PJ._save({"p1": {"id": "p1", "t": 10, "regs": [{"host": "c"}]}, "p2": {"id": "p2", "t": 20}})
-        from labmon.labmon_worker import qslug
-        history = {s: {"project": "p1", "state": s, "host": "c", "root": str(self.d), "jobs": "jobs.txt",
-                       "dispatch": {"phase": "done"}} for s in ("completed", "withdrawn")}
-        save_json(poolqueues.state_file(), {"workspaces": {"p1": {"root": str(self.d)}, "p2": {}}, "queues": history})
         usage_file("a").parent.mkdir(parents=True)
         usage_file("a").write_text("用量历史")
         log_events([{"kind": "project", "project": "p1", "msg": "旧审计"}])
@@ -273,11 +206,6 @@ class ArchiveTest(unittest.TestCase):
         with self.assertRaisesRegex(ConfigError, "在跑或等待"):
             delete()
         save_json(status, fake_status())
-        route = self.wh / "hosts" / ("pool-" + qslug(str(self.d), "jobs.txt") + ".json.route")
-        route.write_text("old-route")
-        with self.assertRaisesRegex(ConfigError, "通道标记"):
-            delete()
-        route.unlink()
         overrides = status.with_name("overrides.json")
         save_json(overrides, [{"kind": "pause", "target": "p1"}])
         with self.assertRaisesRegex(ConfigError, "暂停或优先"):
@@ -290,13 +218,11 @@ class ArchiveTest(unittest.TestCase):
             with self.assertRaisesRegex(ConfigError, "仍保留"):
                 delete()
         self.assertIn("p1", PJ.archived())
-        self.assertIn("p1", poolqueues.read()["workspaces"])
         ver = PJ.get_config("p1")["ver"]
         self.assertIn("永久删除", delete())
         self.assertEqual(set(PJ.archived()), {"p2"})
         self.assertEqual(PJ.registered(), ["p2"])
         self.assertFalse(PJ.out_dir("p1").parent.exists())
-        self.assertEqual(poolqueues.read(), {"workspaces": {"p2": {}}, "queues": history})
         self.assertEqual(shared.read_text(), "实验文件")
         self.assertEqual(usage_file("a").read_text(), "用量历史")
         self.assertEqual(self.regs_left()["b"], ["q2"])

@@ -111,11 +111,6 @@ from . import maint as MT
 from . import overview as O
 from . import platform as PF
 from . import projects as PJ
-from . import poolview as PV
-from . import project_resources as PR
-from . import poolqueues as PQ
-from . import pool_supply as PS
-from . import pool_dispatch as PD
 from . import rebalance as RB
 from . import renew as R
 from . import users as U
@@ -780,7 +775,6 @@ class Handler(BaseHTTPRequestHandler):
     def _me(self, who: U.Ident) -> dict:
         """GET /api/me 与页面上的 ME：users.me 加上在跑的代码是哪个提交、何时启动（deploy.RUNNING；部署脚本等它换成新提交，#164）。"""
         out = U.me(who, self.entry) | {"commit": DP.RUNNING["commit"], "started": DP.RUNNING["started"]}
-        out["pool_access"] = PV.allowed(who, PV.trial())
         if out["admin"]:
             try:
                 cfg = F.conf()
@@ -830,22 +824,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"reports": report_headers()})
         if path == "/api/me":
             return self._json(200, self._me(who))
-        if m := re.fullmatch(r"/api/project/([^/]+)/pool", path):
-            return self._json(200, PQ.project_view(m[1], writable="project" in who.scopes))
-        if path == "/api/pool/queues":
-            try:
-                return self._json(200, PQ.listing(who, dispatch_enabled=PD.enabled()))
-            except U.Denied as x:
-                return self._json(x.code, {"error": x.msg})
-        if path == "/api/pool":
-            trial = PV.trial()
-            if not PV.allowed(who, trial):
-                return self._json(403, {"error": "你的账号没有加入算力池试点"})
-            try:
-                out = PV.live(who)
-            except (AttributeError, KeyError, TypeError, ValueError, OverflowError):
-                return self._json(503, {"error": "资源状态暂不可读，请联系算力池管理员"})
-            return self._json(200, out)
         if path == "/api/users":
             got = U.listing(directory=True)
             for u in got["users"]:                     # 各人填没填推送（#167；目标不给管理员看）
@@ -862,12 +840,6 @@ class Handler(BaseHTTPRequestHandler):
                 ok = U.access(who).allowed
                 got["hosts"] = [h for h in got["hosts"] if str(h.get("id")) in ok]
             return self._json(200, got)
-        resource = re.fullmatch(r"/api/project/([^/]+)/resources", path)
-        if resource:
-            try:
-                return self._json(200, PR.view(who, unquote(resource[1])))
-            except U.Denied as x:
-                return self._json(x.code, {"error": x.msg})
         m = PROJECT_CONFIG_PATH.fullmatch(path)
         if m:
             try:
@@ -1065,25 +1037,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"msg": msg, "push": S.push_view(who.name)})
             if act == "push/test":
                 return self._json(200, {"msg": S.user_push_test(who.name)})
-            if act == "pool/workspace":
-                PQ.bind(body.get("project"), body.get("root"), body.get("host"), who.name)
-                return self._json(200, {"msg": "算力池工作区已绑定"})
-            resources = re.fullmatch(r"project/([^/]+)/queues", act)
-            if resources:
-                return self._json(200, PR.submit(who, unquote(resources[1]), body))
-            if act == "pool/queues":
-                return self._json(200, PR.submit(who, body.get("project"), {**body, "destination": "pool"}))
-            if act == "pool/queues/stop":
-                return self._json(200, {"queue": PD.stop(who, body.get("id"), body.get("attempt_id"))})
-            if act == "pool/member":
-                return self._json(200, PV.set_member(body.get("name"), body.get("included"), who.name))
-            if act == "pool/dispatch":
-                return self._json(200, PD.set_enabled(body.get("enabled"), who.name))
-            if act == "pool/supply-daily":
-                PS.supply_daily(body, who.name)
-                return self._json(200, {"msg": "日常供给已批准"})
-            if act == "pool/queues/withdraw":
-                return self._json(200, {"queue": PQ.withdraw(who, body.get("id"))})
             if act == "users/add":
                 role = "admin" if body.get("admin") else "user"
                 person = body.get("person")
@@ -1112,14 +1065,6 @@ class Handler(BaseHTTPRequestHandler):
                 self.board.overview.wake.set()
                 log(f"账号：{msg}（{who.name}）")
                 return self._json(200, {"msg": msg})
-            if act == "pool/supply":
-                return self._json(200, PS.supply(body, who.name))
-            if act == "pool/revoke":
-                return self._json(200, PS.revoke(s("host"), who.name))
-            if act == "pool/run":
-                return self._json(200, PS.run(body.get("hosts"), who.name))
-            if act == "pool/status":
-                return self._json(200, PS.reconcile(s("host"), who.name))
             if act == "admin/deploy":
                 out = DP.apply(body.get("bundle"))
                 log(f"部署由 {who.name} 发起：{out['msg']}")
@@ -1667,7 +1612,7 @@ def live_snapshot() -> dict:
 
 # 备用时照收的写请求（#163）：登录与账号（只动本机的账号库）、部署（换代码、重启，主备都要能部署）。别的写请求回 409。
 PROJECT_CONFIG_PATH = re.compile(r"/api/project/([^/]+)/config")
-CLI_READS = re.compile(r"/api/(hosts|project/[^/]+/(config|resources)|client/wheel|reports|pool/queues)")     # 命令行读的接口：备用上同样回 409 standby（_standby），命令行接着找主那台
+CLI_READS = re.compile(r"/api/(hosts|project/[^/]+/config|client/wheel|reports)")     # 命令行读的接口：备用上同样回 409 standby（_standby），命令行接着找主那台
 STANDBY_OK = re.compile(r"/api/(login|setup|logout|password|tokens/add|revoke|users/.*|admin/deploy)")
 
 
@@ -1699,11 +1644,7 @@ ROUTES = [
     _R("GET", r"/login|/favicon\.ico|/healthz", OPEN),                 # /healthz：TX 的看门狗探活，只回四项（health，#165）
     _R("POST", r"/api/(login|setup|logout)", OPEN),
     _R("GET", r"/api/me", "read"),
-    _R("GET", r"/api/pool(?:/queues)?", "read"),
-    _R("POST", r"/api/pool/queues(?:/withdraw|/stop)?", "project", own="self"),
     _R("POST", r"/api/users/public-ops", "admin", admin=True, lan=True),
-    _R("POST", r"/api/pool/workspace", "admin", admin=True, lan=True),
-    _R("POST", r"/api/pool/(member|supply|supply-daily|dispatch|revoke|run|status)", "admin", admin=True, lan=True),
     _R("GET", r"/api/reports", "reports", admin=True),
     _R("POST", r"/api/report", "project", own="report"),
     _R("GET", r"/api/admin/deploy", "deploy", admin=True),             # 部署（#164）：在跑哪个提交、平台操作、日志里的 Traceback
@@ -1720,9 +1661,6 @@ ROUTES = [
     _R("POST", r"/api/wait", "project", own="wait"),                   # labmon wait 的长轮询（waits.wait）
     _R("POST", r"/api/project/init", "project", own="init"),
     _R("POST", r"/api/project/[^/]+/check", "project", own="new"),
-    _R("GET", r"/api/project/[^/]+/resources", "read", own="path"),
-    _R("POST", r"/api/project/[^/]+/queues", "project", own="path"),
-    _R("GET", r"/api/project/[^/]+/pool", "read", own="path"),
     _R("GET", r"/api/hosts", "read"),                                  # 普通用户只列他能用的（Handler.do_GET）
     _R("GET", PROJECT_CONFIG_PATH.pattern, "read", own="path"),
     _R("PUT", PROJECT_CONFIG_PATH.pattern, "project", own="new"),     # 推项目配置（#161）：第一次推的人是主人（#167）
@@ -1809,7 +1747,6 @@ def serve(port: int, interval: int | None = None, public_port: int | None = None
         threading.Thread(target=pub.serve_forever, name="public", daemon=True).start()
     rotate_log()
     stopping = threading.Event()
-    threading.Thread(target=PD.loop, args=(stopping,), name="pool-dispatch", daemon=True).start()
 
     def bye(signum, _frame):
         """停服务（systemd stop、launchd unload、kill）：等这一轮采集做完、释放服务租约，备用的那台下一轮就接管，不用等 ttl（#163）。

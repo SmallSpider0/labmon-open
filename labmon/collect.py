@@ -326,7 +326,6 @@ def build(cfg: dict, probes: dict, out_dir: Path, lan: dict | None = None, glob_
     ratios, quiet = _lanes(cfg, snap, state, raw_by_host, t)
     _groups(cfg, snap, state, ratios)
     _host_alerts(cfg, snap, state, hist, glob_snap, t)
-    _pool(snap, cfg["id"], t)
     _no_work(cfg, snap, glob_snap, quiet, t)
     _rebalance(snap)
     snap["thresholds"] = {"stale_s": stale_limit(cfg["interval"], cfg["alerts"]["stale_min"])}      # 页面据此标“数据过期”，与 labmon wait 同一门槛
@@ -708,29 +707,13 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                                 f"worker 不在就 labmon worker start {hd['id']}；保活由 worker 管，不自己 ka.sh start", idle_say))
 
 
-def _pool(snap, project, t):
-    """同一池账本投影给页面与会话；旧失败不盖过同清单的新提交。"""
-    from . import poolqueues as pq
-    data = pq.read()
-    snap["pool"] = pq.project_view(project, data, now=t)
-    snap["pool"]["occupancy"] = {h: [r for r in rows if r["p"] == project] for h, rows in pq.occupancy(data, now=t).items()}
-    latest = {}
-    for q in sorted(pq.project_rows(project, data), key=lambda q: q["t"]):
-        latest[(q.get("canonical") or q["root"], q["jobs"])] = q
-    for q in latest.values():
-        a = q.get("dispatch") or {}
-        if a.get("phase") in ("failed", "unknown", "stopped"):
-            text = {"failed": "失败，请查看项目任务记录的日志和原清单状态，后续任务由原 worker 按依赖继续", "unknown": "状态待确认，先核对清理结果，不要重复提交", "stopped": "已停止，余项不会自动继续；需要时从项目重新提交"}[a["phase"]]
-            snap["alerts"].append(alert("pool:" + a["id"] + ":" + a["phase"], "agent", f"算力池任务 {a['task_name']} {text}"))
-
-
 def _no_work(cfg: dict, snap: dict, glob_snap: dict, quiet: float, t: float) -> None:
     """暂时没实验：清单里没有待办，worker 上也没有本项目在跑、在等的（单元不进车道，经工作台快照看）。往清单里加任务就接着跑，不用做什么。
     起点取跑完的任务与收起的车道（quiet：_lane_specs 给的最后一次活动）里最晚的。
     这时主机的事（连不上、磁盘余量、空闲关机风险）不归它报：主机仍由工作台和在用它的项目盯着，没在用这台的会话不被叫醒。"""
     wjobs = [j for e in glob_snap.get("hosts", []) for k in ("running", "waiting") for j in (e.get("status") or {}).get(k) or []
              if j.get("project") == cfg["id"]]
-    snap["no_work_since"] = None if wjobs or snap.get("pool", {}).get("active") or any(ln.get("unfinished") for ln in snap["lanes"]) else max([j.get("end_ts") or 0 for j in snap["jobs"]] + [quiet]) or t
+    snap["no_work_since"] = None if wjobs or any(ln.get("unfinished") for ln in snap["lanes"]) else max([j.get("end_ts") or 0 for j in snap["jobs"]] + [quiet]) or t
     if snap["no_work_since"]:
         snap["alerts"] = [a for a in snap["alerts"] if a["key"].split(":")[0] not in ("ssh_fail", "disk_low", "idle")]
 

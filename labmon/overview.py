@@ -36,17 +36,14 @@ from . import lan as L
 from . import lease as LS
 from . import rebalance as RB
 from . import renew as R
-from . import pool_supply as PS
-from . import pool_dispatch as PD
 from .projects import archived_rows
-from .labmon_worker import qslug
 from .collect import write_page
 from .config import STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, parse_time, pause_by, pick_color, sched, user_hosts
 from .health import container_step, lease_due, lease_end, link_step
 from .records import EVENT_CATS, EVENT_KINDS, log_events, told
 from .state import append_row, load_json, load_rows, parse_rows, save_json, snapshot, state_dir, usage_file, write_atomic
 from .service import log
-from .workerctl import run_out, ssh, worker_env
+from .workerctl import run_out, ssh
 
 KEEP_S = 7 * 86400
 SHOW_S = 24 * 3600
@@ -70,17 +67,11 @@ def fetch(h: dict, timeout: int = 60) -> tuple[str | None, str | None]:
     n = 60 if usage_file(h["id"]).exists() else 3000
     # 服务租约（#163）：先续约，$lok 为 0（这一刻租约是这台看板服务的）才写 put；读回的租约作为倒数第二段带回（collect 交给 lease.decide）
     lz = LS.remote_sh(h, h["lease"]) if h.get("lease") else "lease=; lok=0; "
-    observe = ""
-    if h.get("pool_observe"):
-        args = [h["python"], h["worker_home"].rstrip("/") + "/labmon_worker.py", "pool-observe", json.dumps(h["pool_observe"])]
-        observe = (f"if [ \"$lok\" = 0 ]; then LABMON_HOME={shlex.quote(h['worker_home'])} "
-                   f"LABMON_DATA_ROOT={shlex.quote(h['data_root'])} {worker_env(h)} {shlex.join(args)}; fi; ")
-    pool_part = f"echo {SEP}; {observe}echo; " if observe else ""
     remote = (f"{lz}put=; if [ \"$lok\" = 0 ]; then :; {put}fi; cat {d}/status.json 2>/dev/null; echo; echo {SEP}; tail -n 40 {d}/worker.log 2>/dev/null; "
               f"echo {SEP}; tail -n {n} {d}/usage.jsonl 2>/dev/null; echo {SEP}; date +%s; "
               f"echo {SEP}; tail -n 100 {d}/events.jsonl 2>/dev/null; echo {SEP}; cat {d}/stopped 2>/dev/null; echo; "
               f"echo {SEP}; m=$(stat -c %Y {ix} 2>/dev/null || stat -f %m {ix} 2>/dev/null); echo \"$m\"; "
-              f"[ -n \"$m\" ] && [ \"$m\" != {DK.seen()} ] && cat {ix}; echo; echo {SEP}; {_reg_cmd(h)}echo {SEP}; echo \"$lease\"; {pool_part}echo {SEP}; echo \"$put\"")
+              f"[ -n \"$m\" ] && [ \"$m\" != {DK.seen()} ] && cat {ix}; echo; echo {SEP}; {_reg_cmd(h)}echo {SEP}; echo \"$lease\"; echo {SEP}; echo \"$put\"")
     cmd = L.ssh_argv(h["ssh"], h["port"], known_hosts=h.get("known_hosts")) + [remote] if h.get("ssh") else ["bash", "-c", remote]
     try:
         r = (L.ssh_run if h.get("ssh") else subprocess.run)(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
@@ -118,7 +109,7 @@ def _reg_cmd(h: dict) -> str:
             f"for f in \"$hd\"/queues/*.json; do [ -f \"$f\" ] || continue; echo \"{REG} $id ${{f##*/}}\"; cat \"$f\"; echo; done; done; ")
 
 
-REG_KEYS = ("root", "jobs", "project", "stop", "gpus", "pool")     # 登记的全局视图里一条登记带的字段（状态里的 queues 与登记文件共有的）
+REG_KEYS = ("root", "jobs", "project", "stop", "gpus")     # 登记的全局视图里一条登记带的字段（状态里的 queues 与登记文件共有的）
 
 
 def _parse_regs(text: str, *, strict: bool = False) -> dict:
@@ -188,26 +179,21 @@ def _regs(hosts: list[dict], by: dict, got: dict, old: dict, t: float, fleet_cfg
     return out + rest
 
 
-def _project_worker_state(host: dict, markers: list[str]) -> tuple[str | None, str | None]:
+def _project_worker_state(host: dict) -> tuple[str | None, str | None]:
     """即使有 status.json，也读实际的登记文件。只读这份 worker 目录，留着的归还或旧主机目录一并核对。"""
     home = shlex.quote(host["worker_home"].rstrip("/"))
     remote = (f"set -e; if [ -e {home}/hosts ]; then [ -d {home}/hosts ] && [ -r {home}/hosts ] && [ -x {home}/hosts ] || exit 1; fi; "
               f"{_reg_cmd({**host, 'regs': []})}echo {SEP}; "
               f'for f in {home}/hosts/*/status.json {home}/hosts/*/overrides.json; do '
               '[ -f "$f" ] || continue; printf "%s\\n" "$f"; cat "$f"; echo; ' + f'echo {SEP}; done')
-    if markers:
-        paths = shlex.join([host["worker_home"].rstrip("/") + "/hosts/" + marker for marker in markers])
-        remote += (f'; for f in {paths}; do [ ! -e "$f" ] && [ ! -L "$f" ] || exit 9; done')
     try:
         rc, out = ssh(host, remote, timeout=20)
     except (OSError, subprocess.TimeoutExpired):
         return None, "读不到 worker 目录"
-    if rc == 9:
-        return None, "算力池清单仍有通道标记，请先解除登记"
     return (out, None) if rc == 0 else (None, "读不到 worker 目录")
 
 
-def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict, pool_rows: list[dict]) -> None:
+def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict) -> None:
     """只核对与本项目相关的 worker 目录；快照提供线索，删除以本次读到的文件为准。"""
     known = {h["id"]: h for h in all_hosts()}
     configured = {h["id"]: h for h in cfg.get("hosts", [])}
@@ -226,13 +212,7 @@ def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict
             associated.add(reg["host"])
             if reg.get("home"):
                 related_homes.add(reg["home"].rstrip("/"))
-    markers = {}
-    for row in pool_rows:
-        associated.add(row["host"])
-        marker = "pool-" + qslug(row["root"], row["jobs"]) + ".json"
-        markers.setdefault(row["host"], []).extend([marker, marker + ".route"])
     active_ids = {h["id"] for h in active}
-    markers_by_home = {}
     for hid in associated - {None, ""}:
         h = known.get(hid) or configured.get(hid)
         home = (h or {}).get("worker_home") or reg_homes.get(hid)
@@ -240,17 +220,14 @@ def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict
             raise ConfigError(f"主机 {hid} 的 worker 目录未知，暂时无法确认任务和登记已收尾")
         home = home.rstrip("/")
         related_homes.add(home)
-        markers_by_home.setdefault(home, set()).update(markers.get(hid, []))
     targets = {}
     for home in sorted(related_homes):
         h = home_host(home, active)
         if h is None:
             raise ConfigError(f"worker 目录 {home} 没有在用主机代读，暂时无法确认任务和登记已收尾")
-        targets[home] = (h, sorted(markers_by_home.get(home, ())))
-    _, readings = L.gather(targets, lambda args: _project_worker_state(*args), lambda key: bool(targets[key][0].get("ssh")))
+        targets[home] = h
+    _, readings = L.gather(targets, _project_worker_state, lambda key: bool(targets[key].get("ssh")))
     for home, (raw, error) in readings.items():
-        if error and error.startswith("算力池"):
-            raise ConfigError(error)
         try:
             if error or not raw:
                 raise ValueError("读不到状态")
@@ -401,7 +378,7 @@ def _notices(hosts: list[dict], hcfg: dict, t: float, per_host: dict | None = No
     """采完各台后的判定：连通与租期（health）、预备续租、借用、共享盘、组内服务器。后三样出错不影响全局页。
     返回 (提醒, wake, 共享盘, 组内服务器, 组内配置)；wake 另有作废的任务（_voided）与页面上的改动（records.told）。per_host 见 health。"""
     notices = health(hosts, hcfg, t, per_host=per_host)
-    notices += R.check(hosts, hcfg, t, busy=set(FO.busy()) | {h["id"] for h in hosts if PS.held(h["id"])})     # 预备续租：到期前自动预备、判断能否续租（正在做平台操作的不预备）
+    notices += R.check(hosts, hcfg, t, busy=set(FO.busy()))     # 预备续租：到期前自动预备、判断能否续租（正在做平台操作的不预备）
     try:
         msgs, wake = B.check(hosts, t)                # 借来的主机：补齐指令、到点提醒、跑完归还；wake 给 labmon wait
     except Exception as x:  # noqa: BLE001
@@ -440,11 +417,6 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
     prog, put = _to_worker(projects, t, sw)
     hcfg = {h["id"]: h for h in active_hosts()}
     by = {h["id"]: dict(h, put=put(h), lease="renew") if use_ssh else dict(h, ssh=None, put=put(h), lease="renew") for h in hcfg.values()}
-    for hid, h in PD.observation_hosts().items():
-        if hid in by:
-            by[hid].update(pool_observe=h["pool_observe"], pool_lease_end=h["pool_lease_end"])
-        else:
-            by[hid] = dict(h, lease="renew", **({"ssh": None} if not use_ssh else {}))
     for home in {h["worker_home"] for h in by.values()}:   # 每个 worker_home 挑一台在用主机（config.home_host）顺带读别的主机目录里的登记（_regs）
         by[home_host(home, list(by.values()))["id"]]["regs"] = list(by)
     lan, got = L.gather(by, fetch, lambda k: bool(by[k].get("ssh")), t)
@@ -456,17 +428,8 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
     _expire(t)
     old = snapshot()                                  # 上一轮的全局快照：不在内网时沿用各台的状态；挪法建议的滞回
     prev = {} if lan["ok"] else {x["id"]: x for x in old.get("hosts", [])}
-    hosts, pool_observed = [], {}
+    hosts = []
     for h in by.values():
-        if h.get("pool_observe"):
-            raw, error = got[h["id"]]
-            parts = raw.split(SEP + "\n") if raw else []
-            try:
-                pool_observed[h["id"]] = {**json.loads(parts[9]), "observed": t, "lease_end": h.get("pool_lease_end")} if not error and lan["ok"] else {}
-            except (IndexError, TypeError, ValueError):
-                pool_observed[h["id"]] = {}
-        if h["id"] not in hcfg:
-            continue
         e = _host_entry(h, *got[h["id"]], not lan["ok"] and bool(h.get("ssh")), prev.get(h["id"]), sd, t)
         _annotate(e, h, projects, prog, colors, t)
         hosts.append(e)
@@ -477,7 +440,7 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
     notices, wake, disk, fleet, fleet_cfg = _notices(hosts, hcfg, t, per_host)
     if lan["ok"]:
         RB.keep_offers(hosts, old, t)                 # 这一轮读失败的主机沿用上一轮的 offers（挪法建议不消失一轮再出现）
-    snap = {"generated": t, "pool_observed": pool_observed, "hosts": hosts, "colors": colors, "notices": notices, "lan": lan, "wake": wake,
+    snap = {"generated": t, "hosts": hosts, "colors": colors, "notices": notices, "lan": lan, "wake": wake,
             "host_notices": per_host,                 # 各主机这一轮的掉线、恢复（serve.Overview.once 另推给能用这台的人，#167）
             # 各项目的挪法建议（worker 的 offers 汇的；项目看板据此告警）；不在内网时沿用上一轮的，回来后不重复叫醒
             "rebalance": RB.suggest(hosts, old.get("rebalance"), t) if lan["ok"] else old.get("rebalance") or {},
@@ -708,8 +671,7 @@ def occupancy(hosts: list[dict], projects: list[dict], since: float, skip: str |
             # 卡按 uuid 对到此刻的序号；换过容器的（uuid 全不在了）用记下时的序号 gi
             g = [idx[u] for u in r.get("g") or [] if u in idx] or r.get("gi")
             if g and r["t"] >= since and r.get("p") != skip:
-                rows.append({"p": r.get("p"), "n": r["n"], "lane": names.get((h["id"], r.get("root"), r.get("queue"))),
-                             "root": r.get("root"), "queue": r.get("queue"), "t0": r["s"], "t1": r["t"], "g": g, "st": r["st"]})
+                rows.append({"p": r.get("p"), "n": r["n"], "lane": names.get((h["id"], r.get("root"), r.get("queue"))), "t0": r["s"], "t1": r["t"], "g": g, "st": r["st"]})
         for ln in (st.get("plan") or {}).get("lanes", []):
             if ln.get("project") == skip:
                 continue
@@ -717,25 +679,6 @@ def occupancy(hosts: list[dict], projects: list[dict], since: float, skip: str |
             for j in ln["jobs"]:
                 g = [i for i in j.get("gpus") or [] if i is not None]
                 if g and j.get("t1"):
-                    rows.append({"p": ln.get("project"), "n": j["name"], "lane": lab, "t0": j["t0"], "t1": j["t1"], "g": g,
-                                 "root": ln.get("root"), "queue": ln.get("queue"), "st": "run" if j.get("run") else "plan", **({"after": j["after"]} if j.get("after") else {})})
+                    rows.append({"p": ln.get("project"), "n": j["name"], "lane": lab, "t0": j["t0"], "t1": j["t1"], "g": g, "st": "run" if j.get("run") else "plan", **({"after": j["after"]} if j.get("after") else {})})
         out[h["id"]] = rows
-    from . import poolqueues
-    for hid, entries in poolqueues.occupancy(since=since, skip=skip).items():
-        if hid not in out:
-            continue
-        host = next((h for h in hosts if h["id"] == hid), {})
-        idx = {g["uuid"]: g["i"] for g in ((host.get("status") or {}).get("info") or {}).get("gpus") or []}
-        for row in entries:
-            row["g"] = [idx.get(g, g) for g in row["g"]]
-        # 同一实际运行可能同时进入原 worker 用量和池账本；以真实分配节点的观测替代。
-        for item in entries:
-            out[hid] = [r for r in out[hid] if not (r.get("p") == item["p"] and r.get("n") == item["n"]
-                and r.get("root") == item.get("root") and r.get("queue") == item.get("queue")
-                and r.get("t0") and abs(r["t0"] - item["t0"]) < 2)]
-        out[hid].extend(entries)
-    for rows in out.values():
-        for row in rows:
-            row.pop("root", None)
-            row.pop("queue", None)
     return out

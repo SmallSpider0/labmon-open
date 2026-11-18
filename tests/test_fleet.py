@@ -985,16 +985,6 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(ev["kind"], "guard_yield")
         self.assertIn("有了 train.py，停掉了守护开的保活", ev["msg"])
 
-    def test_pool_supply_blocks_start_but_preserves_existing_yield(self):
-        from labmon import pool_supply
-
-        with unittest.mock.patch.object(pool_supply, "held", return_value=True):
-            for k in range(7):
-                self.tick(T0 + k * 600)
-            self.assertEqual(self.remote, [])
-            self.raw = guarded(KA_JOB, T0 + 3500, T0 + 3800)
-            self._yield(T0 + 4200)
-
     def test_watcher_yield_logged_once(self):
         self.raw = guarded(JOB, T0, T0 + 300, f"yield {T0 + 120}")                             # 服务器上盯着时让出了
         self.tick(T0 + 200)

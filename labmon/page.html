@@ -249,9 +249,8 @@ function kpis() {
   const out = [], since = NOW - 6 * 3600;
   // 全部完成与里程碑余量
   const next = (D.markers || []).filter(m => m.ts > NOW).sort((a, b) => a.ts - b.ts)[0];
-  const end = D.pool?.active ? null : D.all_done_ts;
+  const end = D.all_done_ts;
   let meter = "", sub = end ? `剩余约 ${dur(end - NOW)}` : D.no_work_since ? `<span ${tip(noWorkTip(D.no_work_since))}>${NO_WORK}</span>` : "没有未完成的任务";
-  if (D.pool?.active) sub = "算力池仍有待位或在途任务，尚无可靠完成预测";
   if (next && end) {
     const f = (end - NOW) / (next.ts - NOW), late = f > 1;
     meter = `<div class="meter" ${tip(`现在 → 全部完成 ${ts(end)} → ${next.label} ${ts(next.ts)}`)}><i style="width:${Math.min(100, f * 100)}%;background:${late ? "var(--bad)" : "var(--accent)"}"></i></div>`;
@@ -324,14 +323,8 @@ function kpis() {
 const GAP_S = 600;
 let EV = {events: {}, storage: {}, occ: {}, colors: {}};   // 经 serve 打开时取 events.json：主机 30 天事件、同机别的项目的占用与配色、本项目存储（共享盘目录 dirs/at/free，各主机本地盘 local）
 const evs = h => EV.events?.[h] || [];
-const poolIntervals = () => Object.values(D.pool?.occupancy || {}).flat();
-function poolCovers(lane, name, start) {
-  return !!start && poolIntervals().some(x => x.root === lane.root && x.queue === lane.queue
-    && x.n === name && Math.abs(x.t0 - start) < 2);
-}
 tlInit({get: (k, d) => LS.get(k, d), set: (k, v) => LS.set(k, v), now: () => NOW, draw: () => drawTimeline(),
-  all: () => tlSpan([...D.jobs.map(jobT0).filter(Boolean), ...(D.attempts || []).map(x => x.t0), ...poolIntervals().map(x => x.t0)],
-    [...D.jobs.map(jobT1).filter(Boolean), ...poolIntervals().map(x => x.t1)]),
+  all: () => tlSpan([...D.jobs.map(jobT0).filter(Boolean), ...(D.attempts || []).map(x => x.t0)], D.jobs.map(jobT1).filter(Boolean)),
   near: () => D.jobs.map(j => [jobT0(j), jobT1(j), j.status === "running" || j.status === "queued"])});
 
 // 临时指令事件 → {act, okind, target, until, at, glob}：worker 记事件时就带这些字段；glob 是项目级的（所有主机，serve.proj_events 标的），
@@ -478,13 +471,6 @@ function drawTimeline() {
     if (oc.length) rows.push({h: Math.min(44, 8 + 10 * tlPack(oc)), draw: (y, hh, c) => othersRow(h, oc, y, hh, c)});
     vis.forEach(l => rows.push({h: 24, draw: (y, hh, c) => laneRow(l, hb, multi ? gsOf(l) : [], y, hh, c, used)}));
   }
-  for (const [hid, items] of Object.entries(D.pool?.occupancy || {})) {
-    const intervals = items.filter(x => win(x.t0, x.t1));
-    if (!intervals.length) continue;
-    rows.push({h: 22, sep: true, draw: y => `<text class="lab" x="0" y="${y + 15}">${esc(hid)} · 算力池</text>`});
-    rows.push({h: Math.max(24, 10 + 12 * tlPack(intervals)), draw: (y, h, c) => occBars(intervals, y, h, c, {
-      color: () => "var(--accent)", label: x => x.n, text: x => `${x.n} · ${POOL_QUEUE_STATE[x.phase]?.[0] || x.phase}\n${ts(x.t0)} → ${ts(x.t1)}\n${x.end_kind === "finished" ? "训练结束" : x.end_kind === "cleaned" ? "确认清理完成的时刻" : "最后观测时刻，非预计结束"}\nGPU ${x.g.join(", ")}`})});
-  }
   const more = hidden || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? "收起这段时间没有任务的车道" : `另有 ${hidden} 条车道这段时间没有任务，显示`}</span></div>` : "";
   tlShow(box, rows, {markers: D.markers, more, over: depLines, items: () => tlItems(gcolor([...used][0]))});
   const lg = document.getElementById("tllegend");
@@ -573,7 +559,7 @@ function laneRow(l, hb, gs, y, h, c, used) {
     s += `<rect x="${xa}" y="${y + 4}" width="${Math.max(4, gw)}" height="${h - 8}" fill="transparent" ${tip(`${g.future ? "预计空档" : "空档"} ${ts(g.a)} → ${g.now ? "现在" : ts(g.b)}（${dur(g.b - g.a)}）\n` + (g.why.length ? g.why.slice(0, 8).map(x => x.text).join("\n") : "原因未记录：这段时间没有掉线、重启、drain 或等待记录（较早的事件 labmon 还没开始存）"))}/>`;
   }
   let beyond = null;
-  for (const j of js.filter(j => !poolCovers(l, j.id, j.start_ts))) {
+  for (const j of js) {
     const a0 = jobT0(j), e0 = jobT1(j);
     if (a0 == null || e0 == null) continue;
     if (e0 > c.t1 && j.status !== "done") beyond = Math.max(beyond || 0, e0);
@@ -597,7 +583,7 @@ function laneRow(l, hb, gs, y, h, c, used) {
     }
   }
   // 失败的尝试（后来重跑成功的也留着）：车道底部细红条＋圆标，横向相距不到 14px 的合成一个标
-  const fa = (D.attempts || []).filter(x => x.lane === l.id && !poolCovers(l, x.name, x.t0) && c.win(x.t0, x.t1)).sort((a, b) => a.t0 - b.t0), cs = [];
+  const fa = (D.attempts || []).filter(x => x.lane === l.id && c.win(x.t0, x.t1)).sort((a, b) => a.t0 - b.t0), cs = [];
   for (const x of fa) {
     const xa = c.cl(x.t0);
     s += `<rect x="${xa}" y="${y + h - 4}" width="${Math.max(2.5, c.cl(x.t1) - xa)}" height="3" rx="1" fill="var(--bad)"/>`;
@@ -832,10 +818,9 @@ function render() {
   if (!D) { app.textContent = "没有数据"; return; }
   chN = 0;
   let h = topline() + kpis();
-  if (D.lanes.length || D.pool?.attempts?.length) h += timelineCard();
+  if (D.lanes.length) h += timelineCard();
   if (D.groups.length || D.lanes.length) h += `<div class="cols">${groupsCard()}${D.lanes.length ? runningCard() : ""}</div>`;
   h += resourcesCard() + jobDetails();
-  if (D.pool?.queues?.length) h += `<div class="card"><div class="row wrap"><b>算力池实验</b><a class="btn" target="_top" href="../../#/p/${encodeURIComponent(D.id)}/manage">查看任务记录</a></div><p class="sm mut">${D.pool.active ? "仍有待位或在途任务" : "本轮提交已结束"} · 真实运行与历史见上方时间线</p></div>`;
   h += `<p class="sm mut" style="margin-top:14px">${LIVE ? "每 15 秒取新数据" : `每 ${D.refresh} 秒刷新`} · 采集间隔 ${D.interval} 秒 · labmon</p>`;
   app.innerHTML = h;
   tipCheck();

@@ -180,7 +180,7 @@ class ContractTest(unittest.TestCase):
         # 队列与推演：lanes 带 root / queue / project，jobs 的 t0 / t1 是 epoch 秒、gpus 是卡序号；等着的写明等谁
         self.assertEqual({q["project"] for q in st["queues"]}, {"pa", "pb"})
         for q in st["queues"]:
-            self.assertEqual(set(q), {"root", "jobs", "gpus", "project", "stop", "empty", "added_t", "dur", "pool"})
+            self.assertEqual(set(q), {"root", "jobs", "gpus", "project", "stop", "empty", "added_t", "dur"})
             self.assertIsInstance(q["added_t"], int)                                                      # 登记时刻（epoch 秒）：看板在同一清单登记在两台时取晚的（#94）
         lanes = {ln["project"]: ln for ln in st["plan"]["lanes"]}
         self.assertEqual(set(lanes), {"pa", "pb"})

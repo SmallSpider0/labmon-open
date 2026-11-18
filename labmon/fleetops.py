@@ -42,7 +42,7 @@ from . import fleetboot as FB
 from . import lease as LS
 from . import platform as P
 from . import renew as R
-from .config import HOSTS_LOCK, active_hosts, fmt_time, parse_time
+from .config import active_hosts, fmt_time, parse_time
 from .health import lease_end
 from .records import log_events
 from .service import notify
@@ -358,12 +358,8 @@ def start(kind: str, cfg: dict, code: str | None = None, ids: list[str] | None =
                   servers={i: {} for i in ids}, steps=[{"name": n, "state": "wait", "note": None} for n in steps])
         th.start()                                    # 写进 op.json 的同时拉起线程：op() 按线程判活，中间不留空档
         return ""
-    from . import pool_supply
-    with HOSTS_LOCK:
-        if any(pool_supply.held(i) for i in ids):
-            raise P.PlatformError(pool_supply.HELD)
-        if (why := F.edit_state("op.json", init)):
-            raise P.PlatformError(why)
+    if (why := F.edit_state("op.json", init)):
+        raise P.PlatformError(why)
     _op_event("op_start", op(), "")
     if code:
         with LOCK:

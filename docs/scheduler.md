@@ -75,28 +75,6 @@ CPU 像内存一样记账（硬上限是配额的 100%，估计核数 `cpus=` �
 7. **看得见、页面上能改**（11-07）：排位 `pos`、等多久 `wait`、调度卡、`POST /sched/…`。
 8. **示例项目 接入**：示例项目 下次开跑前由 示例项目 自己的会话改监督进程（单元命令加前缀，删掉自带的闸门、选卡、重型锁与保活租约）。
 
-## 算力池离线试算（#244）
-
-维护者可运行 `python3 -m labmon.pool < examples/pool-shadow.json` 回放两机各一张卡的试点场景，或在 Python 中调用 `labmon.pool.plan(snapshot)`。输出为 JSON，`mode` 恒为 `shadow`。入口不读取主机清单、登录账号或共享盘，也不执行作业。看板用户接口须由调用方另做授权和最小投影。
-
-快照由受信调用方准备。下表的时刻均为 epoch 秒，设备用真实 GPU UUID。一次试点使用同类整卡，适配性以授权设备清单为准。同一物理机上的两个容器/worker 必须提供不同的执行节点 ID，不能合并为一个节点。输入方须确认多个执行节点的 CPU 与内存预算不重复。物理机未核实可用 `null`，该节点仅参与独立单卡试算。准备快照时须排除未经批准的环境及失去授权的项目，`eligible_nodes` 必须使用每个项目实际获准的节点及设备列表。队首、暂停、依赖、环境和数据是否就绪由输入方核实。
-
-| 输入 | 必填字段及口径 | 可选字段 |
-|---|---|---|
-| 快照 | `now`、`nodes`、`jobs` | `attempts` 缺省空 |
-| 节点 | `node`、`physical_host`、`model`、`state`（`ready`、`paused`、`offline`、`borrowed`）、`observed_at`；`cpu_cores` 和 `ram_gib` 是扣除实际运行负载后的可用量，未启动承诺和本次观测以来开跑的作业由试算另扣；`ram_limit_gib` 为原始上限，用于计算内存余量；`cards` 每项为 `uuid`、`vram_mb`、`free_mb`、`idle`（整卡此刻未被任何进程占用） | `deadline` 节点最迟可用时刻 |
-| 作业 | `job`（稳定的队首 ID）、`project`、`account`（可信、稳定的账户 ID）、`gpus`（正整数）、`since`（队首可运行起算）、`vram_gib`（每张）、`ram_gib`、`cpu_cores`、`eligible_nodes`（节点 ID → 获准的 UUID 列表） | `paused`、`focus_until`（经管理员授权的优先到期）、`duration_min`、`deadline` |
-| 尝试 | `attempt_id`、`job`、`account`、`project`、`node`、`gpus`（UUID 数组）；已承诺用 `reserved_at`，已启动用 `t0`，跑完加 `t1`，未启动撤销加 `released_at`；活跃尝试还需 `cpu_cores`、`ram_gib` | 同一尝试的多条回执共享相同身份字段，可补充阶段时刻 |
-
-先把仍在跑和已承诺的卡都算给账户。允许的限时优先先排，其余按账户当前占用从少到多，同档按可运行的队首先后和稳定作业 ID。每个候选只从单个合格节点取整卡，使用现有 `place` 校验资源，使用 `acct_job` 扣这一轮假设分配的 CPU／内存并重新比较账户占用。候选节点优先填剩余空卡少的，尽量给别的节点保留连续可用的多卡组。碰到物理卡或环境不足的作业，其他独立任务照常匹配。本轮只比较此刻能不能放，截止使用已有 `fits_before` 的估时余量。池内跨机成组、抢占、预留未来时刻的屏障由后续独立设计决定。
-
-管理员一次性真卡试点（#252）用现测单卡节点快照调用同一个 `pool.plan`。只把两项已获成员/项目授权的固定算子匹配到两台节点。同机双卡申请只用于验证等待原因。实际起进程前由远端 worker 再核节点、设备、保活与本机资源，流程见 [管理员固定算子试点](pool-execution.md#管理员固定算子试点252)。
-
-- `capacity` 给 `total`（不含借来节点，暂停和离线仍算已登记）、`free`（状态新鲜且接单的整张空卡，已扣活跃尝试）和 `max_same_node_free`。前两项为全池统计，最后一项按单执行节点，物理归属未知节点最多贡献 1。三项是试算前的观测值，与某个项目能否使用或任务是否放得下分开。
-- `nodes` 给 `node`、`physical_host`、`model`、`total`、`free`、`state`，过期用现有 worker 过期阈值，标 `offline`。
-- `assignments` 每项有 `job/account/project/gpus/node/devices`；`waiting` 每项有 `job/account/project/gpus/reason/text`。常见原因 `same_node`（需要 N 张同机空闲卡）、`busy`（等下一张空卡）、`vram`、`ram`、`cpu`、`cut`、`paused`、`offline`、`ineligible`、`active`（已在跑或承诺）。
-- `usage` 按账户给 `active_cards`（实际在跑与未启动承诺的卡数）、`card_seconds`（从提供的可信回执算出的实际卡秒）。卡秒按 `attempt_id` 合并同一身份的乱序重发，未启动承诺不记卡秒，历史不改变当前占用排序。调用方决定提供哪些历史，结果不是持久账本。设备别名重复、两个活跃尝试占同一卡、同一尝试身份或时刻冲突使整个输入失败，命令行退出 2。
-
 ## 版本记录
 
 后续公开版本的行为变更通过本仓库 Issue、PR 与提交记录跟踪。当前准入、估计、公平份额和生命周期规则见 [worker.md](worker.md)。

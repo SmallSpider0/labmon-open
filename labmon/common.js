@@ -512,7 +512,7 @@ function tlPack(items) {
 // 同一行里重叠的分道（先 tlPack）。o.color(项目)、o.text(条) 悬停、o.label(条) 条上的字（放不下省略中间）、o.pre(条) 可选的前缀（原样留着）
 const OCC_BAR = {done: "done", failed: "failed", stop: "failed", run: "running", plan: "queued"};
 const OCC_ST = {done: "完成", failed: "失败", stop: "停下重排", run: "在跑（预计结束）", plan: "预计（推演）"};
-const occState = x => x.observed && x.st === "run" ? "在跑（右端为最后观测）" : x.observed && x.st === "stop" ? "已停止" : OCC_ST[x.st];
+const occState = x => OCC_ST[x.st];
 // 推演里排在谁后面（[[项目, 任务]]）；self 是本项目时只写任务名
 const afterText = (af, self) => af.map(([p, n]) => p === self ? n : `${p} 的 ${n}`).join("、");
 // 占用条的图例条目（接进 tlShow 的 items）；pre 是说明前缀
@@ -521,8 +521,6 @@ const occItems = (c, pre = "") => [
   ["occ_run", pre + "在跑（填色到现在，右端是预计结束）", tlSw(jobBar("running", false, 0, 1, 22, 10, c, .45))],
   ["occ_plan", pre + "排队（worker 按放行规则推演，同机各项目一起排）", tlSw(jobBar("queued", false, 0, 1, 22, 10, c))],
   ["occ_failed", pre + "失败", tlSw(jobBar("failed", false, 0, 1, 22, 10, "var(--bad)"))],
-  ["pool_run", "算力池在跑（右端为最后观测，无结束预测）", tlSw(jobBar("running", false, 0, 1, 22, 10, c, 1))],
-  ["pool_stop", "算力池已停止（不会自动重排）", tlSw(jobBar("failed", false, 0, 1, 22, 10, "var(--warn)"))],
   ["occ_stop", pre + "停下重排", tlSw(jobBar("failed", false, 0, 1, 22, 10, "var(--warn)"))]];
 function occBars(items, y, h, c, o) {
   const n = Math.max(1, ...items.map(x => x.k + 1)), th = (h - 4) / n, now = TL.cfg.now();
@@ -530,7 +528,7 @@ function occBars(items, y, h, c, o) {
   for (const x of items) {
     if (!c.win(x.t0, x.t1)) continue;
     const xa = c.cl(x.t0), w = Math.max(1.5, c.cl(x.t1) - xa - 1), yy = y + 2 + x.k * th, st = OCC_BAR[x.st] || "done";
-    c.seen.add((x.observed && ["run", "stop"].includes(x.st) ? "pool_" : "occ_") + x.st);
+    c.seen.add("occ_" + x.st);
     s += jobBar(st, false, xa, yy, w, th - 1, x.st === "failed" ? "var(--bad)" : x.st === "stop" ? "var(--warn)" : o.color(x.p),
       st === "running" ? (c.cl(now) - xa) / w : 0, tip(o.text(x)));
     if (w > 56 && th >= 13) s += `<text x="${xa + 4}" y="${yy + th / 2 + 3}" style="font-size:10px;pointer-events:none;fill:${st === "done" ? "#fff" : "var(--fg)"}">${esc(fit(o.label(x), w - 8, o.pre ? o.pre(x) : true))}</text>`;
@@ -538,6 +536,3 @@ function occBars(items, y, h, c, o) {
   return s;
 }
 
-const POOL_QUEUE_STATE = {preparing: ["正在核对资源", "warn"], queued: ["排队", "mute"], claimed: ["待启动", "warn"], waiting: ["等待", "warn"],
-  starting: ["启动中", "warn"], running: ["运行中", "ok"], done: ["完成", "ok"], failed: ["失败", "bad"],
-  stopping: ["停止中", "warn"], stopped: ["已停止", "mute"], unknown: ["状态待确认", "warn"], withdrawn: ["已撤回", "mute"]};

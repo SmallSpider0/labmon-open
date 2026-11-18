@@ -435,7 +435,7 @@ def guest_host(s: dict, hosts: list[dict]) -> dict:
     from .fleet import state_file                 # fleet 在上层 import 本模块，这里只能延迟 import
     tpl = next((h for h in hosts if not h.get("returned") and not h.get("borrow")), hosts[0] if hosts else {})
     node = str(s.get("ssh", "")).rsplit(".", 1)[-1] or str(s["id"])
-    return {**{k: tpl[k] for k in ("python", "data_root", "ka_bin", "pool_python", "shared", "mounts", "checks") if k in tpl},
+    return {**{k: tpl[k] for k in ("python", "data_root", "ka_bin", "shared", "mounts", "checks") if k in tpl},
             "id": str(s["id"]), "label": f"{node}（借 {s.get('holder')}）", "ssh": s.get("ssh"), "port": s.get("port", 22),
             "known_hosts": str(state_file("known_hosts")), "worker": "auto", "returned": s.get("borrow_returned"),
             "borrow": {"holder": str(s.get("holder")), "since": parse_time(s.get("borrow_since")), **_until(s.get("borrow_until")),

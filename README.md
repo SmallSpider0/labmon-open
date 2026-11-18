@@ -19,7 +19,7 @@
 | 接入一个项目、排队、暂停、看告警、取结果（给实验会话的操作规程） | [skills/lab-experiments/SKILL.md](skills/lab-experiments/SKILL.md) |
 | 看板服务与命令、工作台各块、项目页各块、告警清单、掉线与租期、预备续租、借用与归还 | [docs/workbench.md](docs/workbench.md)（告警清单在 [这里](docs/workbench.md#告警)） |
 | worker：命令、清单写法、资源提示、占位、依赖、独占、准入与公平份额、预计时长、推演、临时指令、单元申请 | [docs/worker.md](docs/worker.md) |
-| 跨项目调度的设计与依据、算力池离线试算、分期、改动记录 | [docs/scheduler.md](docs/scheduler.md) |
+| 跨项目调度的设计与依据、分期、改动记录 | [docs/scheduler.md](docs/scheduler.md) |
 | 组内服务器：配置、探测与归类、保活守护、平台操作（核对、续租、开关机、换人）、借用、共享盘 | [docs/fleet.md](docs/fleet.md) |
 | 快照与状态文件的字段 | [docs/schema.md](docs/schema.md) |
 | 看板的登录、账号与令牌、两个入口、各路由要的权限与账号接口 | [docs/api.md](docs/api.md) |
@@ -27,7 +27,6 @@
 | SCM 平台的接口记录 | [docs/platform_scm.md](docs/platform_scm.md) |
 | 配置逐项说明 | [examples/monitor.toml](examples/monitor.toml)、[examples/hosts.toml](examples/hosts.toml) |
 | 改 labmon 本身的规则（怎么开发：Issue 与 PR、子 agent 分工、审查；一个概念只有一处实现、怎么测、怎么部署） | [AGENTS.md](AGENTS.md) |
-| 算力池受控试点与执行隔离 | [docs/pool-execution.md](docs/pool-execution.md) |
 | 设计新功能、改行为时逐维度对照的影响清单与设计说明模板 | [docs/interactions.md](docs/interactions.md) |
 | 开发流程一页图：从 Issue 到部署、分工与强度档、实验会话怎么报问题（只概括，以 AGENTS.md 为准） | [docs/workflow.html](docs/workflow.html)；维护规则见 [AGENTS.md「流程总览」](AGENTS.md#流程总览) |
 
@@ -115,8 +114,6 @@ labmon/lan.py           连服务器的 ssh（共用长连接）与“本机在�
 labmon/probe.py         项目页的探针（在被监控主机上运行，只用标准库，兼容 3.8）：GPU、cgroup、磁盘、自定义检查、队列原始数据
 labmon/collect.py       项目页：跑探针 → 统一快照（hosts / lanes / jobs / groups / alerts / history）→ 渲染 page.html
 labmon/page.html        项目页的单文件页面模板，只读快照
-labmon/pool.py         单池整卡离线试算：按账户当前占用与队首排序，按执行节点放卡与按尝试去重计卡秒
-labmon/pool_supply.py  管理员一次性池供给与固定 CUDA 验收
 labmon/overview.py      工作台的数据：读各主机 worker 的状态、连通与租期（health）、调度卡 sched_view、各卡被谁占着 occupancy；
                         写给各主机 worker 的 eta.json、sched.json 与 returned.json；渲染 overview.html
 labmon/overview.html    工作台的单文件页面：总览、主机页、项目页入口、记录、组内服务器

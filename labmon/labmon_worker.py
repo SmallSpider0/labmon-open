@@ -75,7 +75,6 @@ import json
 import math
 import os
 import re
-import shlex
 import shutil
 import signal
 import stat
@@ -171,60 +170,6 @@ def write(p, s):
     with open(tmp, "w") as f:
         f.write(s)
     os.replace(tmp, p)
-
-
-@contextlib.contextmanager
-def pool_device_lock():
-    """试点与普通 worker 共用的本机接单锁。已有任务照常收尾。"""
-    os.makedirs(LOCAL, exist_ok=True)
-    with open(os.path.join(LOCAL, "pool-device.lock"), "a") as f:
-        try:
-            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            yield None
-        else:
-            yield f
-
-
-def pool_supply_hold(host):
-    """供给闸门保存在共享 worker 目录；掉线、到期和重启都不能自行解封。"""
-    path = os.path.join(Paths(host).dir, "pool-supply.json")
-    if not os.path.exists(path):
-        return None
-    try:
-        value = json.loads(read(path, ""))
-        if isinstance(value, dict) and value.get("supply_id"):
-            return value
-    except (TypeError, ValueError):
-        pass
-    return {"error": "供给闸门记录损坏，需管理员核对"}
-
-
-def pool_gate(spec):
-    """关闸与普通放行共用接单锁；开闸必须匹配同一次供给且池进程已释放锁。"""
-    host, identity, action = (spec.get(k) for k in ("host", "supply_id", "action"))
-    if not isinstance(host, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", host) or not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{32}", identity) or action not in ("close", "open"):
-        raise ValueError("供给闸门参数无效")
-    p = Paths(host)
-    with pool_device_lock() as lock:
-        if not lock:
-            raise ValueError("接单或池任务尚未收尾，继续保持供给闸门")
-        current = pool_supply_hold(host)
-        if current and current.get("supply_id") != identity:
-            raise ValueError("供给编号不匹配，不能改动当前闸门")
-        path = os.path.join(p.dir, "pool-supply.json")
-        if action == "open":
-            if current:
-                os.unlink(path)
-            return {"released": True, "supply_id": identity}
-        if spec.get("regular"):
-            status = json.loads(read(p.status, "{}"))
-            pid = read_pid(p.pid)
-            if not alive(pid, ("labmon_worker",)) or status.get("pid") != pid or not status.get("pool_supply_gate") or not 0 <= time.time() - status.get("t", 0) <= STATUS_STALE_S:
-                raise ValueError("请先升级并启动支持供给闸门的 worker，再确认供给")
-        os.makedirs(p.dir, exist_ok=True)
-        write(path, json.dumps({"supply_id": identity}))
-        return {"closed": True, "supply_id": identity}
 
 
 def queue_stop_path(mode, root=None):
@@ -416,7 +361,7 @@ def reg_dirs():
 
 
 def queue_state_conflict(queue, host, directories):
-    """登记锁内检查状态目录唯一；普通登记与池通道交接共用。"""
+    """登记锁内检查状态目录唯一（worker add 用）。"""
     for h, directory in directories.items():
         for other in registry(directory)[0]:
             same = os.path.normpath(other["root"]) == os.path.normpath(queue["root"]) and other["jobs"] == queue["jobs"]
@@ -424,15 +369,6 @@ def queue_state_conflict(queue, host, directories):
                 return "状态目录 %s 已被%s %s/%s 用着：在清单旁的 .env 里给这条写不同的 QUEUE_STATE" % (
                     queue["state"], "" if h == host else "主机 %s 上登记的" % h, other["root"], other["jobs"])
     return None
-
-
-def pool_registration(root, jobs):
-    return os.path.join(HOME, "hosts", "pool-" + qslug(root, jobs) + ".json")
-
-
-def pool_cpu(r):
-    """池清单的 CPU 行留在来源 worker，仍走原 CPU/内存准入；专属清单不享有此例外。"""
-    return bool((r.get("q") or {}).get("pool")) and r.get("ngpu") == 0
 
 
 def reg_lock(*, required=False):
@@ -461,7 +397,7 @@ def load_queue(reg):
     return {"key": reg["_slug"], "root": root, "jobs": jobs, "jobs_path": os.path.join(root, jobs),
             "env": envf if os.path.exists(envf) else None, "gpus": reg.get("gpus"),
             # 项目 id 就是登记时写的 --project（add 必写）
-            "project": reg["project"], "stop": reg.get("stop") or "boundary", "pool": reg.get("pool"),
+            "project": reg["project"], "stop": reg.get("stop") or "boundary",
             "added_t": reg_added(reg),            # 登记时刻（epoch 秒）：状态里带出去，看板在同一清单登记在两台在用主机上时取晚的（collect.reg_queues）
             "state": env("QUEUE_STATE", "results/_queue"), "logs": env("QUEUE_LOGS", "results/_logs")}
 
@@ -2468,11 +2404,11 @@ class Worker:
         self.oom_n, self.oom_ours = n, 0
 
     # ---- 临时指令 ----
-    def load_overrides(self, *, inspect=False):
+    def load_overrides(self):
         """读 overrides.json，去掉过期的（并记事件）；pause --now 的按各自的停法停下这个项目正在跑的任务，只做一次（记 applied；
         带 once 的是命令行不带 --host 的 pause --now：停完照样当暂停挡着，等看板写来的 sched.json 里有了这个项目的全局暂停才删（全局的接着挡），
         最多留 ONCE_HOLD_S（看板一直没写来、或全局的还没送到就被 resume 了）。停完立刻删的话，sched.json 还没到，被停的任务下一轮就又放行了）。读改写在文件锁（flock）里：命令行 override add/rm 同时写也不丢。
-        返回这些再接上看板写来的项目级暂停、优先（sched_ovr，所有主机生效）。inspect 只看还生效的指令，供一次性池试点查询。"""
+        返回这些再接上看板写来的项目级暂停、优先（sched_ovr，所有主机生效）。"""
         with flock(self.p.overrides):
             try:
                 with open(self.p.overrides) as f:
@@ -2481,8 +2417,6 @@ class Worker:
                 ovr = []
             keep = [o for o in ovr if not o.get("until") or o["until"] > time.time()]
             global_ovr = sched_ovr(self.p.sched)
-            if inspect:
-                return keep + global_ovr
             for o in ovr:
                 if o not in keep:
                     self.event("override", "临时指令到期：%s" % ovr_text(o), **ovr_fields(o, "expire"))
@@ -2543,7 +2477,6 @@ class Worker:
             ms = ms or set()
             ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [cur] if cur else [], "deps": {}, "gang": {},
                   "held": "paused" if "paused" in ms else (self.override_hit({"project": q["project"]}, ("pause",))
-                                                           or (["pool"] if q.get("pool") else None)
                                                            or self.override_hit({"project": q["project"]}, ("drain",)) or [None])[0]}
             for n, _ in c[1]:
                 v = "done" if n + ".done" in ms else "failed" if n + ".failed" in ms else None
@@ -2629,7 +2562,7 @@ class Worker:
     def dep_note(self, k, project):
         """还会跑、眼下却不会动的被等任务的说明（等待原因里写）：所在清单暂停、drain，或在 worker 不在的主机上；照常在排的为 None。"""
         host, age, held = self.dep_where.get(k, (None, 0, None))
-        why = [{"paused": "所在清单暂停中", "pause": "所在项目暂停中", "drain": "所在主机 drain 中", "pool": "所在清单由算力池调度"}.get(held, held)] if held else []
+        why = [{"paused": "所在清单暂停中", "pause": "所在项目暂停中", "drain": "所在主机 drain 中"}.get(held, held)] if held else []
         if host is not None and age > STATUS_STALE_S:
             why.append("在 %s 上，那台 worker 已 %d 分钟没更新" % (host, age / 60))
         return "%s %s" % (dep_names([k + (False,)], project), "，".join(why)) if why else None
@@ -3196,7 +3129,7 @@ class Worker:
         self.load_eta()
         wait = [r for r in reqs if r["key"] not in self.running]
         key = (tuple(sorted((r["key"], r["name"], bool(r["held"])) for r in wait)), tuple(sorted((k, j["name"]) for k, j in self.running.items())),
-               tuple((q["key"], q.get("pool")) for q in queues),
+               tuple(q["key"] for q in queues),
                self.durs_key, json.dumps(self.ovr, sort_keys=True), self.eta_m, json.dumps(pol, sort_keys=True), frozenset(self.dep_idx.items()),
                json.dumps(self.todo),         # 还会跑的行（删了 .failed 重跑时清单与队首都没变）：plan 与写进状态的 todo 同一轮对得上（#25）
                frozenset(self.other["ka"]),   # 借来的主机上有停不了的保活的卡（推演不放它，#45）：出现、消失当轮重推
@@ -3223,12 +3156,6 @@ class Worker:
             hit = cur and pend and self.override_hit(dict(pend[0][1], q=q, key=k, kind="queue", name=pend[0][0], project=q["project"]), lasting=True)
             if hit and hit[0] != "deadline":
                 pend = []
-            if q.get("pool"):
-                # 来源机只推演首个池 GPU 行之前的 CPU；后续串行项要等池真实执行后才能排。
-                for i, (_, h) in enumerate(pend):
-                    if not pool_cpu(dict(h, q=q)):
-                        pend = pend[:i]
-                        break
             jobs = [self.job_spec(n, h, self.qest.get(k, {}).get(n) or estimate(self.hist, dict(h, name=n, project=q["project"])),
                                   self.req_dur({"key": k, "name": n, "project": q["project"], "gang": None if is_hold(n) else h["gang"]}),
                                   self.dur_k(q["project"], n, h["est_min"])) for n, h in pend]
@@ -3339,7 +3266,7 @@ class Worker:
         pl = {(ln.get("root"), ln.get("queue")): ln for ln in plan.get("lanes") or [] if ln.get("kind") == "queue"}
         out = []
         for ln in todo:
-            if not ln.get("queue") or ln.get("held") in ("paused", "pause", "pool"):
+            if not ln.get("queue") or ln.get("held") in ("paused", "pause"):
                 continue
             key = (ln["root"], ln["queue"])
             cur = running.get(key)
@@ -3391,7 +3318,7 @@ class Worker:
                     for k in ds:
                         waiters.setdefault(tuple(k[:2]), set()).add((ln.get("project"), n))
         for h, age, _, ln in self.peer_todo:      # 那台 worker 不在（续租、重启）：它的清单还会跑、看不到何时跑完，整批推不出（#25 第 8 条）
-            if h not in self.peer_st and h not in self.gone and ln.get("queue") and ln.get("jobs") and ln.get("held") not in ("paused", "pause", "pool"):
+            if h not in self.peer_st and h not in self.gone and ln.get("queue") and ln.get("jobs") and ln.get("held") not in ("paused", "pause"):
                 others.append({"host": h, "root": ln["root"], "queue": ln["queue"], "project": ln["project"], "pend": [], "run": 0, "end": None,
                                "state": "unknown", "unread": False,
                                "why": "%s 的 worker 不在（状态 %d 分钟没更新），那里的 %s 不知道何时跑完" % (h, age / 60, ln["queue"])})
@@ -3504,14 +3431,12 @@ class Worker:
         own = [ln["end"] for ln in self.proj_lanes(self.host, [ln for ln in self.todo if ln["project"] == p], {"lanes": lanes}, cx["mine"], cx["held"])]
         return round(max(e["t1"] for e in moved)), None if None in own else round(max([cx["now"]] + own))
 
-    def override_hit(self, r, kinds=None, lasting=False, remote=False):
+    def override_hit(self, r, kinds=None, lasting=False):
         """挡住这个请求的临时指令：(指令种类, 原因)，没有为 None。看板据种类把车道标成暂停（drain 另报给同机各项目）。
         kinds 只看这几种（list_state 标清单暂停只看 pause、drain）。截止（续租、约定归还）不挡占位任务：它不占资源，
         续租、归还打断它也只是重开后接着等（推演里同样不挡，place 先放占位任务再看截止）。
         lasting：只看持久的挡法（截止、drain、pause、借来的主机只给别的项目用），跳过对方此刻超出预留（guest_block）：
         推演（forecast 排除哪些队列）与 offers（几小时后接不接得了）用它，此刻才有的原因推演不模拟（#25）；真放行看全部。"""
-        if not remote and not pool_cpu(r) and pool_supply_hold(self.host):
-            return "pool", "主机已供给算力池，等待收回并核对结束"
         for o in self.ovr:
             if kinds and o["kind"] not in kinds:
                 continue
@@ -3596,24 +3521,14 @@ class Worker:
         """放行：gpus 是快照里选中的卡（place 给的）。从排到队首（单元：申请）到放行等了多久（分钟）记进运行中任务与用量记录，
         看板的调度卡算各项目平均等多久；占位任务不算。"""
         r["wait"] = None if is_hold(r["name"]) or not r.get("since") else round((time.time() - r["since"]) / 60, 1)
-        with pool_device_lock() as allowed:
-            if not allowed or (not pool_cpu(r) and pool_supply_hold(self.host)):
-                return "主机已供给算力池，收回并核对结束后恢复专属任务", False
-            if gpus:
-                write(os.path.join(LOCAL, "pool-last-start"), str(time.time()))
-            return self.start(r["q"], r, gpus) if r["kind"] == "queue" else self.grant(r, gpus)
+        return self.start(r["q"], r, gpus) if r["kind"] == "queue" else self.grant(r, gpus)
 
-    def start(self, q, job, gpus, *, base_env=None, pass_fds=(), registry_locked=False, pool_authorized=False):
+    def start(self, q, job, gpus):
         """开跑清单里的一个任务；返回 None。开跑前再核一次归属：这一轮收请求之后登记被 worker add 搬到别的主机或被移除（#95），
         或别的主机已放了这条清单（current 已在，#88），这次不放，返回 (等待原因, False)，下一轮按新的登记与 current 重来。
         核归属、起进程、写 current 在登记归属的锁里（reg_lock，与 worker add 同一把）。"""
-        if not pool_authorized and not pool_cpu(dict(job, q=q)) and (q.get("pool") or pool_supply_hold(self.host)):
-            return "清单或主机已交给算力池，不能从专属通道放行", False
         st, lg = q["state"], q["logs"]
-        with (contextlib.nullcontext() if registry_locked else reg_lock()):  # 核归属到写下 current 一气做完：搬登记（worker add）插不进来（Codex 审查 #120）
-            route = read(pool_registration(q["root"], q["jobs"]) + ".route")
-            if not pool_authorized and route and q.get("pool") != route:
-                return "清单刚切换到池，等待来源 worker 重新读取登记", False
+        with reg_lock():                          # 核归属到写下 current 一气做完：搬登记（worker add）插不进来（Codex 审查 #120）
             if q.get("file") and not os.path.exists(q["file"]):
                 return "这条清单的登记刚搬到别的主机或被移除，这次不放", False
             if os.path.exists(os.path.join(st, "current")):   # 收请求之后别的主机已放了这条清单（两台都登记着，#88）：这次不放
@@ -3628,25 +3543,20 @@ class Worker:
             sd, cd = scratch_dir(q["project"], job["name"]), cache_dir(q["project"])
             for d in (sd, cd):
                 os.makedirs(d, exist_ok=True)
-            env = dict(os.environ if base_env is None else base_env, PYTHONUNBUFFERED="1", QUEUE_ROOT=q["root"], LABMON_SCRATCH=sd, LABMON_CACHE=cd)
+            env = dict(os.environ, PYTHONUNBUFFERED="1", QUEUE_ROOT=q["root"], LABMON_SCRATCH=sd, LABMON_CACHE=cd)
             env.pop("PYTHONPATH", None)
             env["CUDA_VISIBLE_DEVICES"] = ",".join(c["uuid"] for c in gpus) if job["ngpu"] > 0 else ""
             env["LABMON_CPUS"] = str(self.cpus_for(job))   # 给它记账的核数：项目拿它设线程数、DataLoader 进程数（nproc 是宿主机的）
             # 命令放子 shell 里跑：清单行里的 exit 不会跳过写退出码。借来的主机上先调高自己的 oom_score_adj（子进程继承）
             script = ("echo %d > /proc/self/oom_score_adj 2>/dev/null; " % GUEST_ADJ if self.guest() else "") \
-                + 'set -a; [ -n "$1" ] && . "$1"; set +a; '
-            if registry_locked:
-                script += 'export CUDA_VISIBLE_DEVICES="$4" LABMON_CPUS="$5"; '
-            script += '( eval "$2" ); echo $? > "$3"'
+                + 'set -a; [ -n "$1" ] && . "$1"; set +a; ( eval "$2" ); echo $? > "$3"'
             args = ["bash", "-c", script, "labmon-job:" + job["name"], q["env"] or "", job["cmd"], rcf]
-            if registry_locked:
-                args.extend((env["CUDA_VISIBLE_DEVICES"], env["LABMON_CPUS"]))
             with open(os.path.join(lg, job["name"] + ".log"), "a") as out:
                 out.write("===== %s labmon 开始（GPU %s）=====\n" % (now_str(), ",".join(str(c["i"]) for c in gpus) or "无"))   # 分隔行，见 START_RE
                 out.flush()
                 pr = subprocess.Popen(args,
                                       cwd=q["root"], env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                      start_new_session=True, pass_fds=pass_fds)
+                                      start_new_session=True)
             t0 = time.time()
             write(os.path.join(st, "current"), "%s %d %s %s" % (job["name"], pr.pid, now_str(t0), self.host))   # 放行的主机：别的主机据此不动它（run_elsewhere）
         gtxt = "，".join("GPU %d %s" % (c["i"], c["uuid"]) for c in gpus)
@@ -3656,7 +3566,7 @@ class Worker:
         self.event("start", "开始 %s%s%s" % (job["name"], "（%s）" % gtxt if gtxt else "",
                                            "，独占%s" % {"gpu": "卡", "host": "整机"}[job["excl"]] if job.get("excl") else ""),
                    name=job["name"], project=q["project"], queue=q["jobs"])
-        return pr if pass_fds else None
+        return None
 
     def grant(self, r, gpus):
         """放行一次单元申请：写 .ok（含选中的卡），申请方据此设 CUDA_VISIBLE_DEVICES 后 exec 原命令。"""
@@ -3803,13 +3713,6 @@ class Worker:
                            if time.time() - (t or 0) <= GANG_LATE_S}
 
     def adopt(self, q):
-        # 与池最后放行共用登记锁：同机来源 worker 也只观察这次池尝试。
-        with reg_lock():
-            if read(pool_registration(q["root"], q["jobs"])):
-                return False
-            self._adopt(q)
-
-    def _adopt(self, q, *, stopping=False):
         """接管上一个 worker 留下的任务（别的主机放行的不接管，requests 先过 run_elsewhere）：还在跑的继续盯；跑完了的按 .rc 记账；进程没了又没有 .rc 的（服务器重启）重跑。"""
         cur = read_current(q["state"])
         if not cur:
@@ -3826,7 +3729,7 @@ class Worker:
                    gpus=gpus, use=old.get("use") or {}, oom0=old.get("oom0"), fc0=old.get("fc0"), owner_gpu=old.get("owner_gpu"), io_sus=old.get("io_sus"),
                    gang_with=old.get("gang_with"), gang_stop=old.get("gang_stop"))
         job["excl"] = old.get("excl", job["excl"])
-        if stopping or job["gang_stop"] and job["gang_stop"].get("sent"):   # 停止请求已发：收尾照原重排规则记
+        if job["gang_stop"] and job["gang_stop"].get("sent"):   # 停止请求已发：收尾照原重排规则记
             job["stopping"] = True
         job["est"] = old.get("est") or estimate(self.hist, dict(job, root=q["root"], queue=q["jobs"]))
         if local and alive(pid, ("labmon-job:" + name,)):
@@ -4241,8 +4144,7 @@ class Worker:
         （否则 pause 半小时一 resume，队首立刻满 wait_cap 成屏障，别的项目全让位）；单元从申请时刻起算。"""
         old = self.wsince.get(r["key"])
         r["est"] = estimate(self.hist, r)
-        remote = bool((r.get("q") or {}).get("pool")) and not pool_cpu(r)
-        r["held"] = self.override_hit(r, kinds=("pause",) if remote else None, remote=remote)
+        r["held"] = self.override_hit(r)
         # 依赖没满足（dep_block）、成组的还不能排队（gang_block）：同被临时指令挡住
         r["dep"] = None if r["held"] else self.dep_block(r, now) or self.gang_block(r, now)
         g = r.get("gang") and self.gsim.get((r["project"], r["gang"]))
@@ -4251,34 +4153,11 @@ class Worker:
         elif g and not r["held"] and not r["dep"] and (r["key"], r["name"]) in g["local"]:
             g["local"][(r["key"], r["name"])] = now   # 这一轮在队首、能排队：组里别的成员留资源按它此刻就能算（gang_until）
         r["dur"] = self.req_dur(r)
-        r["stall"] = None if remote else self.stalled(r, self.snapshot(limits))
+        r["stall"] = self.stalled(r, self.snapshot(limits))
         fresh = not old or old[0] != r["name"] or old[2]            # 第一次见、换了任务，或上一轮被挡着
         r["since"] = now if r["held"] or r["dep"] else (r["t"] if r["kind"] == "slot" and not old else now) if fresh else old[1]
         r["charge"] = self.cards(r["ngpu"], r["est"]["vram"], r["excl"]) * (r["dur"] or 0.0) / 60
         return r
-
-    def pool_requests(self, queues, reqs):
-        """把原准备结果发布为资源请求；池不重读清单、不自行判依赖。来源机空卡及缓存不代表执行节点。"""
-        by_queue = {r["key"]: r for r in reqs}
-        out = []
-        for q in queues:
-            if not q.get("pool"):
-                continue
-            row = {"queue_id": q["pool"], "project": q["project"], "root": q["root"], "jobs": q["jobs"],
-                   "task_name": None, "ready": False, "empty": bool(q.get("empty"))}
-            r = by_queue.get(q["key"])
-            if r:
-                blocked = r["held"] or r["dep"]
-                row.update(task_name=r["name"], ready=not blocked, reason=blocked[1] if blocked else None,
-                           gpus=r["ngpu"], vram_gib=r["est"]["vram"], ram_gib=r["est"]["ram"],
-                           cpu_cores=r["est"]["cpus"], duration_min=r["dur"], gang=r.get("gang"))
-                # 保留真正的依赖原因；仅已就绪项等待池授权，不进本机 admit，也不为它停保活。
-                if pool_cpu(r):
-                    row.update(ready=False, reason=blocked[1] if blocked else "由来源 worker 执行 CPU 任务")
-                elif not blocked:
-                    r["held"] = ("pool", "等待算力池分配资源")
-            out.append(row)
-        return out
 
     def stage_bg(self, r, cp):
         """本地缺、共享盘有主副本的依赖在后台线程里拷（大文件要很久，不拖住这一轮 tick）：没在拷就起线程（共享盘慢时先推迟，io_yield）；
@@ -4349,7 +4228,6 @@ class Worker:
         reqs = self.gang_doomed(reqs, now)        # 同一次开跑的同伴在这边跟上之前就失败了：没开跑的也记失败
         for r in reqs:
             self.prep(r, now, limits)
-        self.pool_ready = self.pool_requests(queues, reqs)
         gpus, apps = self.gpu_state(reqs, now)
         focus = {o.get("target") for o in self.ovr if o["kind"] == "focus"}
         use = self.share(now, pol)
@@ -4408,9 +4286,8 @@ class Worker:
                 waiting.append({"key": q["key"], "q": q, "name": None,
                                 "why": "主机 %s 放行的 %s 还没收尾（这条清单也登记在那台），等那台跑完；那台已不在、任务确定没了，删掉状态目录里的 current 这台就接着跑" % (other, cur[0])})
                 continue
-            if cur and self.adopt(q) is False:
-                waiting.append({"key": q["key"], "q": q, "name": None, "why": "算力池尝试仍在执行或核对收尾，由池执行端处理"})
-                continue
+            if cur:
+                self.adopt(q)
             if q["key"] in self.running:
                 continue
             lock = read_pid(os.path.join(q["state"], "lock"))
@@ -4443,9 +4320,7 @@ class Worker:
         now = time.time() if now is None else now
         need_gpu = (any(j.get("ngpu", 1) > 0 or j.get("excl") for j in self.running.values())
                     or any((r["ngpu"] > 0 or r["excl"]) and not r["held"] and not r.get("dep") and not r["stall"] and self.gang_soon(r, now) for r in reqs))
-        with pool_device_lock() as allowed:
-            if allowed:
-                self.keepalive(need_gpu)          # 先停保活再看显存，否则保活占的显存会让任务以为没卡
+        self.keepalive(need_gpu)                  # 先停保活再看显存，否则保活占的显存会让任务以为没卡
         gpus = query_gpus() if any(r["ngpu"] > 0 for r in reqs) else []
         apps = self.gpu_now() if any(r["excl"] for r in reqs) else []
         live = [r for r in reqs if not r["held"] and not r.get("dep")]
@@ -4531,9 +4406,8 @@ class Worker:
         S = self.snapshot(limits)
         hits = [round(t) for t in self.ka_hits if t > now - FIGHT_S]   # 近 FIGHT_S 秒保活被拉起的时刻（kafight，重启后 load_prev 找回）
         write(self.p.status, json.dumps({
-            "t": time.time(), "pid": os.getpid(), "host": self.host, "pool_trial_gate": True, "pool_supply_gate": True, "info": self.info, "gpu_procs": self.gprocs,
+            "t": time.time(), "pid": os.getpid(), "host": self.host, "info": self.info, "gpu_procs": self.gprocs,
             "gate": {"on": self.gate, "at": GATE}, "limits": limits, "overrides": self.ovr, "local": self.local, "storage": self.storage,
-            "pool_ready_protocol": 1, "pool_requests": getattr(self, "pool_ready", []),
             "voided": self.voided,
             "kafight": dict(self.fight, n=len(hits), hits=hits) if hits else None,
             "ka_stop": self.ka_stop_t if self.ka_off else None,   # 要卡的这段里 worker 停着保活：停它的时刻（接管时找回，load_prev）
@@ -4548,7 +4422,7 @@ class Worker:
             "room": {"ram": ram_free(S), "margin": S["margin"], "gpus": {u: max(0.0, v) for u, v in card_free(S).items()},
                      "cpu": cpu_free(S), "cpu_cap": S["cpu_cap"]},
             "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"],
-                        "pool": q.get("pool"), "empty": q.get("empty", False), "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {})} for q in queues],
+                        "empty": q.get("empty", False), "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {})} for q in queues],
             "plan": self.plan,                    # 推演（forecast）：各队列与单元每个任务的预计开始、结束、用哪几张卡
             "todo": self.todo,                    # 还会跑的任务（list_state）：别的主机的依赖按它认谁还会跑、排在谁后面
             "dep_miss": [[p, n, int(t)] for (p, n), t in sorted(self.dep_miss.items())],   # 依赖等的、哪里都找不到的任务与起算时刻（dep_block；接管时找回，取整往前不往后）
@@ -5640,773 +5514,8 @@ def slot_main(argv):
         time.sleep(1)
 
 
-# 组内互信试点只运行这一段固定算子，不接受清单或命令输入。
-POOL_SMOKE = """
-import json, os, sys, time
-import torch
-
-device, start_at, until = sys.argv[1], float(sys.argv[2]), float(sys.argv[3])
-torch.set_num_threads(1)
-if os.environ.get("CUDA_VISIBLE_DEVICES") != device or torch.cuda.device_count() != 1:
-    raise SystemExit("worker 放行的设备不符")
-if time.time() >= until:
-    raise SystemExit("试点已到截止")
-a = torch.ones((128, 128), device="cuda")
-b = a.clone()
-while time.time() < start_at and time.time() < until:
-    time.sleep(0.1)
-started = time.time()
-steps = 0
-while time.time() < min(started + 25, until):
-    result = a @ b
-    torch.cuda.synchronize()
-    steps += 1
-    time.sleep(0.3)
-ended = time.time()
-if steps == 0 or result[0, 0].item() != 128:
-    raise SystemExit("CUDA 算子没有通过数值检查")
-print(json.dumps({"start": started, "end": ended, "steps": steps,
-                  "device": device, "model": torch.cuda.get_device_name()}), flush=True)
-"""
-POOL_PYTHON = os.environ.get("LABMON_POOL_PYTHON", sys.executable)
-POOL_HINTS = "gpus=1 exclusive=gpu vram=2 ram=2 cpus=1 est_min=1"
-POOL_DRAIN_S = 8
-POOL_DRAIN_POLL_S = 0.25
-
-
-def pool_checked_files(base, root, jobs, *, read_files=True):
-    """核对获准路径，读取清单与环境的实际字节及指纹；解除登记只核路径。"""
-    import contextlib
-    import hashlib
-    import os
-    import stat
-    from pathlib import PurePosixPath
-
-    base, canonical = os.path.realpath(base), os.path.realpath(root)
-    if canonical == base or os.path.commonpath((canonical, base)) != base:
-        raise ValueError("工作区超出共享项目目录")
-    path = PurePosixPath(jobs)
-    if jobs and (path.is_absolute() or ".." in path.parts or not path.name.endswith(".txt")):
-        raise ValueError("清单路径无效")
-    hashes, contents = [], []
-    if not read_files:
-        return canonical, hashes, contents
-    flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
-    with contextlib.ExitStack() as stack:
-        directory = os.open("/", flags)
-        stack.callback(os.close, directory)
-        for part in canonical.split("/")[1:] + list(path.parts[:-1]):
-            directory = os.open(part, flags, dir_fd=directory)
-            stack.callback(os.close, directory)
-        if jobs:
-            for i, rel in enumerate((path.name, path.name[:-4] + ".env")):
-                try:
-                    fd = os.open(rel, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW, dir_fd=directory)
-                except FileNotFoundError:
-                    if not i:
-                        raise
-                    hashes.append(None)
-                    contents.append(None)
-                    continue
-                with os.fdopen(fd, "rb") as f:
-                    if not stat.S_ISREG(os.fstat(f.fileno()).st_mode):
-                        raise ValueError("清单和环境必须是普通文件")
-                    content = f.read(4 * 1024 * 1024 + 1)
-                if len(content) > 4 * 1024 * 1024:
-                    raise ValueError("清单或环境超过 4 MiB")
-                hashes.append(hashlib.sha256(content).hexdigest())
-                contents.append(content)
-    return canonical, hashes, contents
-
-
-def pool_gpu_apps():
-    """池试点严格查询，驱动失败时不能把空输出当成无进程。"""
-    return gpu_procs(strict=True)
-
-
-def pool_probe(host, device, regular, project=None, *, daily=False):
-    """读执行代际和目标卡，只有正常空闲或 ka.sh 管的保活才可做试点。"""
-    p = Paths(host)
-    status = json.loads(read(p.status, "{}"))
-    pid = read_pid(p.pid)
-    up = alive(pid, ("labmon_worker",))
-    if regular:
-        if not up or pid != status.get("pid") or not status.get("pool_trial_gate") or not 0 <= time.time() - status.get("t", 0) <= STATUS_STALE_S:
-            raise ValueError("现有 worker 尚未支持试点接单锁或状态过期")
-        if time.time() - num(read(os.path.join(LOCAL, "pool-last-start")), 0) < 2 * TICK:
-            raise ValueError("现有 worker 刚放行过任务，等下一轮核实")
-        if daily and (not status.get("pool_supply_gate") or not pool_supply_hold(host)):
-            raise ValueError("请升级 worker 并先关闭专属接单通道")
-        if any(status.get(k) for k in (("running", "external") if daily else ("running", "waiting", "external", "todo"))):
-            raise ValueError("现有 worker 有任务在跑或待办")
-        overrides = Worker(host).load_overrides(inspect=True)
-        if any(o["kind"] in ("drain", "deadline", "guest") for o in overrides):
-            raise ValueError("主机暂停接单、预备续租或正借用")
-        if project and any(o["kind"] == "pause" and o.get("target") == project for o in overrides):
-            raise ValueError("试点项目已暂停")
-    elif up:
-        raise ValueError("这台组内服务器有普通 worker 在运行")
-    if daily and not pool_supply_hold(host):
-        raise ValueError("尚未确认供给闸门，不能派单")
-    generation = started_at(1)
-    gpus = gpu_table()
-    if generation is None or not set(device.split(",")) <= {g["uuid"] for g in gpus} or (not daily and len(gpus) != 1):
-        raise ValueError("执行节点代际或单卡 UUID 无法确认")
-    info = host_info(gpus, DATA_ROOT)
-    apps = pool_gpu_apps()
-    if apps and not pool_only_keepalive(Worker(host), apps):
-        raise ValueError("GPU 上有实验或无法确认的保活")
-    if (not daily and not os.access(POOL_PYTHON, os.X_OK)) or not info.get("cpu_quota") or not info.get("mem"):
-        raise ValueError("试点 Python 或容器资源信息缺失")
-    g = gpus[0]
-    m = info["mem"]
-    # 已核实为可停止的保活，试算计回它的显存；真放行仍须停保活后重新实测。
-    cards = [{"uuid": c["uuid"], "vram_mb": c["total"], "idle": True,
-              "free_mb": min(c["total"], c["free"] + sum(mb for _, mb, gpu in apps if gpu == c["uuid"]))}
-             for c in gpus if c["uuid"] in device.split(",")]
-    return {"node": host, "physical_host": None, "model": g["name"], "generation": generation,
-            "state": "ready", "clock": time.time(), "cpu_cores": int(info["cpu_quota"]), "ram_gib": max(0, m["limit"] - m["anon"]),
-            "ram_limit_gib": m["limit"], "cards": cards}
-
-
-def pool_only_keepalive(w, apps):
-    """仅接受能归到已有 ka.sh 进程树的 GPU 进程。"""
-    groups = w.ka_groups() if w.ka_reg else None
-    procs = scan_procs()
-    keep = proc_tree(procs, groups or ())
-    accounted = {v for p in keep for v in (p, procs.get(p, {}).get("hpid")) if v}
-    return bool(groups) and {pid for pid, _, _ in apps} <= accounted
-
-
-
-def pool_wait_for_card(previous, until):
-    """ka.sh 已结束，驱动可能暂时还列着旧 PID；发现任何新 PID 或设备即停止。"""
-    end = time.monotonic() + min(POOL_DRAIN_S, max(0, until - time.time()))
-    while True:
-        apps = pool_gpu_apps()
-        if not apps:
-            return
-        if any((pid, gpu) not in previous for pid, _, gpu in apps):
-            raise ValueError("停保活后出现其他 GPU 进程")
-        left = end - time.monotonic()
-        if left <= 0:
-            raise ValueError("已停止的保活未在时限内释放 GPU")
-        time.sleep(min(POOL_DRAIN_POLL_S, left))
-
-
-def pool_receipt(root, *, finished, result=None, reason=None, keepalive=None):
-    """保留首发失败，保活恢复结果另记。未知结果不写成终态。"""
-    success = finished and result is not None and reason is None and keepalive not in ("busy", "failed")
-    receipt = {"finished": finished, "success": success, "cuda": result, "reason": reason, "keepalive": keepalive}
-    write(os.path.join(root, "receipt.json" if finished else "pending.json"), json.dumps(receipt))
-    return receipt
-
-
-def pool_trial(host, device, regular, project, attempt, generation, start_at, until):
-    """一次执行，复用 Worker 资源准入及收尾。独立目录不会读旧登记、单元申请或扫描盘。"""
-    global HOME, DATA_ROOT, LOCAL
-    if not re.fullmatch(r"[a-f0-9]{24}", attempt) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}", project):
-        raise ValueError("试点尝试或项目编号无效")
-    if not all(math.isfinite(t) for t in (generation, start_at, until)) or not time.time() < until <= time.time() + 1800 or start_at >= until:
-        raise ValueError("试点执行窗口无效")
-    with pool_device_lock() as allowed:
-        if not allowed:
-            raise ValueError("主机接单锁正在使用")
-        old = LOCAL
-        os.umask(0o077)   # 本命令在独立进程运行
-        root = os.path.join(old, "pool-trials", attempt)
-        os.makedirs(root, mode=0o700, exist_ok=False)
-        try:
-            node = pool_probe(host, device, regular, project)
-            if node["generation"] != generation:
-                raise ValueError("执行节点已更换容器")
-        except (OSError, ValueError, subprocess.SubprocessError) as e:
-            return pool_receipt(root, finished=True, reason=str(e))
-        HOME = LOCAL = root
-        DATA_ROOT = old
-        w = Worker(host)
-        # 这两行仅供本次 Worker 状态、结果和本地缓存使用。
-        os.makedirs(w.p.dir)
-        name = "pool-" + attempt
-        script = os.path.join(root, "smoke.py")
-        write(script, POOL_SMOKE)
-        cmd = shlex.join([POOL_PYTHON, script, device, str(start_at), str(until)])
-        q = load_queue({"root": root, "jobs": "pilot.txt", "gpus": [0], "project": project, "_slug": name, "stop": "term"})
-        write(q["jobs_path"], name + "|" + cmd + " # " + POOL_HINTS + "\n")
-        for d in (q["state"], q["logs"]):
-            os.makedirs(d)
-        job = queue_req(q, next_job(q))
-        job.update(est=estimate([], job), dur=1, wait=0)
-        had_ka = False
-        result, reason, keepalive = None, None, None
-        launch_attempted, child_exited = False, False
-        try:
-            apps = pool_gpu_apps()
-            running_ka = bool(w.ka_reg and w.ka_groups())
-            if apps and not pool_only_keepalive(w, apps):
-                raise ValueError("放行前出现其他 GPU 进程")
-            if running_ka:
-                had_ka = True
-                write(os.path.join(root, "had-keepalive"), str(os.getpid()))
-                w.keepalive(True)
-                pool_wait_for_card({(pid, gpu) for pid, _, gpu in apps}, until)
-            w.sample([])
-            gpus = w.info.get("gpus") or []
-            if len(gpus) != 1 or gpus[0]["uuid"] != device or started_at(1) != generation:
-                raise ValueError("放行前设备或执行代际发生变化")
-            if w.gate:
-                raise ValueError("内存闸门关闭，停止放行")
-            q["gpus"] = [gpus[0]["i"]]
-            x = w.as_job(job)
-            snap = w.snapshot({})
-            snap["cut"] = (until, False)
-            cards, why, _ = place(x, snap, time.time())
-            if cards is None or [c["uuid"] for c in cards] != [device]:
-                raise ValueError(why or "指定设备放不下")
-            if pool_gpu_apps():
-                raise ValueError("放行前 GPU 出现其他任务")
-            launch_attempted = True
-            # 固定算子只需要共享 Python 与驱动搜索路径，不继承执行端其余环境变量。
-            env = {k: os.environ[k] for k in ("PATH", "LD_LIBRARY_PATH") if k in os.environ}
-            child = w.start(q, job, cards, base_env={**env, "HOME": root, "TMPDIR": root},
-                            pass_fds=(allowed.fileno(),))   # 一次性 worker 崩溃时，固定任务仍持锁直到退出
-            if isinstance(child, tuple):
-                launch_attempted = False
-                raise ValueError(child[0])
-            try:
-                child.wait(timeout=max(0, until - time.time()))
-            except subprocess.TimeoutExpired:
-                w.send_stop(w.running[q["key"]], "term")
-                try:
-                    child.wait(timeout=2)
-                except subprocess.TimeoutExpired:
-                    try:
-                        os.killpg(child.pid, signal.SIGKILL)   # 只清理这次固定脚本的进程组
-                    except ProcessLookupError:
-                        pass
-                    child.wait(timeout=2)
-            # 确认父进程已经退出；GPU 驱动状态由下面的严格查询独立验证。
-            child_exited = True
-            w.finish(q["key"])
-            records = [json.loads(line) for line in (read(os.path.join(q["logs"], name + ".log"), "") or "").splitlines() if line.startswith("{")]
-            result = records[-1] if records and os.path.exists(os.path.join(q["state"], name + ".done")) else None
-            reason = None if result else "固定算子未成功，请核对本次日志"
-        except (OSError, ValueError, subprocess.SubprocessError) as e:
-            reason = str(e)
-        finished = not launch_attempted
-        if child_exited:
-            try:
-                apps = pool_gpu_apps()
-                finished = not apps or pool_only_keepalive(w, apps)
-                if not finished and not reason:
-                    reason = "GPU 上还有无法确认的进程，请核对本次清理"
-            except (OSError, ValueError, subprocess.SubprocessError):
-                if not reason:
-                    reason = "无法核实 GPU 清理结果"
-        if had_ka and finished:
-            try:
-                keepalive = pool_restore_keepalive(w, str(os.getpid()))
-            except (OSError, ValueError, subprocess.SubprocessError):
-                keepalive = "failed"
-        # 任务结束与保活恢复分开。恢复仍忙或失败时保留同一次尝试供 status 续查。
-        return pool_receipt(root, finished=finished and keepalive not in ("busy", "failed"),
-                            result=result, reason=reason, keepalive=keepalive)
-
-
-def pool_restore_keepalive(w, pid):
-    """只撤本次保活登记，确认卡空闲时恢复原保活。"""
-    if not w.ka_reg:
-        return "failed"
-    pidf = os.path.join(w.ka_reg, "pid")
-    if read(pidf) == pid:
-        os.unlink(pidf)
-    apps = pool_gpu_apps()
-    if apps:
-        return "restored" if pool_only_keepalive(w, apps) else "busy"
-    if w.ka_groups():
-        return "restored"
-    if w.ka("start").returncode != 0:
-        return "failed"
-    return "restored" if w.ka_groups() else "failed"
-
-
-def pool_status(host, attempt, generation, until):
-    if not re.fullmatch(r"[a-f0-9]{24}", attempt) or started_at(1) != generation or not math.isfinite(until):
-        raise ValueError("尝试编号、执行代际或时限不符")
-    with pool_device_lock() as allowed:
-        if not allowed:
-            return {"finished": False}
-        root = os.path.join(LOCAL, "pool-trials", attempt)
-        raw = read(os.path.join(root, "receipt.json"))
-        if raw:
-            return json.loads(raw)
-        raw_pending = read(os.path.join(root, "pending.json"))
-        pending = json.loads(raw_pending) if raw_pending else {}
-        recovery_only = pending.get("keepalive") in ("busy", "failed")
-        if not recovery_only and time.time() <= until + 5:
-            return pending or {"finished": False}
-        if not os.path.exists(root):
-            return {"finished": True, "success": False, "reason": "执行窗口已过，节点从未开始这次尝试"}
-        w = Worker(host)
-        apps = pool_gpu_apps()
-        if apps and not pool_only_keepalive(w, apps):
-            return pending or {"finished": False}
-        # 尚未证实子进程退出的，等截止后才收尾。仅待保活恢复的，卡空就可重试。
-        pid = read(os.path.join(root, "had-keepalive"))
-        try:
-            keepalive = pool_restore_keepalive(w, pid) if pid else None
-        except (OSError, ValueError, subprocess.SubprocessError):
-            keepalive = "failed"
-        reason = pending.get("reason") if recovery_only else pending.get("reason") or "执行端无完成回执，已核实任务退出"
-        return pool_receipt(root, finished=keepalive not in ("busy", "failed"), result=pending.get("cuda"),
-                            reason=reason, keepalive=keepalive)
-
-
-def pool_daily_receipt(path, attempt, phase, **fields):
-    previous = json.loads(read(os.path.join(path, "receipt.json"), "{}"))
-    row = {"phase": phase, "generation": attempt["generation"],
-           **{k: previous.get(k) for k in ("finished_at", "queue_state", "queue_logs")}, **fields}
-    # 只取本次尝试固定文件的尾部，不接受网页提供的任意日志路径。
-    name = attempt.get("task_name", "")
-    if name and "/" not in name and "\\" not in name:
-        logs = row.get("queue_logs") or (load_queue({"_slug": attempt["id"], "root": attempt["root"], "jobs": attempt["jobs"], "project": attempt["project"]})["logs"] if attempt.get("root") and attempt.get("jobs") else path)
-        row["log_tail"] = log_tail(os.path.join(logs, name + ".log"), 30, fold=False)
-    row["observed_at"] = time.time()
-    write(os.path.join(path, "receipt.json"), json.dumps(row))
-    return row
-
-
-def pool_group_alive(pid):
-    try:
-        os.killpg(pid, 0)
-    except ProcessLookupError:
-        return False
-    return True
-
-
-def pool_daily_recover(worker, path, attempt, receipt):
-    """监督进程已消失且设备锁拿到后，核对身份并沿原接管/收尾规则处理共享 current。"""
-    root, jobs, task = (attempt[k] for k in ("root", "jobs", "task_name"))
-    queue = load_queue({"root": root, "jobs": jobs, "project": attempt["project"], "_slug": attempt["id"]})
-    # 沿本次启动已使用的路径恢复；会话后来改 .env 不会让旧 current 丢失。
-    for key in ("state", "logs"):
-        if receipt.get("queue_" + key):
-            queue[key] = receipt["queue_" + key]
-    if os.path.commonpath((root, os.path.realpath(queue["state"]))) != root:
-        return None
-    marker = pool_registration(root, jobs)
-    stopped = read(os.path.join(path, "stop")) == attempt["id"]
-    started = receipt.get("started_at")
-    with reg_lock(required=True):
-        if read(marker) not in (None, "", attempt["id"]) or read(marker + ".route") != attempt.get("queue_id"):
-            return None
-        current = read_current(queue["state"])
-        if not current and os.path.exists(os.path.join(queue["state"], "current")):
-            return None
-        if current:
-            name, pid, t0, host = current
-            if read(marker) != attempt["id"] or name != task or host != attempt["node"] or str(pid) != read(os.path.join(path, "child")):
-                return None
-            started = started or t0
-            worker.prev[(root, jobs, name, pid)] = {"gpus": attempt["devices"]}
-            os.makedirs(worker.p.dir, exist_ok=True)
-            worker._adopt(queue, stopping=stopped)
-            if read_current(queue["state"]):
-                return None
-        done = os.path.exists(os.path.join(queue["state"], task + ".done"))
-        failed = os.path.exists(os.path.join(queue["state"], task + ".failed"))
-        result = "stopped" if stopped else "done" if done else "failed"
-        return {"phase": result, "started_at": started, "task_finished": bool(started and not stopped and (done or failed)),
-                "requeued": bool(started and not stopped and not (done or failed)),
-                "log_path": os.path.join(queue["logs"], task + ".log") if started else None}
-
-
-def pool_daily_status(path, attempt, stop=False):
-    """停止请求只写给本次尝试，执行端按本次进程组处理。"""
-    receipt = json.loads(read(os.path.join(path, "receipt.json"), "{}"))
-    if receipt.get("cleaned"):
-        return receipt
-    if stop and os.path.isdir(path):
-        write(os.path.join(path, "stop"), attempt["id"])
-    pid = read_pid(os.path.join(path, "supervisor"))
-    start = pstart(pid) if pid else None
-    if receipt and start is not None and str(start) == read(os.path.join(path, "supervisor-start")):
-        return {"phase": "stopping", "generation": attempt["generation"]} if stop else receipt
-    with pool_device_lock() as allowed:
-        if not allowed:
-            return {"phase": "unknown"}
-        if not os.path.isdir(path):
-            if time.time() < attempt["start_before"] + 5:
-                return {"phase": "unknown"}
-            return {"phase": "stopped" if stop else "failed", "generation": attempt["generation"], "cleaned": True}
-        raw = read(os.path.join(path, "child"))
-        if not raw and not receipt.get("started_at") and time.time() < attempt["until"] + 5 and not read(os.path.join(path, "terminal")):
-            return {"phase": "unknown"}
-        if raw == "starting":
-            return {"phase": "unknown"}
-        if raw and pool_group_alive(int(raw)):
-            return {"phase": "unknown"}
-        w = Worker(attempt["node"])
-        apps = pool_gpu_apps()
-        if apps and not pool_only_keepalive(w, apps):
-            return {"phase": "unknown"}
-        recovered = pool_daily_recover(w, path, attempt, receipt)
-        if recovered is None:
-            return {"phase": "unknown"}
-        ka = read(os.path.join(path, "had-keepalive"))
-        if ka and pool_restore_keepalive(w, ka) != "restored":
-            return {"phase": "unknown"}
-        pool_daily_unmark(attempt)
-        phase = recovered.pop("phase")
-        return pool_daily_receipt(path, attempt, phase, cleaned=True, **recovered)
-
-
-def pool_queue_route(spec):
-    """一条清单的通道交接。与普通登记及最后放行共用锁；运行中或结果不明不搬。"""
-    root, jobs, project, identity, action = (spec.get(k) for k in ("root", "jobs", "project", "queue_id", "action"))
-    if action not in ("claim", "release") or not isinstance(identity, str) or not re.fullmatch(r"[0-9a-f]{32}", identity):
-        raise ValueError("清单通道参数无效")
-    canonical, _, _ = pool_checked_files(os.path.join(DATA_ROOT, "projects"), root, jobs, read_files=action == "claim")
-    if canonical != root:
-        raise ValueError("工作区实际路径改变")
-    with reg_lock(required=True):
-        active = pool_registration(root, jobs)
-        route = active + ".route"
-        marker = read(route)
-        if marker and marker != identity:
-            raise ValueError("这条清单正属于另一笔池提交")
-        if os.path.exists(active):
-            raise ValueError("清单还有池尝试在途，先等清理确认")
-        directories = reg_dirs()
-        registrations = [pair for directory in directories.values() for pair in matching_regs(directory, root, jobs, aliases=True)]
-        for directory in directories.values():
-            status = json.loads(read(os.path.join(os.path.dirname(directory), "status.json"), "{}"))
-            if any(j.get("root") == root and j.get("queue") == jobs for j in status.get("running", []) + status.get("external", [])):
-                raise ValueError("原 worker 仍记录该清单在跑，等核对结束再切换")
-        if any(reg.get("project") != project for _, reg in registrations):
-            raise ValueError("清单登记属于其他项目")
-        queue = load_queue({"root": root, "jobs": jobs, "project": project, "_slug": identity})
-        if os.path.commonpath((root, os.path.realpath(queue["state"]))) != root:
-            raise ValueError("切换资源需要 QUEUE_STATE 位于项目工作区内")
-        if os.path.exists(os.path.join(queue["state"], "current")):
-            raise ValueError("清单还有普通任务在跑或待核对，不能切换资源")
-        names = [name for name, _ in parse_jobs(read(os.path.join(root, jobs), ""))]
-        valid = lambda name: isinstance(name, str) and bool(re.fullmatch(r"[^/\\,\x00-\x1f]{1,160}", name)) and name not in (".", "..")
-        if any(not valid(name) for name in names):
-            raise ValueError("清单任务名不能用于状态交接")
-        finished = spec.get("finished") or {}
-        if not isinstance(finished, dict) or any(not valid(name) or phase not in ("done", "failed") for name, phase in finished.items()):
-            raise ValueError("清单完成标记无效")
-        if action == "claim":
-            source = spec.get("source_host")
-            if not isinstance(source, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+", source):
-                raise ValueError("需要明确清单来源 worker")
-            conflict = queue_state_conflict(queue, source, directories)
-            if conflict:
-                raise ValueError(conflict)
-            source_dir = Paths(source).queues
-            source_status = json.loads(read(os.path.join(os.path.dirname(source_dir), "status.json"), "{}"))
-            if not source_status.get("pool_ready_protocol"):
-                raise ValueError("来源 worker 需要更新后才能接入池")
-            os.makedirs(os.path.dirname(route), exist_ok=True)
-            # 保留一个来源登记，只改资源目的地；它仍按原清单状态判断依赖与推进。
-            write(route, identity)
-            reg = dict(registrations[0][1]) if registrations else {"root": root, "jobs": jobs, "project": project, "added": now_str()}
-            reg["pool"] = identity
-            os.makedirs(source_dir, exist_ok=True)
-            target = os.path.join(source_dir, qslug(root, jobs) + ".json")
-            for name, phase in finished.items():
-                if name in names:
-                    os.makedirs(queue["state"], exist_ok=True)
-                    write(os.path.join(queue["state"], name + "." + phase), "")
-            write(target, json.dumps(reg))
-            for path, _ in registrations:
-                if path != target:
-                    os.unlink(path)
-            finished = {name: phase for name in names for phase in ("done", "failed")
-                        if os.path.exists(os.path.join(queue["state"], name + "." + phase))}
-            return {"claimed": True, "prior_finished": finished}
-        if finished and names:
-            os.makedirs(queue["state"], exist_ok=True)
-        for name, phase in finished.items():
-            if name in names:
-                write(os.path.join(queue["state"], name + "." + phase), "")
-        for path, reg in registrations:
-            if reg.get("pool") == identity:
-                os.unlink(path)
-        if marker:
-            os.unlink(route)
-        return {"released": True}
-
-
-def pool_daily_unmark(a):
-    with reg_lock(required=True):
-        marker = pool_registration(a["root"], a["jobs"])
-        if read(marker) == a["id"]:
-            os.unlink(marker)
-
-
-def pool_daily_launch(path, a, lock):
-    """独立进程内运行同一套准入及清单进程生命周期。"""
-    root, jobs, task = (a[k] for k in ("root", "jobs", "task_name"))
-    generation, until, devices = (a[k] for k in ("generation", "until", "devices"))
-    original_home, original_local = HOME, LOCAL
-    worker = Worker(a["node"])
-    marked, child, stopped, result, started = False, None, False, "failed", None
-    ka = []
-    marker = pool_registration(root, jobs)
-    try:
-        node = pool_probe(a["node"], ",".join(devices), a["regular"], a["project"], daily=True)
-        if node["generation"] != generation or time.time() >= a["start_before"]:
-            raise ValueError("派单窗口或执行代际已改变")
-        canonical, digest, content = pool_checked_files(os.path.join(os.environ.get("LABMON_DATA_ROOT", DATA_ROOT), "projects"), root, jobs)
-        if canonical != root or digest != a["fingerprint"]:
-            raise ValueError("工作区、清单或环境指纹已改变")
-        command = first_rows(parse_jobs(content[0].decode("utf-8"))).get(task)
-        if command is None or not re.fullmatch(r"[^/\\,\x00-\x1f]{1,160}", task) or task in (".", ".."):
-            raise ValueError("队首无效")
-        request = job_of(task, command)
-        if request["gang"] or request["ngpu"] != len(devices):
-            raise ValueError("队首资源或依赖已改变")
-        ka = pool_gpu_apps()
-        if ka:
-            if not pool_only_keepalive(worker, ka):
-                ka = []
-                raise ValueError("GPU 上已有非保活进程")
-            write(os.path.join(path, "had-keepalive"), str(os.getpid()))
-            os.makedirs(worker.p.dir, exist_ok=True)
-            worker.keepalive(True)
-            pool_wait_for_card({(pid, gpu) for pid, _, gpu in ka}, until)
-        # 分配回执留本地，清单状态、环境与日志沿用项目原路径。
-        globals().update(HOME=path, LOCAL=original_local)
-        w = Worker(a["node"])
-        os.makedirs(w.p.dir)
-        # 池执行仍写原主机的共享用量：其它 worker 的依赖、估计和公平记账沿用同一份历史。
-        w.p.usage = worker.p.usage
-        os.makedirs(os.path.dirname(w.p.usage), exist_ok=True)
-        queue = load_queue({"_slug": a["id"], "root": root, "jobs": jobs, "project": a["project"], "pool": a["queue_id"]})
-        for directory in (queue["state"], queue["logs"]):
-            os.makedirs(directory, exist_ok=True)
-        w.sample([])
-        gpus = w.info.get("gpus") or []
-        queue["gpus"] = [c["i"] for c in gpus if c["uuid"] in devices]
-        job = queue_req(queue, request)
-        globals().update(HOME=original_home, LOCAL=original_local)
-        w.reload_hist()
-        w.queue_durs([queue])
-        job.update(est=estimate(w.hist, job), dur=w.req_dur(job), wait=0)
-        def launch_ready(req, cards):
-            nonlocal child, marked, result
-            if {c["uuid"] for c in cards} != set(devices):
-                raise ValueError("资源分配已改变")
-            globals().update(HOME=original_home, LOCAL=original_local)
-            w.ovr = worker.load_overrides(inspect=True)
-            held = w.override_hit(req, remote=True)
-            if held:
-                return held[1], False
-            with reg_lock(required=True):
-                registrations = [r for d in reg_dirs().values() for _, r in matching_regs(d, root, jobs, aliases=True)]
-                if read(marker + ".route") != a.get("queue_id") or os.path.exists(marker) or len(registrations) != 1 or registrations[0].get("pool") != a["queue_id"]:
-                    raise ValueError("清单来源登记或池尝试已改变")
-                current_job = next_job(queue)
-                if not current_job or current_job["name"] != task:
-                    raise ValueError("原 worker 队首已改变或已有完成标记")
-                w.queue_durs([queue])
-                w.dep_state([queue], time.time(), [job])
-                if w.dep_block(job, time.time()):
-                    raise ValueError("最终放行时原 worker 依赖条件已改变")
-                if read(os.path.join(path, "stop")) == a["id"]:
-                    result = "stopped"
-                    raise ValueError("启动前已收到停止请求")
-                if pool_gpu_apps() or started_at(1) != generation or time.time() >= until:
-                    raise ValueError("最终放行前设备状态已变化")
-                write(marker, a["id"])
-                marked = True
-                # 有启动意图但还没来得及记录 PID 时，失联后也保留占用。
-                write(os.path.join(path, "child"), "starting")
-                env = {k: os.environ[k] for k in ("PATH", "LD_LIBRARY_PATH") if k in os.environ}
-                globals().update(HOME=path, LOCAL=original_local)
-                child = w.start(queue, job, cards, base_env={**env, "HOME": path, "TMPDIR": path},
-                                pass_fds=(lock.fileno(),), registry_locked=True, pool_authorized=True)
-                if isinstance(child, tuple):
-                    child = None
-                    os.unlink(os.path.join(path, "child"))
-                    raise ValueError("任务状态目录已占用")
-                write(os.path.join(path, "child"), str(child.pid))
-            return None
-
-        while child is None:
-            globals().update(HOME=path, LOCAL=original_local)
-            w.sample([])
-            snap = w.snapshot({})
-            snap["cut"] = (until, False)
-            waiting = w.place(job, snap, launch=launch_ready)
-            if child is not None:
-                break
-            if read(os.path.join(path, "stop")) == a["id"]:
-                result = "stopped"
-                raise ValueError("准备期间已收到停止请求")
-            if time.time() >= until:
-                raise ValueError("供给已到期")
-            if waiting:
-                write(os.path.join(path, "dispatch.log"), waiting[0])
-            time.sleep(0.5)
-        started = w.running[queue["key"]]["t0"]
-        pool_daily_receipt(path, a, "running", started_at=started, queue_state=queue["state"], queue_logs=queue["logs"])
-        sample_after = started + TICK
-        while True:
-            child.poll()
-            if not pool_group_alive(child.pid):
-                break
-            now = time.time()
-            if now >= until or read(os.path.join(path, "stop")) == a["id"]:
-                stopped = True
-                w.running[queue["key"]]["stopping"] = True
-                w.send_stop(w.running[queue["key"]], "term")
-                end = time.monotonic() + 2
-                while pool_group_alive(child.pid) and time.monotonic() < end:
-                    child.poll()
-                    time.sleep(0.1)
-                if pool_group_alive(child.pid):
-                    try:
-                        os.killpg(child.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                    child.wait(timeout=3)
-                if pool_group_alive(child.pid):
-                    return
-                break
-            if now >= sample_after:
-                w.sample([])
-                sample_after = now + TICK
-                pool_daily_receipt(path, a, "running", started_at=started)
-            time.sleep(0.5)
-        globals().update(HOME=path, LOCAL=original_local)
-        finished = time.time()
-        w.finish(queue["key"])
-        pool_daily_receipt(path, a, "stopping", started_at=started, finished_at=finished)
-        result = "stopped" if stopped else "done" if os.path.exists(os.path.join(queue["state"], task + ".done")) else "failed"
-        os.unlink(os.path.join(path, "child"))
-    except (OSError, ValueError, subprocess.SubprocessError) as e:
-        write(os.path.join(path, "dispatch.log"), str(e))
-        if os.path.exists(os.path.join(path, "child")):
-            return
-    finally:
-        globals().update(HOME=original_home, LOCAL=original_local)
-    write(os.path.join(path, "terminal"), result)
-    if pool_gpu_apps():
-        return
-    if ka and pool_restore_keepalive(worker, str(os.getpid())) != "restored":
-        return
-    if marked:
-        pool_daily_unmark(a)
-    pool_daily_receipt(path, a, result, cleaned=True, started_at=started,
-                       task_finished=bool(started and not stopped),
-                       log_path=os.path.join(queue["logs"], task + ".log") if started else None)
-
-
-def pool_daily(action, a):
-    if not re.fullmatch(r"[a-f0-9]{32}", a["id"]) or a["generation"] != started_at(1):
-        return {"phase": "unknown"}
-    path = os.path.join(LOCAL, "pool-daily", a["id"])
-    if action == "pool-dispatch":
-        gate = pool_supply_hold(a["node"])
-        if not gate or gate.get("supply_id") != a.get("supply_id"):
-            raise ValueError("供给闸门已变化，不能启动这次尝试")
-    if action != "pool-dispatch":
-        return pool_daily_status(path, a, stop=action == "pool-stop")
-    if os.path.isdir(path) or not time.time() < a["start_before"]:
-        return pool_daily_status(path, a)
-    with pool_device_lock() as lock:
-        if not lock:
-            return {"phase": "unknown"}
-        gate = pool_supply_hold(a["node"])
-        if not gate or gate.get("supply_id") != a.get("supply_id"):
-            raise ValueError("供给闸门在启动前变化")
-        os.umask(0o077)
-        try:
-            os.makedirs(path, exist_ok=False)
-        except FileExistsError:
-            return {"phase": "unknown"}
-        signal.signal(signal.SIGHUP, signal.SIG_IGN)
-        pid = os.fork()
-        if pid:
-            return {"phase": "starting", "generation": a["generation"]}
-        try:
-            os.setsid()
-            with open(os.devnull, "r+b", buffering=0) as null:
-                for fd in (0, 1, 2):
-                    os.dup2(null.fileno(), fd)
-            write(os.path.join(path, "supervisor"), str(os.getpid()))
-            write(os.path.join(path, "supervisor-start"), str(pstart(os.getpid())))
-            pool_daily_receipt(path, a, "starting")
-            pool_daily_launch(path, a, lock)
-        finally:
-            os._exit(0)
-
-
-def pool_observe(spec):
-    """同一采集连接核对库存和在途结果；一项失败不丢掉其余回执。"""
-    out = {"attempts": {}}
-    try:
-        out["node"] = pool_probe(spec["host"], ",".join(spec["devices"]), spec["regular"], daily=True)
-    except (OSError, ValueError, subprocess.SubprocessError) as e:
-        out["reason"] = str(e)
-    for attempt in spec.get("attempts", []):
-        try:
-            out["attempts"][attempt["id"]] = pool_daily("pool-check", attempt)
-        except (OSError, ValueError, subprocess.SubprocessError):
-            out["attempts"][attempt["id"]] = {"phase": "unknown"}
-    return out
-
-
-def pool_main(argv):
-    ap = argparse.ArgumentParser(prog="labmon_worker.py " + argv[0])
-    if argv[0] in ("pool-gate", "pool-route", "pool-observe"):
-        ap.add_argument("spec", type=json.loads)
-        a = ap.parse_args(argv[1:])
-        try:
-            print(json.dumps({"pool-gate": pool_gate, "pool-route": pool_queue_route, "pool-observe": pool_observe}[argv[0]](a.spec)))
-            return 0
-        except (ValueError, OSError) as e:
-            print(json.dumps({"error": str(e)}, ensure_ascii=False))
-            return 3
-    if argv[0] in ("pool-dispatch", "pool-check", "pool-stop"):
-        ap.add_argument("attempt", type=json.loads)
-        a = ap.parse_args(argv[1:])
-        print(json.dumps(pool_daily(argv[0], a.attempt)))
-        return 0
-    ap.add_argument("--host", required=True)
-    ap.add_argument("--device", required=True)
-    ap.add_argument("--regular", action="store_true")
-    ap.add_argument("--daily", action="store_true")
-    if argv[0] != "pool-probe":
-        ap.add_argument("--attempt", required=True)
-        ap.add_argument("--generation", required=True, type=float)
-        ap.add_argument("--until", required=True, type=float)
-    if argv[0] == "pool-trial":
-        ap.add_argument("--project", required=True)
-        ap.add_argument("--start-at", required=True, type=float)
-    a = ap.parse_args(argv[1:])
-    try:
-        if argv[0] == "pool-probe":
-            result = pool_probe(a.host, a.device, a.regular, daily=a.daily)
-        elif argv[0] == "pool-status":
-            result = pool_status(a.host, a.attempt, a.generation, a.until)
-        else:
-            signal.signal(signal.SIGHUP, signal.SIG_IGN)   # SSH 中断后仍按截止收尾并落盘
-            result = pool_trial(a.host, a.device, a.regular, a.project, a.attempt, a.generation, a.start_at, a.until)
-    except (ValueError, OSError, subprocess.SubprocessError) as e:
-        print(json.dumps({"error": str(e)}, ensure_ascii=False))
-        return 3
-    print(json.dumps(result, ensure_ascii=False))
-    return 0
-
-
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
-    if argv and argv[0] in ("pool-probe", "pool-trial", "pool-status", "pool-dispatch", "pool-check", "pool-stop", "pool-gate", "pool-route", "pool-observe"):
-        return pool_main(argv)
     if argv[:1] == ["slot"]:
         return slot_main(argv[1:])
     ap = argparse.ArgumentParser(prog="labmon_worker.py")
@@ -6466,13 +5575,6 @@ def main(argv=None):
                 return 0
             if not a.project:
                 print("add 必须写 --project <看板项目 id>（monitor.toml 的 id）", file=sys.stderr)
-                return 2
-            if pool_supply_hold(a.host):
-                print("服务器已供给算力池，先收回并核对结束", file=sys.stderr)
-                return 2
-            pool_mark = pool_registration(os.path.realpath(root), os.path.normpath(a.args[1]))
-            if os.path.exists(pool_mark) or os.path.exists(pool_mark + ".route"):
-                print("清单已有算力池尝试，请先等执行端确认收尾", file=sys.stderr)
                 return 2
             if not os.path.exists(os.path.join(root, a.args[1])):
                 print("清单不存在：%s/%s" % (root, a.args[1]), file=sys.stderr)

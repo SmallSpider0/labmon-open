@@ -78,12 +78,7 @@ def host(sub: str, target: str, at: float | None = None, now: bool = False) -> d
             o.p("[labmon] " + B.request_return(target, now, ((e.get("status") or {}).get("running"))))
             return o.done(0)
         when = fmt_time(at or time.time(), year=True) if sub == "return" else None
-        from . import config, pool_supply
-
-        with config.HOSTS_LOCK:
-            if pool_supply.held(target):
-                raise ConfigError(pool_supply.HELD)
-            p = set_returned(target, when)
+        p = set_returned(target, when)
     except ConfigError as e:
         o.err(f"[labmon] {e}")
         return o.done(3)

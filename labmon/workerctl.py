@@ -77,32 +77,9 @@ def ssh(h: dict, remote: str, stdin: str = "", timeout: float | None = None) -> 
 
 
 def worker_env(h: dict) -> str:
-    """把主机的部署路径交给普通 worker 和池命令；取值均按 shell 参数转义。"""
-    pairs = (("KA_BIN", h.get("ka_bin")), ("LABMON_POOL_PYTHON", h.get("pool_python")))
+    """把主机的部署路径（保活脚本 ka_bin）交给 worker；取值按 shell 参数转义。"""
+    pairs = (("KA_BIN", h.get("ka_bin")),)
     return " ".join("%s=%s" % (name, shlex.quote(str(value))) for name, value in pairs if value)
-
-
-def pool_remote(h: dict, action: str, args: list[str], *, timeout: float) -> dict:
-    """给受信池试点用的 worker。每次经同一条长连接传入 main 已提交的代码及跑一次命令。"""
-    if action not in ("pool-probe", "pool-trial", "pool-status", "pool-dispatch", "pool-check", "pool-stop", "pool-gate", "pool-route"):
-        raise ConfigError("未知的算力池 worker 动作")
-    LS.need("算力池试点")
-    # 脚本放本地盘，但 HOME 仍指到原 worker 的目录，以便核对既有 worker 与锁。
-    code = committed("labmon_worker.py")
-    launch = ('umask 077; f=$(mktemp /tmp/labmon-pool-worker.XXXXXX) || exit 4; '
-              "trap 'rm -- \"$f\"' EXIT; cat > \"$f\" || exit 4; "
-              f"LABMON_HOME={shlex.quote(h['worker_home'])} LABMON_DATA_ROOT={shlex.quote(h['data_root'])} {worker_env(h)} {shlex.quote(h['python'])} \"$f\" "
-              + shlex.join([action, *args]))
-    # 检查共享盘租约；remote_sh 把结果放在 lok。测试命令在轮询与只读状态之外一律主机实核。
-    launch = LS.remote_sh(h) + 'if [ "$lok" != 0 ]; then exit 7; fi; ' + launch
-    try:
-        rc, out = ssh(h, launch, code, timeout=timeout)
-        result = json.loads(out.strip().splitlines()[-1])
-    except (OSError, subprocess.TimeoutExpired, ValueError, IndexError) as e:
-        raise ConfigError("未收到试点 worker 回执") from e
-    if rc or not isinstance(result, dict) or result.get("error"):
-        raise ConfigError((result.get("error") if isinstance(result, dict) else None) or "试点 worker 未成功")
-    return result
 
 
 def project_init(hid: str, name: str | None) -> tuple[int, str]:

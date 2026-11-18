@@ -505,13 +505,3 @@ labmon undrain 29
 
 - **目录规范**：`labmon project init 29 [项目]` 在主机的 `data_root` 下建规范目录，写入说明 `README.md`（原文是 [`labmon/data_root_readme.md`](../labmon/data_root_readme.md)），并列出现有的共享环境、数据集与权重：`projects/<项目>/` 放各项目自己的东西，`envs/`、`datasets/`、`weights/` 放各项目共用、只读引用的环境（按版本命名，建好不改）、数据集和权重，`archive/<日期>/` 放压缩归档与删除清单，`labmon/` 放 worker。
 - **用量统计**：主机清单写了 `shared` 的自用主机，`labmon worker start` 把第一个目录交给 worker（`--shared`）限速轮流扫（`Disk`），只有一台在扫；借来的主机不扫。怎么扫、怎么归人见 [fleet.md「共享盘」](fleet.md#共享盘)。
-
-### 供给期间的专属通道（#267）
-
-日常池供给的闸门落在 `worker_home/hosts/<host>/pool-supply.json`，不放在会被清理的 `/tmp` 中。`pool-gate` 与普通开跑共用接单锁；队列与 slot 的新放行、等待原因和推演统一读取此标记。正在运行的普通任务先完成。收回时以同一供给编号核对，池尝试仍持锁或编号不符时不能解封。启动状态的 `pool_supply_gate: true` 表示当前 worker 理解该协议；只部署看板不够，先按原流程升级执行节点 worker，再确认供给。
-
-
-池目的地的清单保留在来源 worker 登记中（`pool` 为池队列编号）。GPU 行经原 `prep` 判断依赖后发布在 `status.pool_requests`，不会在来源机自行放行；CPU 行沿原 CPU/内存准入。执行节点使用原 `place`（含 needs 准备）和 `start/finish`，写原清单标记与日志。`pool_ready_protocol=1` 表示实际运行的 worker 支持该契约。池库存与尝试回执通过 `pool-observe` 随既有采集连接带回；没有常驻 worker 的供给节点也使用同一批次。
-池通道登记与普通 `worker add` 共用跨主机状态目录冲突检查。池监督进程意外退出时，核实本次标记、清单、PID 和执行节点并确认进程已退出后，经原接管/收尾逻辑处理 `current` 与 `.rc`：有退出码照原结果记账，没有退出码沿原规则重排；共享状态处理结束才确认池资源清理。无退出码的中断通过 `requeued` 回执让原清单继续等待调度，监听也报待位；主动停止仍结束本笔提交。已有回执按原采样节奏携带本次任务日志末 30 行，经原采集链进入项目记录，无额外 SSH。
-
-来源 worker 的 `plan` 只推演池清单首个 GPU 任务之前的 CPU 行；等待池的 GPU 与其后串行项没有来源机预计时间。`todo.held=pool` 让原均衡建议排除该清单，依赖仍照常读取其待办。池执行节点与来源节点相同时，原接管入口在登记锁内检查池尝试标记，仅由池执行端收尾。
