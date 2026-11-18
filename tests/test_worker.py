@@ -5605,6 +5605,49 @@ class WatchdogTest(unittest.TestCase):
                              env=dict(os.environ, LABMON_HOME=str(self.d / "home"))).stdout
         self.assertIn("找到的保活看门狗（没动）：PID %d" % wd, out)
 
+    def test_status_shows_keepalive(self):
+        """worker status 列出这台的保活（#61）：在跑、几点起、nvidia-smi 里的 PID（宿主机的）对得上哪张卡；归属照 sample 认的（gpu_owners）。"""
+        (self.p / "stat").write_text("cpu 1 2 3\nbtime 1000\n")
+        self.proc(300, ["python3.8", "/x/train_keep_alive.py"], start=500)   # 开机后 5 秒起（CLK_TCK=100）
+        (self.p / "300" / "sched").write_text("python3.8 (5300, #threads: 1)\n---\n")
+        env = {"LABMON_GPUS": "GPU-aaa:7000:48000:99", "LABMON_GPU_APPS": "5300:6886:GPU-aaa"}
+        os.environ.update(env)
+        try:
+            w = self.m.Worker("t")
+            os.makedirs(w.p.dir)
+            w.sample([])
+            w.write_status([], [], {}, self.m.POLICY, {}, time.time())
+        finally:
+            for k in env:
+                os.environ.pop(k)
+        st = json.loads(Path(w.p.status).read_text())
+        self.assertEqual((st["gpu_procs"][0]["owner"], st["gpu_procs"][0]["t0"]), ("keepalive", 1005))
+        self.assertEqual(st["keepalive"], {"ctl": True, "why": None})
+        out = subprocess.run([sys.executable, WORKER, "ls", "--host", "t"], capture_output=True, text=True,
+                             env=dict(os.environ, LABMON_HOME=str(self.d / "home"))).stdout
+        self.assertIn("  GPU 保活：在跑（%s 起）：PID 5300（容器内 300），卡 0 占 6.7 GiB；有任务要卡时 worker 自动停" % self.m.now_str(1005)[5:16], out)
+
+    def test_ka_lines_states(self):
+        """保活的几种说法（#61）：停着、不拉起的原因、等着拉起、没配 ka.sh、对方停不了的、被拉起；旧状态没有这些字段时什么都不说。"""
+        L, ns = self.m.ka_lines, lambda t: self.m.now_str(t)[5:16]
+        info = {"gpus": [{"i": 0, "uuid": "GPU-a"}, {"i": 1, "uuid": "GPU-b"}]}
+        on = {"keepalive": {"ctl": True, "why": None}, "info": info}
+        self.assertEqual(L({}), [])
+        self.assertEqual(L(dict(on, ka_stop=1793970000)), ["GPU 保活：停着（worker %s 停的，有任务要卡；卡空下来后 worker 再拉起）" % ns(1793970000)])
+        self.assertEqual(L(dict(on, ka_stop=0.0)), ["GPU 保活：停着（有任务要卡；卡空下来后 worker 再拉起）"])
+        self.assertEqual(L(dict(on, keepalive={"ctl": True, "why": "还有进程在用 GPU（PID 7777）"})),
+                         ["GPU 保活：没在跑，没有任务要卡，但还有进程在用 GPU（PID 7777），不拉起"])
+        self.assertEqual(L(on), ["GPU 保活：没在跑（卡连着空两轮后 worker 拉起）"])
+        two = [{"hpid": 5300, "pid": 5300, "mb": 1024, "uuid": "GPU-a", "owner": "keepalive", "ka": False},
+               {"hpid": 5300, "pid": 5300, "mb": 512, "uuid": "GPU-b", "owner": "keepalive", "ka": False}]
+        self.assertEqual(L({"keepalive": {"ctl": False}, "info": info, "gpu_procs": two}),
+                         ["GPU 保活：在跑：PID 5300，卡 0,1 占 1.5 GiB；这台没配 ka.sh，worker 不停它"])
+        ext = [{"hpid": 6100, "pid": 61, "mb": 2048, "uuid": "GPU-b", "owner": "other", "ka": True}]
+        fight = {"n": 2, "t": 1793970000, "who": "看门狗 PID 400"}
+        self.assertEqual(L(dict(on, gpu_procs=ext, kafight=fight)),
+                         ["GPU 保活：没在跑（卡连着空两轮后 worker 拉起）", "对方的保活（ka.sh 停不了，这几张卡不放）：PID 6100（容器内 61），卡 1 占 2.0 GiB",
+                          "GPU 保活 1 小时内被拉起 2 次（最近 %s）：看门狗 PID 400" % ns(1793970000)])
+
     def test_owner_keepalive_manager(self):
         """出借方自己的保活管理器（#31，照 BOB 的 keepalive_control.py）：guardian 起 watchdog，watchdog 每 5 秒看登记文件里的 keeper，
         不在就拉起；keeper 与 ka.sh 同一个解释器、同一个脚本。这里是 run / start 这类会退出的命令起的 keeper（start_new_session，起它的命令退出后
