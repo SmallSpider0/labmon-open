@@ -871,6 +871,36 @@ class AdmissionUnitTest(UnitBase):
         self.assertIn("可以开车道并行：卡 1 可用 43.9 GiB，要 11.0 GiB（提示值", out["v1"])
         self.assertIn("没有实测的只放空卡、不与别的任务同卡：卡上都有任务在跑", out["v2"])
 
+    def test_fit_full_overrides_and_foreign_cards(self):
+        # Codex 审 #49：截止前跑不完的（续租、约定归还）、借来的主机上对方此刻用得比预留多的整台，与真放行一样不开；
+        # 只有提示值的行不放到有 labmon 之外进程（或旧队列任务）的卡上（旧代码只看 labmon 在跑的）
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("x_s0", "bp", now - 7200, now - 3600, ram_peak=1.0, vram_peak=1000.0, cores_peak=1.0)])
+        self.hosts.queues({"g": ["x_s1|true", "v1|true   # vram=10"]}, project="bp")
+        self.hosts.register("t", "g", "bp")
+        self.fit_two_cards(overrides=[{"kind": "deadline", "at": now + 1200, "target": "renew"}])
+        self.assertIn("前跑不完", self.fit_out(["x_s1"])["x_s1"])
+        self.fit_two_cards(guest={"back": ["内存 12.0 GiB，超出预留 4.0 GiB"]})
+        self.assertIn("对方此刻用得比预留多（内存 12.0 GiB，超出预留 4.0 GiB） → 这台不放新任务", self.fit_out(["x_s1"])["x_s1"])
+        self.fit_two_cards(gpu_procs=[{"uuid": "GPU-b", "owner": "other", "mb": 2000, "hpid": 9}])
+        self.assertIn("没有实测的只放空卡、不与别的任务同卡", self.fit_out(["v1"])["v1"])
+        self.fit_two_cards(gpu_procs=[{"uuid": "GPU-b", "owner": "keepalive", "mb": 2000, "hpid": 9}])
+        self.assertIn("可以开车道并行：卡 1", self.fit_out(["v1"])["v1"])     # 保活不算：放任务前 worker 先停它
+
+    def test_fit_list_skips_row_in_current(self):
+        # Codex 审 #49：放行它的主机状态过期了，状态目录的 current 还写着它在跑：不再分给别的主机（旧代码只看新鲜主机状态里的 running）
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("j_s0", "bp", now - 3600, now - 1800, ram_peak=1.0, vram_peak=1000.0, cores_peak=1.0)])
+        q, = self.hosts.queues({"L": ["j_s1|true", "j_s2|true"]}, project="bp")
+        os.makedirs(q["state"])
+        Path(q["state"], "current").write_text("j_s1 4242 %s u\n" % time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now - 600)))
+        self.hosts.register("t", "L", "bp")
+        self.fit_two_cards(running=[])
+        self.hosts.status("u", age=900, info={"gpus": []})
+        rc, out = self.fit_list_out(self.d / "L", hosts=("t", "u"))
+        self.assertIn("还会跑 1 行，在跑 j_s1", out)
+        self.assertNotIn("j_s1 ← 卡", out)
+
     def fit_lines(self, names=("x_s1",)):
         import contextlib
         import io

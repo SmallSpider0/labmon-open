@@ -5522,6 +5522,7 @@ class FitHost:
         self.host, self.st, self.hist, self.eta = host, st, hist, eta
         self.w = object.__new__(Worker)
         self.w.host, self.w.info, self.w.ovr = host, st.get("info") or {}, st.get("overrides") or []
+        self.w.req_dur = lambda r: r.get("dur")       # override_hit 判截止前跑不跑得完要的时长：fit 拼的请求（job_spec）里已有
         self.S = fit_snapshot(st)
         u10 = st.get("util10") or {}
         self.cards = [dict(c, util=u10.get(c["uuid"])) for c in self.S["cards"]]
@@ -5557,10 +5558,14 @@ class FitHost:
         return ((self.w.info.get("gpus") or [{}])[0]).get("name")
 
     def blocked(self, project):
-        """这台此刻不开新车道的整台原因：持久的临时指令挡住这个项目（drain、只给别的项目用、暂停，override_hit 的 lasting）、容器在限流；没有为 None。"""
+        """这台此刻不开新车道的整台原因：持久的临时指令挡住这个项目（drain、只给别的项目用、暂停，override_hit 的 lasting）、
+        借来的主机上对方此刻用得比预留多（真放行的 guest_block 挡住整台；状态的 guest.back 是那几句原因）、容器在限流；没有为 None。"""
         hit = self.w.override_hit({"project": project, "name": ""}, ("drain", "guest", "pause"), lasting=True)
         if hit:
             return hit[1]
+        back = (self.st.get("guest") or {}).get("back")
+        if back:
+            return "对方此刻用得比预留多（%s） → 这台不放新任务" % "；".join(back[:3])
         if self.slack["throttle"] is not None:
             return "容器 CPU 在限流（近 1 分钟 %.0f%% 的周期被限流） → 不开新车道：先减线程（按 LABMON_CPUS 设线程数与 DataLoader 进程数）" % self.slack["throttle"]
         return None
@@ -5570,11 +5575,14 @@ class FitHost:
         判断就是 place；fit 只多两条：估计只有提示值的（没有实测）只放空卡、不与别的任务同卡（不用卡的只在这台没有 labmon 任务时开）；
         利用率低的卡上在跑的任务被 CPU 卡住时不在那张卡上开（gpu_slack）。"""
         why = self.blocked(x["project"])
-        if why:
-            return None, why
+        hit = None if why else self.w.override_hit(x, ("deadline",), lasting=True)    # 续租、约定归还的截止前跑不完的不放（同真放行，按这一行的预计时长）
+        if why or hit:
+            return None, why or hit[1]
         S, gpu = self.S, x["ngpu"] > 0
         hint = e["src" if gpu else "ram_src"] == "提示值"
-        busy = {u for j in S["jobs"] if not j["hold"] for u in j["gpus"]}
+        # 有别的任务的卡：labmon 在跑的、旧 gpu_queue.sh 的、卡上 labmon 之外的进程（保活不算：放任务前 worker 先停它）
+        busy = ({u for j in S["jobs"] if not j["hold"] for u in j["gpus"]} | {u for j in S["ext"] for u in j.get("gpus") or []}
+                | {g["uuid"] for g in self.st.get("gpu_procs") or [] if g.get("owner") != "keepalive"})
         free = card_free(S)
         full = place(dict(x), dict(S, holds={}), t)
         if gpu:
@@ -5720,6 +5728,9 @@ def fit_list(p, root, jobs, project, hosts):
             skip.append("%s：%s" % (h, hit[1] if hit else "看不到 GPU"))
         else:
             fhs.append(fh)                        # 在限流的照样列出来（各行都写先减线程）
+    cur = read_current(q["state"])                # 状态目录里在跑的：放它的主机状态过期了（worker 停了、崩了）任务照样可能在跑，不能再分
+    if cur:
+        running.add(cur[0])
     _, pend = rows_left(q["state"], rows, None)
     pend = first_rows(pend)
     pend = [(n, c) for n, c in pend.items() if n not in running]
