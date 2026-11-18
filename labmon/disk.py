@@ -321,10 +321,10 @@ def _burst(d24: float, v: dict) -> bool:
     return d24 > v["burst_gb"] * GIB and d24 > BURST_FREE * v["df"]["free"]
 
 
-def _write(sers: list, s: float, e: float) -> tuple:
+def _write(sers: list, s: float, e: float, live=()) -> tuple:
     """[s, e] 这段时间项目目录的净增：每个单位取开跑前最后一次扫描到结束后第一次扫描之差，加起来。
     开跑前还没有的单位只在它从 0 算起（看板记了新建，absorb 的 born）时按 0 起算；拆出来的、结束以后才建的算不了，跳过；
-    结束以后还没重扫的记进 pend。返回 (净增, [(单位, 增量)], 最早用到的扫描时刻, 最晚的, pend, 用到的那组扫描)。时刻都是 worker 写的（索引与用量行同一口径）。"""
+    结束以后还没重扫的记进 pend（最后一次是 0 的只有已不在索引里（不在 live）才算删掉了、之后一直是 0）。返回 (净增, [(单位, 增量)], 最早用到的扫描时刻, 最晚的, pend, 用到的那组扫描)。时刻都是 worker 写的（索引与用量行同一口径）。"""
     tot, parts, lo, hi, pend, used = 0, [], None, None, 0, []
     for u, sr in sers:
         k0 = bisect.bisect_right(sr, (s, math.inf)) - 1
@@ -337,7 +337,7 @@ def _write(sers: list, s: float, e: float) -> tuple:
         k1 = bisect.bisect_left(sr, (e, -1))
         if k1 < len(sr):
             t1, b1 = sr[k1]
-        elif sr[-1][1] == 0:                       # 删掉了：之后一直是 0
+        elif sr[-1][1] == 0 and u not in live:     # 删掉了：之后一直是 0
             t1, b1 = sr[-1]
         else:
             pend += 1
@@ -362,7 +362,7 @@ def _job_writes(p: str, roots: list[str], ser: dict, units: dict, rows: list[dic
     mine = sorted((r for r in rows if r.get("p") == p), key=lambda r: r["t"])
     out, grp = [], {}
     for r in mine:
-        tot, parts, lo, hi, pend, used = _write(sers, r["s"], r["t"])
+        tot, parts, lo, hi, pend, used = _write(sers, r["s"], r["t"], units)
         wait = pend > 0 and t - r["t"] < JOB_WAIT_S
         if abs(tot) < 64 * 2 ** 20 and not wait:
             continue

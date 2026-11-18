@@ -4789,6 +4789,31 @@ class ProjectDiskTest(UnitBase):
         self.assertLess(u[pb]["due"], far)
 
 
+    def test_ends_hinted_after_taking_lease(self):
+        # PR #56 审查：没拿到扫描租约（没有索引）时读到的结束记录不算提前过，接手租约、读进索引后再提前重扫
+        d = self.d
+        (d / "projects" / "pa").mkdir(parents=True)
+        (d / "projects" / "pa" / "w.bin").write_bytes(b"x" * 100)
+        pa = str(d / "projects" / "pa")
+        self.w.disk = self.m.Disk(str(d), "t")
+        now = self.hosts.now()
+        self.scan(now)
+        lease = os.path.join(self.w.disk.dir, "lease")
+        with open(lease, "w") as f:
+            f.write("other %d" % now)                                         # 别的主机接着扫
+        self.w.disk = self.m.Disk(str(d), "t")                                # 这台重启：租约在别人手上
+        self.hosts.usage("u", [{"t0": now - 600, "t1": now - 10, "root": pa + "/run", "queue": "q.txt", "name": "j", "project": "pa", "rc": "0"}])
+        self.w.reload_hist()
+        self.w.scan_local([], now + 1)
+        self.assertIsNone(self.w.disk.ix)
+        later = now + self.m.SCAN_LEASE_S + 60                                # 那台不扫了：这台接手
+        self.assertTrue(self.w.disk.lease(later))
+        far = later + 10 ** 6
+        for r in self.w.disk.ix["units"].values():
+            r["due"] = far
+        self.w.disk_ends(later)
+        self.assertLess(self.w.disk.ix["units"][pa]["due"], far)
+
 class LocalDiskTest(UnitBase):
     """容器根盘开机以来的新写入（#149）：LocalDisk 在假根盘上扫（只进开机以后动过的目录、跳过 /proc 等、labmon 目录拆到各项目）、
     借来的主机只数借来以后的、labmon 之外的新写入变了 LOCAL_DRIFT 才提前重扫；rootfs_info 的可信判定与 /dev/shm；scan_local 的接线。

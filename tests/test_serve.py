@@ -1862,6 +1862,17 @@ class DiskTest(unittest.TestCase):
         v, _ = DK.update(hosts(t2), t2, cfg)
         self.assertEqual(round(v["ours"]["projects"]["pa"]["d24"] / G), 3)   # 已列过的目录下新建的照常从 0 算
 
+        board()                                                          # 5：开跑前是 0、还在索引里的目录没重扫：等，不当作删掉了
+        C0, O = f"{pa}/cache", f"{pa}/out"
+        ix = {"root": "/r", "host": "h", "t": t0, "listed": t0, "split": ["/r/alice/projects", pa], "units": {C0: u(0, t0), O: u(100, t0)}}
+        DK.absorb("1\n" + json.dumps(ix), t0)
+        use("z", t0 + 60, t0 + 120)
+        ix = {**ix, "t": t1, "listed": t1, "units": {C0: u(0, t0), O: u(110, t1)}}
+        DK.absorb("2\n" + json.dumps(ix), t1)
+        v, _ = DK.update(hosts(t1), t1, cfg)
+        z = v["ours"]["projects"]["pa"]["jobs"][0]
+        self.assertEqual((z["pending"], z["wait"], z["big"]), (1, True, False))
+
         board()                                                          # 4：A 扫得勤、B 扫得慢；两个任务先后跑，最外侧时刻相同
         T = [t0, t0 + 1000, t0 + 2000, t0 + 3000]
         A, B = f"{pa}/a", f"{pa}/b"

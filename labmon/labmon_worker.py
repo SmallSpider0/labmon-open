@@ -1988,7 +1988,7 @@ class Worker:
         self.oom_n, self.oom_ours, self.hit = None, 0, None   # 容器 oom_kill 计数（上一轮）、其间被杀的我们的任务数、最近一次杀了别人进程的时刻
         self.squeezed = {}                    # 任务名 → 借来的主机上被对方挤掉、重新排队的次数
         self.hist_cache, self.hist, self.hist_v = {}, [], 0   # 各主机的用量记录（load_hist），hist_v 每次有变化加一
-        self.hinted, self.hint_v = set(), -1   # 已按跑完提前重扫过的用量行（disk_ends）、那时的 hist_v
+        self.hinted, self.hint_v, self.hint_ix = set(), -1, None   # 已按跑完提前重扫过的用量行（disk_ends）、那时的 hist_v 与索引
         self.reload_hist()
         self.qlists, self.durs, self.durs_key = {}, {}, None   # 各清单的 (fsig, [(名称, 资源提示)])、预计时长（queue_durs）
         self.durk = {}                                        # (项目, 任务, 清单估时, 同卡任务数 k) → duration 的结果（dur_k；queue_durs 重算时清掉）
@@ -4534,7 +4534,12 @@ class Worker:
     def disk_ends(self, now):
         """有清单任务跑完（各主机的 usage.jsonl，load_hist 读的；成败都算）：它的项目目录下的单位尽快重扫（Disk.hint）。
         看板拿跑完那次重扫与开跑前的扫描之差算任务写入量（disk.project_storage 的 jobs，#53）。只有拿着租约的那台有索引，hint 才起作用；
-        只认近一小时结束的（worker 重启后不把一天的旧记录都重扫一遍），已提前过的不再提前。"""
+        只认近一小时结束的（worker 重启后不把一天的旧记录都重扫一遍），已提前过的不再提前。没拿着租约时不记“提前过”，接手（读进新索引）后重新看近一小时的。"""
+        d = self.disk
+        if not (d.mine and d.ix is not None):
+            return
+        if self.hint_ix is not d.ix:
+            self.hint_ix, self.hinted, self.hint_v = d.ix, set(), -1
         if self.hint_v == self.hist_v:
             return
         self.hint_v = self.hist_v
