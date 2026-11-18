@@ -142,6 +142,27 @@ class LendSetTest(Base):
         P.set_lend("a", False, None, who("boss", "admin"), True, False)      # 代关不用勾
         self.assertIsNone(self.server("a").get("lend"))
 
+    def test_lend_race_with_holder_change(self):
+        # Codex #50 P1：旧持有人入池与管理员换人并发，不能把 lend 写回新持有人名下。换人线程在 set_lend 读完配置后才起，
+        # 配置锁盖住读到写的全过程时它只能等 set_lend 写完再清 lend；锁只盖写入时它先换完、lend=True 被写回
+        import threading
+        t = []
+        real = F.conf
+
+        def conf(*a, **k):
+            r = real(*a, **k)
+            if not t:
+                th = threading.Thread(target=CF.set_fleet_holder, args=("a", "BB"))
+                t.append(th)
+                th.start()
+                th.join(0.5)                # 有锁：卡在锁上、等 set_lend 写完；没锁：这里就换完了
+            return r
+        with mock.patch.object(P.F, "conf", conf):
+            P.set_lend("a", True, None, who("AA"), False, False)
+        t[0].join(5)
+        s = self.server("a")
+        self.assertEqual((s["holder"], s.get("lend")), ("BB", None))
+
     def test_need_holder(self):
         self.assertEqual(P.need_holder(who("AA"), "a")["id"], "a")
         with self.assertRaises(U.Denied):
@@ -175,6 +196,15 @@ class PoolRegTest(Base):
         self.assertEqual([h for h, _ in sent], ["here", "here"])
         self.assertTrue(all("--host pool" in c for _, c in sent))
         self.assertEqual(CF.pool_home(), W.host_conf("here")["worker_home"])
+
+    def test_explicit_worker_home(self):
+        # Codex #50 P2：模板主机显式配了 worker_home，池与借来的主机都沿用它，不按 data_root 另推
+        self.write()
+        (self.d / "hosts.toml").write_text(HOSTS.format(extra="").replace('data_root = "/data/me"', 'data_root = "/data/me"\nworker_home = "/data/custom-w"'))
+        self.assertEqual(CF.pool_home(), "/data/custom-w")
+        hosts = [dict(h) for h in CF._read_toml(CF.hosts_file())["hosts"]]
+        self.assertEqual(CF.host_defaults(CF.guest_host(self.server("a"), hosts))["worker_home"], "/data/custom-w")
+        self.assertEqual(W.via(CF.POOL)["id"], "here")
 
     def test_no_self_host(self):
         (self.d / "hosts.toml").write_text("")

@@ -13,7 +13,7 @@ import posixpath
 import time
 
 from . import fleet as F
-from .config import POOL, ConfigError, set_fleet_keys
+from .config import HOSTS_LOCK, POOL, ConfigError, set_fleet_keys
 from .state import snapshot
 from .users import Denied, Ident
 
@@ -52,24 +52,25 @@ def need_holder(who: Ident, sid: str, cfg: dict | None = None) -> dict:
 def set_lend(sid: str, on: bool, hours: str | None, who: Ident, ops: bool, ok: bool) -> str:
     """POST /api/pool/lend：开、关这台的入池，改时段（None 或空是全天）。持有人本人直接改；管理员代别人开要能做平台操作（ops）且勾了
     「已和这人说好」（ok，关掉不用勾）。写进主机清单这台的 [[fleet.servers]]（set_fleet_keys，记一条配置改动）。返回给人看的一句。"""
-    cfg = F.conf()
-    s = next((x for x in (cfg or {}).get("servers", []) if x["id"] == sid), None)
-    if s is None:
-        raise Denied(404, f"组内服务器里没有 {sid}")
-    mine = s["holder"] == _person(who, cfg)
-    if not mine:
-        if who.role != "admin":
-            raise Denied(403, f"{sid} 不是你的服务器：只有持有人本人能开入池，管理员能代开")
-        if not ops:
-            raise Denied(403, "代别人开入池要能做平台操作：从内网入口来，或开启公网平台操作")
-        if on and not ok:
-            raise Denied(409, f"先和 {s['holder']} 说好，再勾「已和这人说好」")
-    hours = (hours or "").strip() or None
-    if on and hours and F.lend_span(hours) is None:
-        raise Denied(400, f"时段「{hours}」认不出：写成 22:00-09:00 这样（每天一段，可跨零点），不写是全天")
-    by = "" if mine else f"，{who.name} 代开（已和这人说好）" if on else f"，{who.name} 代关"
-    say = f"{s['holder']}（{sid}）{'入池' + (f'，每天 {hours}' if hours else '，全天') if on else '退出算力池'}{by}"
-    set_fleet_keys({"lend": True if on else None, "lend_hours": hours if on else None}, say, sid=sid)
+    with HOSTS_LOCK:                 # 读配置、核持有人到写入同一把锁（与换人 set_fleet_holder 互斥：旧持有人的请求不会把 lend 写回新持有人名下）
+        cfg = F.conf()
+        s = next((x for x in (cfg or {}).get("servers", []) if x["id"] == sid), None)
+        if s is None:
+            raise Denied(404, f"组内服务器里没有 {sid}")
+        mine = s["holder"] == _person(who, cfg)
+        if not mine:
+            if who.role != "admin":
+                raise Denied(403, f"{sid} 不是你的服务器：只有持有人本人能开入池，管理员能代开")
+            if not ops:
+                raise Denied(403, "代别人开入池要能做平台操作：从内网入口来，或开启公网平台操作")
+            if on and not ok:
+                raise Denied(409, f"先和 {s['holder']} 说好，再勾「已和这人说好」")
+        hours = (hours or "").strip() or None
+        if on and hours and F.lend_span(hours) is None:
+            raise Denied(400, f"时段「{hours}」认不出：写成 22:00-09:00 这样（每天一段，可跨零点），不写是全天")
+        by = "" if mine else f"，{who.name} 代开（已和这人说好）" if on else f"，{who.name} 代关"
+        say = f"{s['holder']}（{sid}）{'入池' + (f'，每天 {hours}' if hours else '，全天') if on else '退出算力池'}{by}"
+        set_fleet_keys({"lend": True if on else None, "lend_hours": hours if on else None}, say, sid=sid)
     return say
 
 

@@ -489,16 +489,16 @@ def pool_home(hosts: list[dict] | None = None) -> str | None:
         hf = hosts_file()
         hosts = [dict(h) for h in _read_toml(hf).get("hosts", [])] if hf.exists() else []
     tpl = _guest_tpl(hosts)
-    return host_defaults({"id": POOL, **{k: tpl[k] for k in ("data_root",) if k in tpl}})["worker_home"] if tpl else None
+    return host_defaults({"id": POOL, **{k: tpl[k] for k in ("data_root", "worker_home") if k in tpl}})["worker_home"] if tpl else None
 
 
 def guest_host(s: dict, hosts: list[dict]) -> dict:
-    """借来的组内服务器当调度主机用时的样子：id 用组内服务器的，照抄一台在用自用主机（_guest_tpl）的 python、data_root、shared、mounts、checks
+    """借来的组内服务器当调度主机用时的样子：id 用组内服务器的，照抄一台在用自用主机（_guest_tpl）的 python、data_root、worker_home（显式配的；与 pool_home 同一个目录选择）、shared、mounts、checks
     （同一套镜像与共享盘），ssh 主机密钥沿用组内服务器的 known_hosts。hosts：[[hosts]] 各块。"""
     from .fleet import state_file                 # fleet 在上层 import 本模块，这里只能延迟 import
     tpl = _guest_tpl(hosts)
     node = str(s.get("ssh", "")).rsplit(".", 1)[-1] or str(s["id"])
-    return {**{k: tpl[k] for k in ("python", "data_root", "ka_bin", "shared", "mounts", "checks") if k in tpl},
+    return {**{k: tpl[k] for k in ("python", "data_root", "worker_home", "ka_bin", "shared", "mounts", "checks") if k in tpl},
             "id": str(s["id"]), "label": f"{node}（借 {s.get('holder')}）", "ssh": s.get("ssh"), "port": s.get("port", 22),
             "known_hosts": str(state_file("known_hosts")), "worker": "auto", "returned": s.get("borrow_returned"),
             "borrow": {"holder": str(s.get("holder")), "since": parse_time(s.get("borrow_since")), **_until(s.get("borrow_until")),

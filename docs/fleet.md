@@ -439,7 +439,7 @@ labmon 之外的按目录一段段斜纹，过门槛变紫），下面「本地�
   ka.sh 本身出错（跑不起来、输出认不出）另写一句，带上退出码与它的报错（#29：以前只看 `ka.sh running` 的退出码，认出一个就放过旁边停不了的，提示里也没写是哪个）。
   ka.sh 认保活的规则：python 跑它的保活脚本（`ka.env` 的 `AGRI_KA_DIR/AGRI_KA_SCRIPT`），命令行写完整路径，或相对路径按进程工作目录还原后是它（维护者 11-17 定，#29），worker 的 `ka_owned` 同一条。
   然后这台的块里写 `borrow_since`、`borrow_until`、`borrow_for`，下临时指令、拉起 worker。
-  借用中它同时是调度主机（`config.guest_host`：id 不变，照抄一台在用自用主机的 Python、共享盘、检查项，主机密钥沿用这里的 `known_hosts`），
+  借用中它同时是调度主机（`config.guest_host`：id 不变，照抄一台在用自用主机的 Python、共享盘、worker 目录（显式配了 `worker_home` 的照用）、检查项，主机密钥沿用这里的 `known_hosts`），
   侧栏里多一台“27（借 BOB）”。不在对方的容器里扫共享盘。
   worker 一起来就找一遍保活看门狗（会把 worker 停掉的保活又拉起来的进程），只列出来（确定的写明“要卡时它把保活拉起来就暂停，还卡时恢复”）；真把保活拉起来了才暂停确定的（它正持着平时不持的文件锁时等它放了再暂停），规则见 [worker.md「保活」](worker.md#保活)。
   出借方自己的保活管理器（如 BOB 的 `keepalive_control.py`）也按这条规则，不调用它的让路接口，见同一节。
