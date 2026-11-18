@@ -1187,6 +1187,8 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(run(ka, 11, 13), "noka 11 13")                      # 没有在跑的保活：都不是 ka.sh 的
         self.assertEqual(run(f"bash {d / 'nope.sh'}", 11), "fail ka.sh running 出错（退出码 127）")
         self.assertIn("nope.sh", self.err)                                    # ka.sh 的报错照传到标准错误，借用的提示带上它
+        (d / "ka0.sh").write_text("exit 0\n")
+        self.assertEqual(run(f"bash {d / 'ka0.sh'}", 11), "fail 保活在跑，但 ka.sh 没列出进程组，无法确认归属")  # 在跑却没列出：认不了，不当没在跑（#26 与 #29 合并后同一读法）
         (d / "pid").write_text("9\noops\n")
         (d / "calls").write_text("")
         self.assertEqual(run(ka, 11), "fail ka.sh running 的输出认不出")      # 输出认不出也不当成核对过
