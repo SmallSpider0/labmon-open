@@ -56,7 +56,7 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
    不留兼容层，不留“旧版”分支。只有已经落盘、还会被读到的历史数据可以暂留兼容代码，
    注释里写明数据从何时起不再产生、何时可删。到了日期就删，动到附近的代码时顺手查一遍：`/usr/bin/grep -rn '可删' labmon`。
    旧数据能一次迁成新格式的（本机状态目录、共享盘上 worker 的 usage.jsonl），迁完就删兼容代码，不必等到期；
-   只有补不出来的才留到期。现有的：11-13 借用样本缺 `ma` 的回退（borrow.py，`ma` 11-06 起才记，之前的只有偏大的 `mr`）；11-17 借用样本不带 `mk` 的回退（borrow.py `_ram_sample`，之前的 `ma` 按保活进程树的 RSS 扣、扣多了，取不扣保活的总 anon）；11-23 页面上内存估计来源没有 `ram_src` 的回退（overview.html `ramSrc`，#61 之前放行、被新 worker 接管的运行中任务沿用旧 `est`，跑完就没了）；11-23 用量行没有 `conc` 的回退（labmon_worker.py `rec_conc`，#67 之前的行：同卡没别的任务的当 1、其余不知道，推不出来）；
+   只有补不出来的才留到期。现有的：11-13 借用样本缺 `ma` 的回退（borrow.py，`ma` 11-06 起才记，之前的只有偏大的 `mr`）；11-17 借用样本不带 `mk` 的回退（borrow.py `_ram_sample`，之前的 `ma` 按保活进程树的 RSS 扣、扣多了，取不扣保活的总 anon）；11-23 页面上内存估计来源没有 `ram_src` 的回退（overview.html `ramSrc`，#61 之前放行、被新 worker 接管的运行中任务沿用旧 `est`，跑完就没了）；11-23 用量行没有 `conc` 的回退（labmon_worker.py `rec_conc`，#67 之前的行：同卡没别的任务的当 1、其余不知道，推不出来）；普通用户视图剔除旧快照里的 `pool_observed`（users.py `view`，#12 删池之前写的；主看板与备用机都重写过 `snapshot.json`、也不再恢复这之前的备份时删）；
    #161 部署那次的迁移（把 launchd plist 里旧的 `-c` 登记进来：`projects.adopt`（连同 `OUT_NAMES`）、`serve.serve` 的 `legacy`、`service._read` 的 `legacy` 与 `service.install` 里迁移的几行、`__main__` 传 `legacy` 的那处）：部署后跑过一次 `labmon service install` 就删。
 4. **前端同理。** 两个页面都要用的放进 `labmon/common.js`，渲染时内联。
    同一种文字（租期、时长、状态）在页面上只有一个函数生成。

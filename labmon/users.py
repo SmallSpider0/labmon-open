@@ -802,6 +802,9 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     out = dict(snap, fleet=None, notices=[], wake=[], hostcheck=None, host_notices=None,
                event_cats=[c for c in snap.get("event_cats") or EVENT_CATS if c[0] not in FLEET_CATS and c[0] != "report"],
                access={"own": sorted(acc.projects), "hosts": sorted(acc.allowed)})
+    # 可删（#12）：删池之前写的 snapshot.json 带着 pool_observed（各项目的节点观测与尝试回执），备用机不采集、照读旧快照。
+    # 主看板与备用机都在 #12 之后重写过 snapshot.json、也不再恢复这之前的备份时删。
+    out.pop("pool_observed", None)
     out["hosts"] = [h for h in snap.get("hosts") or [] if h.get("id") in acc.hosts]
     out["projects"] = [p for p in snap.get("projects") or [] if p.get("id") in acc.projects]
     out["archived"] = [a for a in snap.get("archived") or [] if a.get("id") in acc.projects]

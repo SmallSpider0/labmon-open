@@ -440,6 +440,14 @@ class ViewTest(UsersBase):
                 {"kind": "disk"}, {"kind": "account"}, {"kind": "hostcheck"}, {"kind": "config", "who": "zz"}, {"kind": "config"}, {"kind": "config", "host": "h"}, {"kind": "done", "project": "p"}]
         self.assertEqual([r["kind"] for r in rows if see(r)], ["host_down", "config", "done"])
 
+    def test_user_view_drops_old_pool_observed(self):
+        # #12 删了算力池，但部署前写的 snapshot.json 里还有 pool_observed（各项目的节点观测与尝试回执）；
+        # 备用机不重新采集、照读旧快照，普通用户的视图不能把它带出去
+        amy = U.Ident("amy", "user", frozenset({"read"}), "session", "k")
+        snap = {"hosts": [{"id": "h"}], "pool_observed": {"hosts": {"x": {"tail": "别人的日志"}}}}
+        v = U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))
+        self.assertNotIn("pool_observed", v)
+
 
 if __name__ == "__main__":
     unittest.main()
