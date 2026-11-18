@@ -375,11 +375,44 @@ def _version_dir(p: Path, versions: Path) -> str | None:
     return rel.parts[0] if rel.parts else None
 
 
+_HOLD = None
+
+
+def hold_version() -> None:
+    """看板装的命令行一起来就对自己这版的 ready 加共享锁，持到进程结束（exec 换版本时随 O_CLOEXEC 放掉；__main__.main 调）：
+    清旧版本（_prune）跳过有进程在用的，别的会话里退避中的旧 wait 不会被删掉自己那版（#18）。加不上（ready 正被删）就算了。"""
+    global _HOLD
+    if _HOLD is not None or not installed():
+        return
+    try:
+        fh = open(HERE.parents[3] / "ready", "rb")      # HERE = versions/<提交>/lib/pythonX.Y/site-packages/labmon
+    except (OSError, IndexError):
+        return
+    try:
+        fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+    except OSError:
+        fh.close()
+        return
+    _HOLD = fh
+
+
 def _prune(versions: Path, keep: set) -> None:
-    """删掉 versions/ 下不在 keep 里的旧版本目录（#18：每装一版留一个 venv，以前从不删）；持 install.lock 调，装到一半断了的也一并删。
-    keep：这次装的、切换前命令入口指着的（别的会话里还在跑的旧 wait 要跑完这一轮，再自己 exec 到新版）、skill 入口指着的、当前进程这版。"""
+    """删掉 versions/ 下的旧版本目录（#18：每装一版留一个 venv，以前从不删）；持 install.lock 调。
+    keep：这次装的、切换前命令入口指着的、skill 入口指着的、当前进程这版；此外有进程持着 ready 共享锁的（hold_version：还在跑的旧 wait）也留着，
+    试着加排它锁加上了才删（删的时候持着，起来的进程加不上共享锁）。没有 ready 的是装到一半断了的，一并删。"""
     for d in versions.iterdir():
-        if d.is_dir() and not d.is_symlink() and d.name not in keep:
+        if not d.is_dir() or d.is_symlink() or d.name in keep:
+            continue
+        try:
+            fh = open(d / "ready", "rb")
+        except OSError:
+            shutil.rmtree(d, ignore_errors=True)
+            continue
+        with fh:
+            try:
+                fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                continue
             shutil.rmtree(d, ignore_errors=True)
 
 

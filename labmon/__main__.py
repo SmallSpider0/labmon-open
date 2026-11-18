@@ -599,6 +599,7 @@ def cmd_read(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    dist.hold_version()                                # 看板装的：这版在用，别的命令更新时不删它（#18）
     if argv[:1] and argv[0] in OVR:
         return cmd_override(argv)
     if argv[:1] == ["borrow"]:

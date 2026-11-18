@@ -259,10 +259,26 @@ class ClientDistTest(unittest.TestCase):
         fixed = data / "labmon/bin/labmon"
         fixed.parent.mkdir(parents=True)
         fixed.symlink_to(versions / prev / "bin/labmon")
+        running = "6" * 40                              # 别的会话里还在跑的更旧一版（不是切换前那版）：它一起来就持着共享锁
+        _, run_pkg = version(running)
+        shutil.copytree(Path(dist.__file__).parent, run_pkg, dirs_exist_ok=True, ignore=shutil.ignore_patterns("__pycache__", "_build.py"))
+        (run_pkg / "_build.py").write_text(f'COMMIT = "{running}"\n')
+        holder = subprocess.Popen([sys.executable, "-c", "import sys, time\nfrom labmon import dist\ndist.hold_version()\nprint('held', flush=True)\ntime.sleep(30)\n"],
+                                  cwd=str(self.root), stdout=subprocess.PIPE, text=True,
+                                  env=dict(os.environ, PYTHONPATH=str(run_pkg.parent), XDG_DATA_HOME=str(data)))
+        self.addCleanup(holder.wait)
+        self.addCleanup(holder.kill)
+        self.assertEqual("held", holder.stdout.readline().strip())
         with patch.dict(os.environ, {"HOME": str(home), "XDG_DATA_HOME": str(data)}), patch.object(dist, "HERE", pkg):
             dist.install_wheel(self.root / f"labmon-0.1.0+g{new[:7]}-py3-none-any.whl", new)
         self.assertEqual(versions / new / "bin/labmon", fixed.readlink())
-        self.assertEqual(sorted(p.name for p in versions.iterdir()), [mine, prev, new])
+        self.assertEqual(sorted(p.name for p in versions.iterdir()), [mine, prev, new, running])
+        holder.kill()
+        holder.wait()
+        holder.stdout.close()
+        with patch.dict(os.environ, {"HOME": str(home), "XDG_DATA_HOME": str(data)}), patch.object(dist, "HERE", pkg):
+            dist.install_wheel(self.root / f"labmon-0.1.0+g{new[:7]}-py3-none-any.whl", new)
+        self.assertNotIn(running, [p.name for p in versions.iterdir()])        # 那个进程退出了：下一次更新就删
 
     def test_auto_update_backs_off_after_failed_install(self):
         # 装不上（venv、pip 出错，装出来的版本不对）：自动更新（wait）同一个提交过一阵才再试、不先下载（#18；以前每 5 分钟重下一次）；
