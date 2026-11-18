@@ -1,12 +1,13 @@
 # labmon 组内服务器的开保活与让路：经 ssh 标准输入送到服务器上跑（bash -s -- 动作 …），只碰保活，别的进程一概不动。
 #
-#   start <ka 命令> <盯几秒> <谁开的>
+#   start <ka 命令> <盯几秒> <谁开的（一个词）>
 #       确认保活进程组已占 GPU 才报 ok。已有保活进程不重开；GPU 上还有别的进程：不开（busy）。
-#       否则 <ka 命令> start，记进 /tmp/labmon-guard.state，再在后台盯这么久：
+#       否则 <ka 命令> start，登记进 /tmp/labmon-guard.state（一行：start 登记时刻 进程组 盯到几点 谁开的 进程出生时钟），再在后台盯这么久：
 #       每 20 秒看一次 GPU，出现不属于这个保活进程组的进程（实验或这人自己开的保活）就 <ka 命令> stop 让出，保活被别人停了也退出。
 #       按进程组认自己：保活本身在 GPU 上占几个进程（多卡）都不算别人。
 #   repair <ka 命令> <盯几秒> <谁开的> <容器出生时钟> <登记时刻或 manual> <进程组> <进程出生时钟> <卡数>
 #       在同一次锁定内核对状态、全部 GPU 均未活动且没有别的 GPU 进程，再重开本工具登记的保活，或停掉配置脚本能确认的用户保活并开启看板保活。
+#       停下了、新的却没开成回 gap（GPU 上此刻没有保活，看板下次探测直接再开）；没停成仍是 fail。
 #   stop <ka 命令> <为什么>
 #       只停 labmon 开的那一个保活（进程组对得上才停）；别人开的、已经不在的不动。
 #   kacheck <ka 命令> <GPU 进程…>
@@ -15,7 +16,8 @@
 #
 # ka 命令是主机清单 [fleet] 的 keepalive_cmd（ka.sh：容器内加锁，不会起两个；python 跑它的保活脚本才算，命令行写完整路径，
 # 或相对路径按进程工作目录还原后是它，#29）。
-# 最后一行是结果：ok … / busy … / fail … / unmanaged …；探针（fleet_probe.sh）读 /tmp/labmon-guard.state 看保活是不是 labmon 开的。
+# 最后一行是结果：ok … / busy … / fail … / unmanaged … / gap …；探针（fleet_probe.sh）读 /tmp/labmon-guard.state 看保活是不是 labmon 开的。
+# 进程身份只比出生时钟（/proc/<pid>/stat 第 22 项，开机以来的时钟数，proc_birth），不换算成墙上时钟。
 ST=${GUARD_STATE:-/tmp/labmon-guard.state}
 PROC=${GUARD_PROC:-/proc}
 
@@ -77,23 +79,26 @@ watch() {   # $1 盯到几点（epoch）$2 保活进程组 $3 ka 命令 $4 登�
   done
 }
 
-running_groups() {   # ka.sh 每行一个进程组号，空输出或命令失败都不是已运行的证据。
-  # 返回 0 有；1 没有在跑的（ka.sh running 退出 1，或什么都没打印）；200 输出认不出（strict）；其余是 ka.sh 自己的退出码。
+running_groups() {   # ka.sh running 的读法（与 worker 的 Worker.ka_groups 同一口径：退出码 0 是保活在跑，非 0 是没在跑），打出列出的进程组。
+  # 返回 0 有；1 没有在跑的（ka.sh running 退出 1）；201 在跑却没列出进程组（认不了归属，不当作没在跑）；
+  # 200 另有认不出的行（strict）；其余是 ka.sh 自己的退出码（同样不是在跑的证据，kacheck 报成出错）。
   # ka.sh 的标准错误照传，认不出的那一行也写到标准错误（kacheck 带回原因，同一次调用，#29）
   local ids rc
   ids=$(bash -c "$1 running" 9>&-); rc=$?
   [ "$rc" = 0 ] || { [ "$rc" = 1 ] && return 1; return "$rc"; }
   if [ "${2:-}" = strict ]; then
     printf '%s\n' "$ids" | awk 'NF && $0 !~ /^[1-9][0-9]*$/ {if (!bad) print "认不出的一行：" substr($0, 1, 200) > "/dev/stderr"; bad=1}
-      /^[1-9][0-9]*$/ {print; seen=1} END {exit (bad ? 2 : !seen)}' || return $(( $? == 2 ? 200 : 1 ))
+      /^[1-9][0-9]*$/ {print; seen=1} END {exit (bad ? 2 : seen ? 0 : 3)}' || return $(( $? == 2 ? 200 : 201 ))
   else
-    printf '%s\n' "$ids" | grep -E '^[1-9][0-9]*$'
+    printf '%s\n' "$ids" | grep -E '^[1-9][0-9]*$' || return 201
   fi
 }
 
 start() {
-  local groups gpu g now until
-  if groups=$(running_groups "$1"); then
+  local groups gpu g now until born rc
+  groups=$(running_groups "$1"); rc=$?
+  if [ "$rc" = 201 ]; then echo "fail 保活在跑，但 ka.sh 没列出进程组，无法确认归属"; return; fi
+  if [ "$rc" = 0 ]; then
     for g in $groups; do
       gpu=$(gpu_procs "$g") || { echo "fail 查不到 GPU 进程"; return; }
       if [ "${gpu% *}" -gt 0 ]; then echo "ok already $g"; return; fi
@@ -104,11 +109,14 @@ start() {
   gpu=$(gpu_procs "") || { echo "fail 查不到 GPU 进程"; return; }
   if [ "${gpu#* }" -gt 0 ]; then echo "busy ${gpu#* }"; return; fi
   bash -c "$1 start" 9>&- >/dev/null 2>&1 || { echo "fail 保活没起来"; return; }
-  groups=$(running_groups "$1") || { echo "fail 保活没起来"; return; }
+  groups=$(running_groups "$1"); rc=$?
+  if [ "$rc" = 201 ]; then echo "fail 开了保活，但 ka.sh 没列出进程组，无法确认归属"; return; fi
+  [ "$rc" = 0 ] || { echo "fail 保活没起来"; return; }
   if [[ "$groups" == *$'\n'* ]]; then echo "fail 开保活后找到多个进程组，无法确认归属"; return; fi
   g=$groups
   now=$(date +%s)
-  echo "start $now $g $(( now + $2 )) $3" > "$ST"
+  born=$(proc_birth "$g") || born=-          # 读不到出生时钟的登记认不出身份：照样让路、停，只是不自动重开
+  echo "start $now $g $(( now + $2 )) ${3//[[:space:]]/_} $born" > "$ST"
   if [ "$2" -gt 0 ]; then       # 后台盯着：不继承本会话的输入输出，ssh 才能马上返回
     ST="$ST" PROC="$PROC" setsid bash -c "$(declare -f gpu_procs running_groups guard_owner watch_yield watch); watch \"\$@\"" _ \
       "$(( now + $2 ))" "$g" "$1" "$now" </dev/null >/dev/null 2>&1 9>&- &
@@ -184,16 +192,13 @@ repair() {  # ka 命令、盯几秒、谁开的、容器出生时钟、登记时
     return
   fi
   bash -c "$1 stop" 9>&- >/dev/null 2>&1 || { echo "fail 空转的保活停不下来"; return; }
-  if [ "$5" = manual ]; then
-    result=$(start "$1" "$2" "$3")
-    case "$result" in
-      "ok already "*) echo "fail 原保活又被拉起，未开启看板保活" ;;
-      *) printf '%s\n' "$result" ;;
-    esac
-  else
-    echo "stop $(date +%s) 保活空转" >> "$ST"
-    start "$1" "$2" "$3"
-  fi
+  [ "$5" = manual ] || echo "stop $(date +%s) 保活空转" >> "$ST"
+  result=$(start "$1" "$2" "$3")
+  case "$result" in
+    "ok already "*) if [ "$5" = manual ]; then echo "fail 原保活又被拉起，未开启看板保活"; else printf '%s\n' "$result"; fi ;;
+    "ok "*|"busy "*) printf '%s\n' "$result" ;;
+    *) echo "gap ${result#fail }" ;;      # 旧的已停、新的没开成：GPU 上此刻没有保活
+  esac
 }
 
 kacheck() {  # ka 命令、认作保活的 GPU 进程（容器 PID）…
@@ -202,6 +207,7 @@ kacheck() {  # ka 命令、认作保活的 GPU 进程（容器 PID）…
   case "$rc" in               # 没有在跑的保活（返回 1）不是出错；出错的原因 ka.sh 已写到标准错误，借用的提示带上它
     0|1) ;;
     200) echo "fail ka.sh running 的输出认不出"; return ;;
+    201) echo "fail 保活在跑，但 ka.sh 没列出进程组，无法确认归属"; return ;;
     *) echo "fail ka.sh running 出错（退出码 $rc）"; return ;;
   esac
   for pid in "${@:2}"; do

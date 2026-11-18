@@ -596,8 +596,8 @@ JOB = probe_out(apps=[(700, 7800)], maps=[(40, 700, "/root/proj")], ps=[(1, 0, "
 
 
 def guarded(raw, t, until, *more):
-    """探针输出后面接上 fleet_guard.sh 记的 /tmp/labmon-guard.state。"""
-    return raw + f"@@ guard\nstart {t} 9 {until} 守护\n" + "".join(m + "\n" for m in more)
+    """探针输出后面接上 fleet_guard.sh 记的 /tmp/labmon-guard.state（不带 proc 行：认不出身份，只管让路）。"""
+    return raw + f"@@ guard\nstart {t} 9 {until} 守护 100100\n" + "".join(m + "\n" for m in more)
 
 
 class LocalWritesTest(unittest.TestCase):
@@ -878,8 +878,8 @@ class GuardTest(unittest.TestCase):
         self.tick(T0 + 4800)
         self.assertEqual(self.guard(T0 + 4800)["status"], "ours")
 
-    def stalled(self, *, util=(0, 0), started=T0 - 86400, birth=100100, marker=True, job=False, second=None):
-        """自己开的保活占住少量显存；登记来自手动开、续租和守护时同形。"""
+    def stalled(self, *, util=(0, 0), started=T0 - 86400, birth=100100, born=100100, marker=True, job=False, second=None):
+        """自己开的保活占住少量显存；登记来自手动开、续租和守护时同形。birth 是探针此刻读到的出生时钟，born 是登记时记下的（None：旧登记没有这一列）。"""
         ps = [(1, 0, "/bin/bash"), KA_PS]
         apps, maps = [(500, 384)], [(9, 500, "/x/ka")]
         if job:
@@ -891,7 +891,7 @@ class GuardTest(unittest.TestCase):
             raw = raw.replace("@@ util", "1, GPU-y, GPU, 0, 49140, 0\n@@ util")
             raw = raw.replace("@@ cpu", "".join(f"1, {v}\n" for v in second) + "@@ cpu")
         if marker:
-            raw += f"@@ guard\nstart {T0 - 1000} 9 {T0 - 700} 看板\nproc 9 {birth}\n"
+            raw += f"@@ guard\nstart {T0 - 1000} 9 {T0 - 700} 看板{'' if born is None else f' {born}'}\nproc 9 {birth}\n"
         return raw
 
     def test_stalled_keepalive_restarts_and_refreshes(self):
@@ -967,7 +967,7 @@ class GuardTest(unittest.TestCase):
     def test_breaks_in_stall_evidence(self):
         for raw in (self.stalled(marker=False), self.stalled(util=(0, "N/A", 0)), self.stalled(job=True),
                     self.stalled(second=(1, 0)), self.stalled(second=()), self.stalled(birth=100500),
-                    self.stalled(started=T0 - 72000), self.stalled(birth=10_000_000)):
+                    self.stalled(started=T0 - 72000), self.stalled(birth=10_000_000), self.stalled(born=None)):
             with self.subTest(raw=raw[-85:]):
                 st = {}
                 s = self.c["servers"][0]
@@ -981,13 +981,93 @@ class GuardTest(unittest.TestCase):
         F.record(s, self.stalled(), None, self.c, st, T0 + 1200)
         self.assertNotEqual(F.guard_state(s, st, self.c, T0 + 1200).get("act"), "repair")
 
-    def test_stalled_recovery_waits_for_pre_upgrade_watcher_to_expire(self):
-        self.raw = self.stalled().replace(f"9 {T0 - 700} 看板", f"9 {T0 + 590} 看板")
+    def test_stalled_recovery_waits_for_watch_window(self):
+        self.raw = self.stalled().replace(f"9 {T0 - 700} 看板", f"9 {T0 + 650} 看板")     # 服务器上还在盯：归远端看门狗管
         self.tick(T0)
         self.tick(T0 + 600)
         self.assertEqual(self.remote, [])
-        F.tick(T0 + 650, self.fetch, self.c, force="b", ssh_fn=self.ssh)
+        F.tick(T0 + 650, self.fetch, self.c, force="b", ssh_fn=self.ssh)                # 盯完就重开，不再为升级前的看门狗多等一轮
         self.assertEqual(len(self.remote), 1)
+
+    def test_identity_compares_birth_clock_not_wall_clock(self):
+        """登记后墙上时钟前跳：换算出的进程启动时刻晚于登记时刻，但出生时钟对得上，照样认得出、能重开（#26）。"""
+        jumped = self.stalled(birth=10_000_000, born=10_000_000)
+        a = F.analyze(F.parse(jumped), self.c)
+        self.assertEqual(a["guard"]["identity"], [100000, T0 - 1000, 9, 10_000_000])
+        self.raw = jumped
+        self.tick(T0)
+        self.tick(T0 + 600)
+        self.assertEqual(self.remote, [f"bash -s -- repair 'bash /x/ka.sh' 300 '守护' 100000 {T0 - 1000} 9 10000000 1"])
+        self.assertNotIn("identity", F.analyze(F.parse(self.stalled(born=None)), self.c)["guard"])   # 旧登记没有出生时钟：认不出
+
+    def test_multi_card_with_one_busy_card_is_not_stalled(self):
+        """多卡只有一张卡持续非零：看板登记的与自行开启的保活都不算空转，不重开（#26）。"""
+        for raw in (self.stalled(second=(5, 7)), self.manual(second=(5, 7))):
+            with self.subTest(manual="ka_groups" in raw):
+                a = F.analyze(F.parse(raw), self.c)
+                self.assertNotIn("zero_cards", a["guard"] or {})
+                self.assertIsNone(a["manual_guard"])
+                st, s = {}, self.c["servers"][0]
+                F.record(s, raw, None, self.c, st, T0)
+                F.record(s, raw, None, self.c, st, T0 + 600)
+                self.assertNotIn("guard_zero", st)
+                self.assertEqual(F.guard_act(s, st, self.c, T0 + 600, False, self.ssh), (None, []))
+        self.assertEqual(self.remote, [])
+
+    def test_gap_after_repair_restarts_on_next_probe(self):
+        """重开时停了旧的、新的没开成（gap）：下次探测直接开，不等空闲计时与 30 分钟退避（#26）。"""
+        self.raw, self.reply = self.stalled(), "gap 保活没起来"
+        self.tick(T0)
+        msg, = self.tick(T0 + 600)
+        self.assertIn("停掉了空转保活，新的没开起来：保活没起来", msg)
+        self.assertEqual(len(self.remote), 1)
+        self.assertEqual(self.guard(T0 + 601)["status"], "fail")              # 页面：没开成、约几点再试
+        self.raw, self.reply = IDLE, "ok start 9"                              # GPU 上没有保活了
+        self.assertEqual(self.tick(T0 + 1200), [])
+        self.assertEqual(len(self.remote), 2)
+        self.assertTrue(self.remote[1].startswith("bash -s -- start 'bash /x/ka.sh' 300 "))
+        ev = records(cat="keepalive")[0]
+        self.assertEqual(ev["kind"], "guard_restart")
+        self.assertIn("上次停了空转的保活、新的没开起来", ev["msg"])
+        st = F._load_state()["b"]
+        self.assertFalse({"guard_gap", "guard_fail"} & set(st))
+
+    def test_gap_retry_is_once_then_normal_backoff(self):
+        self.raw, self.reply = self.stalled(), "gap 保活没起来"
+        self.tick(T0)
+        self.tick(T0 + 600)
+        self.raw, self.reply = IDLE, "fail 保活没起来"
+        self.assertEqual(self.tick(T0 + 1200), [])                             # 快速再试又没成：不再弹
+        self.assertEqual(len(self.remote), 2)
+        self.assertNotIn("guard_gap", F._load_state()["b"])
+        for k in range(3, 8):
+            self.tick(T0 + k * 600)
+        self.assertEqual(len(self.remote), 2)                                  # 回到平常：空闲满 60 分钟、隔 30 分钟才再试
+        self.tick(T0 + 8 * 600)
+        self.assertEqual(len(self.remote), 3)
+
+    def test_gap_cleared_when_gpu_gets_used_or_container_changes(self):
+        for raw in (KA_JOB, probe_out(used=0, util=(0, 0), started=T0 - 3600)):
+            with self.subTest(raw=raw[:60]):
+                st, s = {}, self.c["servers"][0]
+                self.reply = "gap 保活没起来"
+                F.record(s, self.stalled(), None, self.c, st, T0)
+                F.record(s, self.stalled(), None, self.c, st, T0 + 600)
+                F.guard_act(s, st, self.c, T0 + 600, False, self.ssh)
+                self.assertIn("guard_gap", st)
+                F.record(s, raw, None, self.c, st, T0 + 1200)
+                self.assertNotIn("guard_gap", st)
+                self.assertNotEqual(F.guard_state(s, st, self.c, T0 + 1200).get("act"), "start")
+
+    def test_borrowed_clears_stall_evidence(self):
+        """借用中（新算力池也走 borrow.begin）不攒空转证据，守护不管（#26 第 4 条）。"""
+        st, s = {}, dict(self.c["servers"][0])
+        F.record(s, self.stalled(), None, self.c, st, T0)
+        self.assertIn("guard_zero", st)
+        s.update(borrow_since="2027-01-15 08:00", borrow_by="AA")
+        F.record(s, self.stalled(), None, self.c, st, T0 + 600)
+        self.assertNotIn("guard_zero", st)
+        self.assertEqual(F.guard_state(s, st, self.c, T0 + 600)["status"], "borrowed")
 
     def test_stalled_recovery_backoff_and_new_attempt(self):
         self.raw, self.reply = self.stalled(), "fail 未看到 GPU 进程"
@@ -1193,12 +1273,13 @@ class GuardTest(unittest.TestCase):
         for cmd, body in {
             "timeout": 'shift 3; exec "$@"',
             "nvidia-smi": 'case "$*" in *query-gpu*) cat "$NV_UTIL";; *) cat "$NV_APPS";; esac',
-            "ka.sh": ('case "$1" in running) cat "$PID";; stop) echo stop >> "$ACTIONS"; : > "$PID"; : > "$NV_APPS";; '
-                      'start) echo start >> "$ACTIONS"; echo "$PID_VALUE" > "$PID"; echo 5011 > "$NV_APPS";; esac'),
+            # 没在跑时 running 退出码非 0（同真的 ka.sh）；NOSTART 在时 start 什么也没开起来
+            "ka.sh": ('case "$1" in running) [ -s "$PID" ] && cat "$PID";; stop) echo stop >> "$ACTIONS"; : > "$PID"; : > "$NV_APPS";; '
+                      'start) echo start >> "$ACTIONS"; [ -e "$NOSTART" ] || { echo "$PID_VALUE" > "$PID"; echo 5011 > "$NV_APPS"; };; esac'),
         }.items():
             (d / cmd).write_text("#!/bin/bash\n" + body + "\n")
             (d / cmd).chmod(0o755)
-        env = {**self.shell_env(d), "PID_VALUE": str(pid), **{k: str(d / k) for k in ("PID", "ACTIONS", "NV_UTIL", "NV_APPS")}}
+        env = {**self.shell_env(d), "PID_VALUE": str(pid), **{k: str(d / k) for k in ("PID", "ACTIONS", "NV_UTIL", "NV_APPS", "NOSTART")}}
 
         def run(p1=2000, marked=T0, birth=2345):
             args = ["repair", f"bash {d / 'ka.sh'}", "0", "守护", str(p1), str(marked), str(pid), str(birth), "2"]
@@ -1250,7 +1331,21 @@ class GuardTest(unittest.TestCase):
         self.assertFalse((d / "ACTIONS").exists())
         self.assertEqual(run(marked="manual"), f"ok start {pid}")
         self.assertEqual((d / "ACTIONS").read_text(), "stop\nstart\n")
-        self.assertIn(f" {pid} ", (d / "guard.state").read_text())
+        marker = (d / "guard.state").read_text().split()
+        self.assertEqual((marker[0], marker[2], marker[4:]), ("start", str(pid), ["守护", "2345"]))   # 登记里记下出生时钟（#26）
+
+        # 停了旧的、新的没开成：回 gap，与“没停成”的 fail 分开（#26）
+        (d / "NOSTART").touch()
+        self.assertEqual(run(marked=marker[1]), "gap 保活没起来")
+        self.assertEqual((d / "ACTIONS").read_text(), "stop\nstart\n" * 2)
+        self.assertIn("\nstop ", (d / "guard.state").read_text())
+
+        # ka.sh running 退出码 0 却没列出进程组：在跑、认不了归属，不当作没在跑去再开一个
+        (d / "PID").write_text("unknown\n")
+        out = subprocess.run(["bash", "-s", "--", "start", f"bash {d / 'ka.sh'}", "0"], input=F.GUARD.read_text(), env=env,
+                             capture_output=True, text=True, check=True, timeout=20).stdout.strip()
+        self.assertEqual(out, "fail 保活在跑，但 ka.sh 没列出进程组，无法确认归属")
+        self.assertEqual((d / "ACTIONS").read_text(), "stop\nstart\n" * 2)
 
 
     def test_set_guard(self):

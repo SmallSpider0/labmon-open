@@ -9,11 +9,19 @@ cgv() { for f in "$@"; do [ -r "$CG/$f" ] && { cat "$CG/$f"; return; }; done; }
 mstat() { cgv memory/memory.stat memory.stat | awk -v k="$1" '{v[$1] = $2} END {if (("total_" k) in v) print v["total_" k]; else if (k in v) print v[k]}'; }
 cpuns() { v=$(cgv cpuacct/cpuacct.usage cpu,cpuacct/cpuacct.usage); [ -n "$v" ] && echo "$v" && return
           awk '$1 == "usage_usec" {printf "%d\n", $2 * 1000}' /sys/fs/cgroup/cpu.stat 2>/dev/null; }
+# 进程出生时钟：/proc/<pid>/stat 第 22 项（开机以来的时钟数）；传 leader 时只认进程组长。同 fleet_guard.sh 的 proc_birth（各自经标准输入送去）
+birth() {
+  local s f
+  { read -r s < "/proc/$1/stat"; } 2>/dev/null || return 1
+  read -ra f <<< "${s##*) }"
+  [ "${2:-}" != leader ] || [ "${f[2]:-}" = "$1" ] || return 1
+  [[ "${f[19]:-}" =~ ^[0-9]+$ ]] && echo "${f[19]}"
+}
 echo "@@ info"
 echo "clock $(date +%s)"
 echo "btime $(awk '$1 == "btime" {print $2}' /proc/stat)"
 echo "tck $(getconf CLK_TCK)"
-echo "p1 $(sed 's/.*) //' /proc/1/stat | awk '{print $20}')"
+echo "p1 $(birth 1)"
 echo "nproc $(nproc)"
 echo "memlim $(cgv memory/memory.limit_in_bytes memory.max)"
 echo "memuse $(cgv memory/memory.usage_in_bytes memory.current)"
@@ -93,20 +101,14 @@ for p in $KA; do
   { read -r gs < "/proc/$p/stat"; } 2>/dev/null || continue
   read -ra fields <<< "${gs##*) }"
   gg=${fields[2]:-}
-  [[ "$gg" =~ ^[1-9][0-9]*$ ]] || continue
-  { read -r gs < "/proc/$gg/stat"; } 2>/dev/null || continue
-  read -ra fields <<< "${gs##*) }"
-  [ "${fields[2]:-}" = "$gg" ] && echo "$p $gg ${fields[19]:-}"
+  [[ "$gg" =~ ^[1-9][0-9]*$ ]] && b=$(birth "$gg" leader) && echo "$p $gg $b"
 done
-echo "@@ guard"                  # labmon 开的保活（fleet_guard.sh 记的）：开的时刻、进程组、盯到几点、谁开的，之后的让出与停止
+echo "@@ guard"                  # labmon 开的保活（fleet_guard.sh 记的）：开的时刻、进程组、盯到几点、谁开的、出生时钟，之后的让出与停止
 GUARD=$(cat /tmp/labmon-guard.state 2>/dev/null)
 echo "$GUARD"
 read -r gk gt gg rest <<< "$GUARD"
-if [ "$gk" = start ] && [[ "$gg" =~ ^[1-9][0-9]*$ ]]; then
-  { read -r gs < "/proc/$gg/stat"; } 2>/dev/null && {
-    gs=${gs##*) }; set -- $gs
-    [ "${3:-}" = "$gg" ] && echo "proc $gg ${20:-}"
-  }
+if [ "$gk" = start ] && [[ "$gg" =~ ^[1-9][0-9]*$ ]] && b=$(birth "$gg" leader); then
+  echo "proc $gg $b"             # 登记的进程组此刻的出生时钟：与登记里的对得上才是同一个进程
 fi
 if [ -n "$LABMON_SCAN" ]; then
   # 根盘开机以来新写的文件（同 worker 的 LocalDisk：两份，探针在未必有 Python 的镜像里跑）：ctime 不晚于开机的目录整棵不进
