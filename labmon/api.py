@@ -149,10 +149,11 @@ def override(verb: str, target: str, host_ids: list[str] | None, until: float | 
 
 
 def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project: str | None = None, stop: str | None = None, own: bool = False,
-           may=None) -> dict:
+           lst: bool = False, may=None) -> dict:
     """labmon worker start|stop|status|add|rm|limit|fit：经 workerctl.run_out 一次 ssh；输出是 worker 打印的原文。
     status 成功时末尾补一行与这台共用 worker 目录的在用主机（home_text，#35 A）；may：普通用户能用哪台（None 不限），只列他能用的。
-    hid 是 pool（算力池，#24）时只认 add、rm；rm 在清单此刻登记的地方撤（pool.locate）。"""
+    hid 是 pool（算力池，#24）时只认 add、rm；rm 在清单此刻登记的地方撤（pool.locate）。
+    fit --list（lst）：看与这台共用 worker 目录的在用主机（config.home_peers；may 是普通用户能用哪台，None 不限），在这台上读它们的状态（#35 B）。"""
     if sub not in WORKER_ACTS or not hid:
         return usage(f"不认识的 worker 动作 {sub}")
     if hid == POOL and sub not in ("add", "rm"):         # 算力池（#24）只收清单、撤清单：没有 worker，状态看项目页
@@ -163,8 +164,9 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
         with PJ._reg_locked() if sub == "add" else nullcontext():
             if project and sub != "rm" and (reason := unknown_project(project, require=sub == "add")):
                 return usage(reason)
+            fl = {"list": True, "hosts": ",".join(h for h in home_peers(hid) if h == hid or may is None or may(h))} if lst and sub == "fit" else {}
             rc, out = W.run_out(sub, hid, rest, gpus, project=project if sub != "rm" else None, stop=stop,
-                                **({"expect_project": project} if own and sub in ("add", "rm") else {}))
+                                **({"expect_project": project} if own and sub in ("add", "rm") else {}), **fl)
     except ConfigError as e:
         return {"rc": 3, "out": "", "err": f"[labmon] {e}\n"}
     extra = home_text(hid, may) if sub == "status" and rc == 0 else ""

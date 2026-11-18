@@ -17,7 +17,8 @@
     labmon borrow [<组内服务器> [--until "明天 18:30"] [--for a1,b] [--away]]   借来给自己的项目跑（见 borrow.py；--away 对方说好约定前不用；要 admin 令牌）；不给参数列出在借的
     labmon borrow <自用主机> --until … [--from 名字]             换给自己借来的：记下约定还的时间（--until none 去掉）
     labmon worker start|stop|status <id> | add|rm <id> ROOT JOBS [--gpus 0] [--project P] [--stop term] | limit <id> tag=N
-    labmon worker fit <id> 任务名… [--project P]               开并行车道前看显存够不够、卡是不是已经吃满
+    labmon worker fit <id> 任务名… [--project P]               开并行车道前：放不放得下（与真放行同一份准入）、卡吃不满是不是 CPU 受限
+    labmon worker fit <id> ROOT JOBS --list --project P        一条清单还会跑的行此刻能在共用 worker 目录的几台上再开几条车道
                                                             服务器端队列执行器（见 workerctl.py；start、stop、limit 要 admin 令牌）
     labmon pause|resume|focus|unfocus <项目> [--host id] [--until 11-10|+3h] [--now]  临时指令（项目的不带 --host 记在主机清单、所有主机生效；--now 只用于 pause）
     labmon drain|undrain <主机> [--until …]                  这台主机不再放行新任务（要 admin 令牌）
@@ -600,6 +601,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--gpus", help="worker add：这条队列只用这些卡（nvidia-smi 序号，逗号分隔）")
     ap.add_argument("--project", help="worker add 必写：看板的项目 id（monitor.toml 里的 id；pause、focus、借卡的“只给谁用”都按它认）")
     ap.add_argument("--stop", help="worker add：暂停时怎么停：boundary（缺省）/ term / file:<相对 ROOT 的路径>")
+    ap.add_argument("--list", action="store_true", help="worker fit：位置参数是 ROOT JOBS，看这条清单还会跑的行能在共用 worker 目录的几台在用主机上再开几条车道（要 --project）")
     ap.add_argument("--at", help="host return 的归还时间（缺省为现在）：2026-11-04 18:40、11-04 18:40、18:40、明天 9:00，写进清单的是带年份的")
     ap.add_argument("--now", action="store_true", help="host return 借来的组内服务器：正在跑的按各自的停法停下，不等跑完")
     ap.add_argument("-c", "--config", action="append", help="项目目录里的配置文件（缺省 monitor.toml）")
@@ -669,14 +671,18 @@ def main(argv: list[str] | None = None) -> int:
     if a.cmd == "worker":
         if a.sub not in WORKER_ACTS or not a.target:
             ap.error("用法：labmon worker start|stop|status <主机> | labmon worker add <主机> ROOT JOBS --project <项目 id> [--gpus 0]"
-                     " | labmon worker rm <主机> ROOT JOBS | labmon worker limit <主机> tag=N | labmon worker fit <主机> 任务名… [--project <项目 id>]")
+                     " | labmon worker rm <主机> ROOT JOBS | labmon worker limit <主机> tag=N | labmon worker fit <主机> 任务名… [--project <项目 id>]"
+                     " | labmon worker fit <主机> ROOT JOBS --list --project <项目 id>")
+        if a.list and (a.sub != "fit" or len(a.rest) != 2 or not a.project):
+            ap.error("--list 只用于 worker fit：labmon worker fit <主机> ROOT JOBS --list --project <项目 id>")
         if a.sub == "fit" and not a.rest:
             ap.error("worker fit 需要任务名")
         if a.sub in ("add", "rm") and len(a.rest) != 2:
             ap.error(f"worker {a.sub} 需要 ROOT JOBS")
         if a.sub == "add" and not a.project:            # worker 缺省取共享盘目录名，与看板的项目 id 常不一样：暂停、优先、借卡的“只给谁用”就对不上
             ap.error("worker add 需要 --project <项目 id>（monitor.toml 里的 id）")
-        return client.run("POST", f"/api/worker/{a.sub}", {"host": a.target, "args": a.rest, "gpus": a.gpus, "project": a.project, "stop": a.stop},
+        return client.run("POST", f"/api/worker/{a.sub}", {"host": a.target, "args": a.rest, "gpus": a.gpus, "project": a.project, "stop": a.stop,
+                                                           **({"list": True} if a.list else {})},
                           admin=a.sub in ("start", "stop", "limit"), ap=ap)
     if a.cmd == "serve":                              # -c 只给迁移用（可删：#161 部署后 labmon service install 去掉了 plist 里的 -c 就删）
         return serve(a.port or PORT, a.interval, a.public_port or None, legacy=a.config or [])

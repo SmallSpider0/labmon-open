@@ -710,6 +710,8 @@ class Handler(BaseHTTPRequestHandler):
                 body["project"] = U.need_reg(who, PO.locate(*args) if s("host") == POOL and len(args) == 2 else s("host"), *args)
             elif body.get("project"):
                 U.need_project(who, s("project"))
+                if sub == "fit" and body.get("list"):     # fit --list 读这条清单：别的项目名下的清单不给看
+                    U.need_list(who, *args, s("project"))
         elif r.own == "reg":                           # 页面上搬、移除登记：逐条核
             snap = snapshot()
             items = _reg_items(body, move=path.endswith("/move"))
@@ -1128,7 +1130,7 @@ class Handler(BaseHTTPRequestHandler):
             sub = act[len("worker/"):]
             args = _worker_args(sub, body)
             r = A.worker(sub, s("host"), args, body.get("gpus") or None, project=body.get("project") or None,
-                         stop=body.get("stop") or None, own=who.role != "admin",
+                         stop=body.get("stop") or None, own=who.role != "admin", lst=bool(body.get("list")),
                          may=None if who.role == "admin" else lambda hid: U.may_host(who, hid))
             what = f"worker {sub} {s('host')} {' '.join(args)}"
         elif act.startswith("override/"):
@@ -1462,6 +1464,8 @@ def _worker_args(sub: str, body: dict) -> list[str]:
     args = _strings(body, "args")
     if any(not x or x.startswith("-") for x in args):
         raise U.Denied(400, "args 只接受位置参数，选项请单独传")
+    if body.get("list") not in (None, False, True) or (body.get("list") and (sub != "fit" or len(args) != 2 or not body.get("project"))):
+        raise U.Denied(400, "list 只用于 worker fit：位置参数是 ROOT JOBS，要写 project")
     if (sub in ("add", "rm") and len(args) != 2) or (sub in ("start", "stop", "status") and args) or (sub == "fit" and not args):
         raise U.Denied(400, f"worker {sub} 的位置参数数量不对")
     for key in ("project", "gpus") if sub == "add" else ("project", "gpus", "stop"):

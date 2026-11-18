@@ -86,6 +86,15 @@ class AddTest(unittest.TestCase):
         ssh.assert_not_called()
 
 
+class FitListTest(unittest.TestCase):
+    def test_fit_list_passes_flag_and_hosts(self):
+        # fit --list（#35 B）：--list 是不带值的开关，--hosts 逗号分隔；位置参数在 --host 前
+        with mock.patch.object(workerctl, "ssh", return_value=(0, "")) as ssh, mock.patch.object(workerctl, "host_conf",
+                return_value={"worker_home": "/worker", "python": "python3"}):
+            workerctl.run_out("fit", "a", ["/root", "jobs/q.txt"], project="p", list=True, hosts="a,b")
+        self.assertIn("fit /root jobs/q.txt --list --project p --hosts a,b --host a", ssh.call_args.args[1])
+
+
 class OverrideCliTest(unittest.TestCase):
     def test_project_pause_focus_global_unless_host(self):
         """#96：labmon pause / focus <项目> 不带 --host 只改主机清单（所有主机，含之后加入的），不连服务器；

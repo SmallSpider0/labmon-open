@@ -5,7 +5,8 @@
     python3 labmon_worker.py add   --host 29 ROOT JOBS [--gpus 0]  登记一条队列（ROOT 绝对路径，JOBS 相对 ROOT）
     python3 labmon_worker.py rm    --host 29 ROOT JOBS
     python3 labmon_worker.py ls    --host 29                     登记的队列、运行中与等待中的任务
-    python3 labmon_worker.py fit   --host 29 NAME…               开并行车道前：显存够不够、卡是不是已经吃满
+    python3 labmon_worker.py fit   --host 29 NAME…               开并行车道前：与真放行同一份准入，放不放得下、卡吃不满是不是 CPU 受限
+    python3 labmon_worker.py fit   --host 29 ROOT JOBS --list --project P [--hosts 29,30]   一条清单还会跑的行此刻能在这几台上再开几条车道
     python3 labmon_worker.py stop  --host 29                     停 worker；运行中的任务不受影响，下次启动时接管
     python3 labmon_worker.py thaw  --host 29                     恢复借来时暂停的保活看门狗（还卡时 borrow.finish 调）
 
@@ -133,6 +134,8 @@ RATIO_N = 20             # 项目的 实际/估时 比值看最近这么多个�
 DUR_MARGIN = 1.2         # 截止前（续租、约定归还）的准入：预计时长再乘这么多（估时偏一点是常事，跑不完这一格就白跑）
 OVER_FRAC, OVER_MIN_S = 0.2, 600   # 剩余时长说不准时（超了预计；看板那边还有进度刚开始、没估时或已超估时）按已跑的这么多比例估、至少这么多秒（overrun_left）
 UTIL_WIN_S = 600         # 各卡利用率取近这么久的平均（状态的 util10，fit 列出来看）
+UTIL_LOW = 50            # 卡近 UTIL_WIN_S 的利用率低于这个 %，且上面在跑的被 CPU 卡住时，先加核、不在这张卡上开新车道（gpu_slack，#35、#37）
+CPU_BOUND_FRAC = 0.9     # 在跑任务近 CPU_WARM_S 各 1 分钟窗口核数的平均不少于给它的核数的这么多，算被 CPU 卡住（cpu_bound）
 CONC_MAX = 12            # 按同卡并行数挑同类记录（duration 的 k）时封顶到这么多（推演里查表、缓存用）
 FORECAST_S = 7 * 86400   # 推演（simulate）往后排多远
 FORECAST_EVERY = 120     # 推演的输入没变时多久重算一次（在跑的超了预计，后面的跟着往后挪）
@@ -284,6 +287,7 @@ def proc_env(pid, key):
 
 class Paths:
     def __init__(self, host):
+        self.host = host
         self.dir = os.path.join(HOME, "hosts", host)
         self.queues = os.path.join(self.dir, "queues")
         self.pid = os.path.join(self.dir, "worker.pid")
@@ -2295,7 +2299,7 @@ class Worker:
 
     def cpus_for(self, j):
         """开跑时导出的 LABMON_CPUS：估计核数封顶到配额（cpu_give，与运行中记账开头 10 分钟的估计同一个数），至少 1（写 cpus=0 的不记账，也给 1）。"""
-        return max(1, cpu_give(j["est"]["cpus"], cpu_cap(self.info.get("cpu_quota"))))
+        return cpus_export(j["est"]["cpus"], cpu_cap(self.info.get("cpu_quota")))
 
     def mem_room(self):
         """labmon 的任务全停时容器内存还能放多少（GiB）：上限 − labmon 之外收不回的内存 − 借来的主机上给对方留着、对方还没用上的部分。
@@ -4581,12 +4585,15 @@ class Worker:
             "guest": {"keep": self.keep(), "other": {"vram": self.other["vram"], "ram": self.other["ram"] and round(self.other["ram"], 2),
                                                      "cpu": self.other["cpu"] and round(self.other["cpu"], 2)},
                       "back": list(self.back.values()), "quiet": sorted(set(self.back_last) - set(self.back)), "tight": self.tight,
-                      "hit": self.hit, "away": self.away_state()} if self.guest() else None,
+                      "hit": self.hit, "away": self.away_state(),
+                      "block": self.guest_block()} if self.guest() else None,        # 整台不放新任务的原因（guest_block）：fit 照它挡整台
             "util10": {k: round(sum(x[1] for x in w) / len(w)) for k, w in self.uwin.items() if len(w) >= 3},
             "disk": self.disk.brief() if self.disk else None,
             # 按记账还能放多少：内存 GiB、各卡 MB（整卡任务记账超过卡时写 0）、CPU 核（cpu_cap 是记账上限：配额向下取整；读不到配额都为 None）
             "room": {"ram": ram_free(S), "margin": S["margin"], "gpus": {u: max(0.0, v) for u, v in card_free(S).items()},
-                     "cpu": cpu_free(S), "cpu_cap": S["cpu_cap"]},
+                     "cpu": cpu_free(S), "cpu_cap": S["cpu_cap"], "other_cpu": S["cpu"],   # other_cpu：认得准的 labmon 之外的核数（fit 判整机独占，同 intruders）
+                     "keep": {c["uuid"]: round(c["keep"]) for c in S["cards"] if c["keep"]},   # 各卡给对方留着的 MB（keep_left）：fit 的整卡封顶 card_need 照它
+                     "owner": sorted(S["owner"])},        # 不放的卡（对方超出预留或刚回落、有停不了的保活）：fit 的快照照它（fit_snapshot）
             "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"],
                         "empty": q.get("empty", False), "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {})} for q in queues],
             "plan": self.plan,                    # 推演（forecast）：各队列与单元每个任务的预计开始、结束、用哪几张卡
@@ -4904,6 +4911,11 @@ def cpu_warm(u):
     """运行中任务的 CPU 记账已按窗口核数回收（#65）：从开始量窗口核数（use 的 pk0）起满 CPU_WARM_S、量到了 pks。
     Worker.acct（回收）与 cpu_held（只把没回收的算“记账比实测多”）共用这一个判断。"""
     return bool(u.get("pks") and u.get("t") and u.get("pk0") and u["t"] - u["pk0"] >= CPU_WARM_S)
+
+
+def cpus_export(cpus, cap):
+    """开跑时导出的 LABMON_CPUS（给这个任务的核数）：cpu_give 再至少 1。Worker.cpus_for 与判在跑的是不是被 CPU 卡住（cpu_bound）共用。"""
+    return max(1, cpu_give(cpus, cap))
 
 
 def cpu_give(cpus, cap):
@@ -5494,92 +5506,345 @@ def list_row(lists, name, project=None):
     return None
 
 
-def fit(p, names, project=None):
-    """要不要为这些任务开并行车道：显存按 worker 准入同一套估计（estimate、另留 1 GiB、选可用最多的卡）看够不够，
-    再看内存与 CPU 按记账够不够（状态的 room）。依次判断，判可以的按估计值占掉显存、内存与核数再判下一个。
-    卡的利用率只列出来、不据此劝阻（#67：到 100% 的卡上小任务并行 4 条与 6 条每条一样快）；可以开的写同类在那张卡上并行 k 条时约要多久（duration 的 k）。
-    请求按登记过的清单里那一行拼（known_lists → list_row → job_of → queue_req，与真放行同一个请求：tag、同队列、cpus=、gpus= 都照清单行，项目取登记的）；
-    清单里找不到的只按名字找同类（项目缺省取同名任务最近一次的）。估计用的是清单提示值的不开车道（没有同 tag、同名的实测，同一条队列别的任务的历史不盖过提示值，见 estimate；提示值常偏离实测，估小了并行会 OOM；
-    不用卡的看内存的来源 ram_src，内存估小了是容器 OOM）；不用卡、有历史的不看显存与卡的利用率。"""
-    st = json.loads(read(p.status, "{}") or "{}")
-    if not st.get("t") or time.time() - st["t"] > STATUS_STALE_S:
-        print("worker 没在跑（status.json 超过 %d 分钟没更新）：先 labmon worker start，再判断" % (STATUS_STALE_S // 60))
-        return 2
-    hist = load_hist({}) or []
-    try:
-        eta = json.loads(read(p.eta, "{}") or "{}")
-    except ValueError:
-        eta = {}
-    ka = {}                                       # 保活占的显存：放任务前 worker 会先停保活，算可用
-    for g in st.get("gpu_procs", []):
+def cpu_bound(j, cap):
+    """在跑的任务 j（状态 running 的形状：name、est、use）是不是被 CPU 卡住（#37）：从开始量窗口核数起满 CPU_WARM_S（cpu_warm），
+    近这么久各 1 分钟窗口核数（use.pks）的平均不少于给它的核数（cpus_export，开跑时导出的 LABMON_CPUS）× CPU_BOUND_FRAC。
+    返回 (平均核数, 给的核数)，不是为 None。占位任务不算。"""
+    u = j.get("use") or {}
+    if is_hold(j.get("name")) or not cpu_warm(u):
+        return None
+    give = cpus_export((j.get("est") or {}).get("cpus", CPU_DEFAULT), cap)
+    avg = sum(x[1] for x in u["pks"]) / len(u["pks"])
+    return (avg, give) if avg >= give * CPU_BOUND_FRAC else None
+
+
+def gpu_slack(cards, jobs, th, cap):
+    """卡吃不满是不是真有余量（fit 开车道、offers 同机多开车道共用一条规则，#35、#37）：
+    cards [{uuid, util 近 10 分钟利用率 %（样本不够为 None）}]；jobs 在跑的（状态 running 的形状：name、gpus、est、use）；
+    th 是状态的 throttle（Worker.throttle：这一段限流，门槛 THR_HOT、THR_COOL 只在 thr_step；没在限流为 None）；cap 记账上限（cpu_cap）。
+    返回 {throttle: 限流时的那句说明、否则 None（这台先减线程，不开新车道）,
+    bound: {卡 uuid: [(任务, 平均核数, 给的核数)]}：利用率低于 UTIL_LOW 的卡上被 CPU 卡住的在跑任务（先给它们加核，不在这张卡上开新车道）}。"""
+    low = {c["uuid"] for c in cards if c.get("util") is not None and c["util"] < UTIL_LOW}
+    bound = {}
+    for j in jobs:
+        b = cpu_bound(j, cap)
+        for u in j.get("gpus") or []:
+            if b and u in low:
+                bound.setdefault(u, []).append((j["name"], b[0], b[1]))
+    thr = None if th is None else th.get("thr")
+    return {"throttle": None if th is None else "容器 CPU 在限流（%s，已持续 %d 分钟）" % (
+        "近 1 分钟 %.0f%% 的周期被限流" % thr if thr is not None else "近 1 分钟被限流的周期过了门槛", th.get("for", 0) // 60), "bound": bound}
+
+
+def fit_snapshot(st):
+    """fit 用：一台主机的 status.json → 准入核心 place 认的资源快照（字段见 _place；与 Worker.snapshot 同形）。
+    卡的空闲取状态的 room.gpus（已扣在跑任务的记账与给对方留的），加回保活占的（放任务前 worker 先停保活），给对方留的照 room.keep（整卡封顶要扣）；在跑的只记内存与核（显存已扣在卡上），
+    room、cpu_room 是 labmon 全停时能给的（room 加回在跑的记账：ram_need、cpu_need 按它封顶）；tag 上限照 limits；对方超出预留与有停不了保活的卡
+    照 room.owner 不放（旧 worker 没写为空）。独占留卡、成组留的资源不在状态里，不模拟。"""
+    room, info = st.get("room") or {}, st.get("info") or {}
+    ka = {}
+    for g in st.get("gpu_procs") or []:
         if g.get("owner") == "keepalive":
             ka[g["uuid"]] = ka.get(g["uuid"], 0.0) + g["mb"]
-    room, u10 = st.get("room") or {}, st.get("util10") or {}
-    cards = [{"i": g["i"], "avail": ((room.get("gpus") or {}).get(g["uuid"], g["free"]) + ka.get(g["uuid"], 0.0)) / 1024,
-              "util": u10.get(g["uuid"]), "jobs": [j["name"] for j in st.get("running", []) if g["uuid"] in j.get("gpus", [])]}
-             for g in (st.get("info") or {}).get("gpus", [])]
-    if not cards:
+    acct = lambda j, k: (j.get("acct") or {}).get(k) or 0.0
+    jobs = [{"key": "run:%d" % i, "project": j.get("project"), "name": j["name"], "t0": j.get("t0"), "t1": None, "gpus": j.get("gpus") or [],
+             "vram": {}, "ram": acct(j, "ram"), "cpu": acct(j, "cpu"), "excl": j.get("excl"), "tag": j.get("tag"), "hold": bool(j.get("hold")),
+             "ngpu": len(j.get("gpus") or []), "use": j.get("use") or {}, "cards": 0.0} for i, j in enumerate(st.get("running") or [])]
+    by = {j["name"]: j for j in jobs}
+    gp = [dict(g, _j=by.get(g.get("job")) if g.get("owner") == "job" else None) for g in st.get("gpu_procs") or []   # 独占的判断（intruders）要看卡上有谁；
+          if g.get("owner") != "keepalive"]                     # worker 停得了的保活放任务前先停（卡的空闲已加回），停不了的是 other、照算
+    cards = [{"i": g["i"], "uuid": g["uuid"], "total": g.get("total") or 0.0, "keep": (room.get("keep") or {}).get(g["uuid"], 0.0), "other": 0.0, "ka": False,
+              "free": (room.get("gpus") or {}).get(g["uuid"], g.get("free") or 0.0) + ka.get(g["uuid"], 0.0)} for g in info.get("gpus") or []]
+    return {"cards": cards, "limit": (info.get("mem") or {}).get("limit"),
+            "room": None if room.get("ram") is None else room["ram"] + sum(j["ram"] for j in jobs), "margin": room.get("margin") or 0,
+            "cpu_cap": room.get("cpu_cap"), "cpu_room": None if room.get("cpu") is None else room["cpu"] + sum(j["cpu"] for j in jobs),
+            "jobs": jobs, "ext": st.get("external") or [], "gp": gp, "cpu": room.get("other_cpu"), "holds": {}, "tags": (st.get("limits") or {}).get("tags") or {},
+            "owner": set(room.get("owner") or []), "who": "对方" if st.get("guest") else "labmon 之外的进程",
+            "kept": bool((st.get("guest") or {}).get("keep")), "cut": None, "brief": False, "gholds": {}, "gangs": {}, "gfirst": {}}
+
+
+class FitHost:
+    """fit 眼里的一台主机：它的状态（status.json）拼成的快照（fit_snapshot），这次 fit 假设开的车道按 acct_job 记进快照再判下一行（与推演同一做法）。
+    请求拼法与临时指令借 Worker 的 job_spec、override_hit（只填它们要的 info、ovr、host），不另写。"""
+
+    def __init__(self, host, st, hist, eta):
+        self.host, self.st, self.hist, self.eta = host, st, hist, eta
+        self.w = object.__new__(Worker)
+        self.w.host, self.w.info, self.w.ovr = host, st.get("info") or {}, st.get("overrides") or []
+        self.w.req_dur = lambda r: r.get("dur")       # override_hit 判截止前跑不跑得完要的时长：fit 拼的请求（job_spec）里已有
+        self.S = fit_snapshot(st)
+        u10 = st.get("util10") or {}
+        self.cards = [dict(c, util=u10.get(c["uuid"])) for c in self.S["cards"]]
+        self.slack = gpu_slack(self.cards, st.get("running") or [], st.get("throttle"), self.S["cpu_cap"])
+        self.lanes, self.say, self.why = [], [], None     # 这次假设开的 [(任务, 卡号)] 与各行的说明；最近一行没开成的原因
+        self.solo, self.solo_host = {}, None              # 这次分给只有提示值的行的卡 {uuid: 任务}（之后哪一行都不与它同卡）；不用卡的那种占了整台：任务名
+
+    def card_lines(self):
+        """各卡此刻的样子（可用显存、利用率、在跑谁、CPU 受限）与限流：fit 先列出来。"""
+        free, out = card_free(self.S), []
+        for c in self.cards:
+            jobs = [j["name"] for j in self.S["jobs"] if c["uuid"] in j["gpus"]]
+            b = self.slack["bound"].get(c["uuid"])
+            out.append("卡 %d：可用 %.1f GiB，近 10 分钟利用率 %s%s%s" % (
+                c["i"], max(0.0, free[c["uuid"]]) / 1024, "%d%%" % c["util"] if c["util"] is not None else "—（样本不够）",
+                "（在跑 %s）" % "、".join(jobs) if jobs else "（空着）",
+                "；%s 跑满了给的核（CPU 受限）" % "、".join("%s %.1f/%d 核" % x for x in b) if b else ""))
+        if self.slack["throttle"] is not None:
+            out.append(self.slack["throttle"])
+        return out
+
+    def req(self, q, n, cmd, project):
+        """清单 q 里叫 n 的一行（命令 cmd）在这台上的样子：(请求 r, 资源估计 e, place 认的 x)。q 是别的主机上登记的，--gpus 限卡只在那台上算。"""
+        r = queue_req(q, job_of(n, cmd))
+        if project:
+            r["project"] = project
+        e = estimate(self.hist, r)
+        # 时长同真放行（queue_durs）：按此刻放一个新任务会遇到的同卡并行数（最空的那张卡，同 k_now；这次假设开的也算）与在跑同类的进度挑记录
+        kn = min((1 + sum(1 for j in self.S["jobs"] if not j["hold"] and c["uuid"] in j["gpus"]) for c in self.S["cards"]), default=1)
+        d = duration(self.hist, r, self.model(), kn, self.runs(r))
+        x = dict(self.w.job_spec(n, r, e, d and d["min"]), key="fit:%s" % n, project=r["project"],
+                 allowed=q["gpus"] if q.get("_host") == self.host else None)
+        return r, e, x
+
+    def model(self):
+        return ((self.w.info.get("gpus") or [{}])[0]).get("name")
+
+    def runs(self, r):
+        """这台在跑的同类（项目 + 去掉种子编号的名字）按进度估的总长（模块级 run_tot，与 worker 同口径；看板写来的 eta.json），不含它自己。"""
+        return [m for y, m in run_tot(self.st.get("running") or [], self.eta.get("jobs") or {}, self.eta.get("t") or 0).get((r["project"], base_name(r["name"])), [])
+                if y != r["name"]]
+
+    def blocked(self, project):
+        """这台此刻不开新车道的整台原因：持久的临时指令挡住这个项目（drain、只给别的项目用、暂停，override_hit 的 lasting）、
+        借来的主机上对方的内存或 CPU 超出预留、刚回落（真放行的 guest_block，状态的 guest.block）、容器在限流；没有为 None。"""
+        hit = self.w.override_hit({"project": project, "name": ""}, ("drain", "guest", "pause"), lasting=True)
+        if hit:
+            return hit[1]
+        block = (self.st.get("guest") or {}).get("block")       # 只有内存、CPU 超出（或刚回落）挡整台；某张卡超出的经 room.owner 只挡那张
+        if block:
+            return block + " → 这台不开新车道"
+        if self.slack["throttle"] is not None:
+            return self.slack["throttle"] + " → 不开新车道：先减线程（按 LABMON_CPUS 设线程数与 DataLoader 进程数）"
+        return None
+
+    def open(self, r, e, x, t, row=True):
+        """为这一行再开一条车道放不放得下：放得下返回说明并把它记进快照（acct_job）；放不下返回 (None, 原因)。
+        判断就是 place；fit 只多两条：估计只有提示值的（没有实测）只放空卡、不与别的任务同卡（不用卡的只在这台没有 labmon 任务时开；
+        这次 fit 先分了它，后面的行也不与它同卡、同台：solo）；
+        利用率低的卡上在跑的任务被 CPU 卡住时不在那张卡上开（gpu_slack）。"""
+        why = self.blocked(x["project"])
+        hit = None if why else self.w.override_hit(x, ("deadline",), lasting=True)    # 续租、约定归还的截止前跑不完的不放（同真放行，按这一行的预计时长）
+        if why or hit:
+            return None, why or hit[1]
+        if self.solo_host:
+            return None, "这次已把没有实测的 %s 分到这台（只在这台没有别的 labmon 任务时开） → 不再与它同开" % self.solo_host
+        S, gpu = self.S, x["ngpu"] > 0
+        hint = e["src" if gpu else "ram_src"] == "提示值"
+        # 有别的任务的卡：labmon 在跑的、旧 gpu_queue.sh 的、卡上 labmon 之外的进程（保活不算：放任务前 worker 先停它）
+        busy = ({u for j in S["jobs"] if not j["hold"] for u in j["gpus"]} | {u for j in S["ext"] for u in j.get("gpus") or []}
+                | {g["uuid"] for g in self.st.get("gpu_procs") or [] if g.get("owner") != "keepalive"})
+        free = card_free(S)
+        full = place(dict(x), dict(S, holds={}), t)
+        if gpu:
+            sel = [c["i"] for c in S["cards"] if (x["allowed"] is None or c["i"] in x["allowed"])
+                   and c["uuid"] not in self.slack["bound"] and c["uuid"] not in self.solo and not (hint and c["uuid"] in busy)]
+            cs, why, _ = place(dict(x, allowed=sel), dict(S, holds={}), t)
+            solo = [self.solo[u] for u in (c["uuid"] for c in (full[0] or [])) if u in self.solo]
+            if cs is None and solo and not hint:
+                return None, "这次已把没有实测的 %s 分到卡 %s → 不与它同卡" % ("、".join(solo), ",".join(str(c["i"]) for c in full[0] if c["uuid"] in self.solo))
+        elif hint and any(not j["hold"] for j in S["jobs"]):
+            cs, why = None, None
+        else:
+            cs, why = full[0], full[1]
+        if cs is None:
+            if full[0] is None:
+                return None, full[1]
+            c = full[0][0] if full[0] else None
+            b = self.slack["bound"].get(c["uuid"]) if c else None
+            if b and not hint:
+                left = cpu_free(S)
+                return None, "卡 %d 近 10 分钟利用率 %d%%，低是因为在跑的 %s跑满了给它的核 → 不在这张卡上开新车道：先给它那条车道加核（清单行 cpus=）%s" % (
+                    c["i"], next(x_["util"] for x_ in self.cards if x_["uuid"] == c["uuid"]),
+                    "、".join("%s（近 10 分钟平均 %.1f 核，给了 %d 核）" % y for y in b),
+                    "；这台还能给 %.0f 核" % left if left is not None and left >= 1 else "；这台已没有余核，瓶颈在 CPU")
+            k, v = ("vram", r["vram"]) if gpu else ("ram", r["ram"])
+            return None, "%s，%s → 不开新车道（%s），排在已有车道后面%s" % (
+                ("没有同 tag、同名任务的实测" if row else "没有同类任务的历史") if v else
+                "没有同类任务的历史%s" % ("（按 tag、去掉种子编号后的名字、同一条队列找）" if row else ""),
+                "清单写了 %s=%g，还没有实测%s" % (k, v, "（同一条清单里别的任务的历史不用）" if row else "") if v else "估不出%s" % ("显存" if gpu else "内存"),
+                "没有实测的只放空卡、不与别的任务同卡：卡上都有任务在跑" if gpu else "没有实测的只在这台没有 labmon 任务在跑时开",
+                "；名字各异的同类任务写同一个 tag= 就认得出" if row and not r["tag"] else "")
+        rneed, rsrc = ram_need(x, S)
+        need, csrc = cpu_need(x, S)
+        if gpu:
+            c = cs[0]
+            k = sum(c["uuid"] in j["gpus"] for j in S["jobs"] if not j["hold"]) + 1     # 与 worker 同口径：这台的型号、在跑同类按进度估的（eta.json）
+            d = duration(self.hist, r, self.model(), k, self.runs(r))
+            util = next(y["util"] for y in self.cards if y["uuid"] == c["uuid"])
+            say = "卡 %s 可用 %.1f GiB，要 %.1f GiB（%s，含另留的 1 GiB）；近 10 分钟利用率 %s%s%s" % (
+                ",".join(str(y["i"]) for y in cs), free[c["uuid"]] / 1024, need_mb(x["vram"]) / 1024, x["src"], "%d%%" % util if util is not None else "—",
+                "；它单跑时利用率约 %d%%" % e["util"] if e["util"] is not None else "", "；同卡 %d 条时约要 %.0f 分钟（%s）" % (k, d["min"], d["src"]) if d else "")
+        else:
+            say = "不用 GPU，内存要 %.0f GiB（%s）、%d 核（%s）" % (rneed, rsrc, need, csrc)
+        S["jobs"].append(acct_job(x, cs, t, None, S["cpu_cap"]))
+        self.lanes.append((r["name"], [y["i"] for y in cs]))
+        if hint:                                          # 没有实测的不与别的同卡（同一次 fit 后面分的也算）
+            self.solo.update({y["uuid"]: r["name"] for y in cs})
+            self.solo_host = None if gpu else r["name"]
+        return say, None
+
+
+def fit_status(p, host, now):
+    """fit 读一台的 status.json：(状态, 原因)；读不到或超过 STATUS_STALE_S 没更新的状态为 None、原因写明。"""
+    try:
+        st = json.loads(read(p.status, "{}") or "{}")
+    except ValueError:
+        st = {}
+    if not st.get("t"):
+        return None, "%s 的 worker 没写过状态" % host
+    if now - st["t"] > STATUS_STALE_S:
+        return None, "%s 的 worker 没在跑（状态 %d 分钟没更新）" % (host, (now - st["t"]) / 60)
+    return st, None
+
+
+def fit_eta(p):
+    try:
+        return json.loads(read(p.eta, "{}") or "{}")
+    except ValueError:
+        return {}
+
+
+def fit(p, names, project=None):
+    """要不要为这些任务在这台上开并行车道（labmon worker fit 主机 任务…）：每行与真放行同一个请求、同一份准入 place（FitHost.open），
+    判可以的按 acct_job 记进快照再判下一个。卡的利用率只列出来、不据此劝阻（#67：到 100% 的卡上小任务并行 4 条与 6 条每条一样快）；
+    利用率低的卡上在跑的被 CPU 卡住、容器在限流时说先加核、先减线程（gpu_slack，#37）。可以开的写同类在那张卡上并行 k 条时约要多久。
+    请求按登记过的清单里那一行拼（known_lists → list_row → job_of → queue_req；tag、同队列、cpus=、gpus= 照清单行，项目取登记的）；
+    清单里找不到的只按名字找同类（项目缺省取同名任务最近一次的）。"""
+    now = time.time()
+    st, why = fit_status(p, p.host, now)
+    if st is None:
+        print("%s：先 labmon worker start，再判断" % why)
+        return 2
+    hist = load_hist({}) or []
+    fh = FitHost(p.host, st, hist, fit_eta(p))
+    if not fh.cards:
         print("看不到 GPU")
         return 2
-    for c in cards:
-        print("卡 %d：可用 %.1f GiB，近 10 分钟利用率 %s%s" % (c["i"], c["avail"], "%d%%" % c["util"] if c["util"] is not None else "—（样本不够）",
-                                                  "（在跑 %s）" % "、".join(c["jobs"]) if c["jobs"] else "（空着）"))
-    ram, cores = room.get("ram"), room.get("cpu")
-    # 全停时能给的：可放加回在跑的记账（ram_need、cpu_need 按它封顶）
-    S = {"cpu_room": None if cores is None else cores + sum((j.get("acct") or {}).get("cpu") or 0.0 for j in st.get("running", [])),
-         "room": None if ram is None else ram + sum((j.get("acct") or {}).get("ram") or 0.0 for j in st.get("running", [])), "margin": room.get("margin") or 0}
+    for x in fh.card_lines():
+        print(x)
     lists = known_lists(p)
     for n in names:
         row = list_row(lists, n, project)
         if row:
             host, q, cmd = row
-            r = queue_req(q, job_of(n, cmd))
             where = "（清单：%s 上 %s/%s）" % (host, os.path.basename(q["root"].rstrip("/")), q["jobs"])
+            r, e, x = fh.req(dict(q, _host=host), n, cmd, None)
         else:
             proj = project or next((hist_key(h, "name")[1] for h in reversed(hist)
                                     if base_name(h.get("name") or "") == base_name(n) and (h.get("project") or h.get("root"))), None)
-            r = new_req("queue", None, proj, n)
             where = "（清单里没找到这一行，按名字估；先把它追加到已登记的清单（比如占着卡的那条末尾）再问）"
-        e = estimate(hist, r)
-        gpu, ok = r["ngpu"] > 0, False
-        c = max(cards, key=lambda x: x["avail"])
-        mine = "；它单跑时利用率约 %d%%" % e["util"] if e["util"] is not None else ""
-        need, csrc = cpu_need(e, S)
-        rneed, rsrc = ram_need(e, S)
-        if e["src" if gpu else "ram_src"] == "提示值":
-            k, v = ("vram", r["vram"]) if gpu else ("ram", r["ram"])
-            say = "%s，%s → 不开新车道，排在同机已有车道后面%s" % (
-                ("没有同 tag、同名任务的实测" if row else "没有同类任务的历史") if v else
-                "没有同类任务的历史%s" % ("（按 tag、去掉种子编号后的名字、同一条队列找）" if row else ""),
-                "清单写了 %s=%g，还没有实测%s" % (k, v, "（同一条清单里别的任务的历史不用）" if row else "") if v else "估不出%s" % ("显存" if gpu else "内存"),
-                "；名字各异的同类任务写同一个 tag= 就认得出" if row and not r["tag"] else "")
-        elif gpu and c["avail"] < need_mb(e["vram"]) / 1024:
-            say = "显存不够：要 %.1f GiB（%s，另留 1 GiB），最空的卡 %d 只有 %.1f GiB → 不开新车道，排在占着卡的那条车道后面" % (
-                e["vram"], e["src"], c["i"], c["avail"])
-        elif ram is not None and rneed + S["margin"] > ram:
-            say = "内存不够：要 %.0f GiB（%s，另留 %.0f），只剩 %.0f GiB → 排在已有车道后面" % (rneed, rsrc, S["margin"], ram)
-        elif cores is not None and need > 0 and need > cores + 1e-6:
-            code, held = cpu_held(dict(S, cpu_cap=room.get("cpu_cap"), kept=bool(st.get("guest")),       # 核被谁记着：与真放行同一个 cpu_held
-                                       jobs=[{"cpu": (j.get("acct") or {}).get("cpu") or 0.0, "use": j.get("use") or {}} for j in st.get("running", [])]), cores, need)
-            say = why_text(code, False, cpus=need, src=csrc, left=max(0.0, cores), cap=room.get("cpu_cap"), held=held, warm=CPU_WARM_S // 60) + " → 排在已有车道后面"
-        elif not gpu:
-            ok, say = True, "可以开车道并行：不用 GPU，内存要 %.0f GiB（%s）、%d 核（%s）" % (rneed, rsrc, need, csrc)
+            r = new_req("queue", None, proj, n)
+            e = estimate(hist, r)
+            d = duration(hist, r, fh.model())
+            x = dict(fh.w.job_spec(n, r, e, d and d["min"]), key="fit:%s" % n, project=proj, allowed=None)
+        say, why = fh.open(r, e, x, now, bool(row))
+        print("%s：%s%s" % (n, "可以开车道并行：" + say if say else why if "→" in why else why + " → 排在已有车道后面", where))
+    return 0
+
+
+def fit_list(p, root, jobs, project, hosts):
+    """一条清单里还会跑、互不依赖的行此刻能在几台主机上再开几条车道（labmon worker fit 主机 ROOT JOBS --list --project P，#35 B）：
+    行取清单文件里没标完（.done、.failed）、不在哪台跑着的（rows_left）；写了 after=/afterany=、gang=、占位任务的单列、不分。
+    主机是 hosts（看板按共用 worker 目录的在用主机给，config.home_peers；不给只看这台），在这台上读它们的 status.json（共享 HOME，不多连 ssh），
+    状态过期的写明没算。按清单顺序逐行，每行先在这次分到车道最少的那台上试（一样少的按 hosts 的顺序），判断同单行的 fit（FitHost.open）；
+    哪台都放不下的到此为止，其余排在后面。只回答此刻放得下多少：怎么拆清单、开不开由实验会话定。"""
+    now = time.time()
+    root = os.path.abspath(root)
+    path = os.path.normpath(os.path.join(root, jobs))
+    lists = known_lists(p)
+    reg = next(((h, q) for h, q, _ in lists if os.path.normpath(os.path.join(q["root"], q["jobs"])) == path), None)
+    if reg:
+        q = dict(reg[1], _host=reg[0])
+        if project and q["project"] != project:
+            print("%s 登记在 %s 上，属于项目 %s，不是 %s" % (path, reg[0], q["project"], project))
+            return 2
+    else:
+        if not project:
+            print("这条清单还没登记：写 --project <看板项目 id>")
+            return 2
+        q = load_queue({"_slug": qslug(root, jobs), "root": root, "jobs": jobs, "project": project})
+    rows = list_jobs(q)
+    if not rows and not os.path.exists(q["jobs_path"]):
+        print("读不到清单 %s" % path)
+        return 2
+    hist, fhs, skip = load_hist({}) or [], [], []
+    running = set()
+    for h in hosts or [p.host]:
+        hp = Paths(h)
+        st, why = fit_status(hp, h, now)
+        if st is None:
+            skip.append(why)
+            continue
+        running |= {j["name"] for j in st.get("running") or [] if os.path.normpath(os.path.join(j.get("root") or "", j.get("queue") or "")) == path}
+        fh = FitHost(h, st, hist, fit_eta(hp))
+        hit = fh.w.override_hit({"project": q["project"], "name": ""}, ("drain", "guest", "pause"), lasting=True)
+        if hit or not fh.cards:
+            skip.append("%s：%s" % (h, hit[1] if hit else "看不到 GPU"))
         else:
-            # 卡的利用率到 100% 不等于算满（nvidia-smi 的是“有核函数在跑”的时间占比）：不按它劝阻，改说同类挤着跑时要多久（#67）
-            k = len(c["jobs"]) + 1                 # 与 worker 同口径：这台的型号、在跑同类按进度估的（eta.json）
-            run = [m for x, m in run_tot(st.get("running", []), eta.get("jobs") or {}, eta.get("t") or 0).get((r["project"], base_name(n)), []) if x != n]
-            d = duration(hist, r, ((st.get("info") or {}).get("gpus") or [{}])[0].get("name"), k, run)
-            ok, say = True, "可以开车道并行：卡 %d 可用 %.1f GiB，要 %.1f GiB（%s，含另留的 1 GiB）；近 10 分钟利用率 %s%s%s" % (
-                c["i"], c["avail"], need_mb(e["vram"]) / 1024, e["src"], "%d%%" % c["util"] if c["util"] is not None else "—", mine,
-                "；同卡 %d 条时约要 %.0f 分钟（%s）" % (k, d["min"], d["src"]) if d else "")
-            c["avail"] -= need_mb(e["vram"]) / 1024
-            c["jobs"].append(n)
-        if ok:
-            if ram is not None:
-                ram -= e["ram"]
-            if cores is not None:
-                cores -= cpu_give(need, room.get("cpu_cap"))
-        print("%s：%s%s" % (n, say, where))
+            fhs.append(fh)                        # 在限流的照样列出来（各行都写先减线程）
+    cur = read_current(q["state"])                # 状态目录里在跑的：放它的主机状态过期了（worker 停了、崩了）任务照样可能在跑，不能再分
+    if cur:
+        running.add(cur[0])
+    _, pend = rows_left(q["state"], rows, None)
+    pend = first_rows(pend)
+    pend = [(n, c) for n, c in pend.items() if n not in running]
+    apart, todo = [], []
+    for n, c in pend:
+        h = job_of(n, c)
+        what = "占位" if is_hold(n) else "成组 gang=%s" % h["gang"] if h["gang"] else "after=" if h["deps"] or h["deps_any"] else None
+        (apart if what else todo).append((n, c, what))
+    print("清单 %s（%s，项目 %s）：还会跑 %d 行%s" % (path, "登记在 %s 上" % reg[0] if reg else "还没登记", q["project"], len(pend),
+                                             "，在跑 %s" % "、".join(sorted(running)) if running else ""))
+    if apart:
+        print("不分的 %d 行（要等别的任务或成组开跑，留在原处）：%s" % (len(apart), "、".join("%s（%s）" % (n, w) for n, _, w in apart)))
+    if skip:
+        print("没算：" + "；".join(skip))
+    if not fhs:
+        print("没有能算的主机")
+        return 2
+    for fh in fhs:
+        fh.pre = fh.card_lines()                  # 卡的样子是开车道之前的
+    left = list(todo)
+    while left:
+        n, c, _ = left[0]
+        done = False
+        for fh in sorted(fhs, key=lambda f: (len(f.lanes), fhs.index(f))):
+            r, e, x = fh.req(q, n, c, None)
+            say, why = fh.open(r, e, x, now)
+            if say:
+                fh.say.append("  %s ← 卡 %s：%s" % (n, ",".join(map(str, fh.lanes[-1][1])), say) if x["ngpu"] else "  %s（不用 GPU）：%s" % (n, say))
+                done = True
+                break
+            fh.why = "%s：%s" % (n, why)
+        if not done:
+            break
+        left.pop(0)
+    for fh in fhs:
+        print("== %s ==" % fh.host)
+        for x in fh.pre:
+            print("  " + x)
+        if fh.lanes:
+            print("  可再开 %d 条车道：" % len(fh.lanes))
+            for x in fh.say:
+                print("  " + x)
+        if fh.why:
+            print("  %s不再开：%s" % ("" if fh.lanes else "一条也", fh.why))
+    got = sum(len(fh.lanes) for fh in fhs)
+    if got:
+        print("合计可再开 %d 条车道。照这个在各台新建清单、把分到的行剪过去再 labmon worker add（lists.md「开并行车道」）；%s" % (
+            got, "其余 %d 行（%s…）此刻哪台都放不下：留在原清单，或接在新清单后面，让各条车道的行数相近" % (len(left), left[0][0]) if left else "没有剩下的行"))
+    else:
+        print("此刻哪台都不再开车道：%s" % ("这些行排在已有车道后面" if todo else "没有能分的行"))
     return 0
 
 
@@ -5726,7 +5991,7 @@ def main(argv=None):
         return slot_main(argv[1:])
     ap = argparse.ArgumentParser(prog="labmon_worker.py")
     ap.add_argument("cmd", choices=["run", "add", "rm", "ls", "stop", "limit", "override", "fit", "thaw"])
-    ap.add_argument("args", nargs="*", help="add / rm：ROOT JOBS；limit：tag=N…；override：add|rm KIND [目标] 或 ls；fit：任务名…")
+    ap.add_argument("args", nargs="*", help="add / rm：ROOT JOBS；limit：tag=N…；override：add|rm KIND [目标] 或 ls；fit：任务名…（--list 时 ROOT JOBS）")
     ap.add_argument("--host", required=True)
     ap.add_argument("--idle", action="store_true", help="add：仅在清单空闲时更换资源")
     ap.add_argument("--gpus", help="add：只用这些卡（nvidia-smi 序号，逗号分隔）")
@@ -5738,6 +6003,8 @@ def main(argv=None):
     ap.add_argument("--once", action="store_true", help="override add pause --now：停完就删掉这条（暂停由看板写来的全局那条挡，不在这台另留）")
     ap.add_argument("--at", type=float, help="override add deadline：截止时刻（epoch 秒），之前跑不完的任务不放行（目标 borrow 为约定归还）")
     ap.add_argument("--keep", type=json.loads, help='override add guest：给对方留的量，JSON {"vram": 每张对方的卡 GiB, "ram": GiB, "cpu": 核, "hold": 预先留出, "away": 对方说好不用到几点（epoch 秒，那以前不留）}')
+    ap.add_argument("--list", action="store_true", help="fit：位置参数是 ROOT JOBS，看这条清单还会跑的行能在几台上再开几条车道")
+    ap.add_argument("--hosts", help="fit --list：看哪几台（逗号分隔；看板按共用 worker 目录的在用主机给，缺省只看这台）")
     ap.add_argument("--replace", action="store_true", help="run：已有 worker 时让它退出后接管（升级用）")
     ap.add_argument("--shared", help="run：组里共用的那块盘的挂载点（如 /root/data1），给了就参与统计它的用量")
     a = ap.parse_args(argv)
@@ -5745,6 +6012,10 @@ def main(argv=None):
     if a.cmd == "run":
         return Worker(a.host, a.shared).run(a.replace)
     if a.cmd == "fit":
+        if a.list:
+            if len(a.args) != 2:
+                ap.error("fit --list 需要 ROOT JOBS")
+            return fit_list(p, a.args[0], a.args[1], a.project, [h for h in (a.hosts or "").split(",") if h])
         if not a.args:
             ap.error("fit 需要任务名")
         return fit(p, a.args, a.project)

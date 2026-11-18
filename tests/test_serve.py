@@ -1566,6 +1566,17 @@ class RegsTest(unittest.TestCase):
             self.assertNotIn("共用", A.worker("status", "c", [])["out"])
         with mock.patch.object(W, "run_out", return_value=(3, "连不上\n")):
             self.assertNotIn("共用", A.worker("status", "a", [])["out"])
+        # fit --list（#35 B）：看板给 worker 共用 worker 目录的在用主机（普通用户只给他能用的；这台自己总在）
+        with mock.patch.object(W, "run_out", return_value=(0, "")) as ro:
+            A.worker("fit", "a", ["/r", "jobs/q.txt"], project="p", lst=True)
+            A.worker("fit", "a", ["/r", "jobs/q.txt"], project="p", lst=True, may=lambda h: False)
+            A.worker("fit", "a", ["x_s1"], project="p")
+        self.assertEqual([(c.kwargs.get("list"), c.kwargs.get("hosts")) for c in ro.call_args_list], [(True, "a,b"), (True, "a"), (None, None)])
+        with self.assertRaises(U.Denied):
+            S._worker_args("fit", {"args": ["/r", "jobs/q.txt"], "list": True})          # --list 要 project
+        with self.assertRaises(U.Denied):
+            S._worker_args("status", {"args": [], "list": True, "project": "p"})
+        self.assertEqual(S._worker_args("fit", {"args": ["/r", "jobs/q.txt"], "list": True, "project": "p"}), ["/r", "jobs/q.txt"])
         import contextlib
         import io
         from labmon import __main__ as M
