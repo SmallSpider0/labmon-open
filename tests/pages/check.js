@@ -1276,6 +1276,17 @@ ta("overview", "批量续租：验证码回来前抽屉关了或换了一份勾�
   // 验证码已出来、不关抽屉直接换地址（换了一份勾选）：旧验证码作废，底部回到「续租所选」（Codex 审查 #20）
   const h = run(C, 'RPICK = {key: DH.renew("srv-d"), sel: new Set(["srv-d"]), ack: new Set(["srv-d"])}; FCAP = {code: "c3", tok: "t3", input: "", t: Date.now(), next: {act: "renew", body: rpBody(RPICK)}, pop: "renew"}; renewDrawer("srv-e")');
   ok(run(C, "FCAP") === null && h.includes('data-fop="renewgo"') && !h.includes("fcapin"), "换了抽屉地址，旧的验证码还留着");
+  // 从续租抽屉切到别的抽屉（服务器抽屉）再关：离开续租那一刻就作废，在途的回执也不再记下（Codex 审查 #20）
+  drw(C, "#/fleet/renew/srv-d");
+  run(C, 'RPICK.ack.add("srv-d"); FCAP = {code: "c4", tok: "t4", input: "", t: Date.now(), next: {act: "renew", body: rpBody(RPICK)}, pop: "renew"}');
+  drw(C, "#/fleet/srv/srv-e");
+  ok(run(C, "RPICK") === null && run(C, "FCAP") === null, "切到服务器抽屉后，续租的勾选与验证码还留着");
+  drw(C, "#/fleet/renew/srv-d");
+  run(C, 'RPICK.ack.add("srv-d"); fleetPost = async k => { if (k === "captcha") { location.hash = "#/fleet/srv/srv-e"; render(true); return {code: "c5", tok: "t5"}; } return {}; }');
+  await run(C, 'startOp("renew", rpBody(RPICK), "renew")');
+  drw(C, "#/fleet");
+  ok(run(C, "FCAP") === null && run(C, "RPICK") === null, "离开续租抽屉后回来的验证码回执还是记进了 FCAP");
+  ok(!drw(C, "#/fleet/renew/srv-d").includes("fcapin"), "重新打开续租抽屉恢复了旧的验证码");
 });
 ta("archive", "永久删除要求管理员和当前归档批次的确认", async () => {
   const A = ovCtx(OV, RR, "#/archived"), U = ovCtx(OV, RR, "#/archived");
