@@ -855,7 +855,8 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
         if dk.get("scanner") in acc.hosts:
             d["scanner"] = dk["scanner"]
         if isinstance(dk.get("ours"), dict):
-            d["ours"] = {"dirs": [x for x in dk["ours"].get("dirs") or [] if x.get("p") in acc.projects]}
+            d["ours"] = {"dirs": [x for x in dk["ours"].get("dirs") or [] if x.get("p") in acc.projects],
+                         "projects": {k: v for k, v in (dk["ours"].get("projects") or {}).items() if k in acc.projects}}
         d["alerts"] = [a for a in dk.get("alerts") or [] if a.get("key") in VIEW_DISK_ALERTS]
         out["disk"] = d
     return out

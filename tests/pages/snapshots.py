@@ -640,7 +640,20 @@ def project() -> dict:
             "spans": [[NOW - 40 * H, NOW - 30 * H], [NOW - 29 * H, NOW]], "util_hourly": {"srv-a": [[NOW - k * 3600, 80.0 + k % 9] for k in range(30 * 24, 0, -1)], "srv-b": [[NOW - 3600, 85.0]]},
             "history": hist, "all_done_ts": NOW + 7 * H,
             "attempts": [{"name": "alpha_probe_s9", "lane": la, "t0": NOW - 6.1 * H, "t1": NOW - 6 * H}, {"name": "alpha_probe_s9", "lane": la, "t0": NOW - 6.3 * H, "t1": NOW - 6.2 * H}],
-            "no_work_since": None, "thresholds": {"stale_s": stale_limit(120, 5)}, "rebalance": dict(REBAL)}
+            "no_work_since": None, "thresholds": {"stale_s": stale_limit(120, 5)}, "rebalance": dict(REBAL),
+            # 本项目的存储（disk.project_storage，#53）：项目根下的一级目录（「.」是根下的文件）、删掉的、近来写得多的任务
+            "storage": {"roots": ["/data/share/me/proj-a"], "b": 5.7e10, "d24": 3.5e10, "d7": 4.1e10, "pending": 1, "burst": True,
+                        "dirs": [{"path": "/data/share/me/proj-a/cache", "name": "cache", "b": 4.2e10, "d24": 3.3e10, "d7": 3.9e10, "n": 120, "m": NOW - 600, "t": NOW - 3000,
+                                  "top": [["feats", 4.0e10, NOW - 600]]},
+                                 {"path": "/data/share/me/proj-a/out", "name": "out", "b": 1.4e10, "d24": 2.1e9, "d7": 2.1e9, "n": 40, "m": NOW - 900, "t": NOW - 3000, "top": []},
+                                 {"path": "/data/share/me/proj-a/.", "name": ".", "b": 1.0e9, "d24": 0, "d7": 0, "n": 3, "m": NOW - 86400, "t": NOW - 3000, "top": []}],
+                        "gone": [{"path": "/data/share/me/proj-a/tmp_old", "name": "tmp_old", "d24": 0, "d7": -5e9}],
+                        "jobs": [{"name": "alpha_train_s0", "host": "srv-a", "t0": NOW - 5 * H, "t1": NOW - 4.5 * H, "st": "done", "b": 7.4e9,
+                                  "top": [["cache", 6.9e9], ["out", 5e8]], "from": NOW - 5.2 * H, "to": NOW - 4.4 * H, "pending": 0, "wait": False, "with": 0, "big": True},
+                                 {"name": "alpha_probe_s9", "host": "srv-a", "t0": NOW - 6.1 * H, "t1": NOW - 6 * H, "st": "failed", "b": 2e8,
+                                  "top": [["out", 2e8]], "from": None, "to": None, "pending": 1, "wait": True, "with": 0, "big": False}],
+                        "at": NOW - 3000, "free": 2.2e11, "total": 1.1e12, "eta": 6.3, "eta7": 9.1, "warn_gb": 30, "burst_gb": 30, "bigwrite_gb": 5,
+                        "local": {"srv-a": {"cache": 1.5e10, "scratch": 2e9}, "srv-b": {"cache": 1.2e10, "scratch": 0}}}}
 
 
 def project_events() -> dict:
@@ -666,9 +679,7 @@ def project_events() -> dict:
                      {"p": "proj-b", "n": "hold_until_data", "lane": "车道 2", "t0": NOW - 30 * 60, "t1": NOW + H, "g": [1], "st": "run"}],
            "srv-b": [{"p": "proj-b", "n": "beta_eval_s7", "lane": "车道 1", "t0": NOW - H, "t1": NOW + 2 * H, "g": [0], "st": "run"},
                      {"p": "proj-b", "n": "beta_eval_s8", "lane": "车道 1", "t0": NOW + 2 * H, "t1": NOW + 4 * H, "g": [0], "st": "plan", "after": [["proj-a", "alpha_eval_s7"]]}]}
-    return {"colors": {"proj-a": "#7F77DD", "proj-b": "#D85A30"}, "events": {"srv-a": ev_a, "srv-b": ev_b}, "occ": occ,
-            "storage": {"dirs": {"/data/share/me/proj-a": 5.7e10}, "at": {"/data/share/me/proj-a": NOW - 3000}, "free": 2.2e11, "total": 1.1e12, "warn_gb": 30,
-                        "local": {"srv-a": {"cache": 1.5e10, "scratch": 2e9}, "srv-b": {"cache": 1.2e10, "scratch": 0}}}}
+    return {"colors": {"proj-a": "#7F77DD", "proj-b": "#D85A30"}, "events": {"srv-a": ev_a, "srv-b": ev_b}, "occ": occ}
 
 
 def project_evil() -> dict:
@@ -690,6 +701,9 @@ def project_evil() -> dict:
     d["markers"][0]["label"] = "碑" + BAD
     d["attempts"][0]["name"] = "试" + BAD
     d["rebalance"]["text"] = d["alerts"][3]["msg"] = "挪" + BAD
+    d["storage"]["dirs"][0]["name"] = "目录" + BAD
+    d["storage"]["roots"] = ["/data/share/" + BAD]
+    d["storage"]["jobs"][0].update(name="写" + BAD, top=[["顶" + BAD, 6.9e9]])
     return d
 
 
@@ -698,8 +712,6 @@ def project_events_evil() -> dict:
     d["events"]["srv-a"][0]["msg"] = "事" + BAD
     d["events"]["srv-a"][10]["why"] = "因" + BAD
     d["occ"]["srv-a"][0]["n"] = "占" + BAD
-    d["storage"]["dirs"] = {"/data/share/" + BAD: 5.7e10}
-    d["storage"]["at"] = {"/data/share/" + BAD: NOW - 3000}
     return d
 
 

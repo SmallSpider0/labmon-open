@@ -515,4 +515,4 @@ labmon undrain 29
 ## 共享盘
 
 - **目录规范**：`labmon project init 29 [项目]` 在主机的 `data_root` 下建规范目录，写入说明 `README.md`（原文是 [`labmon/data_root_readme.md`](../labmon/data_root_readme.md)），并列出现有的共享环境、数据集与权重：`projects/<项目>/` 放各项目自己的东西，`envs/`、`datasets/`、`weights/` 放各项目共用、只读引用的环境（按版本命名，建好不改）、数据集和权重，`archive/<日期>/` 放压缩归档与删除清单，`labmon/` 放 worker。
-- **用量统计**：主机清单写了 `shared` 的自用主机，`labmon worker start` 把第一个目录交给 worker（`--shared`）限速轮流扫（`Disk`），只有一台在扫；借来的主机不扫。怎么扫、怎么归人见 [fleet.md「共享盘」](fleet.md#共享盘)。
+- **用量统计**：主机清单写了 `shared` 的自用主机，`labmon worker start` 把第一个目录交给 worker（`--shared`）限速轮流扫（`Disk`），只有一台在扫；借来的主机不扫。登记了清单的项目根（各台状态的 `storage.projects`，扫描那台把别的主机的也合进来）拆开扫，项目根下的一级目录各成一个单位；各主机上有清单任务跑完（成败都算），扫描那台按用量行把它的项目目录提前重扫（`Worker.disk_ends`，#53）。怎么扫、怎么归人见 [fleet.md「共享盘」](fleet.md#共享盘)。

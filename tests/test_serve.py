@@ -463,7 +463,8 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((len(snap["spans"]), snap["attempts"]), (1, []))           # 采集在跑的区间、失败尝试（时间线用）
         self.assertEqual((snap["lanes"][0]["root"], snap["lanes"][0]["queue"]), (str(Path(self.tmp.name) / "proj"), "jobs/q.txt"))
         ev = json.loads(urllib.request.urlopen(f"{base}/p/{pid}/events.json").read())
-        self.assertEqual((ev["events"], ev["storage"], ev["occ"]), ({"here": []}, {"dirs": {}, "at": {}, "free": None, "total": None, "warn_gb": None, "local": {}}, {}))
+        self.assertEqual((ev["events"], ev["occ"], "storage" in ev), ({"here": []}, {}, False))       # 本项目的存储在项目快照里（#53）
+        self.assertEqual((snap["storage"]["dirs"], snap["storage"]["jobs"], snap["storage"]["free"], snap["storage"]["local"]), ([], [], None, {}))
         self.proj.last_end = 0                                             # 跳过“两次立即采集至少隔 10 秒”
         new = json.loads(urllib.request.urlopen(post_req(f"{base}/p/{pid}/collect")).read())
         self.assertGreater(new["generated"], snap["generated"])
@@ -1374,8 +1375,10 @@ class OverviewTest(unittest.TestCase):
             try:
                 self.assertEqual([e["kind"] for e in records(host="here")][::-1], ["override", "wait"])
                 from labmon import disk as DK
-                self.assertEqual(DK.project_storage("a1"), {"dirs": {a1: 5 * 2 ** 30}, "at": {a1: now},
-                                                            "free": 200 * 2 ** 30, "total": 1000 * 2 ** 30, "warn_gb": 30, "local": {"here": {"cache": 1, "scratch": 2}}})
+                st = DK.project_storage("a1")
+                self.assertEqual([(d["path"], d["name"], d["b"], d["t"]) for d in st["dirs"]], [(a1, "", 5 * 2 ** 30, now)])   # 旧 worker 没拆开：整个项目目录一项
+                self.assertEqual((st["roots"], st["b"], st["free"], st["total"], st["warn_gb"], st["local"]),
+                                 ([a1], 5 * 2 ** 30, 200 * 2 ** 30, 1000 * 2 ** 30, 30, {"here": {"cache": 1, "scratch": 2}}))
                 self.assertEqual([o["name"] for o in snap["disk"]["owners"]], ["alice"])     # 索引变了才取回（第二次采集不再传）
             finally:
                 os.environ.pop("LABMON_STATE") if old["LABMON_STATE"] is None else os.environ.__setitem__("LABMON_STATE", old["LABMON_STATE"])
@@ -1736,6 +1739,70 @@ class DiskTest(unittest.TestCase):
             finally:
                 for k, v in old.items():
                     os.environ.pop(k) if v is None else os.environ.__setitem__(k, v)
+
+    def test_project_dirs_growth_and_job_writes(self):
+        # #53：worker 把登记了清单的项目根拆开扫（项目根下的一级目录各一个单位）。新拆开的子单位不算新建（不误报暴涨），
+        # 已拆开的目录下新建的照常从 0 算（以前 split 里任何目录下新建的都漏掉）；按项目合计增量，涨得快标 burst（disk: 告警）；
+        # 任务写入量：开跑前最后一次扫描到跑完那次重扫之差，超过 bigwrite_gb 标 big；告警由 collect._storage 发，disk: 两边都给、bigwrite: 只给会话
+        from labmon import disk as DK
+        G = 2 ** 30
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, {"LABMON_STATE": td, "LABMON_HOSTS": str(Path(td) / "hosts.toml")}):
+            (Path(td) / "hosts.toml").write_text('[[hosts]]\nid = "h"\ndata_root = "/r/alice"\n')
+            (Path(td) / "overview" / "fleet").mkdir(parents=True)
+            save_json(Path(td) / "overview" / "fleet" / "people.json", {"ALICE": {}})
+            cfg = {"servers": [], "disk": {"burst_gb": 20}}
+            t0 = 1_800_000_000
+            u = lambda b, t, **k: {"b": b * G, "n": 3, "m": t, "age": [b * G, 0, 0, 0, 0], "t": t, "s": 5, **k}
+            pa, pb = "/r/alice/projects/pa", "/r/alice/projects/pb"
+            ix = {"root": "/r", "host": "h", "t": t0, "listed": t0, "split": [], "units": {"/r/alice/projects": u(100, t0), "/r/alice/.": u(0, t0)}}
+            DK.absorb("1\n" + json.dumps(ix), t0)
+            t1 = t0 + 600                                                  # 拆开：项目根与它的父目录进 split，原来那个单位消失
+            ix = {**ix, "t": t1, "listed": t1, "split": ["/r/alice/projects", pa],
+                  "units": {f"{pa}/cache": u(60, t1), f"{pa}/out": u(40, t1), f"{pa}/.": u(0, t1), pb: u(0, t1), "/r/alice/.": u(0, t0)}}
+            DK.absorb("2\n" + json.dumps(ix), t1)
+            hosts = lambda t, run=(): [{"id": "h", "status": {"t": t, "info": {"disk": [{"path": "/r/alice", "free": 130, "total": 1000}]},
+                                                             "storage": {"projects": {pa: "pa", pb: "pb"}}, "running": list(run)}}]
+            v, _ = DK.update(hosts(t1), t1, cfg)
+            self.assertEqual(round(v["owners"][0]["d24"] / G), 0)          # 拆出来的不算新建
+            p = v["ours"]["projects"]["pa"]
+            self.assertEqual((round(p["b"] / G), p["d24"], p["burst"], p["roots"]), (100, 0, False, [pa]))
+            s0, e0 = t1 + 100, t1 + 3000                                    # 一个任务在两次扫描之间跑完
+            append = __import__("labmon.state", fromlist=["append_row"]).append_row
+            from labmon.state import usage_file
+            append(usage_file("h"), {"t": e0, "s": s0, "n": "j1", "p": "pa", "root": pa + "/run", "queue": "q.txt", "st": "done"}, 30 * 86400, e0)
+            append(usage_file("h"), {"t": e0 - 60, "s": s0 + 60, "n": "j2", "p": "pa", "root": pa + "/run", "queue": "q.txt", "st": "failed"}, 30 * 86400, e0)
+            t2 = t1 + 3600                                                  # 跑完那次重扫：cache +7、新建的 new +20
+            ix = {**ix, "t": t2, "listed": t2, "units": {f"{pa}/cache": u(67, t2, pb=60 * G, pt=t1), f"{pa}/out": u(40, t2), f"{pa}/.": u(0, t2),
+                                                          f"{pa}/new": u(20, t2), pb: u(0, t2), "/r/alice/.": u(0, t0)}}
+            DK.absorb("3\n" + json.dumps(ix), t2)
+            v, _ = DK.update(hosts(t2, [{"project": "pb", "name": "x", "t0": s0}]), t2, cfg)
+            self.assertEqual(round(v["owners"][0]["d24"] / G), 27)         # 已拆开的目录下新建的从 0 算
+            p = v["ours"]["projects"]["pa"]
+            self.assertEqual((round(p["d24"] / G), p["burst"], p["pending"]), (27, True, 0))
+            j1 = next(j for j in p["jobs"] if j["name"] == "j1")
+            self.assertEqual((round(j1["b"] / G), [(n, round(b / G)) for n, b in j1["top"]], j1["from"], j1["to"], j1["with"], j1["wait"], j1["big"]),
+                             (27, [("new", 20), ("cache", 7)], t1, t2, 1, False, True))   # 同期 j2 也算在内；别的项目在跑的不算
+            snap_g = {"disk": v, "hosts": hosts(t2)}
+            st = DK.project_storage("pa", snap_g)
+            self.assertEqual(sorted(d["name"] for d in st["dirs"]), [".", "cache", "new", "out"])
+            self.assertEqual((st["roots"], st["free"], st["bigwrite_gb"]), ([pa], 130 * G, 5))
+            self.assertEqual(DK.project_storage("pb", snap_g)["jobs"], [])
+            snap = {"alerts": []}
+            C._storage({"id": "pa"}, snap, snap_g, e0 + 600)
+            al = {a["key"]: a for a in snap["alerts"]}
+            self.assertEqual(al["disk:pa"]["to"], "both")
+            self.assertIn("共享盘上本项目近 24 小时 +27 GiB（new +20 GiB）", al["disk:pa"]["msg"])
+            self.assertIn("$LABMON_CACHE", al["disk:pa"]["msg"])
+            self.assertNotIn("$LABMON_CACHE", al["disk:pa"]["page"])
+            bw = [a for a in snap["alerts"] if a["key"].startswith("bigwrite:")]
+            self.assertEqual([(a["key"], a["to"]) for a in bw], [(f"bigwrite:j2:{e0 - 60}", "agent")])   # 同一对扫描量出来的两个任务合成一条
+            self.assertIn("j2、j1 跑的这段时间本项目在共享盘上净增 27 GiB，大头 new +20 GiB：", bw[0]["msg"])
+            self.assertEqual(snap["storage"]["d24"], p["d24"])
+            snap = {"alerts": []}
+            C._storage({"id": "pa"}, snap, snap_g, e0 + 86400)               # 结束一天后不再报 bigwrite
+            self.assertFalse(any(a["key"].startswith("bigwrite:") for a in snap["alerts"]))
+            v, _ = DK.update(hosts(t2 + 60), t2 + 60, {"servers": [], "disk": {}})
+            self.assertFalse(v["ours"]["projects"]["pa"]["burst"])           # 门槛与按人的 burst 同一条：30 GiB 以下不算
 
     def test_rows_cache_sees_second_write_within_same_mtime(self):
         # #31：scans.jsonl 同一个修改时刻里续写一行也要读到（以前只比 st_mtime，漏读到下次写）；换了状态目录不拿另一个目录的缓存

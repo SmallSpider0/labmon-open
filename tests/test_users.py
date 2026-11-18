@@ -490,7 +490,8 @@ class ViewTest(UsersBase):
                 "disk": {"root": "/data", "df": {"free": 1}, "eta": 3, "hist": [[T0, 1]], "warn_gb": 9, "at": T0, "units": 4, "pending": 1, "yield": None,
                          "scanner": "z", "now": "/data/别人/私有目录", "colors": {"某人": "#000"}, "unscanned": 5, "new_field": 1,
                          "ours": {"base": "/data/mine", "dirs": [{"u": "/data/mine/a", "name": "a", "b": 1, "p": "p"}, {"u": "/data/mine/b", "name": "b", "b": 2, "p": "q"},
-                                                                 {"u": "/data/mine/c", "name": "c", "b": 3, "p": None}]},
+                                                                 {"u": "/data/mine/c", "name": "c", "b": 3, "p": None}],
+                                  "projects": {"p": {"b": 1, "jobs": []}, "q": {"b": 2, "jobs": [{"name": "别人的任务"}]}}},
                          "alerts": [{"key": "low"}, {"key": "soon"}, {"key": "burst:zz"}, {"key": "x"}]}}
         v = U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))
         self.assertEqual(set(v), {"generated", "lan", "event_kinds", "event_cats", "sched", "hosts", "projects", "archived", "rebalance", "regs", "occ",
@@ -499,7 +500,7 @@ class ViewTest(UsersBase):
         self.assertEqual(v["colors"], {"p": "#111"})
         self.assertEqual(v["server"], {"role": "standby", "say": U.STANDBY_SAY})
         self.assertEqual(set(v["disk"]), {"root", "df", "eta", "hist", "warn_gb", "at", "units", "pending", "yield", "ours", "alerts"})
-        self.assertEqual(v["disk"]["ours"], {"dirs": [snap["disk"]["ours"]["dirs"][0]]})
+        self.assertEqual(v["disk"]["ours"], {"dirs": [snap["disk"]["ours"]["dirs"][0]], "projects": {"p": {"b": 1, "jobs": []}}})   # 按项目的汇总只留自己的（#53）
         self.assertEqual(v["disk"]["alerts"], [{"key": "low"}, {"key": "soon"}])
         snap["disk"]["scanner"] = "h"
         self.assertEqual(U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))["disk"]["scanner"], "h")   # 扫盘的主机他看得见时才给

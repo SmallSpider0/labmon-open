@@ -4735,6 +4735,60 @@ class IoYieldTest(UnitBase):
         self.assertIn("80 ms/次（本机基线 25），5.0 次/秒", ev["msg"])        # 次数只用本机读到的这一份，不按容器数相加
 
 
+class ProjectDiskTest(UnitBase):
+    """共享盘按项目（#53）：登记了清单的项目根（本机与别的主机状态里的 storage.projects）连同父目录拆开，项目根下的一级目录各成一个单位；
+    各主机的用量行里新结束的清单任务（成败都算）让它的项目目录提前重扫（disk_ends，取代 finish 里只认本机跑成功的 hint）。"""
+
+    def scan(self, now):
+        for _ in range(200):
+            self.w.scan_local([], now)
+            jobs = [d.job for d in (self.w.disk, self.w.ldisk) if d.job]
+            if not jobs:
+                return
+            for j in jobs:
+                j[0].join()
+
+    def test_roots_split_and_ends_from_all_hosts(self):
+        d = self.d
+        for rel in ("projects/pa/cache/w.bin", "projects/pa/out/r.txt", "projects/pa/top.txt", "projects/pb/x.bin", "bob/c/z.bin"):
+            (d / rel).parent.mkdir(parents=True, exist_ok=True)
+            (d / rel).write_bytes(b"x" * 100)
+        pa, pb = str(d / "projects" / "pa"), str(d / "projects" / "pb")
+        self.w.disk = self.m.Disk(str(d), "t")
+        now = self.hosts.now()
+        self.scan(now)
+        u = self.w.disk.ix["units"]
+        self.assertIn(pa, u)                                                     # 还没有登记：照旧到二级目录
+        self.hosts.status("u", storage={"projects": {pa: "pa"}})                # 项目根只在别的主机的状态里
+        self.w.peers(now)
+        self.scan(now + 61)                                                       # 新的项目根：不等 10 分钟就重列
+        u = self.w.disk.ix["units"]
+        self.assertTrue({f"{pa}/cache", f"{pa}/out", f"{pa}/.", pb} <= set(u), sorted(u))
+        self.assertNotIn(pa, u)
+        x = self.m.Disk(str(d), "x")
+        x.want([str(d / "alice" / "projects" / "px"), "/elsewhere/p", str(d / "top")])
+        self.assertEqual(x.forced(), {str(d / "alice" / "projects"), str(d / "alice" / "projects" / "px")})   # 第二级起到项目根；别的盘上的、第一级的不管
+        self.assertIn(pa, self.w.disk.ix["split"])
+        self.assertTrue(all(u[k].get("b") is not None for k in (f"{pa}/cache", f"{pa}/out", f"{pa}/.")))
+        far = now + 10 ** 6
+        for r in u.values():
+            r["due"] = far
+        self.hosts.usage("u", [{"t0": now - 600, "t1": now - 10, "root": pa + "/run", "queue": "q.txt", "name": "j", "project": "pa", "rc": "1"},
+                               {"t0": now - 9000, "t1": now - 7200, "root": pb, "queue": "q.txt", "name": "old", "project": "pb", "rc": "0"}])
+        self.w.reload_hist()
+        self.w.disk_ends(now)
+        self.assertTrue(all(u[k]["due"] < far for k in (f"{pa}/cache", f"{pa}/out", f"{pa}/.")))   # 别的主机上失败的也算
+        self.assertEqual((u[pb]["due"], u[str(d / "bob" / "c")]["due"]), (far, far))   # 只认近一小时结束的；别的项目不动
+        for r in u.values():
+            r["due"] = far
+        self.w.disk_ends(now + 10)
+        self.assertEqual({r["due"] for r in u.values()}, {far})                # 已提前过的不再提前
+        self.hosts.usage("u", [{"t0": now, "t1": now + 20, "root": pb, "queue": "q.txt", "name": "new", "project": "pb", "rc": "0"}])
+        self.w.reload_hist()
+        self.w.disk_ends(now + 30)
+        self.assertLess(u[pb]["due"], far)
+
+
 class LocalDiskTest(UnitBase):
     """容器根盘开机以来的新写入（#149）：LocalDisk 在假根盘上扫（只进开机以后动过的目录、跳过 /proc 等、labmon 目录拆到各项目）、
     借来的主机只数借来以后的、labmon 之外的新写入变了 LOCAL_DRIFT 才提前重扫；rootfs_info 的可信判定与 /dev/shm；scan_local 的接线。

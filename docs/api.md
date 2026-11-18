@@ -120,7 +120,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 
 ## 普通用户看到的
 
-- `/` 与 `/overview.json`：按白名单取（`users.view`，#17），快照以后新加的字段默认不给普通用户。原样给 `generated`、`lan`、`event_kinds`、`sched`；`hosts`、`projects`、`archived`、`rebalance`、`regs`、`occ` 按可见范围过滤；`colors` 只留自己的项目；`server` 只给 `role` 和一句通用的备用提示；`disk` 只给主机页共享盘条要的总量、剩余、历史、提醒线、扫描进度与整块盘的告警（`low`、`soon`），`ours` 只留自己项目的目录，扫盘的主机可见时才给 `scanner`。`fleet`（组内服务器）、`notices`（给系统通知的提醒）、`wake`（给实验会话的消息）、`hostcheck`（看板服务所在机的体检，#166）给空值。`/` 现渲染（`collect.render_page`），不发磁盘上带全量数据的 `index.html`。
+- `/` 与 `/overview.json`：按白名单取（`users.view`，#17），快照以后新加的字段默认不给普通用户。原样给 `generated`、`lan`、`event_kinds`、`sched`；`hosts`、`projects`、`archived`、`rebalance`、`regs`、`occ` 按可见范围过滤；`colors` 只留自己的项目；`server` 只给 `role` 和一句通用的备用提示；`disk` 只给主机页共享盘条要的总量、剩余、历史、提醒线、扫描进度与整块盘的告警（`low`、`soon`），`ours` 只留自己项目的目录与按项目的汇总（`ours.projects`，#53），扫盘的主机可见时才给 `scanner`。`fleet`（组内服务器）、`notices`（给系统通知的提醒）、`wake`（给实验会话的消息）、`hostcheck`（看板服务所在机的体检，#166）给空值。`/` 现渲染（`collect.render_page`），不发磁盘上带全量数据的 `index.html`。
 - 可见主机的主机项整项照给，包括这台上别人任务的命令行、日志末尾与资源用量。同一台主机上的任务用共享的系统账号跑，能在这台上跑任务的人本来就能看到这些；所以开一台主机给谁，就等于让谁看到这台上所有任务的命令行与日志。不想让人看到的任务，不要放在开给这人的主机上。
 - `/records.json`：去掉平台操作、保活、借用、共享盘、账号、看板服务体检这几类，组内服务器的掉线与恢复，以及与组内某人有关（`who`）的（`users.visible`）。
 - 工作台只列自己的项目（含已归档的项目）和获准使用或自己的项目有车道的主机。登记视图只列自己的清单。调度卡保留各项目的份额行，按钮和项目链接只在自己的行上；可见主机上别人的任务照常显示。
