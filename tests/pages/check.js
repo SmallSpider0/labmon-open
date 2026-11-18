@@ -434,6 +434,7 @@ t("overview", "窄屏的弹窗贴在屏幕底部，宽表照常横向滚，页�
   ok(/\.pop, ?\.pop-l \.pop ?\{ ?position: fixed; top: auto;[^}]*bottom: calc\(var\(--tabh\) \+ var\(--kb, 0px\)\);[^}]*max-width: none;[^}]*overflow-y: auto;/.test(nar),
      "窄屏的弹窗要 fixed 贴底、让出底栏与软键盘、太高时自己滚");
   ok(/:focus\) \.pop, ?#drw \.pop ?\{ ?bottom: calc\(8px \+ env\(safe-area-inset-bottom\) \+ var\(--kb, 0px\)\);/.test(nar), "打字时（底栏收起）与抽屉里的弹窗贴到底、让出软键盘");
+  ok(/body:has\(#drw [^{]*:focus\) #drw \.pane ?\{ ?bottom: var\(--kb, 0px\);/.test(nar), "抽屉里打字时抽屉要让出软键盘（批量续租底部的验证码，Codex 审查 #20）");
   ok(/\.scroll:has\(\.pop\) ?\{ ?overflow: visible;? ?\}/.test(ovHtml.slice(0, m.index).replace(/\s+/g, " ")), "宽屏的弹窗不被滚动区裁掉（这条不能丢）");
   // fitPops：量软键盘占掉的高度与看得见的高度；贴底（fixed）的不挪；宽屏的超出所在区域（与视口取交）左边往右挪、右边往左挪（#143：抽屉里靠右、向右开的弹窗）
   const O = ovCtx(OV, RR);

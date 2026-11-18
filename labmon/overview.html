@@ -883,6 +883,7 @@ body.more-open { overflow: hidden; }
   .tlkey.open .tlkey-l { margin-top: 6px; }
   #drw .pane { top: 6vh; left: 0; width: auto; border-left: 0; border-top: 1px solid var(--line); border-radius: 14px 14px 0 0; overflow: hidden;
                box-shadow: 0 -10px 30px rgba(0, 0, 0, .14); transform: translateY(104%); }
+  body:has(#drw :is(input:not([type=checkbox]):not([type=radio]), textarea):focus) #drw .pane { bottom: var(--kb, 0px); }   /* 抽屉里打字时让出软键盘（--kb 由 fitPops 量），底部固定的验证码与按钮不被挡（Codex 审查 #20） */
   .dh { padding-left: 12px; }
   .drawer-tabs { padding: 0 12px; }
   .db { padding: 10px 12px 28px; }
