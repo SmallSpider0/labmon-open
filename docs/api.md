@@ -278,7 +278,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 | `GET /api/hosts` | `{"missing", "hosts": [{"id", "returned", "ssh", "port", "label", "borrow", "worker_home", "home_with"}]}`：`labmon host list`、`labmon borrow` 列表用；`worker_home` 补了缺省值，`home_with` 是与它共用 worker 目录（同一块共享盘）的别的在用主机（`config.home_peers`，已归还的为空；普通用户只列他能用的） |
 
 | `GET /api/project/<id>/status` | `{"rc", "out", "err", "data"}`：`out` 是排好的项目现状，`data` 是项目快照原样（[schema.md](schema.md)；还没采集过为 null）（`api.status`） |
-| `GET /api/project/<id>/disk` | 同上，`data` 是 `disk.project_storage`（`api.disk`） |
+| `GET /api/project/<id>/disk` | 同上，`data` 是项目快照的 `storage`（`disk.project_storage`，`api.disk`；字段见 [schema.md](schema.md)） |
 | `GET /api/project/<id>/records?host=&cat=&q=&limit=` | 同上，`data` 是记录行，新的在前（`api.records`；`limit` 缺省 30、最多 1000；`host` 不是这个项目用的主机时 `rc` 3） |
 
 `labmon collect` 用 `POST /p/<id>/collect`，`project archive|restore` 用 `POST /project/archive|restore`（命令行做的记成“经命令行（名字）”），`project push|pull` 用上面[项目配置](#项目配置)的两个接口。
@@ -298,7 +298,7 @@ labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # �
 ```
 
 - `status` 首行写快照是几分钟前的；超过 `config.stale_limit` 的门槛（项目快照的 `thresholds.stale_s`）时写“看板没在采集”，会话告诉用户。项目已归档时先写那句（`projects.archived_msg`）。
-- `disk` 与项目页「本项目占用」同一份数据（`disk.project_storage`，#53 起细到项目根下的一级目录）；别人的、组里的明细只给管理员。
+- `disk` 与项目页「本项目占用」同一份数据（项目快照的 `storage`，#53：项目根下的一级目录、删掉的目录、近来结束的任务写了多少；同一组扫描量得的几个任务合成一条，与 `bigwrite:` 告警同一句 `collect.write_text`）；别人的、组里的明细只给管理员。
 - `records` 的“与本项目有关”与项目页时间线的事件同一规则（`records.project_mine`）：去掉同机别的项目的作废、被挤掉与对它的暂停、优先，加上对本项目下的项目级暂停与优先。普通用户再按 `users.visible` 筛。
 
 ### `labmon wait` 的长轮询

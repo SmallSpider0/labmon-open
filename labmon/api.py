@@ -12,12 +12,11 @@ from contextlib import nullcontext
 
 from . import borrow as B
 from . import collect as C
-from . import disk as DK
 from . import fleet as F
 from . import pool as P
 from . import projects as PJ
 from . import workerctl as W
-from .config import GIB, HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
+from .config import HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
 from .records import EVENT_KINDS, project_rows
 from .state import load_json, snapshot
 
@@ -234,11 +233,11 @@ def check(pid: str, text: str, may=None) -> dict:
 # ---------- 只读：项目现状、存储、记录（#52：实验会话不看页面，要读的都经命令行） ----------
 # GET /api/project/<id>/(status|disk|records)：回 {rc, out, err, data}，命令行原样打出 out；--json 打 data。
 def _gib(b: float | None) -> str:
-    return "—" if b is None else f"{b / GIB:.1f} GiB"
+    return "—" if b is None else f"{C.gb(b)} GiB"
 
 
 def _delta(b: float | None) -> str:
-    return "" if not b else f"{'+' if b > 0 else '−'}{abs(b) / GIB:.1f} GiB"
+    return "" if not b else f"{'+' if b > 0 else '−'}{C.gb(abs(b))} GiB"
 
 
 def _card(g: dict) -> str:
@@ -367,40 +366,54 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
 
 
 def disk(pid: str, psnap: dict | None = None) -> dict:
-    """labmon disk（#52）：本项目在共享盘上各目录的大小与增量、最大的几项，整块盘的剩余与几天满，各主机本地盘上本项目的缓存与单格临时、本地盘余量。
-    数据 disk.project_storage（与项目页「本项目占用」同一份；#53 起细到项目根下的一级目录、带 24 小时与 7 天增量）。psnap：项目快照（本地盘余量；缺省现读）。"""
+    """labmon disk（#52）：本项目在共享盘上的合计与各一级目录（大小、近 24 小时与 7 天增量、最大的几项）、删掉的目录、近来结束的任务写了多少，
+    整块盘的剩余与几天满，各主机本地盘上本项目的缓存与单格临时、本地盘余量。数据是项目快照的 storage（disk.project_storage，#53；与项目页「本项目占用」同一份）。
+    psnap：项目快照（缺省现读）。data 是 storage 原样（快照还没有为 None）。"""
     o = Out()
-    s = DK.project_storage(pid)
-    psnap = psnap if psnap is not None else (load_json(PJ.out_dir(pid) / "snapshot.json", None) or {})
+    psnap = psnap if psnap is not None else load_json(PJ.out_dir(pid) / "snapshot.json", None)
+    if not psnap:
+        o.p(f"[labmon] 看板上还没有 {pid} 的快照：第一次采集还没完成，过一两分钟再看")
+        return o.done(0, data=None)
+    s = psnap.get("storage") or {}
     free, total = s.get("free"), s.get("total")
     if total:
-        line = f"[labmon] 共享盘剩 {_gib(free)} / 共 {_gib(total)}（{free / total:.0%}）"
         eta = "，".join(f"按近 {w}的速度约 {d:g} 天满" for w, d in (("24 小时", s.get("eta")), ("7 天", s.get("eta7"))) if d is not None)
-        o.p(line + (f"；{eta}" if eta else "；近来没在涨"))
+        o.p(f"[labmon] 共享盘剩 {_gib(free)} / 共 {_gib(total)}（{free / total:.0%}）" + (f"；{eta}" if eta else "；近来没在涨")
+            + (f"；索引 {fmt_time(s['at'])}" if s.get("at") else ""))
     else:
         o.p("[labmon] 共享盘的总量与剩余还没读到")
-    dirs = s.get("dirs") or {}
-    d24, d7, at, top = (s.get(k) or {} for k in ("d24", "d7", "at", "top"))
+    dirs = sorted(s.get("dirs") or [], key=lambda d: -(d.get("b") or 0))
     if dirs:
-        o.p("本项目在共享盘上（扫描时刻各目录不同，见行尾）：")
-        for u, b in sorted(dirs.items(), key=lambda kv: -(kv[1] or 0)):
-            grow = "，".join(f"近 {w} {_delta(x.get(u))}" for w, x in (("24 小时", d24), ("7 天", d7)) if x.get(u))
-            o.p(f"  {u}  {_gib(b)}" + (f"（{grow}）" if grow else "") + (f"  扫描 {fmt_time(at[u])}" if at.get(u) else ""))
-            for p, pb in (top.get(u) or [])[:5]:
-                o.p(f"      {p}  {_gib(pb)}")
-        tot24 = sum(x for x in d24.values() if x)
-        o.p(f"  合计 {_gib(sum(b or 0 for b in dirs.values()))}" + (f"，近 24 小时 {_delta(tot24)}" if tot24 else ""))
+        grow = "，".join(f"近 {w} {_delta(x) or '没变'}" for w, x in (("24 小时", s.get("d24")), ("7 天", s.get("d7"))) if x is not None)
+        o.p(f"本项目在共享盘上（{'、'.join(s.get('roots') or []) or '项目目录'}）：合计 {_gib(s.get('b'))}" + (f"（{grow}）" if grow else "")
+            + ("；近 24 小时涨得快（disk: 告警）" if s.get("burst") else ""))
+        if s.get("pending"):
+            o.p(f"  还有 {s['pending']} 个目录没扫到，合计只算扫过的")
+        for d in dirs:
+            g = "，".join(f"近 {w} {_delta(d.get(k))}" for w, k in (("24 小时", "d24"), ("7 天", "d7")) if d.get(k))
+            o.p(f"  {C.dir_name(d.get('name'))}  {_gib(d.get('b'))}" + (f"（{g}）" if g else "") + (f"  {d['n']} 个文件" if d.get("n") else "")
+                + (f"  扫描 {fmt_time(d['t'])}" if d.get("t") else ""))
+            for x in (d.get("top") or [])[:5]:
+                o.p(f"      {x[0]}  {_gib(x[1])}")
+        for g in s.get("gone") or []:
+            if g.get("d7"):
+                o.p(f"  {C.dir_name(g.get('name'))}（已删）  近 7 天 {_delta(g['d7'])}")
     else:
         o.p("共享盘还没扫到本项目的目录（扫描轮流做，新目录要等一阵）")
+    groups = C.write_groups(s.get("jobs") or [])
+    if groups:
+        o.p("近来结束的任务（跑的期间本项目目录的净增，同期本项目别的任务写的也在内）：")
+    for _, js in groups:
+        j = js[-1]
+        o.p(f"  {C.write_text(js)}；{j.get('host')} 上 {fmt_time(j['t1'])} 结束" + ("；还在等重扫，数字会变" if any(x.get("wait") for x in js) else "")
+            + ("；超过提醒线（bigwrite: 告警）" if j.get("big") else ""))
     local = s.get("local") or {}
-    hosts = {h["id"]: h for h in psnap.get("hosts") or []}
-    ids = list(dict.fromkeys([*hosts, *local]))
+    hosts = {h["id"]: h for h in psnap.get("hosts") or [] if not h.get("returned") and not h.get("pool")}
+    ids = [i for i in dict.fromkeys([*hosts, *local]) if i in hosts]
     if ids:
         o.p("各主机本地盘（续租、容器重启会清空；能重算的缓存放这里，用 needs= 声明）：")
     for hid in ids:
-        loc, h = local.get(hid) or {}, hosts.get(hid) or {}
-        if h.get("returned") or h.get("pool"):
-            continue
+        loc, h = local.get(hid) or {}, hosts[hid]
         mine = f"本项目缓存 {_gib(loc.get('cache') or 0)}，单格临时 {_gib(loc.get('scratch') or 0)}" if loc else "本项目没有缓存"
         room = "，".join(f"{m.get('label') or m['path']} 剩 {m['avail_gb']:.1f} GiB" for m in h.get("mounts") or [] if m.get("avail_gb") is not None)
         o.p(f"  {h.get('label') or hid}：{mine}" + (f"；{room}" if room else ""))

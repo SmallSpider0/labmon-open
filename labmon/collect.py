@@ -761,27 +761,40 @@ def _storage(cfg: dict, snap: dict, glob_snap: dict, t: float) -> None:
     并行的几个同项目任务用的是同一组扫描、量出来是同一个数，按 grp 合成一条（key 取最早结束的那个，_job_writes 定）。
     项目暂时没实验时照报：是项目自己的目录在涨，不是主机的事。"""
     st = snap["storage"] = DK.project_storage(cfg["id"], glob_snap)
-    g = lambda b: f"{b / GIB:.1f}" if abs(b) < 10 * GIB else f"{b / GIB:.0f}"   # noqa: E731
     if st["burst"] and st["d24"]:
         top = max(st["dirs"], key=lambda d: d["d24"] or 0, default=None)
-        head = (f"共享盘上本项目近 24 小时 +{g(st['d24'])} GiB" + (f"（{dir_name(top['name'])} +{g(top['d24'])} GiB）" if top and top["d24"] > 0 else "")
-                + (f"，共享盘剩 {g(st['free'])} GiB，按这个速度约 {st['free'] / st['d24']:.1f} 天占满" if st.get("free") else ""))
+        head = (f"共享盘上本项目近 24 小时 +{gb(st['d24'])} GiB" + (f"（{dir_name(top['name'])} +{gb(top['d24'])} GiB）" if top and top["d24"] > 0 else "")
+                + (f"，共享盘剩 {gb(st['free'])} GiB，按这个速度约 {st['free'] / st['d24']:.1f} 天占满" if st.get("free") else ""))
         snap["alerts"].append(alert(f"disk:{cfg['id']}", "both",
                                     head + "：能重算的缓存放 $LABMON_CACHE（用 needs= 声明），不再用的中间结果清掉；删结果、旧 checkpoint 前先问用户", head))
+    for key, js in write_groups([j for j in st["jobs"] if j["big"] and t - j["t1"] < 86400]):
+        snap["alerts"].append(alert(f"bigwrite:{key}", "agent", write_text(js) + "：能重算的缓存放 $LABMON_CACHE（用 needs= 声明），共享盘只留数据集、代码与结果"))
+
+
+def gb(b: float) -> str:
+    """共享盘上的量的文字（字节换 GiB 的数字，不带单位）：10 GiB 以内一位小数，再大取整（disk:、bigwrite: 告警与 labmon disk 共用；页面上 GB、dGB）。"""
+    return f"{b / GIB:.1f}" if abs(b) < 10 * GIB else f"{b / GIB:.0f}"
+
+
+def write_groups(jobs: list[dict]) -> list[tuple[str, list[dict]]]:
+    """storage.jobs 按 grp 合成几组（并行的几个同项目任务用的是同一组扫描、量出来是同一个数，disk._job_writes 定 grp）：
+    [(组的 key「任务:结束时刻」, 组里的任务按结束先后)]，新结束的组在前（bigwrite: 告警与 labmon disk 共用）。"""
     groups: dict = {}
-    for j in st["jobs"]:
-        if j["big"] and t - j["t1"] < 86400:
-            groups.setdefault(j.get("grp") or f"{j['name']}:{j['t1']}", []).append(j)
-    for key, js in groups.items():
+    for j in jobs:
+        groups.setdefault(j.get("grp") or f"{j['name']}:{j['t1']}", []).append(j)
+    for js in groups.values():
         js.sort(key=lambda j: j["t1"])
-        j, top = js[0], (js[0]["top"] or [None])[0]
-        names = "、".join(x["name"] for x in js[:3]) + (f" 等 {len(js)} 个任务" if len(js) > 3 else "")
-        more = max(x["with"] for x in js) - (len(js) - 1)
-        snap["alerts"].append(alert(f"bigwrite:{key}", "agent",
-                                    f"{names} 跑的这段时间本项目在共享盘上净增 {g(j['b'])} GiB"
-                                    + (f"，大头 {dir_name(top[0])} +{g(top[1])} GiB" if top and top[1] > 0 else "")
-                                    + (f"（同期还有 {more} 个本项目任务，一起算在内）" if more > 0 else "")
-                                    + "：能重算的缓存放 $LABMON_CACHE（用 needs= 声明），共享盘只留数据集、代码与结果"))
+    return sorted(groups.items(), key=lambda kv: -kv[1][-1]["t1"])
+
+
+def write_text(js: list[dict]) -> str:
+    """一组任务（write_groups 的一项）的写入量一句：谁跑的这段时间本项目在共享盘上净增多少、大头、同期还有几个本项目任务（bigwrite: 与 labmon disk 共用）。"""
+    j, top = js[0], (js[0]["top"] or [None])[0]
+    names = "、".join(x["name"] for x in js[:3]) + (f" 等 {len(js)} 个任务" if len(js) > 3 else "")
+    more = max(x["with"] for x in js) - (len(js) - 1)
+    return (f"{names} 跑的这段时间本项目在共享盘上净{'增' if j['b'] >= 0 else '减'} {gb(abs(j['b']))} GiB"
+            + (f"，大头 {dir_name(top[0])} +{gb(top[1])} GiB" if top and top[1] > 0 else "")
+            + (f"（同期还有 {more} 个本项目任务，一起算在内）" if more > 0 else ""))
 
 
 def _rebalance(snap: dict) -> None:

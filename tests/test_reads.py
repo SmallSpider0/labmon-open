@@ -20,7 +20,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from fixtures import NO_HOSTS, board, make_token, register  # noqa: E402
 
 from labmon import __main__ as M  # noqa: E402
-from labmon import disk as DK  # noqa: E402
 from labmon import projects as PJ  # noqa: E402
 from labmon import serve as SV  # noqa: E402
 from labmon.config import GIB  # noqa: E402
@@ -154,38 +153,50 @@ class ReadsTest(unittest.TestCase):
     def test_disk(self):
         board(self)
         root = "/data/alice/projects/p1"
-        self.glob(disk={"df": {"free": 500 * GIB, "total": 2000 * GIB}, "eta": 5.25, "eta7": None, "warn_gb": 30,
-                        "ours": {"base": "/data/alice", "dirs": [{"u": root, "name": "projects/p1", "b": 120 * GIB, "t": self.now - 600, "p": "p1"},
-                                                                {"u": "/data/alice/projects/q", "b": 9 * GIB, "t": self.now, "p": "q"}]}},
-                  hosts=[{"id": "h1", "status": {"storage": {"local": {"p1": {"cache": 12 * GIB, "scratch": GIB // 2}}}}}])
+        n = self.now
+        jobs = [{"name": "a1", "host": "h1", "t0": n - 7200, "t1": n - 3600, "st": "done", "b": 33 * GIB, "top": [["cache", 30 * GIB]],
+                 "from": n - 7300, "to": n - 3500, "with": 1, "pending": 0, "wait": False, "big": True, "grp": f"a1:{n - 3600}"},
+                {"name": "a2", "host": "h1", "t0": n - 7000, "t1": n - 3400, "st": "done", "b": 33 * GIB, "top": [["cache", 30 * GIB]],
+                 "from": n - 7300, "to": n - 3500, "with": 1, "pending": 0, "wait": False, "big": True, "grp": f"a1:{n - 3600}"},
+                {"name": "b1", "host": "h1", "t0": n - 900, "t1": n - 300, "st": "failed", "b": -2 * GIB, "top": [],
+                 "from": None, "to": None, "with": 0, "pending": 1, "wait": True, "big": False, "grp": f"b1:{n - 300}"}]
+        st = {"roots": [root], "b": 120 * GIB, "d24": 33 * GIB, "d7": 39 * GIB, "pending": 2, "burst": True,
+              "dirs": [{"path": f"{root}/out", "name": "out", "b": 40 * GIB, "d24": 0, "d7": -GIB, "n": 12, "m": n, "t": n - 600, "top": []},
+                       {"path": f"{root}/cache", "name": "cache", "b": 80 * GIB, "d24": 33 * GIB, "d7": 40 * GIB, "n": 1203, "m": n, "t": n - 600,
+                        "top": [["feat", 70 * GIB, n]]},
+                       {"path": root, "name": ".", "b": GIB // 2, "d24": None, "d7": None, "n": 3, "m": n, "t": n - 600, "top": []}],
+              "gone": [{"path": f"{root}/tmp_old", "name": "tmp_old", "d24": 0, "d7": -5 * GIB}], "jobs": jobs,
+              "at": n - 600, "free": 500 * GIB, "total": 2000 * GIB, "eta": 5.25, "eta7": None, "warn_gb": 30, "burst_gb": 30, "bigwrite_gb": 5,
+              "local": {"h1": {"cache": 12 * GIB, "scratch": GIB // 2}}}
+        self.snap(storage=st)
         rc, out, err = run(["disk", "-c", str(self.cfg)])
         self.assertEqual(rc, 0, err)
-        for s in ("共享盘剩 500.0 GiB / 共 2000.0 GiB（25%）；按近 24 小时的速度约 5.25 天满", f"{root}  120.0 GiB", "合计 120.0 GiB",
-                  "h1（A6000）：本项目缓存 12.0 GiB，单格临时 0.5 GiB；容器 /tmp 剩 24.9 GiB", "h2：本项目没有缓存"):
-            self.assertIn(s, out)
-        self.assertNotIn("projects/q", out)
-        self.assertNotIn("h3", out)
-        self.assertNotIn("算力池", out)
-        # #53 的细分：项目根下一级目录、24 小时与 7 天增量、最大的几项（假数据：字段名等 #53 定）
-        fake = {**DK.project_storage("p1"), "dirs": {f"{root}/cache": 80 * GIB, f"{root}/out": 40 * GIB},
-                "d24": {f"{root}/cache": 33 * GIB}, "d7": {f"{root}/cache": 40 * GIB, f"{root}/out": -GIB},
-                "top": {f"{root}/cache": [[f"{root}/cache/feat", 70 * GIB]]}}
-        with mock.patch.object(DK, "project_storage", lambda pid, snap=None: fake):
-            rc, out, _ = run(["disk", "p1"])
-            js = json.loads(run(["disk", "p1", "--json"])[1])
-        for s in (f"{root}/cache  80.0 GiB（近 24 小时 +33.0 GiB，近 7 天 +40.0 GiB）", f"{root}/out  40.0 GiB（近 7 天 −1.0 GiB）",
-                  f"{root}/cache/feat  70.0 GiB", "合计 120.0 GiB，近 24 小时 +33.0 GiB"):
-            self.assertIn(s, out)
-        self.assertLess(out.index("/cache  "), out.index("/out  "))
-        self.assertEqual(js["d24"], {f"{root}/cache": 33 * GIB})
+        for x in ("共享盘剩 500 GiB / 共 2000 GiB（25%）；按近 24 小时的速度约 5.25 天满",
+                  f"本项目在共享盘上（{root}）：合计 120 GiB（近 24 小时 +33 GiB，近 7 天 +39 GiB）；近 24 小时涨得快", "还有 2 个目录没扫到",
+                  "cache  80 GiB（近 24 小时 +33 GiB，近 7 天 +40 GiB）  1203 个文件", "      feat  70 GiB", "out  40 GiB（近 7 天 −1.0 GiB）",
+                  "项目根下的文件  0.5 GiB", "tmp_old（已删）  近 7 天 −5.0 GiB",
+                  "a1、a2 跑的这段时间本项目在共享盘上净增 33 GiB，大头 cache +30 GiB；h1 上", "超过提醒线",
+                  "b1 跑的这段时间本项目在共享盘上净减 2.0 GiB；h1 上", "还在等重扫",
+                  "h1（A6000）：本项目缓存 12 GiB，单格临时 0.5 GiB；容器 /tmp 剩 24.9 GiB", "h2：本项目没有缓存"):
+            self.assertIn(x, out)
+        self.assertLess(out.index("cache  80"), out.index("out  40"))
+        self.assertLess(out.index("b1 跑的"), out.index("a1、a2 跑的"))              # 新结束的在前；同一组扫描的合成一条
+        self.assertEqual(out.count("a2"), 1)
+        for x in ("h3", "算力池"):
+            self.assertNotIn(x, out)
+        js = json.loads(run(["disk", "p1", "--json"])[1])
+        self.assertEqual(js["jobs"][2]["grp"], f"b1:{n - 300}")
 
     def test_disk_nothing_scanned(self):
         board(self)
-        self.glob()
-        rc, out, _ = run(["disk", "p1"])
+        rc, out, _ = run(["disk", "p1"])                 # 快照里的 storage 还空着（#53 之前的快照没有这一项）
         self.assertEqual(rc, 0)
         self.assertIn("共享盘的总量与剩余还没读到", out)
         self.assertIn("共享盘还没扫到本项目的目录", out)
+        (PJ.out_dir("p1") / "snapshot.json").unlink()
+        rc, out, _ = run(["disk", "p1"])
+        self.assertIn("第一次采集还没完成", out)
+        self.assertEqual(run(["disk", "p1", "--json"])[1].strip(), "null")
 
     def test_records_only_this_project(self):
         board(self)
