@@ -345,7 +345,8 @@ class LocalQueueTest(unittest.TestCase):
         def alerts(*running):
             with mock.patch.object(C, "snapshot", lambda: {"hosts": [{"id": "here", "status": {"running": list(running)}}]}):
                 return {a["key"]: a for a in C.collect(load(cfg))["alerts"] if a["key"].startswith("cpu_")}
-        run = lambda f, **kw: dict({"kind": "queue", "project": "out", "name": "a_run", "cpus": None, "cpu_fit": f}, **kw)   # noqa: E731
+        run = lambda f, **kw: dict({"kind": "queue", "project": "out", "name": "a_run", "cpus": None, "cpu_fit": f,   # noqa: E731
+                                    "root": str(root) + "/", "queue": "jobs/q.txt"}, **kw)
         al = alerts(run(low))
         self.assertEqual(list(al), ["cpu_low:q/a_run"])
         a = al["cpu_low:q/a_run"]
@@ -360,7 +361,8 @@ class LocalQueueTest(unittest.TestCase):
         self.assertEqual(alerts(run(low, project="other")), {})                   # 别的项目的
         self.assertEqual(alerts(run(low, kind="slot")), {})                       # 单元没有清单行可改
         self.assertEqual(alerts(run(None)), {})
-        self.assertEqual(alerts({"kind": "queue", "project": "out", "name": "a_run"}), {})   # 旧 worker 没写这个字段
+        self.assertEqual(alerts(run(low, root=str(self.d / "other"))), {})        # 同名任务在本项目别的清单上（不是这条车道）：不算到 q 头上（Codex 审 #65）
+        self.assertEqual(alerts({"kind": "queue", "project": "out", "name": "a_run", "root": str(root), "queue": "jobs/q.txt"}), {})   # 旧 worker 没写这个字段
 
     def test_borrow_cut_alert(self):
         """借来的主机上队首被约定归还挡住（borrow.check 在全局快照里给的 late 非空）：报 borrow_cut:<车道>，写主机全名、车道名与还剩几个任务；

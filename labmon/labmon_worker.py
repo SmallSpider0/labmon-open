@@ -3894,7 +3894,7 @@ class Worker:
             gpus = [u for u in (proc_env(pid, "CUDA_VISIBLE_DEVICES") or "").split(",") if u in known] if local else []
         job = dict(hints(cmd), name=name, cmd=cmd, kind="queue", key=q["key"], pid=pid, t0=t0, q=q, project=q["project"], stop=q["stop"],
                    gpus=gpus, use=old.get("use") or {}, oom0=old.get("oom0"), fc0=old.get("fc0"), owner_gpu=old.get("owner_gpu"), io_sus=old.get("io_sus"),
-                   gang_with=old.get("gang_with"), gang_stop=old.get("gang_stop"))
+                   cpu_fit=old.get("cpu_fit"), gang_with=old.get("gang_with"), gang_stop=old.get("gang_stop"))
         job["excl"] = old.get("excl", job["excl"])
         if job["gang_stop"] and job["gang_stop"].get("sent"):   # 停止请求已发：收尾照原重排规则记
             job["stopping"] = True
@@ -3973,7 +3973,8 @@ class Worker:
                 except ValueError:
                     gpus = []
                 self.running[key] = dict(req, t0=os.path.getmtime(base + ".ok"), gpus=gpus, use=old.get("use") or {},
-                                         est=old.get("est") or estimate(self.hist, req), pstart=pstart(pid), io_sus=old.get("io_sus"))
+                                         est=old.get("est") or estimate(self.hist, req), pstart=pstart(pid), io_sus=old.get("io_sus"),
+                                         cpu_fit=old.get("cpu_fit"))
                 continue
             out.append(req)
         return out
@@ -4083,6 +4084,14 @@ class Worker:
             nf["slow"] = nfs_slow(nf)
         return {"thr": r["thr"], "psi": raw["psi"], "nfs": nf,
                 "disk": {"dev": raw["disk"]["name"], "busy": r["busy"], "await": r["await"]} if raw["disk"] else None}
+
+    def cpu_hints(self, cap, util):
+        """运行中任务开跑核数给少、给多（cpu_fit，#46）：同一次运行一旦判出来就留到跑完（j 的 cpu_fit，写进状态、接管时找回）。
+        测量在门槛两侧来回时不反复出现、消失：看板的 cpu_low:、cpu_high: 只在条件出现时叫醒一次，消失再出现会再叫醒（waits._new_alerts）。
+        fit 开车道（gpu_slack）要的是此刻的样子，照旧现算，不用这份。"""
+        for j in self.running.values():
+            if not j.get("cpu_fit"):
+                j["cpu_fit"] = cpu_fit(j, cap, util)
 
     def throttle(self, now):
         """状态的 throttle（#39）：这一段 CPU 限流（thr_step）的起点 since、已持续 for 秒、此刻的 thr、持续满 THR_HOLD_S 的 alert，
@@ -4643,6 +4652,7 @@ class Worker:
         """写 status.json（看板探针读；字段是看板 ↔ worker 的契约，tests/test_contract.py 守着）。"""
         S = self.snapshot(limits)
         u10 = {k: round(v) for k, w in self.uwin.items() for v in [win_mean(w, now, UTIL_WIN_S)] if v is not None}   # 各卡「在用时多高」：fit 与 cpu_fit 用
+        self.cpu_hints(S["cpu_cap"], u10)
         hits = [round(t) for t in self.ka_hits if t > now - FIGHT_S]   # 近 FIGHT_S 秒保活被拉起的时刻（kafight，重启后 load_prev 找回）
         write(self.p.status, json.dumps({
             "t": time.time(), "pid": os.getpid(), "host": self.host, "info": self.info, "gpu_procs": self.gprocs,
@@ -4678,7 +4688,7 @@ class Worker:
             "running": [dict(self.job_view(j), t0=j["t0"], vram=j.get("vram"), excl=j.get("excl"), est_min=j.get("est_min"),
                              oom0=j.get("oom0"), fc0=j.get("fc0"), owner_gpu=j.get("owner_gpu"), wait=j.get("wait"), cpus=j.get("cpus"), io=j.get("io"),
                              io_sus=j.get("io_sus"),   # 记过读写拥塞嫌疑的时刻（io_suspect；接管时找回，同一任务不重复记）
-                             cpu_fit=cpu_fit(j, S["cpu_cap"], u10),   # 开跑给的核数给少了、给多了（#46）：看板据此出只给实验会话的 cpu_low:、cpu_high:
+                             cpu_fit=j.get("cpu_fit"),   # 这一次运行判过的开跑核数给少、给多（cpu_hints，#46）：看板据此出只给实验会话的 cpu_low:、cpu_high:
                              # 成组（#180）：组名、人数、一起开跑的同伴 [[主机, 任务]]、跟着同伴停下的 {kind, why, sent}（接管时找回）
                              gang=j.get("gang"), gn=j.get("gn"), gang_with=j.get("gang_with"), gang_stop=j.get("gang_stop"))
                         for j in self.running.values()],

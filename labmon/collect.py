@@ -727,14 +727,14 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                                 "（OMP_NUM_THREADS 等、torch.set_num_threads、DataLoader num_workers、进程池；按 nproc 取的是宿主机的核数），改成按 $LABMON_CPUS；"
                                 "确实要更多核就在清单那一行写 cpus=，下次放行按它记账", say))
         # 开跑给的核数给少了、给多了（#46）：worker 判的（运行中任务的 cpu_fit，门槛只在 worker 的 cpu_fit），本项目的清单任务才报、只给会话；
-        # key 按车道与任务，同一个任务只叫醒一次。给少的已给到配额（sug 为 None）写大也给不了，不报
-        names = {ln["id"]: ln["label"] for ln in lanes}
+        # key 按车道与任务；worker 同一次运行判出来就留到跑完（Worker.cpu_hints），所以只叫醒一次。给少的已给到配额（sug 为 None）写大也给不了，不报
+        # 车道按清单认（目录 + 清单，_qpath）：同一台上两条清单可以有同名任务
+        by_q = {_qpath(ln["root"], ln["queue"]): ln for ln in lanes if ln.get("root") and ln.get("queue")}
         for r in (st or {}).get("running") or []:
-            f = r.get("cpu_fit")
-            ln = next((x["lane"] for x in snap["jobs"] if x["status"] == "running" and x["id"] == r["name"] and x["lane"] in names), None)
-            if not f or not f.get("sug") or r.get("kind") != "queue" or r.get("project") != cfg["id"] or ln is None:
+            f, lane = r.get("cpu_fit"), by_q.get(_qpath(r.get("root"), r.get("queue")))
+            if not f or not f.get("sug") or r.get("kind") != "queue" or r.get("project") != cfg["id"] or lane is None:
                 continue
-            where = f"{hd['label']} {names[ln]}"
+            ln, where = lane["id"], f"{hd['label']} {lane['label']}"
             if f["how"] == "low":
                 alerts.append(alert(f"cpu_low:{ln}/{r['name']}", "agent",
                                     f"任务 {r['name']}（{where}）近 10 分钟平均用了 {f['avg']:.1f} 核，给它的 {f['give']} 核基本用满，所在的卡利用率不到 50%：可能给少了。"

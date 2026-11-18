@@ -4594,6 +4594,23 @@ class PressTest(UnitBase):
         self.assertEqual(self.m.cpu_from_peak(1.2), 1)                                    # 与 estimate 的峰值 ×1.1 取整同一处
         self.assertEqual(self.m.cpu_from_peak(1.5), 2)
 
+    def test_cpu_hints_latch_per_run(self):
+        # 同一次运行判出给少了就留到跑完：测量在门槛两侧来回时状态里的 cpu_fit 不消失（看板的 cpu_low: 不反复叫醒会话，Codex 审 #65）；新的一次运行重新判
+        t = self.hosts.now()
+        use = lambda avg: {"t": t, "pk0": t - 700, "pks": [[t - 60 * i, avg] for i in range(10)], "cores": avg, "cores_peak": avg}   # noqa: E731
+        j = {"key": "a", "name": "x_s1", "project": "pa", "t0": t - 700, "gpus": ["GPU-a"], "est": {"ram": 1.0, "vram": 1.0, "cpus": 1, "cpu_src": "缺省 1 核"},
+             "use": use(0.98)}
+        self.w.running = {"a": j}
+        self.w.cpu_hints(8, {"GPU-a": 30})
+        self.assertEqual(j["cpu_fit"]["how"], "low")
+        j["use"] = use(0.5)                                                  # 降到门槛下
+        self.w.cpu_hints(8, {"GPU-a": 30})
+        self.assertEqual(j["cpu_fit"]["how"], "low")
+        k = dict(j, key="b", name="x_s2", cpu_fit=None)
+        self.w.running = {"b": k}
+        self.w.cpu_hints(8, {"GPU-a": 30})
+        self.assertIsNone(k["cpu_fit"])
+
     def test_throttle_status_alert_and_restore(self):
         # 持续限流 10 分钟才标 alert，指出超核的任务（占位任务不算）；限流结束为 None；状态里的起点重启后找回（#39）
         t0 = self.hosts.now()
