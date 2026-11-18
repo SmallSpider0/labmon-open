@@ -111,7 +111,8 @@ BEGIN_STEPS = ["探一次：对方空着或轻用", "查共享盘、Python 与�
 
 def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=None, start=None, ovr=_ovr, step=None, light: bool = False,
           away: bool = False, *, account: str | None = None) -> str:
-    """借来用（已在借的就改约定时间与给哪些项目用）。先探一次：对方要么空着（GPU 上没有进程或只有 ka.sh 管的保活，worker 要卡时会停它），
+    """借来用（已在借的就改约定时间与给哪些项目用）。先探一次：对方要么空着（GPU 上没有进程或只有 ka.sh 管的保活，worker 要卡时会停它；
+    认作保活的 GPU 进程逐个核对在不在 ka.sh running 列出的进程组里，相对路径起的同一脚本 ka.sh 也认，#29），
     要么轻用（using：有 VS Code、终端或小实验，且 share 判为轻用）——轻用的要 light（页面上勾「对方在轻用」）；
     共享盘与 Python 在；再写进主机清单、下 guest（带给对方留的量）与截止指令、拉起 worker。返回说明；不能借就抛 ConfigError。
     step(note)：做完 BEGIN_STEPS 的一步就调一次（最后一步不调），看板上的借来用（fleetops.run_borrow）拿它显示进度。
@@ -153,14 +154,18 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
     step(f"{s['holder']} 在轻用（{use}）" if use else "只有保活" if a["work"] else "GPU 空着")
     h = host_defaults(guest_host(s, _read_toml(hosts_file()).get("hosts", [])))
     ka = F.ka_cmd(s, cfg)
-    remote = (f"test -d {shlex.quote(h['data_root'])} || echo nodata; test -x {shlex.quote(h['python'])} || echo nopy"
-              + (f"; ({ka} running) >/dev/null 2>&1 || echo noka" if ka and any(w["kind"] == "keepalive" for w in a["work"]) else ""))
-    rc, out, err = (ssh or F.ssh)(s, remote)
+    kw = {p: w for w in a["work"] if w["kind"] == "keepalive" for p in w.get("gpids") or []}   # 认作保活的 GPU 进程 → 它那组负载
+    remote = f"test -d {shlex.quote(h['data_root'])} || echo nodata; test -x {shlex.quote(h['python'])} || echo nopy"
+    if ka and kw:      # 同一条 ssh 里逐个核对保活是不是 ka.sh 管的（fleet_guard.sh 的 kacheck，只读）：一个不是就借不了，worker 停不了它
+        rc, out, err = (ssh or F.ssh)(s, remote + "; bash -s -- " + shlex.join(["kacheck", ka, *map(str, sorted(kw))]), input=F.GUARD.read_text())
+    else:
+        rc, out, err = (ssh or F.ssh)(s, remote)
     if rc == 255:
         raise ConfigError(f"连不上 {label(s)}：{err.strip()}")
-    bad = {"nodata": f"共享盘上没有 {h['data_root']}", "nopy": f"没有 {h['python']}",
-           "noka": f"GPU 上的保活不是 ka.sh 开的（{F._brief_work(a)}），请 {s['holder']} 先停掉它"}
-    miss = [bad[x] for x in out.split() if x in bad]
+    lines = out.split()
+    miss = ([f"共享盘上没有 {h['data_root']}"] if "nodata" in lines else []) + ([f"没有 {h['python']}"] if "nopy" in lines else [])
+    if ka and kw:
+        miss += _ka_miss(s, kw, (out.strip().splitlines() or [""])[-1], err)
     if miss:
         raise ConfigError(f"{label(s)} 借不了：{'；'.join(miss)}")
     step()
@@ -181,6 +186,24 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
     msg = f"借来 {label(s)}：{what}；{keep_text(kp)}；{'，'.join(notes)}"
     log_events([{"kind": "borrow", "host": sid, "who": s["holder"], "msg": msg, "detail": out.strip()[-400:]}])
     return msg
+
+
+def _ka_miss(s: dict, kw: dict, res: str, err: str) -> list[str]:
+    """kacheck 的结果行 → 借不了的原因（都过了为空）：哪个保活（命令行、PID、工作目录）ka.sh 停不了、对方该怎么做；ka.sh 本身出错另一句。"""
+    word, _, rest = res.partition(" ")
+    if word == "ok":
+        return []
+    if word == "noka":
+        out = []
+        for w in {id(kw[int(p)]): kw[int(p)] for p in rest.split() if p.isdigit() and int(p) in kw}.values():
+            pids = "、".join(str(p) for p in w["gpids"] if str(p) in rest.split())
+            cmd = (w.get("chain") or [w["label"]])[-1]
+            out.append(f"GPU 上的保活 {cmd[:120]}（PID {pids}{'，工作目录 ' + w['cwd'] if w.get('cwd') else ''}）不在 ka.sh 管的进程组里，"
+                       f"借来后 worker 停不了它、那几张卡也用不上：请 {s['holder']} 先停掉它，要保活改用 ka.sh start 开")
+        return out or [f"GPU 上有 ka.sh 停不了的保活（PID {rest}），请 {s['holder']} 先停掉它"]
+    if word == "fail":
+        return [f"核对保活时 {rest}，请先查 [fleet] keepalive_cmd 与共享盘上的 ka.sh"]
+    return [f"核对保活没拿到结果（{(err.strip().splitlines() or ['没有回话'])[-1][:200]}）"]
 
 
 def using(a: dict) -> str:

@@ -9,8 +9,12 @@
 #       在同一次锁定内核对状态、全部 GPU 均未活动且没有别的 GPU 进程，再重开本工具登记的保活，或停掉配置脚本能确认的用户保活并开启看板保活。
 #   stop <ka 命令> <为什么>
 #       只停 labmon 开的那一个保活（进程组对得上才停）；别人开的、已经不在的不动。
+#   kacheck <ka 命令> <GPU 进程…>
+#       只读（不拿锁、不写文件，借用前 borrow.begin 用）：逐个看这些认作保活的 GPU 进程（容器 PID）所在的进程组在不在 ka.sh running 列出的里面。
+#       ok：都在（已经没了的不算）；noka PID…：不在的（ka.sh 停不了它们）；fail …：ka.sh 本身出错（退出码与标准错误的最后一行）。
 #
-# ka 命令是主机清单 [fleet] 的 keepalive_cmd（ka.sh：容器内加锁，按脚本的完整路径认保活，不会起两个）。
+# ka 命令是主机清单 [fleet] 的 keepalive_cmd（ka.sh：容器内加锁，不会起两个；python 跑它的保活脚本才算，命令行写完整路径，
+# 或相对路径按进程工作目录还原后是它，#29）。
 # 最后一行是结果：ok … / busy … / fail … / unmanaged …；探针（fleet_probe.sh）读 /tmp/labmon-guard.state 看保活是不是 labmon 开的。
 ST=${GUARD_STATE:-/tmp/labmon-guard.state}
 PROC=${GUARD_PROC:-/proc}
@@ -188,6 +192,28 @@ repair() {  # ka 命令、盯几秒、谁开的、容器出生时钟、登记时
   fi
 }
 
+kacheck() {  # ka 命令、认作保活的 GPU 进程（容器 PID）…
+  local groups err rc pid row g bad=""
+  if ! groups=$(running_groups "$1" strict); then
+    # 没有在跑的保活（ka.sh running 退出 1、什么都不打印）不是出错；其余再跑一次取原因，不吞掉
+    err=$(bash -c "$1 running" 9>&- 2>&1); rc=$?
+    if [ "$rc" != 1 ] || [ -n "$err" ]; then
+      err=$(printf '%s\n' "$err" | awk 'NF {l = $0} END {print substr(l, 1, 200)}')
+      if [ "$rc" = 0 ]; then echo "fail ka.sh running 的输出认不出（$err）"; else echo "fail ka.sh running 出错（退出码 $rc${err:+：$err}）"; fi
+      return
+    fi
+    groups=""
+  fi
+  for pid in "${@:2}"; do
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+    { read -r row < "$PROC/$pid/stat"; } 2>/dev/null || continue     # 已经没了
+    row=${row##*) }; read -ra row <<< "$row"
+    g=${row[2]:-}
+    { [ -n "$g" ] && printf '%s\n' "$groups" | grep -qx -- "$g"; } || bad="$bad $pid"
+  done
+  if [ -n "$bad" ]; then echo "noka$bad"; else echo ok; fi
+}
+
 control() {
   if ! flock -w 15 9; then
     if [ "$1" = repair ]; then echo "busy 保活正在执行另一项操作"; else echo "fail 保活正在执行另一项操作"; fi
@@ -200,4 +226,4 @@ control() {
     *) echo "fail 不认识的动作 $1" ;;
   esac
 }
-control "$@" 9>>"$ST.lock"
+if [ "${1:-}" = kacheck ]; then kacheck "${@:2}"; else control "$@" 9>>"$ST.lock"; fi

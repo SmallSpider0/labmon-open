@@ -5444,6 +5444,29 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual(self.m.gp_label(gp[0]), "对方的保活 PID 9300（ka.sh 停不了）")
         self.assertEqual([g["owner"] for g in self.m.gpu_owners(apps, procs, {})], ["keepalive", "keepalive"])
 
+    def test_relative_keepalive_is_ka(self):
+        """相对路径起的同一保活脚本（先 cd 进保活目录、用 train_keep_alive.py、./、.. 起的）也算 ka.sh 的（维护者 11-17 定，#29），
+        同 ka.sh 的 pgids()：按进程工作目录还原后比；别的目录里的同名脚本、python -c、不是 python 跑的仍停不了。"""
+        ka_dir = self.d / "ka" / "demo"
+        ka_dir.mkdir(parents=True)
+        full = str(ka_dir / "train_keep_alive.py")
+        other = self.d / "carol"
+        other.mkdir()
+        cases = [(["python3.8", "train_keep_alive.py"], ka_dir, ("keepalive", False)),
+                 (["/opt/conda/bin/python", "-u", "./train_keep_alive.py"], ka_dir, ("keepalive", False)),
+                 (["python3", "demo/../demo/train_keep_alive.py"], ka_dir.parent, ("keepalive", False)),
+                 (["python3.8", "train_keep_alive.py"], other, ("other", True)),
+                 (["python3", "-c", "import time", "train_keep_alive.py"], ka_dir, ("other", True)),
+                 (["bash", "train_keep_alive.py"], ka_dir, ("other", True))]
+        procs, apps = {}, []
+        for i, (args, cwd, _) in enumerate(cases):
+            self.proc(400 + i, args, cwd=cwd)
+            procs[400 + i] = {"hpid": 9400 + i, "comm": "python"}
+            apps.append((9400 + i, 6000.0, "GPU-a"))
+        gp = self.m.gpu_owners(apps, procs, {}, full)
+        self.assertEqual([(g["owner"], g["ka"]) for g in gp], [c[2] for c in cases])
+        self.assertFalse(self.m.ka_owned(["python3", "train_keep_alive.py"], "", full))   # 工作目录读不到（进程没了）：认不出
+
     def test_keepalive_yields(self):
         """空闲时保活在跑、GPU 上有了别的进程（对方回来用）：停保活让路；只有保活时不动。"""
         w = self.m.Worker("t")

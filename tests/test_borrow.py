@@ -74,7 +74,7 @@ class Base(unittest.TestCase):
     def begin(self, work=(), until=None, projects=None, ssh_out="", light=False, away=False, account=None, **a):
         a, self.remote = {"work": list(work), **a}, []
         with mock.patch.object(F, "parse", lambda raw: raw), mock.patch.object(F, "analyze", lambda smp, cfg: a):
-            return B.begin(SID, until, projects, fetch=lambda s: ("raw", None), ssh=lambda s, cmd: self.remote.append(cmd) or (0, ssh_out, ""),
+            return B.begin(SID, until, projects, fetch=lambda s: ("raw", None), ssh=lambda s, cmd, input=None: self.remote.append((cmd, input)) or (0, ssh_out, ""),
                            start=lambda hid: (0, "ok\n"), ovr=self.ovr, light=light, away=away, account=account)
 
 
@@ -118,10 +118,32 @@ class BorrowTest(Base):
         with self.assertRaises(ConfigError) as c:                            # 轻用：要勾「对方在轻用」
             self.begin(work=[train], share=True, vscode=True)
         self.assertIn("在轻用（train、VS Code）", str(c.exception))
-        with self.assertRaises(ConfigError) as c:                            # 对方自己的保活（不是 ka.sh 开的）
-            self.begin(work=[{"kind": "keepalive", "label": "keep_alive.py", "names": [], "mb": 500}], ssh_out="noka\n")
-        self.assertIn("请 BOB 先停掉", str(c.exception))
         self.assertNotIn("borrow_since", self.server())
+
+    def test_begin_checks_each_keepalive(self):
+        """借用前逐个保活 GPU 进程核对在不在 ka.sh running 的进程组里（fleet_guard.sh 的 kacheck，与查共享盘同一条 ssh，#29）：
+        一个不在就借不了，提示写明哪个进程（命令行、PID、工作目录）、为什么停不了、对方该怎么做（原来括号里是空的）；ka.sh 出错另一句。"""
+        ours = {"kind": "keepalive", "label": "train_keep_alive.py", "names": [], "mb": 500, "gpids": [9, 10], "cwd": "/root/data1/alice/ka",
+                "chain": ["/opt/py/bin/python /root/data1/alice/ka/train_keep_alive.py"]}
+        theirs = {"kind": "keepalive", "label": "my_keep_alive.py", "names": [], "mb": 500, "gpids": [21], "cwd": "/root/bob",
+                  "chain": ["bash run.sh", "python my_keep_alive.py"]}
+        with self.assertRaises(ConfigError) as c:
+            self.begin(work=[ours, theirs], ssh_out="noka 21\n")
+        msg = str(c.exception)
+        self.assertIn("GPU 上的保活 python my_keep_alive.py（PID 21，工作目录 /root/bob）不在 ka.sh 管的进程组里", msg)
+        self.assertIn("请 BOB 先停掉它，要保活改用 ka.sh start 开", msg)
+        self.assertNotIn("train_keep_alive", msg)
+        cmd, script = self.remote[-1]
+        self.assertTrue(cmd.endswith("; bash -s -- kacheck 'bash ka.sh' 9 10 21"), cmd)     # 只读动作，脚本经标准输入送去
+        self.assertEqual(script, F.GUARD.read_text())
+        with self.assertRaises(ConfigError) as c:
+            self.begin(work=[ours], ssh_out="fail ka.sh running 出错（退出码 127：bash: ka.sh: No such file or directory）\n")
+        self.assertIn("核对保活时 ka.sh running 出错（退出码 127：bash: ka.sh: No such file or directory），请先查 [fleet] keepalive_cmd", str(c.exception))
+        with self.assertRaises(ConfigError) as c:
+            self.begin(work=[ours], ssh_out="nopy\n")                                       # 脚本没回结果：不当成核对过
+        self.assertIn("核对保活没拿到结果", str(c.exception))
+        self.assertNotIn("borrow_since", self.server())
+        self.assertIn("worker 已拉起", self.begin(work=[ours], ssh_out="ok\n"))
 
     def test_begin_light(self):
         """对方轻用（VS Code 加一个小实验）时勾了也借：借得了；保活的核对只在有保活时做。"""
@@ -130,7 +152,7 @@ class BorrowTest(Base):
         self.assertIn("给对方留显存 2 GiB", msg)
         self.assertEqual(self.keeps[-1]["hold"], True)                       # 对方在轻用：预先留出
         self.assertTrue(self.server()["borrow_light"])
-        self.assertNotIn("running", self.remote[0])
+        self.assertNotIn("kacheck", self.remote[0][0])
         self.assertTrue(self.server()["borrow_since"])
 
     def test_begin_away(self):
