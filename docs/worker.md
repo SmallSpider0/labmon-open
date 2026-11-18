@@ -435,6 +435,8 @@ worker 重启（部署的 `--replace`、`labmon worker start`、续租后拉起�
 要卡时保活真被拉起来了，才 SIGSTOP 暂停当时找到的确定的，记进 `frozen.json` 的 `frozen`；它被恢复后又拉起来，再停一次。代价是第一次被拉起时保活多跑一轮。
 新找到的各记一次“看门狗”事件，组内服务器抽屉的借用一节也列着，`labmon worker status` 同样打印。
 
+**命令行里的保活**（#61）：`labmon worker status <主机>` 与 `labmon status` 的主机行下各写一句这台的保活：在跑的写几点起、nvidia-smi 里的 PID（宿主机的；容器内 PID 不同时括号里另写）、在哪几张卡、占多少显存，以及有任务要卡时 worker 会自动停；停着的写 worker 何时为要卡的任务停的；没在跑的写不拉起的原因或等卡连着空两轮后拉起；借来的主机上 ka.sh 停不了的保活另起一句（那几张卡不放）；近 1 小时被拉起过的写次数与是谁。归属照 `sample` 认的（`gpu_owners`、`ka_owned`），命令行不另判。
+
 **出借方自己的保活管理器**（#31，以 BOB 的 `keepalive_control.py` 为例）：guardian 起 watchdog，watchdog 每 5 秒按登记文件（`keeper_identity.json`）看 keeper，不在、又没有它登记的实验就拉起；
 keeper 用 `start_new_session` 起，只做 setsid、不改父进程：由 `run`、`start` 这类会退出的命令起的，命令退出后父进程是 1 号；watchdog 自己拉回的是 watchdog 的子进程，
 watchdog 因此按“拉起了保活（PID … 的父进程）”认成确定的。保活连同它的整棵子树（DataLoader 等子进程，spawn 起的命令行不带 `keep_alive` 也算）不算看门狗“下面在跑的程序”。它的 keeper 与 `ka.sh` 是同一个解释器、同一个脚本（组里 `server.env` 的 `AGRI_KA_*`），所以：

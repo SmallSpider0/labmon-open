@@ -857,6 +857,40 @@ def wd_text(ws):
     return "、".join("PID %d（%s：%s）" % (w["pid"], w["cmd"] if len(w["cmd"]) <= 80 else w["cmd"][:77] + "…", w["why"]) for w in ws)
 
 
+def ka_lines(st):
+    """status.json 里这台的 GPU 保活说成几句（#61；`labmon worker status` 与看板的 `labmon status` 共用）：在跑的（几点起、
+    nvidia-smi 里的 PID 与卡、占多少显存）、停着的（worker 为要卡的任务停的）、没在跑又不拉起的原因、借来的主机上 ka.sh 停不了的、
+    近 1 小时被拉起几次。归属取状态里 gpu_procs 的 owner 与 ka（sample 经 gpu_owners、ka_owned 认的），这里不另判；PID 写宿主机的（nvidia-smi 列的那个）。"""
+    idx = {g["uuid"]: g["i"] for g in (st.get("info") or {}).get("gpus") or [] if "uuid" in g}
+    ka = st.get("keepalive") or {}
+
+    def procs(gs):
+        by = {}
+        for g in gs:
+            by.setdefault(g.get("hpid"), []).append(g)
+        return "；".join("PID %s%s，卡 %s 占 %.1f GiB" % (hp, "（容器内 %s）" % v[0]["pid"] if v[0].get("pid") not in (None, hp) else "",
+                                                       ",".join(str(idx.get(g.get("uuid"), "?")) for g in v), sum(g.get("mb") or 0 for g in v) / 1024)
+                        for hp, v in by.items())
+    out = []
+    mine = [g for g in st.get("gpu_procs") or [] if g.get("owner") == "keepalive"]
+    if mine:
+        t0 = min((g["t0"] for g in mine if g.get("t0")), default=None)
+        out.append("GPU 保活：在跑%s：%s%s" % ("（%s 起）" % now_str(t0)[5:16] if t0 else "", procs(mine),
+                                         "；有任务要卡时 worker 自动停" if ka.get("ctl") else "；这台没配 ka.sh，worker 不停它" if ka.get("ctl") is False else ""))
+    elif st.get("ka_stop") is not None:
+        out.append("GPU 保活：停着（%s有任务要卡；卡空下来后 worker 再拉起）" % ("worker %s 停的，" % now_str(st["ka_stop"])[5:16] if st["ka_stop"] else ""))
+    elif ka.get("why"):
+        out.append("GPU 保活：没在跑，没有任务要卡，但%s，不拉起" % ka["why"])
+    elif ka.get("ctl"):
+        out.append("GPU 保活：没在跑（卡连着空两轮后 worker 拉起）")
+    ext = [g for g in st.get("gpu_procs") or [] if g.get("ka")]
+    if ext:
+        out.append("对方的保活（ka.sh 停不了，这几张卡不放）：" + procs(ext))
+    if st.get("kafight"):
+        out.append("GPU 保活 %d 小时内被拉起 %d 次（最近 %s）：%s" % (FIGHT_S // 3600, st["kafight"]["n"], now_str(st["kafight"]["t"])[5:16], st["kafight"]["who"]))
+    return out
+
+
 def watchdogs(procs, skip):
     """找会把保活又拉起来的进程（看门狗）。procs 是 scan_procs 的结果，skip 是不算的 PID（labmon 的任务、worker 自己、用着 GPU 的）。
     确定的（sure）：保活的父进程（脚本）、保活的上级进程或同一会话里提到保活程序的，以及提到保活程序又在循环里的；
@@ -4011,7 +4045,9 @@ class Worker:
         self.oom_check(t)
         self.guest_tight(t)
         self.gp, self.procs, self.mine = gp, procs, {pid for v in mine.values() for pid in v}
-        self.gprocs = [{k: v for k, v in g.items() if k != "_j"} for g in gp]
+        # 保活另记启动时刻（epoch 秒，状态的 gpu_procs[].t0：worker status 写“几点起”，#61）
+        self.gprocs = [dict({k: v for k, v in g.items() if k != "_j"}, **({"t0": round(started_at(g["pid"]) or 0) or None}
+                                                                         if g["pid"] and (g["owner"] == "keepalive" or g["ka"]) else {})) for g in gp]
         self.mem_events(m)
 
     def press(self, t):
@@ -4613,6 +4649,7 @@ class Worker:
             "kafight": dict(self.fight, n=len(hits), hits=hits) if hits else None,
             "throttle": self.throttle(now),       # 这一段 CPU 限流与超核的任务（Worker.throttle）；没在限流为 None
             "ka_stop": self.ka_stop_t if self.ka_off else None,   # 要卡的这段里 worker 停着保活：停它的时刻（接管时找回，load_prev）
+            "keepalive": {"ctl": bool(self.ka_reg), "why": self.ka_why},   # worker 管不管这台的保活（有 ka.sh）、没任务要卡却不拉起的原因（ka_lines 用，#61）
             "watchdogs": load_frozen(self.p),
             "guest": {"keep": self.keep(), "other": {"vram": self.other["vram"], "ram": self.other["ram"] and round(self.other["ram"], 2),
                                                      "cpu": self.other["cpu"] and round(self.other["cpu"], 2)},
@@ -6227,8 +6264,8 @@ def main(argv=None):
         print("  暂停着的保活看门狗（还卡时恢复）：" + wd_text(wd["frozen"]))
     if wd["seen"]:
         print("  找到的保活看门狗（没动）：" + wd_text(wd["seen"]))
-    if st.get("kafight"):
-        print("  GPU 保活 %d 小时内被拉起 %d 次（最近 %s）：%s" % (FIGHT_S // 3600, st["kafight"]["n"], now_str(st["kafight"]["t"])[5:16], st["kafight"]["who"]))
+    for ln in ka_lines(st):
+        print("  " + ln)
     th = st.get("throttle")
     if th:
         print("  CPU 被配额限流 %s%%（%s 起，%d 分钟%s）%s" % (th.get("thr"), now_str(th["since"])[5:16], th["for"] // 60, "，已告警" if th["alert"] else "",

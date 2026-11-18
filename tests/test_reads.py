@@ -77,8 +77,11 @@ class ReadsTest(unittest.TestCase):
         save_json(PJ.out_dir("p1") / "snapshot.json", s)
 
     def glob(self, **kw):
-        g = {"generated": self.now, "hosts": [{"id": "h1", "status": {"running": [{"project": "p1", "name": "train_s1", "use": {"cores": 3.25}},
-                                                                                  {"project": "other", "name": "train_s1", "use": {"cores": 9}}]}}]}
+        g = {"generated": self.now, "hosts": [{"id": "h1", "worker_up": True, "status": {
+            "running": [{"project": "p1", "name": "train_s1", "use": {"cores": 3.25}}, {"project": "other", "name": "train_s1", "use": {"cores": 9}}],
+            "info": {"gpus": [{"i": 0, "uuid": "GPU-a"}]}, "keepalive": {"ctl": True, "why": None},
+            "gpu_procs": [{"hpid": 5300, "pid": 300, "mb": 6886, "uuid": "GPU-a", "owner": "keepalive", "ka": False, "t0": self.now - 600}]}},
+            {"id": "h2", "worker_up": False, "status": {"keepalive": {"ctl": True, "why": None}}}]}
         g.update(kw)
         save_json(state_dir() / "snapshot.json", g)
 
@@ -96,6 +99,10 @@ class ReadsTest(unittest.TestCase):
                   "挪法建议：可以把 h1 上 jobs/a.txt 的 train_s2 挪到 h4", "告警（2 条）", "[failed:train_s0] train_s0 失败", "[ssh_fail:h2] h2 连不上（要用户处理）"):
             self.assertIn(s, out)
         self.assertNotIn("看板没在采集", out)
+        # 这台的保活（#61）：nvidia-smi 里的 PID 对得上；连不上、worker 不在的主机不报
+        self.assertIn("h1（A6000）：正常；卡 0 97% 30.0/45 GiB\n    GPU 保活：在跑（", out)
+        self.assertIn("PID 5300（容器内 300），卡 0 占 6.7 GiB；有任务要卡时 worker 自动停", out)
+        self.assertEqual(out.count("GPU 保活"), 1)
         rc, out, _ = run(["status", "p1", "--json"])
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(out)["rebalance"]["key"], "rebalance:p1")
