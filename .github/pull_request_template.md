@@ -36,7 +36,7 @@ Closes #
 - [ ] `flake8 --select=F --max-line-length=200 labmon tools`
 - [ ] 新用例在旧代码上会失败
 - [ ] 跨主机的逻辑：多主机用例（`tests/fixtures.Hosts`）
-- [ ] 改了页面：`tests/pages` 补了快照与断言，用 Safari 逐个路由核对，控制台没有报错；用离线预览（`tests/pages/preview.py`，见 AGENTS.md「怎么测」）看过桌面与窄屏（375 宽）两档：写明路由、结果及本任务的验收窗口与标签是否已清理（`gh` 传不了图片，不把截图提交进分支；只允许提交合成离线预览截图，提交前核对画面不含私人信息）
+- [ ] 改了页面：`tests/pages` 补了快照与断言，在内置浏览器里用离线预览（`tests/pages/preview.py`，见 AGENTS.md「怎么测」）逐个路由核对，`read_console_messages` 没有报错；看过桌面与窄屏（`resize_window` 的 mobile，375 宽）两档：写明路由、结果及本任务开的标签与预览服务是否已清理（`gh` 传不了图片，不把截图提交进分支；只允许提交合成离线预览截图，提交前核对画面不含私人信息）
 
 **唯一实现表**
 - [ ] 对照 AGENTS.md 的表搜过，没有第二份；新增或扩展了表里哪一项：

@@ -19,7 +19,7 @@
 7. 核对：没有进行中的平台操作；服务日志重启以来（没重启就是最后一次「服务启动」以来）没有 Traceback；
    各主机 worker 在写状态（worker_up、age 不超过 AGE_OK 秒，拉起过的状态晚于拉起时刻）；
    看板上的工作台与项目页下载下来，在 node 里用 tests/pages 的桩按路由渲染，不报错、不漏 NaN/undefined（tests/pages/smoke.js）。
-第 6 步（核对 HTML 文档）与改了页面时用 Safari 核对改动并清理验收窗口与标签仍由人做，结论里点名。
+第 6 步（核对 HTML 文档）与改了页面时在 Claude 桌面应用的内置浏览器里核对改动、关掉本任务开的标签仍由人做，结论里点名。
 结论打到标准输出，不超过 15 行；过程打到标准错误。退出码：0 全部通过；1 部署做了、有核对没过；2 没动手就停了。
 """
 from __future__ import annotations
@@ -492,7 +492,7 @@ def deploy(wait_min: float) -> tuple[int, list[str]]:
     todo = [f"核对 HTML 文档 {f}（说明见 AGENTS.md「{s}」）" for f, s in ARTIFACTS.items() if f in files]
     pages = [f for f in files if f.startswith("labmon/") and f.endswith((".html", "common.js"))]
     if pages:
-        todo.append(f"用 Safari 核对改动处（{'、'.join(pages)}），用完关闭本任务开的窗口和标签并记录清理结果")
+        todo.append(f"在内置浏览器里核对改动处（{'、'.join(pages)}；电脑没信任 labmon CA 打不开就写明没看），用完关掉本任务开的标签并记录清理结果")
     if todo:
         out.append("要你手做：" + "；".join(todo))
     fail = [t for ok, t in checks if ok is False]

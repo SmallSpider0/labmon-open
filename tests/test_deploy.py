@@ -261,7 +261,7 @@ class DeployTest(unittest.TestCase):
         text = "\n".join(out)
         self.assertIn("另 6 个", text)
         self.assertIn("核对 HTML 文档 docs/workflow.html", text)
-        self.assertIn("用 Safari 核对改动处（labmon/overview.html、labmon/common.js）", text)
+        self.assertIn("在内置浏览器里核对改动处（labmon/overview.html、labmon/common.js；", text)
 
     def test_summary_at_most_15_lines_when_much_fails(self):
         """核对大多没过（拉起失败、连不上、日志有 Traceback、快照不新、页面不过）：提交让出行数，结论仍不超过 15 行、至少列一个提交。"""

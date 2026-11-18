@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "labmon-preview",
+      "runtimeExecutable": "sh",
+      "runtimeArgs": ["-c", "exec \"$(command -v python3.11 || command -v python3)\" tests/pages/preview.py --port 8799"],
+      "port": 8799
+    }
+  ]
+}
