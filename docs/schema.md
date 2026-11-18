@@ -183,6 +183,9 @@
   jobs [{host, root, queue, name, there 原处预计结束（跑不了为 null）, rest 挪走它之后原处那条清单何时跑完, end 挪来前几行时它们在这台何时都跑完, own 这时本机这个项目自己的清单何时跑完, dep 这一行写了 after=/afterany=}]（按挑的顺序，从队尾往前；同机的 rest 是新推演里本机原清单何时跑完）,
   why 再往下挪不了的原因（只放原因本身，没有为 null）, stop 挪到这台排不上的那一行（why 是推演的原因；与具体某行无关的为 null）, nodur stop 那一行是不是因为没有估时, idle 这台此刻空着（没有 labmon 任务在跑、推演里 10 分钟内也没有要开跑的；挑行跳过挪不动、说不出何时放行的清单，同机那项不带，#62）}`；原因句由看板拼（`rebalance.suggest`）。
   `lan_off` 为本机不在内网（这时沿用上一轮的 `status`）；借来的主机带 `borrow`（同上）。
+  算力池借来的（#25）：`borrow.pool` 为真（`holder` 照写持有人，`by` 是「算力池」）；换了容器的那一轮另带 `gone: true`（`pool._returns` 标，工作台不重新拉起 worker）。
+  借来的主机的 `status.guest` 另有 `owner`（算力池用：对方超出预留的几项里去掉只因 `ka.sh` 停不了的保活超出的卡，非空算主人回来了），各台状态另有 `pool_heads`：
+  `{"目录|清单": {head 队首, n 还要跑几行, held 清单暂停（"paused" 或 null）, dep 队首的依赖没满足时 [状态, 原因]（worker 的 dep_block）}}`，算力池里待放的各清单（看板取最新那份）。
   `offers_kept` 只在这一轮读这台失败（`error`、`status_error`，没 `worker stop`）、沿用它上一轮的 offers 时出现：`{t 那份状态写下的时刻（本机时钟 epoch 秒）, offers}`，按 `STALE_S` 过期（`rebalance.keep_offers`）。
 - 顶层 `rebalance` 是各项目的挪法建议 `{项目: …}`（`rebalance.suggest`，[workbench.md「挪法建议」](workbench.md#挪法建议)）：有建议的 `{key 告警 key（rebalance:<项目>）, target 挪到哪台, lane, before, local 是不是同机多开一条车道, gpus 同机时登记要限的卡（offer 的 gpus）, jobs（offers 的前几项）,
   from 原来整批何时跑完（推不出为 null）, to 挪后（推不出为 null）, idle 是不是接收方空着、按行比的（这时另带 there 这几行在原处最早何时跑完（说不出为 null）、done 挪过去后何时都跑完，#62）, cut 其中被借用约定挡住的清单 ["主机|目录|清单"]（这句写进 borrow_cut，不另报）, text 那一句（句尾“按 HH:MM 的推演”）}`；
@@ -191,6 +194,8 @@
 - 顶层 `lan`（`lan.check` 的结果，总是有）、`wake`（给 `labmon wait` 的全局消息 `[{key, msg, projects, host}]`；作废与被挤掉的 `void:` 另带 `job: [项目, 任务]`（`overview._voided`，`labmon wait --job` 按它认等的任务被作废，#135）；页面上的改动 `records.told` 给的 key 是 `page:<what>:<项目>:<毫秒>`、不带 `host`，#121；借来的主机空着半小时以上的 `borrow_idle:<主机>:<起点>`、不带 `host`，#43）、`sched`（调度卡；`use_sum` 是各项目用量（`share.use`）之和；`projects[]` 的 `person` 是项目算在谁名下、`pk` 是 `sched.json` 里的人员键，看板上没有的项目两者为 null，`puse` 是同一个 `pk` 名下各项目的用量合计（取完整的 `share.use`，含已归档的项目；与 worker 的 `person_use` 同一口径），普通用户看到的别人项目 `person` 为 null，#23）、`occ`（各卡被谁占着）、`fleet`、`disk`（共享盘，`disk.update`：其中 `ours` 是自己目录下的各单位 `dirs[]`（`u`、`name`、`b`、`t`、`p` 项目、`d24`、`d7`、`n`、`m`、`top`）与按项目的汇总 `projects{项目: {roots, b, d24, d7, pending, burst, gone, jobs}}`，项目快照的 `storage` 由它来，#53）、`projects`（各项目看板的摘要）。
   `sched.projects[]` 的 `focus`、`paused` 是 null 或 `{until（epoch 秒，null 为无期限）, hosts}`：`hosts` 为 null 是项目级的（主机清单 `[sched.focus]`、`[sched.pause]`，所有主机），否则是只在这几台单独下的（`--host`），`until` 取最晚的（#96）。项目级的暂停另带 `by`：谁下的（主机清单 `[sched.pause_by]`，`config.pause_by`；没记的为 null，当管理员下的，#16），只在几台单独下的暂停的 `by` 是 `{主机: 谁下的}`（不算 `once`，没记的为 null，#27）；普通用户看到的快照只留他自己项目的 `by`。
   `hosts[].status.overrides[]` 里项目级的暂停、优先带 `global: true`（worker 从 `sched.json` 接上的，每台都有一份），`once: true` 的是不带 `--host` 的 `pause --now` 给各台下的“只停一次”：停完照样挡着，全局暂停送到就删（最多 30 分钟）。经看板带 `--host` 下的暂停、优先另带 `by`：谁下的（看板账号名；没有的当管理员下的，#27），普通用户看到的快照里别人项目的指令去掉 `by`。
+- 顶层 `pool` 是算力池这一轮（`pool.tick`，#25；不持有服务租约的那台为空）：`{lists {"目录|清单": {project, root, jobs, host 此刻登记在哪（pool 是池里待放）, since 从何时起等（epoch 秒）, why 为什么还没放（放过去了的没有）}}, gone [这一轮换了容器、直接还的主机]}`；
+  项目车道的等待原因与 `pool_wait:` 告警取它。
 - 顶层 `regs` 是登记的全局视图（`overview._regs`，项目「管理」抽屉用，[workbench.md「项目的管理抽屉」](workbench.md#项目的管理抽屉)）：各主机目录下登记的清单，每台一项
   `{host, label, state active|pool|returned|unlisted（在用、算力池里待放的（host 为 pool，#24）、主机清单里已归还、主机清单里已没有）, returned 归还时刻（epoch 秒，没有为 null）, home 所在 worker_home, t 读到的时刻（在用的是那份状态的 t）,
   stale 这一轮没读到、沿用上一轮的, queues [{root, jobs, project, stop, gpus}] 或 null（在用主机这轮既没状态、也没读到文件，上一轮也没有）}`；
@@ -244,7 +249,8 @@
 | `overview/projects.json` | 已归档的项目 `{"archived": {id: {id, title, t, revision, by, regs, skipped}}}`（`projects.archive` 写、`restore` 和 `delete` 删；#161 之前归档的条目还带着 `config` 配置文件路径，不再读）；看板服务按它跳过与摘下项目，全局快照的 `archived[]` 取它 |
 | `overview/hostcheck.json` | 看板服务所在机的体检状态（`hostcheck.tick` 写，#166）：上一轮读到的 `win`、`wsl`，`since`（各项从何时起）、`upd`（待装更新与各条第一次看到的 `seen`）、`oom`（计数与近 24 小时的增量）、`warn`、`sent`（各 key 推过的本地日期）、`err` |
 | `overview/maint.json` | 计划维护（`labmon server maint`，#165）：`{until 到何时（epoch 秒；提前结束写 null）, by 谁开的, t 何时开的}`，到期自然失效；`/healthz` 的 `maint_until`、体检与全局快照的 `hostcheck.maint` 经 `maint.until` 读它 |
-| `overview/tell.jsonl` | 页面上的改动给实验会话的消息（7 天，`records.tell` 写）：`{t, what（move、rm、restore、pause、resume、config；看板升级时的 upgrade）, project, msg}`；`records.told` 每轮并进全局快照的 `wake`（#121） |
+| `overview/borrow.json` | 借用的提醒与看板的记忆（`borrow.check` 写，字段见 `labmon/borrow.py` 头部）；算力池借的那台另有 `pool` 子项（#25，`pool._mem` 写，再借时保留）：`{started 借来时的容器启动时刻, since 借来的时刻, busy 最近一次有池任务在跑, rest 休息到几点, rest_why, fail 最近一次借不成, fail_day 那天通知过管理员, nofit [[卡数, 单卡显存, 到期]], want 为哪个形状借的 {ngpu, vram}}` |
+| `overview/tell.jsonl` | 页面上的改动给实验会话的消息（7 天，`records.tell` 写）：`{t, what（move、rm、restore、pause、resume、config、pool（算力池放、搬、回池，`src` 为「算力池」，#25）；看板升级时的 upgrade）, project, msg}`；`records.told` 每轮并进全局快照的 `wake`（#121） |
 
 状态根目录的 `server.json`（`lease.py`，#163，不进备份）：`{id 这台看板服务（机器名-随机串）, primary 本机标记（读不到租约时照它）, role, since, t, homes {worker_home: {holder, renew, ttl, now 共享盘此刻的时刻, at 本机读到的时刻, bad}}}`。
 每个 `worker_home` 下的 `labmon_server.json` 是服务租约本身：`{holder 持有的看板服务 id（释放后为空串）, renew 最后续约（共享盘时钟的 epoch 秒）, ttl 秒}`，旁边 `labmon_server.json.lock` 是互斥用的锁（它的修改时刻就是读共享盘时钟用的）；worker 不读它们。

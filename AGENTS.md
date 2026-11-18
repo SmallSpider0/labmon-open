@@ -119,6 +119,7 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 登录账号在组内人员表里的名字（只认账号库的显式绑定 `fleet_person`，#19：不读主机清单、不按同名猜）、主机上的使用人；后台与历史记录按已登记的人员统计（#70） | `users.person_of`、`users.people_of`（批量）、开通与补绑定前的核对 `users._check_bind`、开通时可选的人 `users.free_people`、`users.add`、`users.bind_person`、名册删人前 `users.removing_person`（账号库同一把锁）；删人时唯一的清理入口 `users.remove`；`fleet.host_holder`；旧数据 `fleet.legacy_person`；项目算在谁名下（按人的公平份额，#23）`fleet.project_people`，写进 `sched.json` 的人员键 `fleet.share_key`；登记人员 `fleet.registered_people`、`fleetboot.set_person`，人员卡与账号详情共用 `personCard`、`directoryDrawer`（overview.html） |
 | 组内服务器的状态文件；这一台正借着；借给了谁（借用中的用量算给他） | `fleet.state_file`；`fleet.borrowed`；`fleet.borrower` |
 | 算力池（#24：保留主机 id `pool` 与池登记的 worker_home；入池开关 `lend`、`lend_hours` 的解析、时段判断、读写与页面上那一句；池成员；池清单收不收、撤回在哪撤；池车道；别处 `after=` 等池里的） | `config.POOL`（worker 另有一份 `POOL`）、`config.pool_home`（模板同借用 `config._guest_tpl`）；`fleet.lend_span`、`fleet.lend_open`；`pool.set_lend`（`POST /api/pool/lend`，换人时 `config.set_fleet_holder` 去掉）、`pool.lend_view`（`me.servers` 与组内服务器的 `lend` 同一份）、`pool.member`（`users.may_host` 的 pool）、`pool.need_holder`、`pool.locate`；worker 的 `pool_refuse`、`Worker.pool_todo`；`collect._lane` 的 `pool`；页面上 `lendPop`、`lendAct`、`lendBadge`、`myServersSec`（overview.html） |
+| 算力池 C（#25：自动借、放、搬、还与收回；每轮工作台采集里、快照写盘前，只在主那台；还的理由 R1 主人回来、R2 时段与租期截止（`borrow.cutoff`）、R3 关了入池或出了时段、R4 `POOL_IDLE_S` 没有池任务、R5 换了容器；休息期、失败退避、nofit 记忆在 `borrow.json` 这台的 `pool` 子项；池清单队首被依赖挡住的由 worker 给；放之前问 `fit --list --json`；换了容器的池借主机不重新拉起 worker） | `pool.tick`（`_returns`、`_place`、`want_borrow`；结果进全局快照的 `pool`，`overview.collect` 的 `pool_tick`）、`pool.reclaim`（`POST /api/pool/reclaim`）、容器核对 `pool._box`、`pool.relaunch_ok`（`overview` 的 relaunch 用）；`borrow.begin(pool=True)`、`borrow.finish(gone=True)`；worker 的 `guest.owner`（`Worker.guest_scan`；`keep.pool` 时 `guest_block` 整台不放、`offers` 为空）、状态的 `pool_heads`、`fit_head`（`fit --list --json`）；事件种类 `pool`；页面上 `reclaimPop`、`lendLent`（overview.html），`hostShort`、`borrowText`、`borrowBadge` 的池分支（common.js） |
 | 租期到期时刻；租期提醒的档（到期前 24、6 小时各一次，已进更近一档不补远的；相近到期合成一组） | `health.lease_end`；`health.lease_due` |
 | 掉线与恢复判定（连续至少 2 次、持续 `DOWN_S` 秒连不上才算掉线；工作台主机、组内服务器、项目页同一条）；换了新容器（续租或重启） | `health.link_step`；`health.container_step` |
 | 平台操作（核对、续租、开保活、关机、开机、换人、借来用；自用主机与组内服务器同一套） | `fleetops.run_*`（中文名 `fleetops.OP_NAMES`）；核对的比对 `fleetops.reconcile`（纯函数）；停平台作业、提交克隆并等运行 `fleetops.stop_job`、`fleetops.submit_job`（续租、换人、开关机共用，进度记进 `op.json`）；出错时这一台的状态一句话 `fleetops._note` |
@@ -128,7 +129,7 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 命令行里保活的那几句（在跑：几点起、nvidia-smi 里的 PID 与卡、显存；停着、不拉起的原因、对方停不了的、近 1 小时被拉起；归属取状态里 `gpu_procs` 的 `owner`、`ka`，不另判，#61） | worker 的 `ka_lines`（`labmon worker status` 与看板的 `api.status` 共用；状态的 `keepalive`、`gpu_procs[].t0`） |
 | 要卡时停了的保活又被拉起（找调用者与看门狗、记事件与状态的 `kafight`；旧 `gpu_queue.sh` 拉的不算）；ka.sh 日志里哪条 `RESTORED` 是这台的（共享盘上各容器共用：按此刻保活的进程组与它的启动时刻认，#123）；进程启动时刻（epoch 秒，容器启动时刻也用它） | worker 的 `ka_restarted`、`ka_caller`、`ka_others`；记一次 `Worker.ka_fought`（推迟中保活自己没了 `Worker.ka_gone`）；`Worker.ka_groups`（`KA_LOG_LAG`，日志时刻 `ka_log_time`）；`started_at`（`host_info` 也调）；重启后找回近 1 小时的次数与“停着保活”（状态的 `kafight.hits`、`ka_stop`）`Worker.load_prev`（#124） |
 | 保活看门狗（认定：确定的、可能的，下面在跑程序的不算确定；借来的主机上平时只列出来，保活真被拉起才暂停、还卡时恢复；它正持着平时不持的文件锁时这一轮不暂停、不停保活） | worker 的 `watchdogs`（`script_of`、`refs`、`ours`）、`freeze`（`ka_restarted` 调）、`thaw`、`Worker.watch`；进程持着的文件锁 `held_locks`，平时持的锁 `Worker.note_seen`（`frozen.json` 的 `seen[].locks`、`locks_t`，读 `lock_base`），要不要推迟 `Worker.lock_busy`（推迟中 `Worker.ka_wait`）；`borrow.finish` 调 `thaw`；页面上借用抽屉 `borrowSec` 的看门狗一行 |
-| 平台操作在不在做；哪些服务器正在做（探测、保活守护、借用、掉线判定、自动预备续租都问它） | `fleetops._live`；`fleetops.busy()` |
+| 平台操作在不在做；哪些服务器正在做（探测、保活守护、借用、算力池自动借、掉线判定、自动预备续租都问它） | `fleetops._live`；`fleetops.busy()` |
 | 自用主机当成组内的一台（换人、关机、续租、配额与组内页列表；字段与 `fleetview.view` 的 servers 同名，组内页的卡片与抽屉同一套模板，差别只在按钮 `srvBtns` 与操作确认的文字；平台操作口径的 `state`、`work` 与样本 `sample` 分开） | `fleetboot.mine`；自用主机的「worker」节 `workerSec`（overview.html） |
 | 服务器的池类型文字（自用 / 公用 / 专用） | `fKind`（overview.html） |
 | 人的缩写与头像（末尾带数字取首字母 + 数字，多段名取各段首字母，否则前两个字；颜色沿用共享盘上这人的配色 `D.disk.colors`（disk.py 经 `config.pick_color` 定），没有的用主色；角上的状态点由调用方传）；账号名换成组内人员名（账号库的 `fleet_person`，读不到写账号名，#15） | `pabbr`、`pfav`（人员卡、人员抽屉、服务器卡与抽屉、保活守护、分配一台；「我」的头像 `accAv` 取 `pabbr`）；`acctPerson`（项目归属）（overview.html） |
@@ -139,7 +140,7 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 可共享（除保活外的显存、利用率、CPU、内存都低于 `[fleet] share`） | `fleet.shareable`（`analyze` 与 `from_worker` 共用） |
 | 预备续租（取消时记下这一期，自动预备时段里取消过的不再自动预备）、续租后拉起 worker | `renew.reserve`、`renew.cancel`、`renew.begin`、`renew.after`；页面上自用主机的按钮 `renewBtns`，续租一台的确认 `goRenew`（overview.html，都由主机页与组内服务器抽屉共用） |
 | 后端看 worker 状态里运行中任务的预计结束（续租与借用的截止判断共用） | `renew.eta_of` |
-| 借用（借来、约定时间与对方租期取早、补齐指令、到点提醒、要还、归还） | `borrow.begin`（页面上点的经 `fleetops.run_borrow` 在后台跑、显示进度）、`borrow.cutoff`、`borrow.check`、`borrow.request_return`、`borrow.cancel_return`（撤销跑完就还）、`borrow.finish`；页面上 `borrowText`、`borrowBadge`（common.js，两个页面共用；项目快照的主机带上 `borrow.check` 算好的 borrow），操作按钮 `borrowBtns`（overview.html，抽屉与主机页共用） |
+| 借用（借来、约定时间与对方租期取早、补齐指令、到点提醒、要还、归还；算力池借的同一套，按 `borrow_pool` 分支：不写 `borrow_by`、不唤醒会话、换了容器 `finish(gone=True)`） | `borrow.begin`（页面上点的经 `fleetops.run_borrow` 在后台跑、显示进度；`pool=True` 是算力池借）、`borrow.cutoff`、`borrow.check`、`borrow.request_return`、`borrow.cancel_return`（撤销跑完就还）、`borrow.finish`；页面上 `borrowText`、`borrowBadge`（common.js，两个页面共用；项目快照的主机带上 `borrow.check` 算好的 borrow），操作按钮 `borrowBtns`（overview.html，抽屉与主机页共用） |
 | 按钮旁的小弹窗（短确认、短表单、验证码；同一时间一个，状态在 `POP`；点外面、Esc 取消，有输入的点外面不关；窄屏贴在屏幕底部，让出底栏与软键盘）与按钮配色（主色推荐、红框会中断、琥珀框撤销，主色灰掉时灰底灰字） | `popConfirm`、`popToggle`、`popClose`、`closePop`、`fitPops`；平台操作的弹窗 `opPop`（overview.html） |
 | 平台操作确认的风险分层（#14：一句结论 → 要勾才动的风险与勾选框 → 折起来的细节，开合记在 `POP.more`；续租一台、关机的弹窗与换人向导共用）；会中断什么的那句 | `riskSay`、`riskNeed`、`riskMore`；`busyText`（批量续租的注意 `renewWarn` 也用它，overview.html） |
 | 批量续租（#14：右侧抽屉 `#/fleet/renew`，提醒条点的 `#/fleet/renew/<id>` 只勾那一台；一台一行，本行勾「已说好」；勾选在 `RPICK`；没登录时验证码在抽屉底部（`FCAP.pop = "renew"`），开始后进度在抽屉顶上） | `renewDrawer`（`rpList`、`rpBody`；`DH.renew`，overview.html） |
@@ -252,16 +253,20 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
   例外是保活守护：有实验时只让出看板自己开的保活。维护者 2026-11-17 确认（#10）：开启守护且未借用、没有平台操作时，
   若至少两轮有效探测相隔 10 分钟、各 GPU 利用率持续为零，只有在 `fleet_guard.sh` 现场复核容器、进程出生时钟、唯一保活进程组及 GPU 无其他负载后，
   才可经该主机配置的保活脚本停掉用户自行开启的空转保活，改由看板开启保活。无法核实归属时告警，其他进程保持只读。
-  另一个例外是借用（borrow.py）：用户勾“已和这人说好”后才拉起 worker，只许 GPU 空着、只有 ka.sh 管的保活，或对方轻用（除保活外各项用量都低于 `[fleet] share`，用户另勾“也借”，11-06 定）时借。
+  另一个例外是借用（borrow.py），有两种授权：
+  - **手动借**：用户勾“已和这人说好”后才拉起 worker，只给用户自己的项目，实验会话不自己去借。只许 GPU 空着、只有 ka.sh 管的保活，或对方轻用（除保活外各项用量都低于 `[fleet] share`，用户另勾“也借”，11-06 定）时借。
+  - **算力池**（维护者 2026-11-17 定，#1、#13、#25）：持有人在看板上给自己的服务器开「入池」（可限时段），或由管理员勾“已和这人说好”代开。入池期间、在时段内，看板可以自动借来（`pool.tick`），给入池成员的项目用；
+    只许 GPU 上除 ka.sh 管的保活外没有进程时借（对方轻用不借）。主人回来（worker 判出对方超出预留，或有了新的 GPU 进程：`guest.owner`）、关了入池、出了时段、没活了就不再放新的池任务，在跑的跑完就还；
+    换了容器直接还（`finish(gone)`：只停 labmon 的 worker、删这台的临时指令，旧容器的进程与保活都不动）；持有人或管理员点「收回」时，按停法停下池任务、重排到别处。实验会话只经 `labmon worker add pool` 提交，不直接往借来的主机上加清单、不自己借。
   ka.sh 管的保活指 python 跑它的保活脚本，命令行写完整路径，或相对路径按进程工作目录还原后是它（维护者 2026-11-17 定，#29）；借前逐个保活进程核对在 `ka.sh running` 列出的进程组里（`fleet_guard.sh` 的只读 `kacheck`）。还时只停自己的 worker、
-  占位任务与 ka.sh 保活，只删 `/tmp/labmon` 与这台的临时指令，`/tmp` 下别的文件不动。只限用户自己的项目，实验会话不自己去借。
+  占位任务与 ka.sh 保活，只删 `/tmp/labmon` 与这台的临时指令，`/tmp` 下别的文件不动。
   借用中 worker 可以暂停（SIGSTOP）确定的保活看门狗（`watchdogs` 认定），还时恢复（`thaw`，核对 PID 与启动时刻）；可能的只列出来，别的进程一概不动。
   它正持着平时不持的文件锁时（读 `/proc/locks`）这一轮不暂停：暂停在锁里，对方的锁会一直占到还卡（#38）。
   再一个例外是扫本地盘的路径（维护者 11-10 允许扫别人的，#149）：只在平常那次探测里顺带，走同一条 ssh 与探针（`LABMON_SCAN`），只用 sh、find、awk；
   只读元数据、不读文件内容，不动进程，不在对方盘上写任何东西，结果经标准输出带回、汇总存在本机；`nice -n 19` 加 `ionice -c3`，限时 60 秒，超时这次作废、标“没扫完”；
   根盘新写入涨过 64 MiB 才再扫、两次至少隔 1 小时；按前三级目录汇总只送回前 30 个；对方在跑实验照样扫（维护者 11-10 定，#155：实测 1.1 万条 0.24 秒、负载不变）、借用中不扫（[fleet.md「本地盘」](docs/fleet.md#本地盘)）。
 - **看板一律要登录，平台操作只给管理员，公网按账号许可。** 维护者 2026-11-14 授权（#275）：内网沿原规则；公网还需该管理员的 `public_ops`，令牌仍需 `admin` 作用域，统一经 `users.can_ops`。许可默认关闭，降级清除；设置入口只在内网，另有本机命令行。 不加“来自本机就放行”之类的捷径（公网入口经隧道来的请求源地址也是 127.0.0.1）；新路由先登记进 `serve.ROUTES`，
-  平台操作与借还路由写 `admin=True, ops=True`；部署、worker 代码推送与池管理沿原 `admin=True, lan=True`，不随公网平台许可开放。口令、设置码、令牌与会话的原文不落盘、不打印、不进日志与记录，不放进地址（令牌只走 `Authorization` 头）。
+  平台操作与借还路由写 `admin=True, ops=True`；入池（`/api/pool/lend`）、收回（`/api/pool/reclaim`）只给这台的持有人本人，或有平台操作权限的管理员（代开入池须勾“已和这人说好”；`pool.need_holder`、`pool.set_lend`、`pool.reclaim` 核）；部署、worker 代码推送与池管理沿原 `admin=True, lan=True`，不随公网平台许可开放。口令、设置码、令牌与会话的原文不落盘、不打印、不进日志与记录，不放进地址（令牌只走 `Authorization` 头）。
 - **只有主动东西。** 两个看板服务同时跑时（交接、冷备恢复），只有持有服务租约的那台采集、写 worker 的输入、做平台操作、改 worker、借用、发通知；
   新加的这类动作先过 `lease.need` 或 `lease.primary`（[deploy.md「主与备用」](docs/deploy.md#主与备用服务租约)）。租约文件写坏了不自动抢，由维护者 `labmon server lease --take`。
 - **测试不弹授权框、不发通知。** 测试与手动跑都带 `LABMON_NO_NOTIFY=1 LABMON_NO_KEYCHAIN=1`；内网状态用 `LABMON_LAN=on|off` 指定。

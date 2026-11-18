@@ -91,7 +91,7 @@ labmon wait    -c monitor.toml --job 任务   # 同时等任务跑完（问看�
 
 labmon worker start 29                 # 服务器端 worker：部署 main 上已提交的版本并拉起（已在跑则无缝替换；start、stop、limit 要 admin 令牌）
 labmon worker add 29 ROOT JOBS --project <id>   # 登记一条队列；之后改清单即可
-labmon worker add pool ROOT JOBS --project <id>  # 交给算力池（池成员；入池在「我的账号 → 我的服务器」，docs/fleet.md「算力池」）
+labmon worker add pool ROOT JOBS --project <id>  # 交给算力池（池成员；入池在「我的账号 → 我的服务器」）：看板自动借入池的服务器、放上去跑，主人回来或收回就停下重排（docs/fleet.md「算力池」）
 labmon worker status 29 | fit 29 任务名… | fit 29 ROOT JOBS --list --project P | limit 29 heavy=2 | rm 29 ROOT JOBS | stop 29   # 看板项目「管理」里能按主机把清单换到别的主机、不用一台，新主机页能接上上一台的
 labmon pause <项目> [--until 11-10] [--now] [--host 29] | resume | focus <项目> --until … | unfocus | drain 29 | undrain 29   # 临时指令（项目的缺省所有主机；--until：11-10、11-10 18:30、明天 9:00、+30m、+3h）
 labmon project init 29 [项目]           # 按共享盘目录规范建目录
@@ -149,7 +149,7 @@ labmon/workerctl.py     在看板服务那台上部署、拉起、停止 worker�
 labmon/renew.py         自用主机的预备续租，以及续租后拉起 worker、放行；运行中任务的预计结束 eta_of（续租与借用的截止判断共用）
 labmon/rebalance.py     多主机负载均衡的提示：把各主机 worker 算的 offers 汇成每个项目一条挪法建议（rebalance: 告警），不改清单与放行
 labmon/borrow.py        借用组内服务器：借来拉起 worker、按对方历史用量推荐给这人留的量、约定时间准入、跑完自动归还；给 labmon wait 的全局消息
-labmon/pool.py          算力池：入池开关（我的服务器）、池成员、池清单撤回时在哪撤；池清单经 worker add pool 登记（docs/fleet.md「算力池」）
+labmon/pool.py          算力池：入池开关（我的服务器）、池成员、池清单撤回时在哪撤；每轮自动借、放、还（tick）与收回（docs/fleet.md「算力池」）
 labmon/fleet.py         组内服务器的探测、归类、保活守护（fleet_guard.sh）与状态文件
 labmon/fleetview.py     组内服务器页面的数据（概览、详情曲线、按人）与命令行 labmon fleet status
 labmon/fleetops.py      平台操作：核对、续租（自用主机与组内服务器共用）、开保活、关机、换人、开机、借来用的后台执行与进度
