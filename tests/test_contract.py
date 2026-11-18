@@ -157,7 +157,7 @@ class ContractTest(unittest.TestCase):
             self.assertIn(k, j)
         self.assertLessEqual({"cpus", "cpu_src"}, set(j["est"]))                                       # CPU 估计与记账（主机页 CPU 一行、任务详情）
         self.assertIsInstance(j["acct"]["cpu"], NUM)
-        self.assertLessEqual({"ram", "margin", "gpus", "cpu", "cpu_cap"}, set(st["room"]))            # 测试里读不到配额：cpu、cpu_cap 为 None
+        self.assertLessEqual({"ram", "margin", "gpus", "cpu", "cpu_cap", "owner"}, set(st["room"]))   # 测试里读不到配额：cpu、cpu_cap 为 None；owner 不放的卡（fit 用）
         w = st["waiting"][0]
         self.assertEqual((w["name"], w["project"], w["link"], w["held"], w["dep"]), (wait["name"], wait["project"], wait["project"], None, None))
         self.assertEqual(w["pos"]["n"], 1)                                                              # 排位：等待表“排第几”

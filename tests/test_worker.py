@@ -400,7 +400,7 @@ class AdmissionTest(WorkerBase):
 
     def test_fit_vram_short(self):
         # 要 32.2+1 GiB，卡只空 29.3 GiB：不开车道
-        self.assertIn("显存不够", self.fit_case("GPU-aaa:30000:48000:30", 30000))
+        self.assertIn("没有可用显存够 32 GiB 的卡", self.fit_case("GPU-aaa:30000:48000:30", 30000))
 
     def test_fit_card_full_not_blocked(self):
         # 显存够、卡的利用率已到 95%：利用率是“有核函数在跑”的时间占比，到 100% 不等于算满，不据此劝阻（#67）；写同类在这张卡上并行 2 条时约要多久
@@ -812,6 +812,111 @@ class AdmissionUnitTest(UnitBase):
         self.hosts.register("t", "qa", "bp")
         self.fit_status()
         self.assertIn("清单：t 上 qa/jobs/q.txt", self.fit_out(["dup"])["dup"])
+
+    def fit_two_cards(self, host="t", util=None, running=None, room=None, **kw):
+        """两张 44 GiB 空闲的卡（卡 0 上有一个任务在跑），内存与 CPU 都够；util 是各卡近 10 分钟利用率 {uuid: %}。"""
+        now = self.hosts.now()
+        room = dict({"ram": 50.0, "margin": 8.0, "gpus": {"GPU-a": 45000.0, "GPU-b": 45000.0}, "cpu": 6.0, "cpu_cap": 8}, **(room or {}))
+        info = dict({"gpus": [{"i": 0, "uuid": "GPU-a", "free": 45000.0}, {"i": 1, "uuid": "GPU-b", "free": 45000.0}], "mem": {}, "disk": [],
+                     "started": now - 3600}, **kw.pop("info", {}))
+        self.hosts.status(host, info=info, room=room, util10=util or {},
+                          running=running if running is not None else [running_job("r0", "bp", gpus=["GPU-a"])], **kw)
+
+    def test_fit_goes_through_place(self):
+        # #37/#35 B：fit 的判断就是真放行的 place：tag 到上限、登记的 --gpus 限卡、对方超出预留的卡（状态 room.owner）都照挡；
+        # 旧 fit 只看显存、内存、CPU 三段，这几种都会说“可以开车道”
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("x_s0", "bp", now - 3600, now - 1800, tag="tt", ram_peak=1.0, vram_peak=1000.0, cores_peak=1.0)])
+        self.hosts.queues({"g": ["x_s1|true   # tag=tt"]}, project="bp")
+        f = self.hosts.register("t", "g", "bp")
+        self.fit_two_cards(limits={"tags": {"tt": 1}}, running=[running_job("x_s0", "bp", gpus=["GPU-a"], tag="tt")])
+        self.assertIn("tag tt 已有 1 个在跑（上限 1） → 排在已有车道后面", self.fit_out(["x_s1"])["x_s1"])
+        f.write_text(json.dumps(dict(json.loads(f.read_text()), gpus=[0])))         # 这条清单只用卡 0，卡 0 只剩 0.5 GiB
+        self.fit_two_cards(room={"gpus": {"GPU-a": 500.0, "GPU-b": 45000.0}})
+        self.assertIn("没有可用显存够 1 GiB 的卡", self.fit_out(["x_s1"])["x_s1"])
+        f.write_text(json.dumps(dict(json.loads(f.read_text()), gpus=None)))
+        self.fit_two_cards(room={"gpus": {"GPU-a": 500.0, "GPU-b": 45000.0}, "owner": ["GPU-b"]})
+        self.assertIn("没有可用显存够 1 GiB 的卡", self.fit_out(["x_s1"])["x_s1"])
+        self.fit_two_cards(room={"gpus": {"GPU-a": 500.0, "GPU-b": 45000.0}})
+        self.assertIn("可以开车道并行：卡 1 可用 43.9 GiB", self.fit_out(["x_s1"])["x_s1"])
+
+    def test_fit_cpu_bound_and_throttle(self):
+        # #37：卡 0 近 10 分钟利用率 30%，上面在跑的 r0 近 10 分钟各窗口平均 1.0 核、给了 1 核（跑满）：不在卡 0 上开，说先给它加核；
+        # 卡 1 空着照开。只有一张卡时不开；容器近 1 分钟 35% 的周期被限流：整台不开，说先减线程；利用率 ≥50% 的卡不判 CPU 受限
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("x_s0", "bp", now - 3600, now - 1800, ram_peak=1.0, vram_peak=1000.0, cores_peak=1.0)])
+        self.hosts.queues({"c": ["x_s1|true", "x_s2|true"]}, project="bp")
+        self.hosts.register("t", "c", "bp")
+        use = {"t": now, "pk0": now - 700, "pks": [[now - 60 * i, 0.98] for i in range(10)], "cores": 1.0}
+        r0 = running_job("r0", "bp", gpus=["GPU-a"], est={"cpus": 1, "ram": 1.0, "vram": 1.0}, use=use)
+        self.fit_two_cards(util={"GPU-a": 30, "GPU-b": 0}, running=[r0])
+        out = self.fit_out(["x_s1", "x_s2"])
+        self.assertIn("可以开车道并行：卡 1", out["x_s1"])
+        self.assertIn("可以开车道并行：卡 1", out["x_s2"])                  # 卡 1 上的不受卡 0 的 CPU 受限影响
+        self.assertIn("r0 1.0/1 核", self.fit_lines()[0])                      # 卡的那行标出来
+        self.fit_two_cards(util={"GPU-a": 30, "GPU-b": 0}, running=[r0], room={"gpus": {"GPU-a": 45000.0, "GPU-b": 500.0}})
+        self.assertIn("卡 0 近 10 分钟利用率 30%，低是因为在跑的 r0（近 10 分钟平均 1.0 核，给了 1 核）跑满了给它的核 → 不在这张卡上开新车道："
+                      "先给它那条车道加核（清单行 cpus=）；这台还能给 6 核", self.fit_out(["x_s1"])["x_s1"])
+        self.fit_two_cards(util={"GPU-a": 80, "GPU-b": 0}, running=[r0])
+        self.assertIn("可以开车道并行", self.fit_out(["x_s1", "x_s2"])["x_s2"])
+        self.fit_two_cards(util={"GPU-a": 30}, running=[r0], info={"press": {"thr": 35.0}})
+        self.assertIn("容器 CPU 在限流（近 1 分钟 35% 的周期被限流） → 不开新车道：先减线程", self.fit_out(["x_s1"])["x_s1"])
+
+    def test_fit_hint_only_takes_an_empty_card(self):
+        # 只有清单提示值（没有实测）的行：只放空卡、不与别的任务同卡（旧 fit 一律不开）；空卡用掉后下一行不开
+        self.hosts.queues({"h": ["v1|true   # vram=10", "v2|true   # vram=10"]}, project="bp")
+        self.hosts.register("t", "h", "bp")
+        self.fit_two_cards()
+        out = self.fit_out(["v1", "v2"])
+        self.assertIn("可以开车道并行：卡 1 可用 43.9 GiB，要 11.0 GiB（提示值", out["v1"])
+        self.assertIn("没有实测的只放空卡、不与别的任务同卡：卡上都有任务在跑", out["v2"])
+
+    def fit_lines(self, names=("x_s1",)):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.m.fit(self.m.Paths("t"), list(names), None)
+        return [ln for ln in out.getvalue().splitlines() if ln.startswith("卡 ")]
+
+    def fit_list_out(self, root, jobs="jobs/q.txt", project="bp", hosts=("t",)):
+        import contextlib
+        import io
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.m.fit_list(self.m.Paths("t"), str(root), jobs, project, list(hosts))
+        return rc, out.getvalue()
+
+    def test_fit_list_across_hosts(self):
+        # #35 B：一条清单还会跑的行在共用 worker 目录的几台上能再开几条车道：按清单顺序、先给分到车道少的主机；跑完的（.done）、
+        # 在跑的不算；after=、成组、占位的单列；状态过期的主机写明没算；放不下的到此为止
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("j_s0", "bp", now - 3600, now - 1800, ram_peak=1.0, vram_peak=20000.0, cores_peak=1.0)])
+        q, = self.hosts.queues({"L": ["j_s1|true", "j_s2|true", "j_s3|true", "j_s4|true", "j_s5|true", "j_s6|true",
+                                      "dep|true   # after=j_s1", "grp|true   # gang=g:2", "hold_x|true   # gpus=0"]}, project="bp")
+        os.makedirs(q["state"])
+        Path(q["state"], "j_s1.done").write_text("")
+        self.hosts.register("t", "L", "bp")
+        self.fit_two_cards(running=[running_job("j_s2", "bp", gpus=["GPU-a"], root=str(self.d / "L"), queue="jobs/q.txt")],
+                           room={"gpus": {"GPU-a": 22000.0, "GPU-b": 45000.0}})
+        self.fit_two_cards(host="u", running=[])
+        self.hosts.status("old", age=600, info={"gpus": []})
+        rc, out = self.fit_list_out(self.d / "L", hosts=("t", "u", "old"))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("还会跑 7 行，在跑 j_s2", out)
+        self.assertIn("不分的 3 行（要等别的任务或成组开跑，留在原处）：dep（after=）、grp（成组 gang=g）、hold_x（占位）", out)
+        self.assertIn("没算：old 的 worker 没在跑（状态 10 分钟没更新）", out)
+        # 一行要 22.5 GiB：t 卡 0 只剩 21.5、卡 1 43.9，u 两张 43.9；先给分到少的：j_s3→t 卡 1、j_s4→u、j_s5 t 放不下→u、j_s6 哪台都放不下，到此为止
+        self.assertIn("== t ==\n  卡 0：可用 21.5 GiB，近 10 分钟利用率 —（样本不够）（在跑 j_s2）", out)      # 卡的样子是开车道之前的
+        self.assertIn("可再开 1 条车道：\n    j_s3 ← 卡 1", out)
+        self.assertIn("可再开 2 条车道：\n    j_s4 ← 卡 0：", out)
+        self.assertIn("j_s5 ← 卡 1", out)
+        self.assertIn("不再开：j_s6：没有可用显存够 21 GiB 的卡", out)
+        self.assertIn("合计可再开 3 条车道", out)
+        self.assertIn("其余 1 行（j_s6…）此刻哪台都放不下", out)
+        rc, out = self.fit_list_out(self.d / "nope", project=None)
+        self.assertEqual(rc, 2)
+        self.assertIn("还没登记：写 --project", out)
 
     def test_job_cmd_first_row(self):
         # 按名字找清单里的一行只有一处（job_cmd）：取第一条、跳过注释行，找不到为 None

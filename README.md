@@ -83,7 +83,7 @@ labmon wait    -c monitor.toml --job 任务   # 同时等任务跑完（问看�
 labmon worker start 29                 # 服务器端 worker：部署 main 上已提交的版本并拉起（已在跑则无缝替换；start、stop、limit 要 admin 令牌）
 labmon worker add 29 ROOT JOBS --project <id>   # 登记一条队列；之后改清单即可
 labmon worker add pool ROOT JOBS --project <id>  # 交给算力池（池成员；入池在「我的账号 → 我的服务器」，docs/fleet.md「算力池」）
-labmon worker status 29 | fit 29 任务名… | limit 29 heavy=2 | rm 29 ROOT JOBS | stop 29   # 看板项目「管理」里能按主机把清单换到别的主机、不用一台，新主机页能接上上一台的
+labmon worker status 29 | fit 29 任务名… | fit 29 ROOT JOBS --list --project P | limit 29 heavy=2 | rm 29 ROOT JOBS | stop 29   # 看板项目「管理」里能按主机把清单换到别的主机、不用一台，新主机页能接上上一台的
 labmon pause <项目> [--until 11-10] [--now] [--host 29] | resume | focus <项目> --until … | unfocus | drain 29 | undrain 29   # 临时指令（项目的缺省所有主机；--until：11-10、11-10 18:30、明天 9:00、+30m、+3h）
 labmon project init 29 [项目]           # 按共享盘目录规范建目录
 labmon project archive|restore <项目 id>  # 项目做完了收起（要求暂时没实验；移除登记、撤权重与指令、看板不再采集，不删数据）/ 加回
