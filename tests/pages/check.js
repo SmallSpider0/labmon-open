@@ -714,7 +714,7 @@ t("overview", "人员卡（#52）：借卡的用量算给借的人，主人那�
   const me = card("ME"), ow = card("OWNER");
   has(me, "实验 88%"); has(me, "+1 台"); has(page(O, "#/fleet/people/ME"), "借 OWNER · 15105"); has(me, "借 OWNER 的 15105 16 小时");
   has(ow, "借出 16 小时（35%）"); has(ow, "借给 ME 16 小时（15105）"); ok(!ow.includes("实验时利用率"), "借出不算进主人的利用率");
-  has(page(O, "#/fleet"), "fc-hs", "卡片墙"); ok((page(O, "#/fleet").match(/class="fc-hs"/g) || []).length === 5, "自用主机的卡也有逐小时条（关机的那台没有）");
+  has(page(O, "#/fleet"), "fc-hs", "卡片墙"); ok((page(O, "#/fleet").match(/class="fc-hs"/g) || []).length === 6, "自用主机的卡也有逐小时条（关机的那台没有）");
   const sa = page(O, "#/fleet/srv/srv-a"); has(sa, "近 7 天"); has(sa, "近 30 天");
   has(run(O, 'hourStrip(D.fleet.servers[0], true)'), "借给 ME");
   const ph = run(O, `perHist({d: {name: "ME", days: [{t: ${NOW - 86400}, h: {job: 20, lent: 0}, util_job: 90}], total: {...D.fleet.holders.find(h => h.holder === "ME")},
@@ -747,7 +747,7 @@ t("overview", "自用主机抽屉（#58）：与组内服务器同一套模板�
   // 人员抽屉里的那一行与抽屉标题同一句池类型（fKind）：以前写成“自用 srv-a 专用”
   const pm = page(O, "#/fleet/people/ME"), r0 = pm.indexOf('class="drow" data-drw="#/fleet/srv/srv-a"'), row = pm.slice(r0, pm.indexOf("</div>", r0));
   ok(r0 >= 0, "人员抽屉里没有 srv-a 那一行"); has(row, "自用"); ok(!row.includes("专用"), "人员抽屉把自用主机写成专用：" + row);
-  ok(run(O, "D.fleet.servers.concat(D.fleet.mine).map(fKind).join()") === "公用,公用,公用,公用,专用,自用");
+  ok(run(O, "D.fleet.servers.concat(D.fleet.mine).map(fKind).join()") === "公用,公用,公用,公用,专用,公用,自用");
   // 掉线的自用主机：红点、提醒条有它（以前 fleetAlerts 只看组内服务器）；租期快到的也提醒
   const dn = run(O, `(() => { const m = D.fleet.mine[0], o = {...m}; Object.assign(m, {state: "down", down: "连不上", since: ${NOW - 600}, sample: null, lease_end: ${NOW + 3 * H}});
     const r = [fDot(m), fleetAlerts().filter(a => a.startsWith("ME（srv-a）")), fleetDue().map(x => x.id)]; Object.assign(m, o); return r; })()`);
@@ -2583,7 +2583,7 @@ ta("auth", "路径前缀（#165）：工作台在 /pfx/、项目页在 /pfx/p/<i
 /* ---------- 算力池 B（#24）：入池开关、我的服务器、池清单 ---------- */
 // fetch 桩：记下 POST 的地址与正文；api/pool/lend 回一句与新的 servers
 const lendFetch = (C, servers) => run(C, `SF = []; fetch = (u, o) => { if (o?.body) SF.push([u, JSON.parse(o.body)]);
-  return Promise.resolve({ok: true, json: async () => u === "api/pool/lend" ? {msg: "存好了", servers: ${JSON.stringify(servers)}} : D}); };`);
+  return Promise.resolve({ok: true, json: async () => u.startsWith("api/pool/") ? {msg: "存好了", servers: ${JSON.stringify(servers)}} : D}); };`);
 ta("overview", "入池（#24）：组内卡片标「入池」，抽屉有「算力池」一行；管理员代开要勾「已和这人说好」，时段两格要么都填要么都空", async () => {
   const C = ovCtx(OV, RR, "#/fleet");
   const card = run(C, 'fleetCard(srvById("srv-g"))'); has(card, ">入池</span>"); has(tips(card), "入池，22:00 开始");
@@ -2621,6 +2621,44 @@ ta("auth", "「我的账号」的「我的服务器」（#24）：持有人自�
   ok(run(U, "POP") === null, "弹窗：" + JSON.stringify(run(U, "POP")));
   ok(JSON.stringify(run(U, "SF[0]")) === JSON.stringify(["api/pool/lend", {id: "srv-m", on: true, hours: null, ok: false}]), "请求：" + JSON.stringify(run(U, "SF")));
   has(page(U, "#/me"), "入池，全天", "存好后用回来的 servers 重画");
+});
+/* ---------- 算力池 C（#25）：借着的那台标「算力池借着」、只能「收回」 ---------- */
+ta("overview", "算力池借着的（#25）：卡片标「算力池借着」不带“借用中”，抽屉「给」写池里的清单、只有「收回」，收回要确认、POST api/pool/reclaim", async () => {
+  const C = ovCtx(OV, RR, "#/fleet");
+  const card = run(C, 'fleetCard(srvById("srv-h"))'); has(card, "算力池借着"); ok(!card.includes("借用中 · 算力池"), "池借的标签不该带“借用中”：" + text(card));
+  let dr = page(C, "#/fleet/srv/srv-h"); has(dr, "算力池里的清单"); has(dr, 'data-lend="rc"'); has(dr, "收回");
+  ok(!dr.includes('data-fop="bret"') && !dr.includes('data-fop="bnow"'), "池借的不该有「跑完就还」「现在还」"); clean(dr, "池借抽屉");
+  ok(!page(accCtx(OV, PUB_ME), "#/fleet/srv/srv-h").includes('data-lend="rc"'), "不能做平台操作的管理员不该能收回");
+  lendFetch(C, []);
+  await run(C, 'lendAct("rc", {id: "srv-h"})');
+  dr = page(C, "#/fleet/srv/srv-h"); has(dr, "停下池任务、重排到别处，几分钟内还回来"); has(dr, 'data-lend="rcgo"'); has(dr, "停下并收回"); clean(dr, "收回弹窗");
+  ok(run(C, "SF.length") === 0, "点「收回」只开弹窗，不该发请求");
+  await run(C, 'lendAct("rcgo", {id: "srv-h"})');
+  ok(JSON.stringify(run(C, "SF[0]")) === JSON.stringify(["api/pool/reclaim", {id: "srv-h"}]), "收回的请求：" + JSON.stringify(run(C, "SF")));
+  ok(run(C, "POP") === null && run(C, "LMSG.m") === "存好了", "收回后该关弹窗、留一句");
+});
+ta("auth", "「我的服务器」里借给算力池的那台（#25）：标「算力池借着」、持有人能收回", async () => {
+  const mine = [{id: "srv-m", holder: "OWNER", label: "OWNER", pool: "pool-public", lend: {on: true, hours: null, open: true, lent: true, returning: false, rest: null, say: "算力池借着"}}];
+  const U = accCtx(OVU, {...OWNER_ME, servers: mine, pool_member: false}, "#/me");
+  run(U, "ACC.at.me = 1");
+  let m = page(U, "#/me"); has(m, "算力池借着"); has(m, 'data-lend="rc"'); clean(m, "我的服务器：借着");
+  const back = [{...mine[0], lend: {on: true, hours: null, open: true, lent: false, returning: false, rest: NOW + 3 * H, say: "入池，休息到 12:00（收回了）"}}];
+  lendFetch(U, back);
+  await run(U, 'lendAct("rc", {id: "srv-m"})'); await run(U, 'lendAct("rcgo", {id: "srv-m"})');
+  ok(JSON.stringify(run(U, "SF[0]")) === JSON.stringify(["api/pool/reclaim", {id: "srv-m"}]), "请求：" + JSON.stringify(run(U, "SF")));
+  m = page(U, "#/me"); has(m, "休息到"); ok(!m.includes('data-lend="rc"'), "还回来以后不该再有收回");
+});
+t("overview", "算力池借来的主机（#25）：短名「池 X」、借用那一句说清何时还；「换到其他主机」不列它", () => {
+  const C = ovCtx(OV, RR);
+  const b = {holder: "PERSON7", pool: true, since: NOW - 2 * H, cutoff: NOW + 8 * H, why: "PERSON7 的入池时段结束", returning: null};
+  ok(run(C, `hostShort({id: "srv-h", borrow: ${JSON.stringify(b)}})`) === "池 PERSON7", "短名");
+  const say = run(C, `borrowText(${JSON.stringify(b)}, ${NOW})`); has(say, "算力池借 PERSON7 的"); has(say, "回来用、关了入池");
+  has(run(C, `borrowText(${JSON.stringify({...b, returning: NOW})}, ${NOW})`), "算力池要还给 PERSON7");
+  has(run(C, `borrowBadge(${JSON.stringify(b)}, ${NOW})`), "算力池借着");
+  const tb = () => run(C, `regTo(D.regs.find(x => x.host === "srv-old2"), "proj-b").map(t => t.id).join()`);
+  ok(tb() === "srv-a,srv-b", "前提：" + tb());
+  run(C, 'D.hosts.find(h => h.id === "srv-b").borrow = {holder: "PERSON7", pool: true}');
+  ok(tb() === "srv-a", "池借来的主机不该能搬去：" + tb());
 });
 t("reg", "交给算力池的清单（#24）：项目抽屉里一行「算力池 · 等着放到某台」、能撤回；接上卡不搬池里的；池成员能撤", () => {
   const C = ovCtx(OV, RR);

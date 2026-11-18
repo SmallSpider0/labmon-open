@@ -270,7 +270,11 @@ def _fleet(mine_host: dict) -> dict:
                 guard={"on": True, "status": "fail", "fail": {"msg": "ssh 失败"}, "at": NOW + 600, "since": NOW - H}, reserve=None),
         _server("srv-f", "PERSON5", "off", off={"t": NOW - 86400, "holder": "PERSON5"}, lease_end=None, guard={"on": False, "status": "off", "since": None}, reserve=None, idle_h=0, strip=[None] * 168),
         _server("srv-g", "PERSON6", "idle", pool="pool-private", public=False, guard={"on": True, "status": "wait", "since": NOW - 30 * 60, "at": NOW + 30 * 60},
-                lend={"on": True, "hours": "22:00-09:00", "open": False, "say": "入池，22:00 开始"})]
+                lend={"on": True, "hours": "22:00-09:00", "open": False, "say": "入池，22:00 开始"}),
+        # 算力池借着的（#25）：持有人开了入池，看板自动借来跑池里的清单（borrow.pool，by 是「算力池」；lend.lent）
+        _server("srv-h", "PERSON7", "job", guard={"on": False, "status": "borrowed"}, reserve=None,
+                borrow={"since": NOW - 2 * H, "until": NOW + 8 * H, "for": None, "by": "算力池", "away": None, "returned": None, "pool": True},
+                lend={"on": True, "hours": None, "open": True, "lent": True, "returning": False, "rest": None, "say": "算力池借着"})]
     # 自用主机（#58）：字段与组内服务器同名，sample 与探针的 analyze 同形（fleet.from_worker 由 worker 状态换出：按任务归组、不带 pid、没有保活进程树单独的量）
     info = mine_host["status"]["info"]
     mine = [{"id": "srv-a", "holder": "ME", "job": "ME", "label": mine_host["label"], "pool": "pool-private", "ssh": "root@192.0.2.1", "port": 15155, "mine": True, "public": False,
