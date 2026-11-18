@@ -4543,12 +4543,14 @@ class Worker:
             "guest": {"keep": self.keep(), "other": {"vram": self.other["vram"], "ram": self.other["ram"] and round(self.other["ram"], 2),
                                                      "cpu": self.other["cpu"] and round(self.other["cpu"], 2)},
                       "back": list(self.back.values()), "quiet": sorted(set(self.back_last) - set(self.back)), "tight": self.tight,
-                      "hit": self.hit, "away": self.away_state()} if self.guest() else None,
+                      "hit": self.hit, "away": self.away_state(),
+                      "block": self.guest_block()} if self.guest() else None,        # 整台不放新任务的原因（guest_block）：fit 照它挡整台
             "util10": {k: round(sum(x[1] for x in w) / len(w)) for k, w in self.uwin.items() if len(w) >= 3},
             "disk": self.disk.brief() if self.disk else None,
             # 按记账还能放多少：内存 GiB、各卡 MB（整卡任务记账超过卡时写 0）、CPU 核（cpu_cap 是记账上限：配额向下取整；读不到配额都为 None）
             "room": {"ram": ram_free(S), "margin": S["margin"], "gpus": {u: max(0.0, v) for u, v in card_free(S).items()},
                      "cpu": cpu_free(S), "cpu_cap": S["cpu_cap"], "other_cpu": S["cpu"],   # other_cpu：认得准的 labmon 之外的核数（fit 判整机独占，同 intruders）
+                     "keep": {c["uuid"]: round(c["keep"]) for c in S["cards"] if c["keep"]},   # 各卡给对方留着的 MB（keep_left）：fit 的整卡封顶 card_need 照它
                      "owner": sorted(S["owner"])},        # 不放的卡（对方超出预留或刚回落、有停不了的保活）：fit 的快照照它（fit_snapshot）
             "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"],
                         "empty": q.get("empty", False), "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {})} for q in queues],
@@ -5492,7 +5494,7 @@ def gpu_slack(cards, jobs, thr, cap):
 
 def fit_snapshot(st):
     """fit 用：一台主机的 status.json → 准入核心 place 认的资源快照（字段见 _place；与 Worker.snapshot 同形）。
-    卡的空闲取状态的 room.gpus（已扣在跑任务的记账与给对方留的），加回保活占的（放任务前 worker 先停保活）；在跑的只记内存与核（显存已扣在卡上），
+    卡的空闲取状态的 room.gpus（已扣在跑任务的记账与给对方留的），加回保活占的（放任务前 worker 先停保活），给对方留的照 room.keep（整卡封顶要扣）；在跑的只记内存与核（显存已扣在卡上），
     room、cpu_room 是 labmon 全停时能给的（room 加回在跑的记账：ram_need、cpu_need 按它封顶）；tag 上限照 limits；对方超出预留与有停不了保活的卡
     照 room.owner 不放（旧 worker 没写为空）。独占留卡、成组留的资源不在状态里，不模拟。"""
     room, info = st.get("room") or {}, st.get("info") or {}
@@ -5507,7 +5509,7 @@ def fit_snapshot(st):
     by = {j["name"]: j for j in jobs}
     gp = [dict(g, _j=by.get(g.get("job")) if g.get("owner") == "job" else None) for g in st.get("gpu_procs") or []   # 独占的判断（intruders）要看卡上有谁；
           if g.get("owner") != "keepalive"]                     # worker 停得了的保活放任务前先停（卡的空闲已加回），停不了的是 other、照算
-    cards = [{"i": g["i"], "uuid": g["uuid"], "total": g.get("total") or 0.0, "keep": 0.0, "other": 0.0, "ka": False,
+    cards = [{"i": g["i"], "uuid": g["uuid"], "total": g.get("total") or 0.0, "keep": (room.get("keep") or {}).get(g["uuid"], 0.0), "other": 0.0, "ka": False,
               "free": (room.get("gpus") or {}).get(g["uuid"], g.get("free") or 0.0) + ka.get(g["uuid"], 0.0)} for g in info.get("gpus") or []]
     return {"cards": cards, "limit": (info.get("mem") or {}).get("limit"),
             "room": None if room.get("ram") is None else room["ram"] + sum(j["ram"] for j in jobs), "margin": room.get("margin") or 0,
@@ -5569,13 +5571,13 @@ class FitHost:
 
     def blocked(self, project):
         """这台此刻不开新车道的整台原因：持久的临时指令挡住这个项目（drain、只给别的项目用、暂停，override_hit 的 lasting）、
-        借来的主机上对方此刻用得比预留多（真放行的 guest_block 挡住整台；状态的 guest.back 是那几句原因）、容器在限流；没有为 None。"""
+        借来的主机上对方的内存或 CPU 超出预留、刚回落（真放行的 guest_block，状态的 guest.block）、容器在限流；没有为 None。"""
         hit = self.w.override_hit({"project": project, "name": ""}, ("drain", "guest", "pause"), lasting=True)
         if hit:
             return hit[1]
-        back = (self.st.get("guest") or {}).get("back")
-        if back:
-            return "对方此刻用得比预留多（%s） → 这台不放新任务" % "；".join(back[:3])
+        block = (self.st.get("guest") or {}).get("block")       # 只有内存、CPU 超出（或刚回落）挡整台；某张卡超出的经 room.owner 只挡那张
+        if block:
+            return block + " → 这台不开新车道"
         if self.slack["throttle"] is not None:
             return "容器 CPU 在限流（近 1 分钟 %.0f%% 的周期被限流） → 不开新车道：先减线程（按 LABMON_CPUS 设线程数与 DataLoader 进程数）" % self.slack["throttle"]
         return None

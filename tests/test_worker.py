@@ -880,8 +880,8 @@ class AdmissionUnitTest(UnitBase):
         self.hosts.register("t", "g", "bp")
         self.fit_two_cards(overrides=[{"kind": "deadline", "at": now + 1200, "target": "renew"}])
         self.assertIn("前跑不完", self.fit_out(["x_s1"])["x_s1"])
-        self.fit_two_cards(guest={"back": ["内存 12.0 GiB，超出预留 4.0 GiB"]})
-        self.assertIn("对方此刻用得比预留多（内存 12.0 GiB，超出预留 4.0 GiB） → 这台不放新任务", self.fit_out(["x_s1"])["x_s1"])
+        self.fit_two_cards(guest={"back": ["内存 12.0 GiB，超出预留 4.0 GiB"], "block": "借来的主机：对方内存 12.0 GiB，超出预留 4.0 GiB，暂不放行"})
+        self.assertIn("借来的主机：对方内存 12.0 GiB，超出预留 4.0 GiB，暂不放行 → 这台不开新车道", self.fit_out(["x_s1"])["x_s1"])
         self.fit_two_cards(gpu_procs=[{"uuid": "GPU-b", "owner": "other", "mb": 2000, "hpid": 9}])
         self.assertIn("没有实测的只放空卡、不与别的任务同卡", self.fit_out(["v1"])["v1"])
         self.fit_two_cards(gpu_procs=[{"uuid": "GPU-b", "owner": "keepalive", "mb": 2000, "hpid": 9}])
@@ -923,6 +923,21 @@ class AdmissionUnitTest(UnitBase):
         self.assertIn("labmon 之外的进程占 3.0 核", self.fit_out(["e_s2"])["e_s2"])
         self.fit_two_cards(running=[], info=gs, room={"other_cpu": 0.5})
         self.assertIn("可以开车道并行", self.fit_out(["e_s2"])["e_s2"])
+
+    def test_fit_guest_card_over_and_keep(self):
+        # Codex 审 #49 第四轮：借来的主机上只有卡 0 的显存超出预留（guest.back 非空、没有 guest.block、room.owner 只有卡 0）：卡 1 照开，
+        # 同真放行的 guest_block 只为内存、CPU 挡整台（旧代码见 back 就整台不开）；
+        # 卡 1 给对方留 10200 MB（room.keep）、可用 37300 MB，历史估 50 GiB：整卡封顶按 总量 − 预留 − 1 GiB 算，放得下（旧代码 keep 恒为 0，封顶到 47 GiB 放不下）
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("x_s0", "bp", now - 3600, now - 1800, ram_peak=1.0, vram_peak=1000.0, cores_peak=1.0),
+                               usage_row("b_s0", "bp", now - 3600, now - 1800, ram_peak=1.0, vram_peak=50 * 1024.0 / 1.1, cores_peak=1.0)])
+        self.hosts.queues({"g": ["x_s1|true", "b_s1|true"]}, project="bp")
+        self.hosts.register("t", "g", "bp")
+        gs = {"gpus": [{"i": i, "uuid": u, "free": 45000.0, "total": 48000.0} for i, u in enumerate(("GPU-a", "GPU-b"))]}
+        self.fit_two_cards(running=[], info=gs, guest={"back": ["卡 0 显存 20.0 GiB，超出预留 8.0 GiB"]}, room={"owner": ["GPU-a"]})
+        self.assertIn("可以开车道并行：卡 1", self.fit_out(["x_s1"])["x_s1"])
+        self.fit_two_cards(running=[], info=gs, guest={"back": []}, room={"owner": ["GPU-a"], "gpus": {"GPU-a": 0.0, "GPU-b": 37300.0}, "keep": {"GPU-b": 10200}})
+        self.assertIn("可以开车道并行：卡 1", self.fit_out(["b_s1"])["b_s1"])
 
     def test_fit_list_skips_row_in_current(self):
         # Codex 审 #49：放行它的主机状态过期了，状态目录的 current 还写着它在跑：不再分给别的主机（旧代码只看新鲜主机状态里的 running）
