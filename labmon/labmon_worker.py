@@ -136,7 +136,8 @@ OVER_FRAC, OVER_MIN_S = 0.2, 600   # 剩余时长说不准时（超了预计；�
 UTIL_WIN_S = 600         # 各卡利用率取近这么久的平均（状态的 util10，fit 列出来看；吃满程度 gpu_busy 的 m10 同一个长度）
 BUSY_WIN_S = 3600        # 各卡「吃满程度」（只有保活时按 0）留近这么久的样本：状态 gpu_busy 的 h1（页面主数字，#51）
 UTIL_LOW = 50            # 卡近 UTIL_WIN_S 的利用率低于这个 %，且上面在跑的被 CPU 卡住时，先加核、不在这张卡上开新车道（gpu_slack，#35、#37）
-CPU_BOUND_FRAC = 0.9     # 在跑任务近 CPU_WARM_S 各 1 分钟窗口核数的平均不少于给它的核数的这么多，算被 CPU 卡住（cpu_bound）
+CPU_BOUND_FRAC = 0.9     # 在跑任务近 CPU_WARM_S 各 1 分钟窗口核数的平均不少于给它的核数的这么多，算被 CPU 卡住、可能给少了（cpu_fit 的 low）
+CPU_SPARE_FRAC, CPU_SPARE_MIN = 0.5, 1.0   # 写了 cpus= 的在跑任务整段 1 分钟峰值不到给的核数的这么多、且少至少这么多核，算给多了（cpu_fit 的 high，#46）
 CONC_MAX = 12            # 按同卡并行数挑同类记录（duration 的 k）时封顶到这么多（推演里查表、缓存用）
 FORECAST_S = 7 * 86400   # 推演（simulate）往后排多远
 FORECAST_EVERY = 120     # 推演的输入没变时多久重算一次（在跑的超了预计，后面的跟着往后挪）
@@ -4641,6 +4642,7 @@ class Worker:
     def write_status(self, queues, waiting, limits, pol, use, now):
         """写 status.json（看板探针读；字段是看板 ↔ worker 的契约，tests/test_contract.py 守着）。"""
         S = self.snapshot(limits)
+        u10 = {k: round(v) for k, w in self.uwin.items() for v in [win_mean(w, now, UTIL_WIN_S)] if v is not None}   # 各卡「在用时多高」：fit 与 cpu_fit 用
         hits = [round(t) for t in self.ka_hits if t > now - FIGHT_S]   # 近 FIGHT_S 秒保活被拉起的时刻（kafight，重启后 load_prev 找回）
         write(self.p.status, json.dumps({
             "t": time.time(), "pid": os.getpid(), "host": self.host, "info": self.info, "gpu_procs": self.gprocs,
@@ -4656,7 +4658,7 @@ class Worker:
                       "back": list(self.back.values()), "quiet": sorted(set(self.back_last) - set(self.back)), "tight": self.tight,
                       "hit": self.hit, "away": self.away_state(),
                       "block": self.guest_block()} if self.guest() else None,        # 整台不放新任务的原因（guest_block）：fit 照它挡整台
-            "util10": {k: round(v) for k, w in self.uwin.items() for v in [win_mean(w, now, UTIL_WIN_S)] if v is not None},   # 「在用时多高」（fit 用）
+            "util10": u10,                        # 「在用时多高」（fit 用）
             "gpu_busy": self.busy_view(now),      # 「吃满程度」（只有保活时按 0；页面上的利用率，#51）
             "disk": self.disk.brief() if self.disk else None,
             # 按记账还能放多少：内存 GiB、各卡 MB（整卡任务记账超过卡时写 0）、CPU 核（cpu_cap 是记账上限：配额向下取整；读不到配额都为 None）
@@ -4676,6 +4678,7 @@ class Worker:
             "running": [dict(self.job_view(j), t0=j["t0"], vram=j.get("vram"), excl=j.get("excl"), est_min=j.get("est_min"),
                              oom0=j.get("oom0"), fc0=j.get("fc0"), owner_gpu=j.get("owner_gpu"), wait=j.get("wait"), cpus=j.get("cpus"), io=j.get("io"),
                              io_sus=j.get("io_sus"),   # 记过读写拥塞嫌疑的时刻（io_suspect；接管时找回，同一任务不重复记）
+                             cpu_fit=cpu_fit(j, S["cpu_cap"], u10),   # 开跑给的核数给少了、给多了（#46）：看板据此出只给实验会话的 cpu_low:、cpu_high:
                              # 成组（#180）：组名、人数、一起开跑的同伴 [[主机, 任务]]、跟着同伴停下的 {kind, why, sent}（接管时找回）
                              gang=j.get("gang"), gn=j.get("gn"), gang_with=j.get("gang_with"), gang_stop=j.get("gang_stop"))
                         for j in self.running.values()],
@@ -4984,7 +4987,7 @@ def cpu_warm(u):
 
 
 def cpus_export(cpus, cap):
-    """开跑时导出的 LABMON_CPUS（给这个任务的核数）：cpu_give 再至少 1。Worker.cpus_for 与判在跑的是不是被 CPU 卡住（cpu_bound）共用。"""
+    """开跑时导出的 LABMON_CPUS（给这个任务的核数）：cpu_give 再至少 1。Worker.cpus_for 与判开跑核数给多给少（cpu_fit）共用。"""
     return max(1, cpu_give(cpus, cap))
 
 
@@ -5453,7 +5456,7 @@ def estimate(hist, r):
             peak = (k[0], hs)
         cs = [h["cores_peak"] for h in same if h.get("cores_peak") is not None][-HIST_N:]
         if cs and cpu is None:
-            cpu = (max(1, job_cpus(1.1 * max(cs))), "%s 近 %d 次峰值 ×1.1" % (label[k[0]], len(cs)))
+            cpu = (cpu_from_peak(max(cs)), "%s 近 %d 次峰值 ×1.1" % (label[k[0]], len(cs)))
         if k[0] == "queue":
             continue
         last = max((i for i, h in enumerate(rows) if h.get("rc") == "0"), default=-1)   # 只认真跑成功的：跑了 5 分钟后被停下、别的错误退出的不算资源够了
@@ -5576,16 +5579,32 @@ def list_row(lists, name, project=None):
     return None
 
 
-def cpu_bound(j, cap):
-    """在跑的任务 j（状态 running 的形状：name、est、use）是不是被 CPU 卡住（#37）：从开始量窗口核数起满 CPU_WARM_S（cpu_warm），
-    近这么久各 1 分钟窗口核数（use.pks）的平均不少于给它的核数（cpus_export，开跑时导出的 LABMON_CPUS）× CPU_BOUND_FRAC。
-    返回 (平均核数, 给的核数)，不是为 None。占位任务不算。"""
-    u = j.get("use") or {}
-    if is_hold(j.get("name")) or not cpu_warm(u):
+def cpu_from_peak(peak):
+    """按 1 分钟峰值核数估几个核：峰值 ×1.1 取整（job_cpus）、至少 1。estimate 按同类历史估、cpu_fit 给“写小”的建议值共用。"""
+    return max(1, job_cpus(1.1 * peak))
+
+
+def cpu_fit(j, cap, util):
+    """在跑的任务 j（状态 running 的形状：name、gpus、est、use）开跑时给的核数是给少了还是给多了（#46；#37 的“被 CPU 卡住”也是它）。
+    从开始量窗口核数起满 CPU_WARM_S（cpu_warm）才判；给的核数 give 是开跑时导出的 LABMON_CPUS（cpus_export）；util 各卡近 UTIL_WIN_S 的利用率 {uuid: %}。
+    - low（给少了、被 CPU 卡住）：近 CPU_WARM_S 各 1 分钟窗口核数（use.pks）的平均不少于 give × CPU_BOUND_FRAC，且所用的卡里有利用率低于 UTIL_LOW 的
+      （卡吃饱了加核也没用；不用卡的不判，单线程脚本本来就只用 1 核）。sug 建议写的 cpus= 是 give 的 2 倍封顶到记账上限 cap；已给到 cap 为 None。
+    - high（给多了）：估计来自清单的 cpus=（est.cpu_src 是“提示值”；按历史估的会往实测靠，不判），跑到现在的 1 分钟峰值 use.cores_peak
+      不超过 give × CPU_SPARE_FRAC、且少至少 CPU_SPARE_MIN 核（看整段峰值：开头加载阶段用过的核不算多给）。sug 按峰值估（cpu_from_peak，同 estimate）。
+    返回 {how, avg 近 10 分钟平均核数, peak 整段峰值, give, sug}，都不是为 None。占位任务、没有估计的不判。
+    gpu_slack（fit 开车道）只取 low；状态里运行中任务的 cpu_fit 是它，看板据此出只给实验会话的 cpu_low:、cpu_high: 告警。"""
+    u, e = j.get("use") or {}, j.get("est")
+    if is_hold(j.get("name")) or not e or not cpu_warm(u):
         return None
-    give = cpus_export((j.get("est") or {}).get("cpus", CPU_DEFAULT), cap)
-    avg = sum(x[1] for x in u["pks"]) / len(u["pks"])
-    return (avg, give) if avg >= give * CPU_BOUND_FRAC else None
+    give = cpus_export(e.get("cpus", CPU_DEFAULT), cap)
+    avg = round(sum(x[1] for x in u["pks"]) / len(u["pks"]), 2)
+    peak = u.get("cores_peak") or max(x[1] for x in u["pks"])
+    out = {"avg": avg, "peak": peak, "give": give}
+    if avg >= give * CPU_BOUND_FRAC and any((util.get(g) is not None and util[g] < UTIL_LOW) for g in j.get("gpus") or []):
+        return dict(out, how="low", sug=None if cap is not None and give >= cap else min(2 * give, cap or 2 * give))
+    if e.get("cpu_src") == "提示值" and e.get("cpus") and peak <= give * CPU_SPARE_FRAC and give - peak >= CPU_SPARE_MIN:
+        return dict(out, how="high", sug=cpu_from_peak(peak))
+    return None
 
 
 def gpu_slack(cards, jobs, th, cap):
@@ -5593,14 +5612,15 @@ def gpu_slack(cards, jobs, th, cap):
     cards [{uuid, util 近 10 分钟利用率 %（样本不够为 None）}]；jobs 在跑的（状态 running 的形状：name、gpus、est、use）；
     th 是状态的 throttle（Worker.throttle：这一段限流，门槛 THR_HOT、THR_COOL 只在 thr_step；没在限流为 None）；cap 记账上限（cpu_cap）。
     返回 {throttle: 限流时的那句说明、否则 None（这台先减线程，不开新车道）,
-    bound: {卡 uuid: [(任务, 平均核数, 给的核数)]}：利用率低于 UTIL_LOW 的卡上被 CPU 卡住的在跑任务（先给它们加核，不在这张卡上开新车道）}。"""
-    low = {c["uuid"] for c in cards if c.get("util") is not None and c["util"] < UTIL_LOW}
+    bound: {卡 uuid: [(任务, 平均核数, 给的核数)]}：利用率低于 UTIL_LOW 的卡上被 CPU 卡住的在跑任务（cpu_fit 的 low；先给它们加核，不在这张卡上开新车道）}。"""
+    util = {c["uuid"]: c.get("util") for c in cards}
+    low = {u for u, v in util.items() if v is not None and v < UTIL_LOW}
     bound = {}
     for j in jobs:
-        b = cpu_bound(j, cap)
+        b = cpu_fit(j, cap, util)
         for u in j.get("gpus") or []:
-            if b and u in low:
-                bound.setdefault(u, []).append((j["name"], b[0], b[1]))
+            if b and b["how"] == "low" and u in low:
+                bound.setdefault(u, []).append((j["name"], b["avg"], b["give"]))
     thr = None if th is None else th.get("thr")
     return {"throttle": None if th is None else "容器 CPU 在限流（%s，已持续 %d 分钟）" % (
         "近 1 分钟 %.0f%% 的周期被限流" % thr if thr is not None else "近 1 分钟被限流的周期过了门槛", th.get("for", 0) // 60), "bound": bound}

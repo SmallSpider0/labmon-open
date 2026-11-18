@@ -4566,6 +4566,34 @@ class PressTest(UnitBase):
         self.assertEqual(over({"pks": [[800, 1.0]], "cores": 3.0}, 1, t), 3.0)    # 窗口过了两分钟：取每轮的核数
         self.assertIsNone(over({}, 1, t))
 
+    def test_cpu_fit(self):
+        # #46：给少、给多由 cpu_fit 一处判定。满 10 分钟（cpu_warm）才判；给少 = 近 10 分钟平均 ≥ 给的 × 0.9、所用的卡有利用率 < 50% 的，
+        # 建议 2 倍封顶到配额（已到配额为 None）；给多 = 写了 cpus=、整段 1 分钟峰值 ≤ 给的一半且少至少 1 核，建议照 estimate 的峰值 ×1.1 取整
+        fit, t = self.m.cpu_fit, 10000.0
+        warm = lambda avg, peak=None: {"t": t, "pk0": t - 700, "pks": [[t - 60 * i, avg] for i in range(10)], "cores": avg,   # noqa: E731
+                                       "cores_peak": avg if peak is None else peak}
+        job = lambda cpus, use, gpus=("GPU-a",), src="同名 近 3 次峰值 ×1.1", name="x_s1": {"name": name, "gpus": list(gpus), "use": use,   # noqa: E731
+                                                                                           "est": {"cpus": cpus, "cpu_src": src, "ram": 1.0, "vram": 1.0}}
+        low = {"GPU-a": 30}
+        self.assertEqual(fit(job(1, warm(0.98)), 8, low), {"how": "low", "avg": 0.98, "peak": 0.98, "give": 1, "sug": 2})
+        self.assertEqual(fit(job(3, warm(2.9)), 4, low)["sug"], 4)                       # 2 倍超过配额：封顶到配额
+        self.assertIsNone(fit(job(4, warm(3.9)), 4, low)["sug"])                         # 已给到配额：写大也给不了
+        self.assertEqual(fit(job(2, warm(1.9)), None, low)["sug"], 4)                    # 没有配额：不封顶
+        self.assertIsNone(fit(job(1, warm(0.98)), 8, {"GPU-a": 80}))                     # 卡吃饱了：加核也没用
+        self.assertIsNone(fit(job(1, warm(0.98)), 8, {}))                                # 利用率样本不够
+        self.assertIsNone(fit(job(1, warm(0.98), gpus=()), 8, low))                      # 不用卡的不报给少
+        self.assertIsNone(fit(job(1, dict(warm(0.98), pk0=t - 300)), 8, low))            # 不满 10 分钟
+        self.assertIsNone(fit(job(1, warm(0.98), name="hold_x"), 8, low))                # 占位任务
+        self.assertIsNone(fit({"name": "x", "gpus": ["GPU-a"], "use": warm(0.98), "est": None}, 8, low))
+        # 给多：只认写了 cpus= 的（估计来自提示值）；看整段峰值，开头加载阶段冒过尖的不算写多
+        self.assertEqual(fit(job(5, warm(0.9, 1.2), src="提示值"), 8, low), {"how": "high", "avg": 0.9, "peak": 1.2, "give": 5, "sug": 1})
+        self.assertEqual(fit(job(8, warm(0.9, 1.2), gpus=(), src="提示值"), 6, {})["give"], 6)   # 给的按配额封顶；不用卡的也报给多
+        self.assertIsNone(fit(job(5, warm(0.9, 3.0), src="提示值"), 8, low))              # 峰值过了一半
+        self.assertIsNone(fit(job(2, warm(0.5, 1.1), src="提示值"), 8, low))              # 只少 0.9 核
+        self.assertIsNone(fit(job(5, warm(0.9, 1.2)), 8, low))                           # 按历史估的：历史会往实测靠，不报
+        self.assertEqual(self.m.cpu_from_peak(1.2), 1)                                    # 与 estimate 的峰值 ×1.1 取整同一处
+        self.assertEqual(self.m.cpu_from_peak(1.5), 2)
+
     def test_throttle_status_alert_and_restore(self):
         # 持续限流 10 分钟才标 alert，指出超核的任务（占位任务不算）；限流结束为 None；状态里的起点重启后找回（#39）
         t0 = self.hosts.now()
