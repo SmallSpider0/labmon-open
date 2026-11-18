@@ -2699,10 +2699,12 @@ class Worker:
     def pool_view(self, now):
         """算力池里待放的各清单还要跑的（#25）：{"目录|清单": {head 队首, n 还要跑几行, dep 队首的依赖没满足时 [状态, 原因]（dep_block），held 清单暂停,
         elsewhere 交给池之前在别的主机放行、还没收尾的那一格 [主机, 任务]（不算在 head、n 里，#80）}}；
-        都跑完了的不列。池目录没有 worker：同一 worker_home 下各台的 worker 都按自己的 dep_state 算一份写进状态的 pool_heads，
-        看板（pool.tick）挑最新的那份：有行要跑、依赖满足、没暂停、没有 elsewhere 的才放、才为它借。"""
-        return {"%s|%s" % (os.path.normpath(r["root"]), r["queue"]): {"head": r["name"], "n": r["n"], "held": r["held"], "elsewhere": r["elsewhere"],
-                                                                      "dep": list(self.dep_block(r, now) or ()) or None} for r in self.pool_heads}
+        池里登记着的每条都列（#86）：都跑完了的 head 为 null、n 为 0；这台读不到清单文件的另带 err（一句原因，head 为 null）。
+        池目录没有 worker：同一 worker_home 下各台的 worker 都按自己的 dep_state 算一份写进状态的 pool_heads，看板（pool._heads）逐条取最新的那份
+        （读得到的优先）：哪一份里都没有的是还没有 worker 读到，不当成跑完了；有行要跑、依赖满足、没暂停、没有 elsewhere 的才放、才为它借。"""
+        return {"%s|%s" % (os.path.normpath(r["root"]), r["queue"]): dict({"head": r["name"], "n": r["n"], "held": r["held"], "elsewhere": r["elsewhere"],
+                                                                           "dep": list(self.dep_block(r, now) or ()) or None if r["name"] else None},
+                                                                          **({"err": r["err"]} if r.get("err") else {})) for r in self.pool_heads}
 
     def dep_block(self, r, now):
         """请求写的依赖（dep_keys）还没都满足：返回 (状态, 原因)，状态 wait（等的还在排、在跑）、failed（after= 等的跑失败了）、
@@ -3293,17 +3295,19 @@ class Worker:
         out, self.pool_heads = [], []
         for q in registry(os.path.join(HOME, "hosts", POOL, "queues"))[0]:
             rows = self.list_of(q["jobs_path"])
-            if rows is None:
+            if rows is None:                                # 这台读不到清单文件：照样列出来（带原因），看板取读得到的那台的（#86）
+                self.pool_heads.append({"project": q["project"], "root": q["root"], "queue": q["jobs"], "name": None, "n": 0, "held": None,
+                                        "elsewhere": None, "err": "%s 上读不到清单 %s" % (self.host, q["jobs_path"])})
                 continue
             cur = read_current(q["state"])
             other = cur and run_elsewhere(POOL, q, cur, self.gone)
             ms, left = rows_left(q["state"], rows, cur[0] if other else None)
-            if not left:
-                continue
-            n, h = left[0]                                  # 队首：看板放之前看它还有没有、依赖满足没有（pool_view）
+            n, h = left[0] if left else (None, {})          # 队首：看板放之前看它还有没有、依赖满足没有（pool_view）；都跑完了的也列（n 为 0）
             self.pool_heads.append({"project": q["project"], "root": q["root"], "queue": q["jobs"], "name": n, "n": len(left),
                                     "deps": h.get("deps"), "deps_any": h.get("deps_any"), "held": "paused" if ms and "paused" in ms else None,
                                     "elsewhere": [other, cur[0]] if other else None})
+            if not left:
+                continue
             ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [n for n, _ in left], "gang": {},
                   "deps": {n: [[p, x] for p, x, _ in d] for n, h in left for d in [dep_keys(dict(h, project=q["project"]))] if d},
                   "held": "paused" if ms and "paused" in ms else None}
@@ -4859,6 +4863,7 @@ class Worker:
             "plan": self.plan,                    # 推演（forecast）：各队列与单元每个任务的预计开始、结束、用哪几张卡
             "todo": self.todo,                    # 还会跑的任务（list_state）：别的主机的依赖按它认谁还会跑、排在谁后面
             "pool_heads": self.pool_view(now),    # 算力池里待放的各清单还要跑什么、队首依赖满足没有（#25）：看板据此放、借
+            "pool_t": round(self.peer_t),          # pool_heads 是何时读的池目录（peers 每 PEER_EVERY 秒一次）：看板逐条取读得最晚的那台（#86）
             "dep_miss": [[p, n, int(t)] for (p, n), t in sorted(self.dep_miss.items())],   # 依赖等的、哪里都找不到的任务与起算时刻（dep_block；接管时找回，取整往前不往后）
             "offers": self.offer,                 # 能接别的主机上哪些任务、接来后几点跑完（offers）：看板汇总成挪法建议
             # 公平份额：生效的设置、这一轮开始时各项目衰减后的 GPU 用量（卡·时）、本机在跑的（别的主机读它算进用量）
