@@ -440,6 +440,7 @@ class RegLanesTest(Base):
         out = C.collect(self.cfg())
         ln, = out["lanes"]
         self.assertEqual(ln["waiting"], C.POOL_WAIT + "：池里没有借着、空得出来的服务器")
+        self.assertEqual(ln["pool_since"], since)          # 页面上写已等多久（#89）
         self.assertEqual(out["alerts"], [])
         snap["pool"]["lists"][k]["since"] = since - PO.POOL_TELL_S
         save_json(state_dir() / "snapshot.json", snap)
