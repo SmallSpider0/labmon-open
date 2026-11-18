@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import contextlib
 import io
+import shutil
 import signal
 import datetime
 import json
@@ -273,6 +274,27 @@ class RegistryTest(WorkerBase):
         self.assertEqual(len(list(qd.glob("*.json"))), 2)
         self.w("rm", str(roots[0]), "jobs/q.txt")
         self.assertEqual([json.loads(f.read_text())["project"] for f in qd.glob("*.json")], ["bp"])
+
+    def test_rm_by_list_file(self):
+        # #77：登记时 ROOT 写到了 jobs 子目录（ROOT=<根>/code/<时间戳>/jobs、JOBS=q.txt），status 列的是拼起来的路径；
+        # 按 status 里看到的路径从别处断开去 rm（<根>/code/<时间戳> + jobs/q.txt，或 <根> + code/<时间戳>/jobs/q.txt）也撤得掉，代码目录已经删了也一样
+        top = self.d / "proj"
+        code = top / "code" / "20261118T000000Z-abc"
+        (code / "jobs").mkdir(parents=True)
+        (code / "jobs" / "q.txt").write_text("x|true\n")
+        (code / "jobs" / "r.txt").write_text("x|true\n")
+        (code / "jobs" / "r.env").write_text("QUEUE_STATE=state_r\n")
+        qd = self.d / "home" / "hosts" / "t" / "queues"
+        for jobs in ("q.txt", "r.txt"):
+            self.assertEqual(self.w("add", str(code / "jobs"), jobs, "--project", "p").returncode, 0)
+        shutil.rmtree(top / "code")
+        r = self.w("rm", str(code), "jobs/q.txt")
+        self.assertEqual(r.returncode, 0, r)
+        self.assertIn("已移除 %s q.txt" % (code / "jobs"), r.stdout)
+        r = self.w("rm", str(top) + "/", "./code/20261118T000000Z-abc/jobs/r.txt", "--expect-project", "p")
+        self.assertEqual(r.returncode, 0, r)
+        self.assertEqual(list(qd.glob("*.json")), [])
+        self.assertIn("没登记过", self.w("rm", str(code), "jobs/q.txt").stdout)
 
     def test_invalid_stop_keeps_existing_registration(self):
         root = self.queue("q", ["x|true"])

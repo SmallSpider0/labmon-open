@@ -1025,6 +1025,8 @@ class AuthTest(unittest.TestCase):
                 ("/api/worker/add", {"host": "a", "project": "exp", "args": ["/root/", "x/../other.txt"]}, 403),
                 ("/api/worker/rm", {"host": "a", "args": ["/root", "other.txt"]}, 403),
                 ("/api/worker/rm", {"host": "a", "args": ["/root", "./other.txt"]}, 403),
+                ("/api/worker/rm", {"host": "a", "args": ["/", "root/other.txt"]}, 403),                        # 从别处断开也是同一条（#77）
+                ("/api/worker/add", {"host": "a", "project": "exp", "args": ["/", "root/other.txt"]}, 403),
                 ("/api/worker/rm", {"host": "a", "args": ["/root", "own.txt", "--host=b"]}, 400),
                 ("/api/worker/add", {"host": "a", "project": "exp", "args": ["/root", "q.txt", "--project=private"]}, 400),
                 ("/api/worker/add", {"host": "a", "project": "exp", "args": ["/root", "q.txt"], "stop": "file:../outside"}, 400),
@@ -1038,6 +1040,8 @@ class AuthTest(unittest.TestCase):
                 self.assertEqual(self.call(self.lan + path, data, tok=amy)[0], expected, path)
             run.assert_not_called()
             self.assertEqual(self.call(self.lan + "/api/worker/rm", {"host": "a", "args": ["/root", "own.txt"]}, tok=amy)[0], 200)
+            self.assertEqual(run.call_args.kwargs["expect_project"], "exp")
+            self.assertEqual(self.call(self.lan + "/api/worker/rm", {"host": "a", "args": ["/", "root/own.txt"]}, tok=amy)[0], 200)   # #77
             self.assertEqual(run.call_args.kwargs["expect_project"], "exp")
             with mock.patch.object(S.L, "check", return_value={"ok": True}):
                 self.assertEqual(self.call(self.lan + "/reg/rm", {"host": "a", "home": "/fake", "project": "exp",

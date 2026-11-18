@@ -136,9 +136,8 @@ def locate(root: str, jobs: str, snap: dict | None = None) -> str:
     （主机项的 borrow.pool，C 之后才有）上登记着它的那台；都没有就是 pool（worker 回“没登记过”）。"""
     snap = snapshot() if snap is None else snap
     lent = {str(h.get("id")) for h in snap.get("hosts") or [] if (h.get("borrow") or {}).get("pool")}
-    same = lambda q: posixpath.normpath(str(q.get("root") or "")) == posixpath.normpath(root) and q.get("jobs") == jobs   # noqa: E731
     for x in snap.get("regs") or []:
-        if (x.get("host") == POOL or x.get("host") in lent) and any(same(q) for q in x.get("queues") or []):
+        if (x.get("host") == POOL or x.get("host") in lent) and any(U.same_list(q, root, jobs) for q in x.get("queues") or []):
             return x["host"]
     return POOL
 
