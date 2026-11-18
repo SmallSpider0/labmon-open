@@ -3516,6 +3516,11 @@ class Worker:
             o["lane"] = [info[tgt[0]["key"]]["root"], info[tgt[0]["key"]]["queue"]] if tgt and cands else None
             # 接在后面的清单里有写了 after= 的行：挪来的插在它前面（它要等别的任务，清单顺序也算依赖，接在它后面会被它堵住，#43）
             o["before"] = next((x["name"] for x in tgt[0]["jobs"] if x["deps"] or x["deps_any"]), None) if o["lane"] else None
+            if o["before"]:                          # 挪来的有等它或它后面哪一行的：插在前面就成环（清单顺序也算依赖），接在末尾（Codex 审 #63）
+                tj = [x["name"] for x in tgt[0]["jobs"]]
+                later = set(tj[tj.index(o["before"]):])
+                if any(q == p and n in later for c in cands for q, n, _ in dep_keys(dict(c["h"], project=p))):
+                    o["before"] = None
             for k in range(1, len(cands) + 1):
                 got = self.try_move(p, cands[:k], tgt[0]["key"] if tgt else None, cx, before=o["before"])
                 if isinstance(got, dict):

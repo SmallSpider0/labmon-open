@@ -3060,6 +3060,16 @@ class OffersTest(UnitBase):
         if not s.get("local"):
             self.assertIn("插在 %s/jobs/r.txt 里 b1 前面" % q["root"], s["text"])
 
+    def test_insert_before_dep_row_not_ahead_of_own_dep(self):
+        # #43（Codex 审 #63 第二轮）：挪来的 a5 写了 after=b1，而 b1 就是目标清单里第一条写了依赖的行：插在 b1 前面会成环（a5 等 b1、b1 排在 a5 后面），
+        # 所以不插、接在末尾
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(5)] + ["a5|true   # est_min=120 vram=20 after=b1"], run=1)
+        q, r = self.local_lane(["b0|true   # est_min=60 vram=20", "b1|true   # est_min=60 vram=20 after=b0"], name="r")
+        self.offer([q], [r])
+        o = next(x for x in self.w.offer if x["project"] == "pa" and not x.get("local"))
+        self.assertEqual((o["lane"], o["before"]), ([q["root"], "jobs/r.txt"], None))
+        self.assertEqual(o["jobs"][0]["name"], "a5")
+
     def test_borrowed_unstoppable_keepalive_card_cannot_take(self):
         # #45：t 是借来只给 pa 用的，唯一的卡上有对方另起、ka.sh 停不了的保活（只占 6 GiB）：真放行一直不放这张卡，t 的推演也不放，
         # 所以接不了 o 上的行，只写原因（旧推演清空了 owner，按剩下的 40 GiB 报能接）
