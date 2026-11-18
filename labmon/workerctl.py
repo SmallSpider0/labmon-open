@@ -155,6 +155,7 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
     extra = " ".join(shlex.quote(a) for a in args) + (f" --gpus {shlex.quote(gpus)}" if gpus else "")
     extra += " --idle" if opts.pop("idle", False) else ""
     extra += " --list" if opts.pop("list", False) else ""    # fit --list（#35 B）：位置参数是 ROOT JOBS，hosts 是看哪几台
+    extra += " --pool" if opts.pop("pool", False) else ""    # add：算力池放过去的（#79），登记里记 pool
     extra += "".join(f" --{k.replace('_', '-')} {shlex.quote(v)}" for k, v in opts.items() if v)
     rc, out = ssh(h, f"{w} {'ls' if sub == 'status' else sub} {extra} --host {hq}")   # 位置参数要在 --host 前
     if opts.get("expect_project") and rc != 0 and "unrecognized arguments: --expect-project" in out:

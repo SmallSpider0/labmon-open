@@ -807,7 +807,7 @@ def add_mine_host(hid: str, job: str, ssh: str, port: int, pool: str, label: str
             if not h.get("returned"):
                 raise ConfigError(f"{p} 里已有在用的主机 {bid}（{ssh}:{port}）")
             if holder is not None and host_holder(h, fleet) != holder:
-                keys["users"] = None
+                keys.update(users=None, lend=None, lend_hours=None)      # 换了人：开给谁用、入池（#79）是原来那人定的
             updated = lines[:s + 1] + _set_keys(lines[s + 1:end], keys) + lines[end:]
             # 首次给旧主机写显式归属时，先把旧清单推断的人名固化。与主机改动同一次覆盖写。
             if holder is not None and not h.get("platform_holder") and fleet is not None and not fleet.get("me"):
@@ -825,6 +825,7 @@ def add_mine_host(hid: str, job: str, ssh: str, port: int, pool: str, label: str
     template = next(x for x in hosts if str(x.get("id")) == tpl[0][2])
     if holder is not None and host_holder(template, fleet) != holder:
         keys["users"] = None
+    keys.update(lend=None, lend_hours=None)                  # 入池（#79）只跟着那一台：照抄来的新主机不带
     block = _set_keys(lines[s + 1:end], {"id": hid, "label": label or hid, "ssh": ssh, "port": int(port), **keys})
     block = [l for l in block if not re.match(r"\s*#", l)]               # 照抄的整行注释是原主机的，不带过来
     new = ["\n", f"# {label or hid}：看板换给自己时加的（照抄 {tpl[0][2]}）\n", "[[hosts]]\n"] + block

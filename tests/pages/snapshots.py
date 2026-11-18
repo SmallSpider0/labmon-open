@@ -145,6 +145,8 @@ def _host_a() -> dict:
     return {"id": "srv-a", "label": "srv-a（A6000）", "error": None, "status_error": None, "status": status, "lan_off": False, "auto": True,
             "lw": local_writes(status["info"]["rootfs"], status["storage"]["wrote"], status["storage"]["own"]),     # overview._annotate
             "platform": {"job": "ME"}, "clock": int(NOW), "stopped": None, "age": 4.0, "worker_up": True,
+            # 自用主机入池（#79，pool.tick 写的 pool.lend_view）：池里的清单直接放上来，此刻跑着 1 条
+            "lend": SELF_LEND,
             "health": {"state": "ok", "fails": 0, "since": None, "why": None}, "lease_end": NOW + 5 * 86400, "auto_res": {"at": NOW + 4 * 86400, "off": False}, "renew": None,
             "log": ["2026-11-07 07:37:49 开始 alpha_train_s1（GPU 0 GPU-aaaa-0），独占卡", "2026-11-07 07:40:01 等待 alpha_train_s2：显存不够"],
             "done": [_done("alpha_train_s0", "proj-a", "0", NOW - 5 * H, NOW - 4.5 * H, root_a, q_a, with_host=["beta_old"]),
@@ -248,6 +250,10 @@ def _server(sid: str, holder: str, state: str | None, **kw) -> dict:
     return base
 
 
+SELF_LEND = {"on": True, "hours": None, "open": True, "lent": False, "returning": False, "rest": None, "say": "入池，全天；跑着池里 1 条清单",
+             "mine": True, "placed": 1, "bar": None, "holder": "ME"}
+
+
 def _fleet(mine_host: dict) -> dict:
     boot = lambda sid, holder: {  # noqa: E731
         "image": "registry.local/lab/ubuntu:" + holder.lower(), "ip": "192.0.2.9", "ports": {"22": "15158"}, "cpu": 17, "memory": 122, "disk": 750, "gpu": 1,
@@ -289,7 +295,7 @@ def _fleet(mine_host: dict) -> dict:
                                  {"kind": "job", "label": "labmon 之外：jupyter", "mb": 150, "n": 1, "names": [], "etime": None, "cwd": None, "owner": "ME"},
                                  {"kind": "keepalive", "label": "保活", "mb": 700, "n": 1, "names": [], "etime": None, "cwd": None}]},
              "strip": _strip("job"), "h0": int(NOW // 3600 * 3600) - 167 * 3600, "idle_h": 0, "s7": _stats(0.9, 0.05), "s30": _stats(0.85, 0.1),
-             "lw": mine_host["lw"]}]
+             "lw": mine_host["lw"], "lend": mine_host.get("lend")}]
     holders = [{"holder": h, "servers": [s], **_stats(0.3, 0.6), "borrowed": [], "lent": []}
                for h, s in (("PERSON3", "srv-d"), ("PERSON4", "srv-e"), ("PERSON6", "srv-g"), ("GONE", "srv-z"))]
     # 借卡（#52）：ME 借 OWNER 的 srv-b 16 小时，OWNER 那边这段记成“借出”；ME 的自用主机 srv-a 也有用量

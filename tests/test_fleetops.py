@@ -1076,7 +1076,7 @@ class FleetOpsTest(unittest.TestCase):
     def test_mine_host_keeps_access_only_for_same_holder(self):
         hf = Path(os.environ["LABMON_HOSTS"])
         hf.write_text('[[hosts]]\nid = "old"\nssh = "root@h"\nport = 15151\nplatform_pool = "p"\n'
-                      'platform_job = "ALICE"\nusers = ["amy"]\nreturned = "2026-11-09 20:00"\n'
+                      'platform_job = "ALICE"\nusers = ["amy"]\nlend = true\nreturned = "2026-11-09 20:00"\n'
                       '[fleet]\nme = "ALICE"\n')
         c = F.conf()
         self.assertEqual(FB.back_port(c, "p", "ALICE"), 15151)
@@ -1088,6 +1088,8 @@ class FleetOpsTest(unittest.TestCase):
         self.assertEqual({h["holder"] for h in FB.mine(c)}, {"EE"})
         self.assertNotIn("users", hs[new])
         self.assertNotIn("users", hs[old])
+        self.assertNotIn("lend", hs[new])                                   # 入池（#79）同样是原来那人定的：照抄的、换了人的都不带
+        self.assertNotIn("lend", hs[old])
 
     def test_reopening_last_legacy_host_keeps_old_borrower(self):
         hf = Path(os.environ["LABMON_HOSTS"])

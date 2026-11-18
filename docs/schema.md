@@ -185,6 +185,7 @@
   why 再往下挪不了的原因（只放原因本身，没有为 null）, stop 挪到这台排不上的那一行（why 是推演的原因；与具体某行无关的为 null）, nodur stop 那一行是不是因为没有估时, idle 这台此刻空着（没有 labmon 任务在跑、推演里 10 分钟内也没有要开跑的；挑行跳过挪不动、说不出何时放行的清单，同机那项不带，#62）}`；原因句由看板拼（`rebalance.suggest`）。
   `lan_off` 为本机不在内网（这时沿用上一轮的 `status`）；借来的主机带 `borrow`（同上）。
   算力池借来的（#25）：`borrow.pool` 为真（`holder` 照写持有人，`by` 是「算力池」）；换了容器的那一轮另带 `gone: true`（`pool._returns` 标，工作台不重新拉起 worker）。
+  自用主机（不是借来、换来的）另带 `lend`（#79，`pool.tick` 写的 `pool.lend_view`：`{on, hours, open, lent, returning, rest, say, mine: true, placed 此刻这台上池放的清单数, bar 不能入池的原因, holder}`；组内页 `fleet.mine[]` 的 `lend` 是同一份）。
   借来的主机的 `status.guest` 另有 `owner`（算力池用：对方超出预留的几项里去掉只因 `ka.sh` 停不了的保活超出的卡，算力池借的再加上有了对方 GPU 进程的卡；非空算主人回来了），各台状态另有 `pool_heads`：
   `{"目录|清单": {head 队首, n 还要跑几行, held 清单暂停（"paused" 或 null）, dep 队首的依赖没满足时 [状态, 原因]（worker 的 dep_block）, elsewhere 交给池之前在别的主机放行、还没收尾的那一格 [主机, 任务]（不算在 head、n 里；没有为 null，#80）}}`，算力池里待放的各清单（看板取最新那份）。
   `offers_kept` 只在这一轮读这台失败（`error`、`status_error`，没 `worker stop`）、沿用它上一轮的 offers 时出现：`{t 那份状态写下的时刻（本机时钟 epoch 秒）, offers}`，按 `STALE_S` 过期（`rebalance.keep_offers`）。
@@ -200,6 +201,7 @@
 - 顶层 `regs` 是登记的全局视图（`overview._regs`，项目「管理」抽屉用，[workbench.md「项目的管理抽屉」](workbench.md#项目的管理抽屉)）：各主机目录下登记的清单，每台一项
   `{host, label, state active|pool|returned|unlisted（在用、算力池里待放的（host 为 pool，#24）、主机清单里已归还、主机清单里已没有）, returned 归还时刻（epoch 秒，没有为 null）, home 所在 worker_home, t 读到的时刻（在用的是那份状态的 t）,
   stale 这一轮没读到、沿用上一轮的, queues [{root, jobs, project, stop, gpus}] 或 null（在用主机这轮既没状态、也没读到文件，上一轮也没有）}`；
+  算力池放过去的登记（`worker add --pool`，登记文件与状态 `queues[]` 里的 `pool`，#79）另带 `pool: true`，别的不带这个键（`overview._pool_mark`）；
   在用主机那项另带 `pool`（`platform_pool`）与 `prev`（上一台：同一个池里最近归还的自用主机的 id，`fleetboot.last_mine`，没有为 null；接上卡排序用，#95）；
   在用主机的 `queues` 取状态里的，另带 `empty` 与 `added_t`（登记时刻，epoch 秒，那台容器的时钟）；其余取登记文件，另带 `added`（登记时刻的文字，那台容器的时钟）、`added_t`（登记文件的修改时刻，epoch 秒，共享盘服务器的时钟；读不到为 null）与 `key`（登记键，文件名去掉 `.json`）。在用的在前（照主机清单顺序），再是算力池、已归还的（归还晚的在前）、主机清单里没有的。
 - `projects[]` 是各项目看板的摘要（`serve.Overview.proj_info` 给什么带什么，只去掉写 `eta.json` 用的 `running`）：`id`、`title`、`alerts`、`alert_msgs`、`generated`、`no_work_since`、`markers`、`quiet`（项目快照的，见上）、`groups`（计划项的进度：`[{id, label, color, auto 自动归出来的, total, done, failed, running, queued}]`，取项目快照的）、`ungrouped`（没归进任何组的任务数，占位任务不算）；`lanes[]` 是 `{host, root, queue, label, unfinished, run 在跑几个, returned}`（项目探针没读到的车道 `unfinished`、`run` 为 null）；

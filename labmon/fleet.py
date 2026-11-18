@@ -133,7 +133,8 @@ def conf(path: Path | None = None) -> dict | None:
     hf = path or hosts_file()
     if not hf.exists():
         return None
-    f = _read_toml(hf).get("fleet")
+    d = _read_toml(hf)
+    f = d.get("fleet")
     if not f:
         return None
     c = {"interval": 600, "lease_days": 7, "private_pools": [], "private_max": None, "public_max": None,
@@ -147,13 +148,12 @@ def conf(path: Path | None = None) -> dict | None:
         s = {**s, "id": str(s["id"]), "holder": str(s["holder"])}
         if s["id"] == POOL:
             raise ConfigError(f"{hf} 的 [[fleet.servers]] 不能叫 {POOL}：它是算力池的保留 id")
-        if "lend" in s and not isinstance(s["lend"], bool):
-            raise ConfigError(f"{hf} 里 {s['id']} 的 lend 要写 true 或 false")
-        if s.get("lend_hours") is not None and lend_span(s["lend_hours"]) is None:
-            raise ConfigError(f"{hf} 里 {s['id']} 的 lend_hours「{s['lend_hours']}」认不出：写成 \"22:00-09:00\" 这样（每天一段，可跨零点）")
+        _lend_check(hf, s)
         s["job"] = str(s.get("job") or s["holder"])          # 平台作业名：缺省就是名字，同名作业已在跑时加了后缀
         s.setdefault("label", s["holder"])
         c["servers"].append(s)
+    for h in d.get("hosts") or []:          # 自用主机也能入池（#79）：同样的两项、同一条校验
+        _lend_check(hf, {**h, "id": str(h.get("id"))})
     if len({s["id"] for s in c["servers"]}) != len(c["servers"]):
         raise ConfigError(f"{hf} 的 [[fleet.servers]] id 重复")
     c["rules"] = []
@@ -165,6 +165,14 @@ def conf(path: Path | None = None) -> dict | None:
         except re.error as e:
             raise ConfigError(f"[[fleet.rules]] 的正则写错了：{r['match']}（{e}）") from None
     return c
+
+
+def _lend_check(hf, s: dict) -> None:
+    """入池的两项（lend、lend_hours）写得对不对：组内服务器与自用主机（#79）共用。"""
+    if "lend" in s and not isinstance(s["lend"], bool):
+        raise ConfigError(f"{hf} 里 {s['id']} 的 lend 要写 true 或 false")
+    if s.get("lend_hours") is not None and lend_span(s["lend_hours"]) is None:
+        raise ConfigError(f"{hf} 里 {s['id']} 的 lend_hours「{s['lend_hours']}」认不出：写成 \"22:00-09:00\" 这样（每天一段，可跨零点）")
 
 
 LEND_RE = re.compile(r"\s*(\d{1,2}):(\d\d)\s*-\s*(\d{1,2}):(\d\d)\s*")
