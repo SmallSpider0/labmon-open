@@ -86,7 +86,7 @@ worker 装在主机的 `worker_home`（缺省 `<data_root>/labmon`，`data_root`
 行尾可写 `gpus=N`（缺省 1，0 表示不用 GPU）、`vram=X`（每张卡的显存 GiB）、`ram=X`（内存 GiB）、`tag=heavy`、`exclusive=gpu|host`、`est_min=N`、`needs=…`，
 以及依赖 `after=…`、`afterany=…`（见[依赖](#依赖)）、成组 `gang=组名:人数`（见[成组](#成组)）。
 `cpus=N`（要几个核）进 CPU 记账（见[准入](#准入)）：没有同类历史、又确知要多核时才写；`io=heavy|light`（读写重不重）只记录、页面上显示，准入与推演都不看。
-开跑时导出的 `LABMON_CPUS` 是开跑时给这个任务记账的核数（之后 CPU 记账按近 10 分钟窗口核数回收，它不变；见“用量”）。
+开跑时导出的 `LABMON_CPUS` 是开跑时给这个任务记账的核数（之后 CPU 记账按近 10 分钟窗口核数回收，它不变；见“用量”）；没设的 `OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`OPENBLAS_NUM_THREADS` 缺省同它。
 建议写在行尾 ` #` 之后，不然这段文字会原样当参数传给程序；提示键前面不能是 `-` 或字母数字，命令自己的 `--gpus=0`、`--ram=64` 不算提示（`needs=`、`after=`、`afterany=`、`gang=` 只认 `#` 之后的）。
 `vram=`、`ram=` 只被同 tag、同名的实测盖过，同一条清单里别的任务的历史不盖过它们（见“资源估计”）。
 
@@ -265,8 +265,11 @@ worker 每轮现读主机容量（各卡显存与利用率、cgroup 内存上限
   **共享盘慢**（`nfs_slow`，状态里 `info.press.nfs.slow`）：此刻每次读写的时间超过基线，且每秒不少于 2 次。
   `press.jsonl` 写不进时只少这一行历史（基线照用内存里的），不影响这一轮的采样与准入，5 分钟后再试；连续失败只在 worker.log 记一次。
 - **`LABMON_CPUS`**：开跑时导出（单元申请放行时经 `.ok` 带给客户端；旧 worker 的 `.ok` 不带时客户端按 `--cpus` 取，没写按 1 核），是开跑时给这个任务记账的核数（开跑满 10 分钟后记账会按实测回收，导出的值不变）：估计（`estimate` 的 `cpus`，见[准入](#准入)）封顶到这台的记账上限（`cpu_give`；历史是各主机一起看的，在 17 核的主机上量到的峰值到 7 核的主机上不能照给），至少 1（写了 `cpus=0` 的不记账，导出 1）。
-  容器里 `nproc` 报的是宿主机的核数（29 上 144，配额只有 17），项目拿 `LABMON_CPUS` 设线程数、DataLoader 进程数；worker 不设 `OMP_NUM_THREADS`。
-  按 `LABMON_CPUS` 设并行数的任务，历史峰值只会照着给它的核数长（给 1 核就只开 1 个、量到的也是 1 核），所以第一次要写 `cpus=`；没写又没历史的按 1 核。
+  容器里 `nproc` 报的是宿主机的核数（29 上 144，配额只有 17），项目拿 `LABMON_CPUS` 设线程数、DataLoader 进程数。
+  任务环境里没设（或为空）的 `OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`OPENBLAS_NUM_THREADS` 缺省设成 `LABMON_CPUS`（`cpu_env`，#38；清单任务与单元都一样，`cpus=0` 的是 1）：
+  不设时 BLAS、OpenMP 与 PyTorch 按 `nproc` 起线程，一个任务就能把配额用满、被限流。已设的不盖：worker 与单元申请方自己环境里的不动，
+  清单的 `.env` 与清单行前缀（`OMP_NUM_THREADS=8 python …`、`export …;`）在补缺省之后才生效（`bash -c` 里先 source `.env` 再 eval 命令行），要更多线程的在这两处写一行。
+  按 `LABMON_CPUS` 设并行数的任务（现在也包括没自己设线程数的 BLAS/OpenMP 任务），历史峰值只会照着给它的核数长（给 1 核就只开 1 个、量到的也是 1 核），所以第一次要写 `cpus=`；没写又没历史的按 1 核。
 - **共享盘慢时让路**（`Worker.io_yield`）：共享盘慢时不开始新的共享盘扫描与本地盘扫描（`Disk.step`，共享盘的写在状态的 `disk.yield`），不起新的拷本地依赖的线程（等待原因写“共享盘慢…，推迟拷 N 个本地依赖”）；已经在做的不打断。
   同一件事连着推迟满 30 分钟（`IO_YIELD_MAX_S`）就照做一次、重新计时：一直慢时扫描每 30 分钟做一件，每个拷贝最多晚 30 分钟。开始推迟与推迟满照做时各记一行 worker.log。准入不看。
 - **读写拥塞嫌疑**（`Worker.io_suspect`，事件 `io_suspect`）：在跑的非占位任务已跑过同类历史给的预计时长（`duration` 的 `same`；项目比值、清单估时不算）的 1.5 倍（`SLOW_RATIO`），且此刻共享盘慢，记一条事件：已跑与同类时长、此刻 ms 与基线、每秒次数，以及同一物理机上在跑的别的任务。

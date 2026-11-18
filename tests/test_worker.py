@@ -426,11 +426,13 @@ class AdmissionTest(WorkerBase):
     def test_slot_grant_and_release(self):
         self.start()
         out = self.d / "out"
-        r = subprocess.run([sys.executable, str(WORKER), "slot", "--host", "t", "--project", "demo-b", "--name", "u1", "--vram", "1",
-                            "--", "bash", "-c", f"echo $CUDA_VISIBLE_DEVICES > {out}; exit 7"], env=self.env, capture_output=True, text=True,
-                           timeout=30)
+        env = {k: v for k, v in self.env.items() if k not in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS")}
+        env["MKL_NUM_THREADS"] = "5"                            # 申请方自己设了的不盖，没设的缺省同 LABMON_CPUS（#38）
+        r = subprocess.run([sys.executable, str(WORKER), "slot", "--host", "t", "--project", "demo-b", "--name", "u1", "--vram", "1", "--cpus", "2",
+                            "--", "bash", "-c", f"echo $CUDA_VISIBLE_DEVICES $LABMON_CPUS $OMP_NUM_THREADS $MKL_NUM_THREADS $OPENBLAS_NUM_THREADS > {out}; exit 7"],
+                           env=env, capture_output=True, text=True, timeout=30)
         self.assertEqual(r.returncode, 7)                       # exec 原命令：退出码原样返回
-        self.assertEqual(out.read_text().strip(), "GPU-aaa")
+        self.assertEqual(out.read_text().strip(), "GPU-aaa 2 2 5 2")
         usage = self.d / "home" / "hosts" / "t" / "usage.jsonl"
         self.until(lambda: usage.exists() and '"kind": "slot"' in usage.read_text())
         self.assertEqual(list((self.d / "slots").iterdir()), [])  # 交换文件清掉
@@ -4444,6 +4446,30 @@ class PressTest(UnitBase):
         os.makedirs(self.m.SLOTS)
         self.w.grant(self.req(key="slot:1", cpus=2.0), [])
         self.assertEqual(json.loads(Path(self.m.SLOTS, "1.ok").read_text())["cpus"], 2)
+
+    def test_thread_vars_default_to_labmon_cpus(self):
+        # #38：没设的 OMP/MKL/OPENBLAS 线程数缺省同 LABMON_CPUS；worker 自己环境里的、.env 里的、清单行前缀的都不盖；cpus=0 导出 1、线程数也是 1
+        e = {"OMP_NUM_THREADS": "", "MKL_NUM_THREADS": "2"}
+        self.assertEqual(self.m.cpu_env(e, 3), {"LABMON_CPUS": "3", "OMP_NUM_THREADS": "3", "MKL_NUM_THREADS": "2", "OPENBLAS_NUM_THREADS": "3"})
+        show = "echo $LABMON_CPUS $OMP_NUM_THREADS $MKL_NUM_THREADS $OPENBLAS_NUM_THREADS"
+        q, = self.hosts.queues({"t": [f"a|{show} > a.out   # gpus=0 cpus=3",
+                                      f"b|OMP_NUM_THREADS=8 bash -c '{show}' > b.out   # gpus=0 cpus=0"]}, "p")
+        Path(q["root"], "jobs", "q.env").write_text("MKL_NUM_THREADS=4\n")
+        q["env"] = str(Path(q["root"], "jobs", "q.env"))
+        for d in (q["state"], q["logs"]):
+            os.makedirs(d)
+        self.w.info = {"cpu_quota": 17.0}
+        with mock.patch.dict(os.environ, {"OPENBLAS_NUM_THREADS": "6"}):
+            for k in ("OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+                os.environ.pop(k, None)
+            for name, cmd in self.m.list_jobs(q):
+                r = self.w.prep(self.m.new_req("queue", "t", "p", q=q, root=q["root"], queue=q["jobs"], **dict(self.m.hints(cmd), name=name, cmd=cmd.strip())), time.time(), {})
+                self.w.start(q, r, [])
+                t = time.time()
+                while not Path(q["state"], name + ".rc").exists() and time.time() - t < 10:
+                    time.sleep(0.05)
+                Path(q["state"], "current").unlink()
+        self.assertEqual([Path(q["root"], n + ".out").read_text().strip() for n in "ab"], ["3 3 4 6", "1 8 4 6"])
 
     def test_peers_read_status_with_press_fields(self):
         # 别的主机写的状态带 info.press、运行中任务带读写，用量记录有新字段也有旧行：本机照常读进份额与历史、写出自己的 info.press

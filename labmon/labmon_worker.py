@@ -61,7 +61,8 @@
   写进 status.json；任务结束时把峰值与运行期间有没有别的任务同卡、同机写一行到 usage.jsonl。读写的量准入不看；
   共享盘慢（超过基线且每秒不少于 IO_MIN_OPS 次）时共享盘扫描与拷本地依赖让路（最多推迟 IO_YIELD_MAX_S），
   在跑的任务已跑过同类历史 1.5 倍又遇上共享盘慢时只记一条“读写拥塞嫌疑”事件。
-- 开跑时导出 LABMON_CPUS（开跑时给这个任务记账的核数，之后回收记账不改它），项目拿它设线程数；不设 OMP_NUM_THREADS。
+- 开跑时导出 LABMON_CPUS（开跑时给这个任务记账的核数，之后回收记账不改它），项目拿它设线程数；任务环境里没设的
+  OMP_NUM_THREADS、MKL_NUM_THREADS、OPENBLAS_NUM_THREADS 缺省同它（cpu_env；清单行与 .env 里设了的不盖）。
 - 任务要跑多久（duration）：同类跑过的实际耗时、实际/估时 比值折算 est_min（各主机的 usage.jsonl 一起看）；各清单每个任务的预计时长
   写进 status.json 给看板排预计时间，截止前的准入在它上面再乘 DUR_MARGIN。
 
@@ -1755,6 +1756,19 @@ def nfs_slow(nfs):
     """共享盘此刻慢不慢（状态的 info.press.nfs）：近 1 分钟每次读写的执行时间超过本机基线（io_base），且每秒至少 IO_MIN_OPS 次读写
     （几次小写的延迟不算）。扫描与拷本地依赖让路（Worker.io_yield）、读写拥塞嫌疑（Worker.io_suspect）共用。"""
     return bool(nfs and nfs.get("ms") is not None and (nfs.get("ops") or 0) >= IO_MIN_OPS and nfs["ms"] > nfs["base"])
+
+
+THREAD_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+
+
+def cpu_env(env, n):
+    """开跑时给任务的核数进环境（清单任务 Worker.start 与单元 slot_main 共用）：导出 LABMON_CPUS，THREAD_VARS 没设（或为空）的缺省设成它（#38）。
+    已设的不盖：worker 与申请方自己环境里的在这里留着；清单的 .env 与清单行前缀的赋值在这之后才生效（bash -c 里 source、eval），本来就盖过缺省。"""
+    env["LABMON_CPUS"] = str(n)
+    for k in THREAD_VARS:
+        if not env.get(k):
+            env[k] = str(n)
+    return env
 
 
 def job_cpus(v):
@@ -3586,7 +3600,7 @@ class Worker:
             env = dict(os.environ, PYTHONUNBUFFERED="1", QUEUE_ROOT=q["root"], LABMON_SCRATCH=sd, LABMON_CACHE=cd)
             env.pop("PYTHONPATH", None)
             env["CUDA_VISIBLE_DEVICES"] = ",".join(c["uuid"] for c in gpus) if job["ngpu"] > 0 else ""
-            env["LABMON_CPUS"] = str(self.cpus_for(job))   # 给它记账的核数：项目拿它设线程数、DataLoader 进程数（nproc 是宿主机的）
+            cpu_env(env, self.cpus_for(job))     # 给它记账的核数：项目拿它设线程数、DataLoader 进程数（nproc 是宿主机的）；没设的 BLAS/OpenMP 线程数缺省同它
             # 命令放子 shell 里跑：清单行里的 exit 不会跳过写退出码。借来的主机上先调高自己的 oom_score_adj（子进程继承）
             script = ("echo %d > /proc/self/oom_score_adj 2>/dev/null; " % GUEST_ADJ if self.guest() else "") \
                 + 'set -a; [ -n "$1" ] && . "$1"; set +a; ( eval "$2" ); echo $? > "$3"'
@@ -5549,7 +5563,7 @@ def slot_main(argv):
         if ok:
             ok = json.loads(ok)
             os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(ok.get("gpus", []))
-            os.environ["LABMON_CPUS"] = str(ok.get("cpus") or max(1, job_cpus(CPU_DEFAULT if a.cpus is None else a.cpus)))   # 旧 worker 的 .ok 不带 cpus：按 --cpus 或缺省
+            cpu_env(os.environ, ok.get("cpus") or max(1, job_cpus(CPU_DEFAULT if a.cpus is None else a.cpus)))   # 旧 worker 的 .ok 不带 cpus：按 --cpus 或缺省
             if ok.get("adj"):                     # 借来的主机：撞容器内存上限时内核先杀我们的
                 try:
                     with open("/proc/self/oom_score_adj", "w") as f:

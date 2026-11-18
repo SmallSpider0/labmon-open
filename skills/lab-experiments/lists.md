@@ -51,8 +51,9 @@ worker 只认命令里对同一路径的 `[ -f … ] ||` 算能自己补；脚�
 - `vram=`、`ram=`：新类型的任务第一次跑写上，跑过一次就按实测（同 tag 或去种子号同名的；同一清单里别的任务的历史不盖过提示值）。
   OOM 后 worker 自己抬高估计、封顶到整卡或整个容器，跑成功一次回到按实测：不用改 `vram=`、拆清单、改名或换 tag（`docs/worker.md`「准入」）。
 - `cpus=`：放行按它记 CPU 账，核不够就等。只在没有同类历史、又确知要多核时写；跑过一次就有峰值历史，写多了白占别人的核。
-  CPU 与内存按容器配额算，不按 `nproc`/`free`（29 上 `nproc` 是 144，配额只有 17）：线程数、DataLoader 进程数、`OMP_NUM_THREADS` 按开跑时导出的 `LABMON_CPUS` 设（worker 不替你设）。
-  按 `LABMON_CPUS` 设并行数的任务**第一次要写 `cpus=`**：历史只会照着给它的核数长。
+  CPU 与内存按容器配额算，不按 `nproc`/`free`（29 上 `nproc` 是 144，配额只有 17）：线程数、DataLoader 进程数按开跑时导出的 `LABMON_CPUS` 设。
+  没设的 `OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`OPENBLAS_NUM_THREADS` worker 缺省设成 `LABMON_CPUS`；要别的值就在清单行前缀或 `.env` 里写，worker 不盖。
+  多线程的任务（自己按 `LABMON_CPUS` 设的、靠上面缺省的）**第一次要写 `cpus=`**：历史只会照着给它的核数长，没写又没历史的只给 1 核、1 个线程。
 - 名字各不相同的同类任务写同一个 `tag=`，fit 与准入才认得出是同类。
 
 ## 排到哪台、开不开并行
