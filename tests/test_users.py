@@ -358,6 +358,13 @@ class AdminTest(UsersBase):
         self.assertEqual(e.exception.code, 409)
         self.assertIn("[fleet.account_people]", e.exception.msg)
         self.assertIn("bob", [u["name"] for u in U.listing(t=T0)["users"]])
+        multi = '[fleet.account_people]\nbob = """\nBOB"""\n'
+        hosts.write_text(multi)                                                      # 跨行的值逐行删不掉（Codex 审查）：不删账号，主机清单不动
+        with self.assertRaises(U.Denied) as e:
+            U.remove("bob", "boss")
+        self.assertEqual(e.exception.code, 409)
+        self.assertEqual(hosts.read_text(), multi)
+        self.assertIn("bob", [u["name"] for u in U.listing(t=T0)["users"]])
         hosts.write_text('[fleet]\naccount_people = {boss = "BOSS"}\n')              # 没有这个账号的对应：照常删，主机清单不动
         U.remove("bob", "boss")
         self.assertEqual(hosts.read_text(), '[fleet]\naccount_people = {boss = "BOSS"}\n')

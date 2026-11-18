@@ -255,7 +255,12 @@ def drop_account_people(account: str, by: str) -> bool:
         return len(row) == 1 and next(iter(row)).casefold() == low
     s, end, _ = b[0]
     block = [line for line in lines[s + 1:end] if not mine(line)]
-    _write_checked(p, "".join(lines[:s + 1] + block + lines[end:]), f"{by} 删了账号 {account}：去掉 [fleet.account_people] 里它的对应")
+
+    def gone(text: str) -> None:                 # 逐行删不掉的写法（跨行的值等）：不写、报错，账号也不删（Codex 审查）
+        left = (tomllib.loads(text).get("fleet") or {}).get("account_people") or {}
+        if any(str(k).casefold() == low for k in left):
+            raise ConfigError(f"[fleet.account_people] 里 {account} 那一项不是单行写法，删不掉：先手动删掉它再删账号")
+    _write_checked(p, "".join(lines[:s + 1] + block + lines[end:]), f"{by} 删了账号 {account}：去掉 [fleet.account_people] 里它的对应", check=gone)
     return True
 
 
