@@ -32,6 +32,7 @@ from labmon.config import load, stale_limit  # noqa: E402
 from labmon.health import DOWN_S, link_step  # noqa: E402
 from labmon.records import log_events, records, told  # noqa: E402
 from labmon.state import load_rows, save_json, state_dir  # noqa: E402
+from labmon import records as RC  # noqa: E402
 from labmon import users as U  # noqa: E402
 from labmon import serve as S  # noqa: E402
 from labmon.serve import Handler, Listener, Overview, Project, Server  # noqa: E402
@@ -693,6 +694,33 @@ class AuthTest(unittest.TestCase):
         with mock.patch.object(S.LS, "primary", return_value=False):
             self.assertTrue(json.loads(self.call(index, tok=watcher)[2])["standby"])
             self.assertTrue(json.loads(self.call(path, body, tok=amy)[2])["standby"])
+        # 每个普通账号 24 小时最多 REPORT_DAY 份（#18）：再交 429，管理员不受限
+        with mock.patch.object(RC, "REPORT_DAY", 2):
+            self.assertEqual(self.call(path, body, tok=amy)[0], 201)
+            status, _, raw = self.call(path, body, tok=amy)
+            self.assertEqual(status, 429)
+            self.assertIn("24 小时", json.loads(raw)["error"])
+            self.assertEqual(self.call(path, {"title": "看板", "evidence": "x"}, tok=admin)[0], 201)
+            with mock.patch("labmon.records.time.time", return_value=time.time() + 86400 + 60):
+                self.assertEqual(self.call(path, body, tok=amy)[0], 201)       # 过了 24 小时又能交
+        self.assertEqual(len(json.loads(self.call(index, tok=watcher)[2])["reports"]), 4)
+
+    def test_user_project_quota(self):
+        # 普通用户名下的项目（含已归档的）最多 USER_PROJECTS 个（#18）：再登记新的回 409；已登记的照常推，管理员不受限
+        amy = make_token("amy", role="user", scopes=("project",))
+        admin = make_token("boss", role="admin", scopes=("project",))
+        put = lambda pid, tok, **kw: self.call(self.lan + f"/api/project/{pid}/config", {"text": f'id = "{pid}"\n', "files": {}}, tok=tok, method="PUT", **kw)   # noqa: E731
+        with mock.patch.object(S.U, "USER_PROJECTS", 2):
+            self.assertEqual(put("e1", amy)[0], 200)
+            status, hd, _ = put("e2", amy)
+            self.assertEqual(status, 200)
+            PJ.archive("e1", {"generated": time.time(), "no_work_since": time.time() - 100, "lanes": []}, {"generated": time.time(), "hosts": [], "regs": []})
+            status, _, raw = put("e3", amy)
+            self.assertEqual(status, 409)
+            self.assertIn("2 个", json.loads(raw)["error"])
+            self.assertFalse(PJ.cfg_file("e3").is_file())
+            self.assertEqual(put("e2", amy, headers={"If-Match": hd["ETag"]})[0], 200)   # 已登记的照常推
+            self.assertEqual(put("e4", admin)[0], 200)
 
     def test_minimum_client_and_version_metadata(self):
         code = fixtures.add_account("boss", "admin", "本机命令行")
@@ -952,7 +980,10 @@ class AuthTest(unittest.TestCase):
             for path, data, expected in (
                 ("/api/worker/add", {"host": "b", "project": "exp", "args": ["/root", "q.txt"]}, 403),
                 ("/api/worker/add", {"host": "a", "project": "exp", "args": ["/root", "other.txt"]}, 403),
+                ("/api/worker/add", {"host": "a", "project": "exp", "args": ["/root", "./other.txt"]}, 403),      # JOBS 换个写法也认得（#18）
+                ("/api/worker/add", {"host": "a", "project": "exp", "args": ["/root/", "x/../other.txt"]}, 403),
                 ("/api/worker/rm", {"host": "a", "args": ["/root", "other.txt"]}, 403),
+                ("/api/worker/rm", {"host": "a", "args": ["/root", "./other.txt"]}, 403),
                 ("/api/worker/rm", {"host": "a", "args": ["/root", "own.txt", "--host=b"]}, 400),
                 ("/api/worker/add", {"host": "a", "project": "exp", "args": ["/root", "q.txt", "--project=private"]}, 400),
                 ("/api/worker/add", {"host": "a", "project": "exp", "args": ["/root", "q.txt"], "stop": "file:../outside"}, 400),

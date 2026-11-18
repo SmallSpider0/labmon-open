@@ -4,7 +4,7 @@
 - JobWatch：labmon wait --job 等某些任务跑完（#135）；内部状态（开始等的时刻、见过它在跑、确认了几份快照……）由 state() 交给客户端、restore() 带回，
   服务端不记会话。
 - wait：长轮询（#157 方案 C）：有新告警、或等的任务都有了结果就回，否则最多挂 HOLD_MAX 秒；挂着时只在相关文件变了、或离上次判过 POLL_S 秒时再判。
-  同时挂着的封顶 SLOTS 个（多了抛 Busy，接口回 503、客户端退避）。请求号 rid：同一个号 RID_KEEP_S 秒内再来回上次那份（回话丢在半路时客户端带同一个号重试，
+  同时挂着的封顶 SLOTS 个（多了抛 Busy，接口回 503、客户端退避），一个普通账号封顶 ACCOUNT_SLOTS 个（多了抛 AccountBusy，回 429，#18）。请求号 rid：同一个号 RID_KEEP_S 秒内再来回上次那份（回话丢在半路时客户端带同一个号重试，
   已记成报过的告警不会漏）。
 """
 from __future__ import annotations
@@ -23,6 +23,7 @@ JOB_BAD_RC = 4        # wait --job 都有了结果、但不全是成功（失败
 HOLD_MAX = 25         # 长轮询一次最多挂这么久（秒）：小于 TX 上 nginx 的 proxy_read_timeout（60 秒）
 POLL_S = 30           # 挂着时文件没变也至少这么久再判一次（collector_stale 按时间判，同以前每 30 秒读一次）
 SLOTS = 32            # 同时挂着的长轮询最多几个：每个占一个处理线程
+ACCOUNT_SLOTS = 8     # 一个普通账号同时最多挂几个（#18）：一个人占不满 SLOTS，别人照样能等；管理员只受 SLOTS 限
 RID_KEEP_S = 120      # 请求号记多久
 
 
@@ -250,7 +251,12 @@ class Busy(Exception):
     """同时挂着的长轮询已满（SLOTS）：接口回 503，客户端退避再来。"""
 
 
+class AccountBusy(Busy):
+    """这个账号同时挂着的已有 ACCOUNT_SLOTS 个（#18）：是他自己挂多了，接口回 429，命令行照实报、不退避。"""
+
+
 _SLOTS = threading.BoundedSemaphore(SLOTS)
+_HELD: dict[str, int] = {}                     # 账号 → 此刻挂着几个（只记限了数的普通账号）
 _RIDS: dict[str, tuple[float, dict]] = {}      # 请求号 → (回话的时刻, 回话)
 _RID_LOCK = threading.Lock()
 
@@ -263,23 +269,34 @@ def _sig(out: Path, w: JobWatch | None) -> tuple:
 
 
 def wait(pid: str, names: list[str] | None = None, watch: dict | None = None, hold: float = 0, extra: dict | None = None,
-         rid: str | None = None, overview: Path | None = None) -> dict:
+         rid: str | None = None, overview: Path | None = None, account: str | None = None) -> dict:
     """POST /api/wait（#162）：判一次，有新告警或等的任务都有结果就回，否则挂着（最多 hold 秒，不超过 HOLD_MAX）等相关文件变了再判。
     回 {new: {key: msg}, jobs: [{name, st, text, final}]（按等的顺序）, watch: JobWatch 的状态（客户端下次带回）, done: 等的任务是不是都有了结果}。
-    项目没登记抛 projects.Refused(404)；挂着的满了抛 Busy。rid 见模块说明。"""
+    项目没登记抛 projects.Refused(404)；挂着的满了抛 Busy；account（普通账号的名字，管理员不传）同时挂着的已满 ACCOUNT_SLOTS 个抛 AccountBusy。rid 见模块说明。"""
     now = time.time()
     with _RID_LOCK:
         for r in [r for r, (t, _) in _RIDS.items() if t < now - RID_KEEP_S]:
             del _RIDS[r]
         if rid and rid in _RIDS:
             return _RIDS[rid][1]
-    PJ.require(pid)
-    if not _SLOTS.acquire(blocking=False):
-        raise Busy(f"看板上同时挂着的 labmon wait 已有 {SLOTS} 个，稍后再来")
+        if account and _HELD.get(account, 0) >= ACCOUNT_SLOTS:
+            raise AccountBusy(f"你这个账号同时挂着的 labmon wait 已有 {ACCOUNT_SLOTS} 个（上限）：先停掉用不着的会话里的 wait，再挂这一个")
+        if account:
+            _HELD[account] = _HELD.get(account, 0) + 1
     try:
-        r = _wait(pid, names or [], watch, max(0.0, min(float(hold or 0), HOLD_MAX)), extra or {}, overview)
+        PJ.require(pid)
+        if not _SLOTS.acquire(blocking=False):
+            raise Busy(f"看板上同时挂着的 labmon wait 已有 {SLOTS} 个，稍后再来")
+        try:
+            r = _wait(pid, names or [], watch, max(0.0, min(float(hold or 0), HOLD_MAX)), extra or {}, overview)
+        finally:
+            _SLOTS.release()
     finally:
-        _SLOTS.release()
+        if account:
+            with _RID_LOCK:
+                _HELD[account] -= 1
+                if not _HELD[account]:
+                    del _HELD[account]
     if rid:
         with _RID_LOCK:
             _RIDS[rid] = (time.time(), r)

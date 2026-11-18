@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import difflib
+import fcntl
 import hashlib
 import functools
 import ipaddress
@@ -18,7 +19,7 @@ import tomllib
 from pathlib import Path, PurePosixPath
 
 from .records import log_events
-from .state import write_atomic
+from .state import state_root, write_atomic
 
 # 计划项（分组）、项目、共享盘上各人的配色顺序；配置里写 color 可覆盖
 PALETTE = ["#7F77DD", "#1D9E75", "#D85A30", "#378ADD", "#D4537E", "#BA7517", "#639922", "#888780"]
@@ -108,7 +109,43 @@ def host_defaults(h: dict) -> dict:
     return h
 
 
-HOSTS_LOCK = threading.RLock()                   # 改配置文件（用户级主机清单、项目的 monitor.toml）的“读 → 改 → 校验 → 写”整段互斥（HTTP、工作台、组内操作线程都会改）
+class _HostsLock:
+    """改配置文件（用户级主机清单、项目的 monitor.toml）的“读 → 改 → 校验 → 写”整段互斥：线程之间（HTTP、工作台、组内操作线程）一把 RLock，
+    进程之间（看板服务与本机命令行，#18）状态根 hosts.lock 上的 flock。可重入：同一线程只在最外层拿、放文件锁（_depth 只由持着 RLock 的线程改）。
+    锁文件放状态根、不放主机清单旁边：测试的 LABMON_HOSTS 指着仓库里不存在的文件；冷备跳过 *.lock。"""
+
+    def __init__(self):
+        self._r = threading.RLock()
+        self._depth = 0
+        self._fh = None
+
+    def __enter__(self):
+        self._r.acquire()
+        if self._depth == 0:
+            try:
+                state_root().mkdir(parents=True, exist_ok=True)
+                fh = open(state_root() / "hosts.lock", "a")
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX)
+                except BaseException:
+                    fh.close()
+                    raise
+            except BaseException:
+                self._r.release()
+                raise
+            self._fh = fh
+        self._depth += 1
+        return self
+
+    def __exit__(self, *exc):
+        self._depth -= 1
+        if self._depth == 0:
+            fh, self._fh = self._fh, None
+            fh.close()                                   # 关了就放掉 flock
+        self._r.release()
+
+
+HOSTS_LOCK = _HostsLock()
 
 
 def _hosts_edit(fn):

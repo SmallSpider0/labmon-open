@@ -216,6 +216,33 @@ host = "g1"
             t.join()
         self.assertEqual(len(ST.load_rows(f)), 400)
 
+    def test_edits_exclusive_across_processes(self):
+        # 本机命令行（另一个进程）与看板服务同时改主机清单：读 → 改 → 写整段跨进程互斥（#18）。另一个进程读完、写之前停 1.5 秒，
+        # 这边这时也改：只有线程锁时这边读到旧文本、先写，那边随后写回自己的那份，这边的改动就丢了
+        import subprocess
+        import time
+        hf = self.d / "hosts.toml"
+        hf.write_text('[[hosts]]\nid = "g1"\n')
+        code = ("import sys, time\nfrom labmon import config as K\norig = K._write_checked\n"
+                "def slow(*a, **k):\n    print('ready', flush=True)\n    time.sleep(1.5)\n    return orig(*a, **k)\n"
+                "K._write_checked = slow\nK.set_weight('child', 2)\n")
+        env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+        root = str(Path(__file__).resolve().parent.parent)
+        p = subprocess.Popen([sys.executable, "-c", code], cwd=root, env=dict(env, PYTHONPATH=root), stdout=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(p.stdout.readline().strip(), "ready")
+            t0 = time.monotonic()
+            K.set_weight("parent", 3)
+            self.assertGreater(time.monotonic() - t0, 0.5)                 # 等那边写完才读
+        finally:
+            p.stdout.close()
+            self.assertEqual(p.wait(timeout=30), 0)
+        self.assertEqual(K.sched()["weight"], {"child": 2, "parent": 3})
+        self.assertEqual(K.HOSTS_LOCK._depth, 0)                          # 最外层退出时放掉了文件锁
+        with K.HOSTS_LOCK, K.HOSTS_LOCK:                                   # 同一线程可重入（_hosts_edit 的函数互相调用）
+            K.set_weight("again", 4)
+        self.assertEqual(K.sched()["weight"]["again"], 4)
+
     def test_no_user_file(self):
         os.environ["LABMON_HOSTS"] = str(self.d / "missing.toml")
         c = self.cfg('[[queues]]\nid = "q"\n')

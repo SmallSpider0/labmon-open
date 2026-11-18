@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import re
+import threading
 import time
 import uuid
 
@@ -50,13 +51,29 @@ def log_events(evs: list[dict], t: float | None = None) -> None:
         append_row(state_dir() / "events.jsonl", {"t": round(t), **{k: v for k, v in ev.items() if v not in (None, [], "")}}, EVENT_KEEP_S, t)
 
 
+REPORT_DAY = 10       # 普通账号 24 小时内最多交几份问题报告（#18）：长度另有上限（serve._report_text），连同保留一年，一个人撑不大 events.jsonl
+_REPORT_LOCK = threading.Lock()
+
+
+class ReportQuota(Exception):
+    """这个账号 24 小时内交的问题报告已满 REPORT_DAY 份：接口回 429。"""
+
+
 def report(name: str, title: str, evidence: str, project: str | None, host: str | None,
-           occurred: float | None) -> str:
-    """由看板登记问题报告。记录时间由看板确定，现象与证据按文本保存。"""
-    rid = "R-" + uuid.uuid4().hex
-    log_events([{"kind": "report", "report_id": rid, "reporter": name,
-                 "project": project, "host": host, "occurred": occurred,
-                 "msg": f"{rid} · {name}：{title}", "detail": evidence}])
+           occurred: float | None, *, capped: bool = False) -> str:
+    """由看板登记问题报告。记录时间由看板确定，现象与证据按文本保存。capped（普通账号）：24 小时内已交满 REPORT_DAY 份的抛 ReportQuota，
+    数与写在同一把锁里（报告只由看板服务这一个进程写）。"""
+    with _REPORT_LOCK:
+        t = time.time()
+        if capped:
+            mine = [e["t"] for e in records(cat="report", since=t - 86400) if e.get("kind") == "report" and e.get("reporter") == name]
+            if len(mine) >= REPORT_DAY:
+                raise ReportQuota(f"{name} 24 小时内已交了 {len(mine)} 份问题报告（上限 {REPORT_DAY} 份）："
+                                  f"约 {max(1, round((min(mine) + 86400 - t) / 3600))} 小时后再交，急的直接找管理员")
+        rid = "R-" + uuid.uuid4().hex
+        log_events([{"kind": "report", "report_id": rid, "reporter": name,
+                     "project": project, "host": host, "occurred": occurred,
+                     "msg": f"{rid} · {name}：{title}", "detail": evidence}], t)
     return rid
 
 

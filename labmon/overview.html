@@ -1615,7 +1615,7 @@ function accountSections(u, L) {
       : `<b>把 ${n} 设为管理员</b>：此账号可以管理所有项目和账号。<div class="sm mut">续租、开关机、换人和借卡可从内网操作，也可按账号开启公网平台操作。</div>`) + err, accGo("rolego", u.name, adm ? "改成普通用户" : "设为管理员"));
   const publicops = adm ? popConfirm(b("publicops", "mini-btn", u.public_ops ? "关闭" : "开启", ME.entry !== "lan", ME.entry !== "lan" ? "从内网入口修改此设置" : ""), pk("publicops"), `<b>${u.public_ops ? "关闭" : "开启"} ${n} 的公网平台操作</b><p>包括续租、开关机、换人、借还和保活管理。</p>${err}`, accGo("publicopsgo", u.name, "确认")) : "";
   const reset = self ? "" : popConfirm(b("reset", "", "重置口令"), pk("reset"),
-    `<b>重置 ${n} 的口令</b>：原口令立即失效，这人已登录的浏览器都要重新登录，令牌不动。给一个新的设置码（24 小时有效），交给这人在登录页设新口令。${err}`, accGo("resetgo", u.name, "重置"));
+    `<b>重置 ${n} 的口令</b>：原口令立即失效，这人已登录的浏览器都要重新登录，${u.tokens.length ? `${u.tokens.length} 个令牌一并吊销（命令行与实验会话要重新 labmon login）` : "令牌也一并吊销"}。给一个新的设置码（24 小时有效），交给这人在登录页设新口令。${err}`, accGo("resetgo", u.name, "重置"));
   const rv = popConfirm(b("urv", "", "吊销全部会话与令牌", !nk, nk ? "" : "没有会话与令牌"), pk("urv"),
     `<b>吊销 ${n} 的全部会话与令牌</b>（${u.sessions.length} 个会话、${u.tokens.length} 个令牌）：下一次请求就失效，口令不变。${err}`, accGo("urvgo", u.name, "吊销"));
   const rm = self ? "" : popConfirm(b("rm", "danger", "删除", last, last ? "最后一个管理员删不掉" : ""), pk("rm"),

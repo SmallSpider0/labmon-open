@@ -9,7 +9,7 @@
 | 入口 | 怎么开 | 绑在哪 | 能做的 |
 |---|---|---|---|
 | 内网入口 | `--port`（缺省 8765；dashboard-host 上 8765 被别的程序占着，用 8443，#168） | 主机清单 `[server]` 的 `lan_bind`（缺省 `127.0.0.1`）；配了证书就是 HTTPS | 全部 |
-| 公网入口 | `--public-port P`（`labmon service install --public-port P`，写 0 去掉） | 只绑 `127.0.0.1`，给隧道接（HTTPS 由 TX 的 nginx 做，挂在随机路径前缀下） | 除平台操作与部署外的全部 |
+| 公网入口 | `--public-port P`（`labmon service install --public-port P`，写 0 去掉） | 只绑 `127.0.0.1`，给隧道接（HTTPS 由 TX 的 nginx 做，挂在随机路径前缀下） | 除只在内网入口的（部署与拉起 worker、冷备、账号管理与公网平台操作许可的设置，下表标了“只在内网入口”）外的全部；平台操作要账号开了公网许可 |
 
 - 两个入口共用同一份项目、采集线程与账号；各自认的 `Host` 见下面 [`[server]`](#server-段)。端口只在命令行给，哪台机器用哪个端口按那台的情况定。
 - **POST 请求体**：通过入口、权限和主备检查后，服务端先读取 JSON 对象再执行操作。空请求体按空对象处理，非法长度或非法 JSON 返回 400。
@@ -64,7 +64,7 @@ public_hosts = ["203.0.113.7"]            # 公网入口另认的 Host：nginx �
 - 登录成功种 Cookie `labmon_s`：32 字节随机，`Path=/; HttpOnly; SameSite=Strict`；经 HTTPS 的入口另加 `Secure`：公网入口、配了证书的内网入口（没 TLS 的内网入口不加：Safari 不在 `http://127.0.0.1` 上存带 `Secure` 的 Cookie）。
   反代加了前缀时由 nginx 的 `proxy_cookie_path` 把 `Path` 改成前缀，Cookie 不发给 TX 上别的服务。
 - 30 天，滑动续期：用着就不过期（“最后用”至多每小时落盘一次，同时重发 Cookie）。看板服务重启不掉线。
-- 重置口令、删账号时这人的会话立即失效；吊销会话、撤管理员都是下一次请求就生效（每次请求都查文件，按修改时刻缓存）。
+- 重置口令、删账号时这人的会话与令牌立即失效（重置时本机命令行可加 `--keep-tokens` 留着令牌，#18）；吊销会话、撤管理员都是下一次请求就生效（每次请求都查文件，按修改时刻缓存）。
 - 没登录：页面（`/`、`/p/<id>/`）302 到 `login?next=<原路径>`（相对地址，浏览器带着 `#/…` 跳，登录后回到原处）；JSON 与 `/api/*` 回 401。页面定时取数据拿到 401 就回登录页。
 
 ## 令牌（命令行与脚本）
@@ -100,7 +100,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /fleet/op/…`、`/fleet/probe/…`、`/renew/…`（平台操作） | `admin`，只给管理员；公网须开启账号许可 |
 | `POST /sched/(weight\|focus\|unfocus)`、`/api/override/(focus\|unfocus)`（调度权重与优先，#16） | `project`，只给管理员 |
 | `POST /sched/…`、`/project/…`、`/reg/…`、`/p/<id>/collect`；`PUT /api/project/<id>/config` | `project` |
-| `POST /collect` | `project` 或 `deploy` |
+| `POST /collect` | `project` 或 `deploy`，只给管理员（普通用户用 `POST /p/<id>/collect` 采自己的项目） |
 | `GET /api/admin/deploy` | `deploy`，只给管理员 |
 | `GET /api/admin/backup`（冷备，回 `.tar.gz`） | `backup`，只给管理员，只在内网入口（#17） |
 | `POST /api/admin/deploy`、`/api/worker/start` | `deploy`，只给管理员，只在内网入口 |
@@ -151,7 +151,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `GET /api/users` | 各账号：角色、口令设了没有、设置码到何时、锁到何时、最后用、会话与令牌（只有 id 与摘要）、项目、能用的主机、推送是否已配置、组内人员对应 `fleet_person` 与对应错误 `fleet_person_error`，以及名册与已匹配的当前人员 `people`、可开通账号的人员 `person_choices`。清单读取失败时返回 `people_error`，已有明确关联仍可管理 |
 | `POST /api/users/add {"name", "admin", "person"}` | 必须给出已登记、尚未绑定的人员 `person`，成功时返回一次性设置码 `code` 和提示 `msg`。重复绑定返回 409 |
 | `POST /api/users/role {"name", "admin"}` | 设为或撤销管理员 |
-| `POST /api/users/reset {"name"}` | `{"code", "msg"}`：原口令与这人的会话立即失效，令牌不动 |
+| `POST /api/users/reset {"name"}` | `{"code", "msg"}`：原口令与这人的会话、令牌立即失效（#18） |
 | `POST /api/users/revoke {"name", "id"?}` | 吊销这人的一个会话或令牌；不给 `id` 是全部 |
 | `POST /api/users/remove {"name"}` | 删账号，连同它的会话、令牌、推送配置与主机清单 `[fleet.account_people]` 里它的对应（同名新账号不继承，#17）；`account_people` 写成 `[fleet]` 里的内联表且含这个账号时回 409，改成段落写法再删 |
 | `POST /api/users/hosts {"name", "hosts": [...]}` | 更新这名普通用户可用的主机 |
@@ -163,12 +163,12 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 ## 客户端分发
 
 - `GET /api/client/install.sh?base=<看板根地址>` 下载 `labmon-install.sh`。页面传自己的根地址（含公网路径前缀）；服务端检查协议和当前入口的 Host 白名单。脚本内有 wheel 和入口配置。内网 HTTPS 配有 `[server].ca_cert` 时随附 CA 公钥证书；未附时脚本说明私有 CA 的手动配置方式。
-- `GET /api/client/wheel` 返回同版本的 wheel，响应头 `X-Labmon-Commit` 是完整提交号。`labmon update` 用命令行令牌取包并安装。包从看板启动时运行的 main 提交构建，版本带提交号。备用入口回 409，客户端接着试下一个入口。更新先验证新版本，再切换命令入口。
+- `GET /api/client/wheel` 返回同版本的 wheel，响应头 `X-Labmon-Commit` 是完整提交号。`labmon update` 用命令行令牌取包并安装。包从看板启动时运行的 main 提交构建，版本带提交号。备用入口回 409，客户端接着试下一个入口。更新先验证新版本，再切换命令入口；切换后删掉没有入口指着、也没有进程在用的旧版本目录（看板装的命令行起来就对自己那版加共享锁 `dist.hold_version`，别的会话里还在跑、在退避的旧 `wait` 那版留着；切换前那版也留着，#18）。
 - 包里带着配套 skill（`skills/lab-experiments`），以及它链接到的 `README.md`、`docs/*.md`、`examples/`。这些文件按仓库里的相对位置放在包目录下（#57）。安装与更新时，skill 的固定入口跟着命令入口一起切换，智能体的 skill 入口只在没有时才建（[README「配套 skill」](../README.md#安装)）。
   `labmon wait` 换了版本时，旧进程把自己那份 skill 的位置交给新进程；新进程逐节比对两份，有改动就报一条 `skill_updated` 并退出 1，没改动就接着等。`labmon update` 也会打出同样一句。
 - 已认证的命令行可用 `X-Labmon-Client` 报告完整的 40 位小写 Git 提交号。服务按令牌保存最近一次报告的 `client_commit` 与 `client_seen`，同版本的报告最多每小时落盘一次。账号详情的令牌摘要还带 `client_status`（`current`、`outdated`、`below_minimum`、`unknown`、`inactive` 或空）。
 - `[server].min_client_commit` 可选，取运行版本或其祖先的完整提交号。配置后，带版本头的命令行确认低于最低版本时，操作前回 426，正文含 `reason: "client_outdated"`、`minimum`、在跑的提交 `commit` 和更新提示。比不出先后的（`unknown`：不在运行版本的祖先链上，如比看板新、从分支跑、冷备回退后）不拦，只在账号详情标“版本待确认”，`labmon wait` 在 stderr 提示一次（#17）。浏览器与没有版本头的旧脚本照常。登录、账号、更新包、部署与备份入口仍可用。主备切换先于最低版本判定。
-- `POST /api/wait` 成功时追加 `commit` 与 `client_status`。用看板安装的客户端发现自己在运行版本的祖先链上且可更新时，会在两次轮询间下载、安装并接着等。该轮有新告警或任务已有终态时，先照原规则退出。收到 426 时，用看板安装的 `labmon wait` 也先下载、安装一次（按 426 给的 `commit` 核对版本），装好接着等；装不成或不是看板安装的，以 5 退出，原因 `client_outdated`（#17）。
+- `POST /api/wait` 成功时追加 `commit` 与 `client_status`。用看板安装的客户端发现自己在运行版本的祖先链上且可更新时，会在两次轮询间下载、安装并接着等。该轮有新告警或任务已有终态时，先照原规则退出。收到 426 时，用看板安装的 `labmon wait` 也先下载、安装一次（按 426 给的 `commit` 核对版本），装好接着等；装不成或不是看板安装的，以 5 退出，原因 `client_outdated`（#17）。自动更新装不上的同一版（venv、pip 出错，装出来的版本不对）记在数据根的 `update_failed.json`，隔 1 小时再试、每再失败一次翻倍、最多隔 1 天，没到时候不下载、照报上次的原因；手动 `labmon update` 照常试，装成了清掉（#18）。
 - 接口演进优先新增字段和路由。已有接口的删改留到各客户端都更新后进行，客户端应容忍附加字段。
 - 命令行请求带 `X-Labmon-Client`，值为客户端提交号。`labmon login` 和 `labmon check` 发现版本不同时提示运行 `labmon update`。
 
@@ -197,7 +197,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `PUT /api/project/<id>/config {"text", "files": {done_when 的路径: 内容或 null}}`，头 `If-Match: "<上次同步的版本>"` | 成功 `{"id", "ver", "created", "changed", "archived", "msg"}`，头 `ETag` |
 
 - `ver` 是 monitor.toml 文本的 SHA-256 前 16 位；`files` 的键是登记目录 `files/` 下的位置（`config.done_key`），值是内容的版本。
-- 第一次推就是登记（不用 `If-Match`），`meta.json` 记下推的账号（`owner`）。带 `If-Match` 但项目不存在时返回 412，旧会话的推送不能因此创建项目。已登记的：没带 `If-Match` 回 428，与看板上的版本对不上回 412（先 GET 或 `labmon project pull`），两者都带 `{"error", "ver" 看板上现在的版本}`；
+- 第一次推就是登记（不用 `If-Match`），`meta.json` 记下推的账号（`owner`）。普通用户名下的项目（含已归档的）最多 20 个（`users.USER_PROJECTS`，#18），满了再登记新的回 409，已登记的照常推；管理员不受限。带 `If-Match` 但项目不存在时返回 412，旧会话的推送不能因此创建项目。已登记的：没带 `If-Match` 回 428，与看板上的版本对不上回 412（先 GET 或 `labmon project pull`），两者都带 `{"error", "ver" 看板上现在的版本}`；
   已登记又已归档的 409；配置按 `config.load` 校验不过、id 与地址里的不同、id 写法不对、done_when 的文件超过 1 MiB 或一个是另一个的上级目录回 400。都不写。
 - `[[hosts]]` 与 `[[queues]]`（`projects.GUARDED`：连哪台主机、在主机或本机上跑什么检查与 Python、读主机上哪些文件）经接口改要平台操作的权限：管理员、`admin` 作用域、入口获准（`users.can_ops`），
   不然 403，第一次推就带着这两段的同样算改了；按 TOML 解析后比，只动了注释、空白的不算。别的项（标题、计划项、里程碑、告警……）`project` 作用域就能推。
@@ -216,7 +216,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 labmon user person <人员名>            # 先登记人员，服务器设置可稍后补
 labmon user add <账号> --person <人员名> [--admin]  # 开通并绑定，打出设置码；第一个必须 --admin
 labmon user bind <账号> <人员名>       # 为未关联的存量账号补关联已登记人员
-labmon user reset <名字>               # 忘了口令：打出新的设置码（这人已登录的浏览器都要重新登录，令牌不动）
+labmon user reset <名字> [--keep-tokens]   # 忘了口令：打出新的设置码（这人已登录的浏览器都要重新登录，令牌一并吊销；只是忘了口令的加 --keep-tokens 留着）
 labmon user remove <名字>              # 删账号（连同会话与令牌；最后一个管理员删不掉）
 labmon user list                       # 列出账号
 labmon user token <名字> --scope deploy --name 部署 --out ~/.config/labmon/deploy.token   # 建令牌：原文只写进文件（600），不打到终端
@@ -306,7 +306,7 @@ labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # �
 - 每轮先与看板上的配置同步，再 `POST /api/wait`：第一次 `hold=0`（马上列出等的任务此刻的状态），之后 `hold=25`。看板那边有新告警、或等的任务都有了结果就回，
   否则挂着，相关文件（项目快照、全局快照、`projects.json`、被等的别的项目的快照）变了、或离上次判过 30 秒时再判一次，最多挂 25 秒（小于 TX 上 nginx 的 60 秒超时）。
 - “报过没有”照旧记在看板上这个项目输出目录的 `.labmon/wait_state.json`（同一项目几个会话共用）；`--job` 的确认状态（见过它在跑、确认了几份快照……）在 `watch` 里，命令行每轮带回，看板不记会话、重启不丢。
-- 请求号 `rid`：回话丢在半路时命令行带同一个号重试，看板 2 分钟内回上次那份，已记成报过的告警不会漏。同时挂着的最多 32 个，多了回 503、命令行退避。
+- 请求号 `rid`：回话丢在半路时命令行带同一个号重试，看板 2 分钟内回上次那份，已记成报过的告警不会漏。同时挂着的最多 32 个，多了回 503、命令行退避；一个普通账号同时最多 8 个（`waits.ACCOUNT_SLOTS`，#18），多了回 429，命令行打出原因、退出 3（先停掉用不着的会话里的 wait），管理员只受 32 个的限。
 - 连不上看板退避重试；连续连不上超过 max(3×采集间隔, `stale_min`) + 1 分钟（`config.stale_limit`，与 `collector_stale` 同一门槛，按本地 monitor.toml）以新告警 `server_unreachable` 退出（退出码 1）。
 - 第一轮推配置就被看板拒（配置不对）照以前“配置错误”退出 3；之后各轮推不上当一条 `sync_error:` 报一次。
 
@@ -319,7 +319,7 @@ labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # �
 
 ## 问题报告
 
-- `POST /api/report` 需要 `project` 作用域。JSON 字段 `title`（现象，最多 200 字）和 `evidence`（证据，最多 12000 字）必填，`project`、`host`、`occurred`（发生时刻，epoch 秒）可省略。报告人取登录身份，提交时间由看板记录。普通用户只能指定自己的项目和能看见的主机。成功回 201，含 `report_id` 及命令行输出。备用看板回 409 standby。
+- `POST /api/report` 需要 `project` 作用域。JSON 字段 `title`（现象，最多 200 字）和 `evidence`（证据，最多 12000 字）必填，`project`、`host`、`occurred`（发生时刻，epoch 秒）可省略。报告人取登录身份，提交时间由看板记录。普通用户只能指定自己的项目和能看见的主机，24 小时内最多交 10 份（`records.REPORT_DAY`，#18），多了回 429、写明多久后能再交；管理员不受限。成功回 201，含 `report_id` 及命令行输出。备用看板回 409 standby。
 - 管理员在「记录 → 问题报告」按报告编号查询原文。记录保留一年，随冷备保存。报告里的文字用于核实问题，提交前去掉口令、令牌及其他秘密。
 - `GET /api/reports` 需要管理员的 `reports` 作用域，回 `{"reports":[{"report_id":"R-…","reporter":"账号","t":1794551400}]}`。这个作用域只读报告元数据，可长期使用；`admin` 令牌也可访问。备用看板回 409 standby。
 
