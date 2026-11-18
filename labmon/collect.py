@@ -653,7 +653,7 @@ def _groups(cfg: dict, snap: dict, state: dict, ratios: dict) -> None:
 
 
 def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict, t: float) -> None:
-    """主机级告警：GPU 空转（还有任务未完成、利用率却一直低，写明各车道在做什么）、drain 挡住本项目的任务、空闲关机风险（when_idle 检查）。"""
+    """主机级告警：GPU 空转（还有任务未完成、利用率却一直低，写明各车道在做什么）、CPU 持续被限流且本项目有超核的任务、drain 挡住本项目的任务、空闲关机风险（when_idle 检查）。"""
     al_cfg, alerts, hstate = cfg["alerts"], snap["alerts"], state.setdefault("hosts", {})
     for hd in snap["hosts"]:
         if not hd["ok"]:
@@ -684,6 +684,17 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
             alerts.append(alert(f"gpu_idle:{hd['id']}", "agent", f"{hd['label']}：还有 {unfinished} 个任务未完成，"
                                 f"GPU 利用率已 {al_cfg['gpu_idle_min']} 分钟低于 {al_cfg['gpu_idle_util']:.0f}%"
                                 + (f"（{'；'.join(why)}）" if why else "")))
+        # CPU 被配额限流（#39）：worker 判的（Worker.throttle，门槛只在那边），持续满时本项目有超核的任务才报；key 带这一段的起点，同一段只叫醒一次
+        th = next(((e.get("status") or {}).get("throttle") for e in glob_snap.get("hosts", []) if e["id"] == hd["id"]), None)
+        over = [o for o in (th or {}).get("over") or [] if o.get("project") == cfg["id"]] if (th or {}).get("alert") else []
+        if over:
+            who = "、".join(f"{o['name']} 实测 {o['cores']:g} 核（给 {o['give']} 核）" for o in over)
+            thr = "" if th.get("thr") is None else f" {th['thr']:g}%"
+            say = f"{hd['label']}：容器 CPU 被配额限流{thr}（已持续 {fmt_dur(th['for'])}），本项目超核的任务：{who}"
+            alerts.append(alert(f"throttle:{hd['id']}:{th['since']}", "both",
+                                f"{say}。没设的 OMP/MKL/OPENBLAS 线程数 worker 已缺省成 $LABMON_CPUS，仍超核的是别处写死了：查代码、.env 与清单行前缀里的线程数与进程数"
+                                "（OMP_NUM_THREADS 等、torch.set_num_threads、DataLoader num_workers、进程池；按 nproc 取的是宿主机的核数），改成按 $LABMON_CPUS；"
+                                "确实要更多核就在清单那一行写 cpus=，下次放行按它记账", say))
         # drain 是整台主机的（续租预备、跑完就还、别的会话手动下的）：挡住本项目的任务时报一次，免得会话一直睡着不知道
         dr = [ln for ln in lanes if ln.get("held") == "drain" and ln.get("unfinished")]
         if dr:

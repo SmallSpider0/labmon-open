@@ -150,6 +150,8 @@ class ContractTest(unittest.TestCase):
         self.assertNotIn("start", j)
         self.assertEqual(j["gpus"], ["GPU-aaa"])
         self.assertEqual((st["kafight"], st["watchdogs"]), (None, {"frozen": [], "seen": []}))           # 保活没被拉起、不是借来的
+        self.assertIn("throttle", st)                                                                    # CPU 限流（#39）：测试里读不到 cpu.stat，没在限流为 None
+        self.assertIsNone(st["throttle"])
         self.assertIsInstance(st["ka_stop"], NUM)                                                        # 有任务要卡：worker 停着保活，停它的时刻（重启时找回，#124）
         for k in ("pid", "cmd", "tail", "log", "use", "est", "hold", "kind", "queue", "root", "cpus", "io", "io_sus"):   # 任务卡展开要用的
             self.assertIn(k, j)

@@ -4284,6 +4284,53 @@ class PressTest(UnitBase):
         (self.proc / "pressure" / "io").write_text("some avg10=1.50 avg60=2.25 avg300=0.10 total=123\nfull avg10=0 avg60=0 avg300=0 total=0\n")
         self.assertEqual(self.w.press(self.hosts.advance(10))["psi"], {"io": 2.25})
 
+    def test_throttle_step_and_over(self):
+        # 限流的起止（#39）：≥ 25% 起算，降到 10% 以下才算结束；thr 为 None（刚起、计数归零）沿用；超核看最近一个 1 分钟窗口
+        step = self.m.thr_step
+        self.assertIsNone(step(None, 24.9, 100))
+        self.assertEqual(step(None, 25.0, 100), 100)
+        self.assertEqual(step(100, 12.0, 160), 100)                        # 门槛与缓过来之间：还算这一段
+        self.assertEqual(step(100, None, 160), 100)
+        self.assertIsNone(step(100, 9.9, 220))
+        over, t = self.m.cpu_over, 1000.0
+        self.assertEqual(over({"pks": [[990, 6.0]], "cores": 1.0}, 4, t), 6.0)    # 窗口 6 核、给 4 核：超 1.5 倍且多 2 核
+        self.assertIsNone(over({"pks": [[990, 5.9]]}, 4, t))                # 不到 1.5 倍
+        self.assertIsNone(over({"pks": [[990, 1.6]]}, 1, t))                # 1.6 倍但只多 0.6 核
+        self.assertEqual(over({"pks": [[800, 1.0]], "cores": 3.0}, 1, t), 3.0)    # 窗口过了两分钟：取每轮的核数
+        self.assertIsNone(over({}, 1, t))
+
+    def test_throttle_status_alert_and_restore(self):
+        # 持续限流 10 分钟才标 alert，指出超核的任务（占位任务不算）；限流结束为 None；状态里的起点重启后找回（#39）
+        t0 = self.hosts.now()
+        self.w.info = dict(self.w.info, cpu_quota=8.0)
+        self.w.other["cpu"] = 0.42
+        now = t0 + 60
+        pk = [[round(now), 6.0]]
+        self.w.running = {"a": {"key": "a", "name": "train", "project": "pa", "t0": t0, "gpus": [], "est": {"ram": 1.0, "vram": 0.0, "cpus": 2}, "use": {"pks": pk}},
+                          "b": {"key": "b", "name": "ok", "project": "pb", "t0": t0, "gpus": [], "est": {"ram": 1.0, "vram": 0.0, "cpus": 4}, "use": {"pks": [[round(now), 4.2]]}},
+                          "h": {"key": "h", "name": "hold_x", "project": "pa", "t0": t0, "gpus": [], "est": {"ram": 0.0, "vram": 0.0, "cpus": 1}, "use": {"pks": pk}}}
+        self.counters(periods=100)
+        self.w.press(t0)
+        self.assertIsNone(self.w.throttle(t0))                              # 第一轮没有速率：没在限流
+        self.counters(periods=700, throttled=300)                           # 近 1 分钟一半的周期被限流
+        self.w.info["press"] = self.w.press(self.hosts.advance(60))
+        th = self.w.throttle(now)
+        self.assertEqual((th["since"], th["for"], th["thr"], th["alert"], th["other"]), (round(now), 0, 50.0, False, 0.4))
+        self.assertEqual(th["over"], [{"project": "pa", "name": "train", "cores": 6.0, "give": 2}])
+        self.counters(periods=1300, throttled=600)
+        self.w.info["press"] = self.w.press(self.hosts.advance(self.m.THR_HOLD_S))
+        th = self.w.throttle(self.hosts.now())
+        self.assertTrue(th["alert"])
+        self.assertEqual(th["for"], self.m.THR_HOLD_S)
+        Path(self.w.p.status).write_text(json.dumps({"t": self.hosts.now(), "running": [], "throttle": th}))
+        w2 = self.hosts.worker("t")                                         # 升级、重启：起点沿用，告警不从头计时
+        self.assertEqual(w2.thr_since, th["since"])
+        Path(self.w.p.status).write_text(json.dumps({"t": self.hosts.now() - 3600, "running": [], "throttle": th}))
+        self.assertIsNone(self.hosts.worker("t").thr_since)                # 停久了：不沿用
+        self.counters(periods=1900, throttled=630)                          # 缓过来（5%）：这一段结束
+        self.w.press(self.hosts.advance(60))
+        self.assertIsNone(self.w.throttle(self.hosts.now()))
+
     def test_unevictable_memory(self):
         # 收不回的内存 = 用量 − 文件页（活跃 + 不活跃页缓存）。#4 在 29（3.10 内核、cgroup v1）的采样：memory.stat 没有 total_shmem，
         # 用量 36.44、活跃 25.48、不活跃 7.37 GiB → 3.59（与 rss 3.57 吻合）；/dev/shm 里另有 20 GiB 没人映射的：它记在 cache 下、

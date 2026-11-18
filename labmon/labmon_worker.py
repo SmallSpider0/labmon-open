@@ -142,6 +142,10 @@ PEAK_WIN = 60            # 任务的核数、读写峰值按这么长的窗口�
 PRESS_WIN = 60           # 主机的 CPU 限流、共享盘延迟、本地盘忙碌，“此刻”取近这么久的计数差
 PRESS_EVERY = 300        # 多久往 press.jsonl 记一行这段时间的聚合值（共享盘延迟基线的历史）
 PRESS_KEEP_S = 14 * 86400   # press.jsonl 留多久，也是基线看的范围
+THR_HOT = 25.0           # 近 1 分钟被配额限流的周期占比（%）不低于它，算这台在限流（thr_step；状态的 throttle，#39）
+THR_COOL = 10.0          # 限流中降到它以下才算缓过来（滞回，免得在门槛上来回跳）
+THR_HOLD_S = 600         # 限流持续满这么久，状态的 throttle 标 alert（看板据此告警）
+CPU_OVER_RATIO, CPU_OVER_MIN = 1.5, 1.0   # 任务 1 分钟窗口核数 ≥ 给的核数（LABMON_CPUS）× 这么多倍、且多出至少这么多核，算超核（cpu_over）
 IO_SLOW_MS = 20          # 共享盘每次读写的执行时间（ms）：基线不低于它，历史不够时就用它（#4 维护者定）
 IO_BASE_N = 288          # 基线至少要这么多个有读写的 5 分钟样本（约一天），不够时取 IO_SLOW_MS
 IO_MIN_OPS = 2           # 共享盘每秒读写不到这么多次时不判慢、也不进基线：几个 worker 每 10 秒写一次状态（合计不到 1 次/秒）的延迟不决定慢不慢
@@ -1771,6 +1775,24 @@ def cpu_env(env, n):
     return env
 
 
+def thr_step(since, thr, t):
+    """这一段 CPU 限流从何时起（Worker.press 每轮调，状态的 throttle 与 fit 都按它）：没在限流时 thr（近 1 分钟被限流的周期 %）≥ THR_HOT 从 t 起算；
+    限流中降到 THR_COOL 以下才结束（None）。thr 为 None（刚起、计数归零）时沿用原状态。"""
+    if thr is None:
+        return since
+    if since is None:
+        return t if thr >= THR_HOT else None
+    return None if thr < THR_COOL else since
+
+
+def cpu_over(u, give, t):
+    """运行中任务超核没有：此刻的核数（use 里最近一个 1 分钟窗口 pks，没有或过了两个窗口取每轮的 cores）≥ 给的核数 give × CPU_OVER_RATIO
+    且多出至少 CPU_OVER_MIN 核时返回这个核数，否则 None。限流时指出是谁（Worker.throttle）用它。"""
+    pk = (u.get("pks") or [None])[-1]
+    c = pk[1] if pk and t - pk[0] <= 2 * PEAK_WIN else u.get("cores")
+    return c if c is not None and c >= give * CPU_OVER_RATIO and c - give >= CPU_OVER_MIN else None
+
+
 def job_cpus(v):
     """核数取整（CPU 记账与开跑时导出的 LABMON_CPUS 同一个口径）：四舍五入、至少 1；写明 0 的是 0（不记账，导出时仍给 1）。配额另按向下取整（cpu_cap）。"""
     return 0 if v == 0 else max(1, int(v + 0.5))
@@ -1975,6 +1997,7 @@ class Worker:
         self.pfail = False                    # press.jsonl 上次写失败了（连续失败只记一次日志）
         self.pdev, self.pdev_t = None, -PRESS_EVERY   # 本地盘的设备号（local_dev）与上次找它的时刻（没找到时隔 PRESS_EVERY 再找）
         self.slow = None                      # 共享盘此刻慢（nfs_slow）时为 info.press.nfs，否则 None（sample 定）
+        self.thr_since = None                 # 这一段 CPU 限流从何时起（thr_step；没在限流为 None，load_prev 找回）
         self.defer = {}                       # 共享盘慢时推迟的事（扫描 "scan"、拷依赖 (请求 key, 任务)）→ 开始推迟的时刻（io_yield）
         self.cpu_block = {}                   # 请求 key → (任务, 开始一直因 CPU 被挡的时刻)：满 CPU_ALERT_S 才在等待项写 cpu_wait
         self.peer_box = []                    # 同一物理机（共享盘 clientaddr 相同）的别的主机在跑的任务 [(主机, 项目, 任务)]（peers 一起读）
@@ -3756,6 +3779,7 @@ class Worker:
                 self.dep_miss = {(p, n): t for p, n, t in old.get("dep_miss") or []}
             # 要卡时停着的保活：重启那段里被拉起，接管后第一轮照样记“保活被拉起”（#124）；停久了那段里怎样说不准，不沿用
             self.ka_off, self.ka_stop_t = (True, old["ka_stop"]) if fresh and old.get("ka_stop") else (False, 0.0)
+            self.thr_since = (old.get("throttle") or {}).get("since") if fresh else None   # 限流的起算时刻：升级、重启不从头计时
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             self.prev, self.voided = {}, []
         # 成组成员近一天的结果（gang.json 里结束了的）：重启后照样告诉同伴（#180）
@@ -3960,6 +3984,7 @@ class Worker:
                     self.wlog("press.jsonl 写不进（%s）：压力历史先只留在内存，每 %d 秒再试" % (e, PRESS_EVERY))
                 self.pfail = True
         r = press_rates(self.pwin[0], raw) if len(self.pwin) > 1 else dict.fromkeys(("thr", "ms", "ops", "mib", "busy", "await"))
+        self.thr_since = thr_step(self.thr_since, r["thr"], t)
         base, n = io_base(self.prows, t)
         nf = {"path": DATA_ROOT, "addr": raw["nfs"]["addr"], "ms": r["ms"], "ops": r["ops"], "mib": r["mib"], "base": base, "n": n,
               "need": IO_BASE_N, "floor": IO_SLOW_MS, "min_ops": IO_MIN_OPS} if raw["nfs"] else None
@@ -3967,6 +3992,25 @@ class Worker:
             nf["slow"] = nfs_slow(nf)
         return {"thr": r["thr"], "psi": raw["psi"], "nfs": nf,
                 "disk": {"dev": raw["disk"]["name"], "busy": r["busy"], "await": r["await"]} if raw["disk"] else None}
+
+    def throttle(self, now):
+        """状态的 throttle（#39）：这一段 CPU 限流（thr_step）的起点 since、已持续 for 秒、此刻的 thr、持续满 THR_HOLD_S 的 alert，
+        超核的任务 over [{project, name, cores, give}]（cpu_over；give 是开跑时导出的 LABMON_CPUS，按核数从多到少；占位任务不算），
+        labmon 之外此刻占的核 other（不含保活；算不出为 None）。没在限流为 None。看板的告警与 fit 都只读它，门槛只在这里。"""
+        if self.thr_since is None:
+            return None
+        over = []
+        for j in self.running.values():
+            if is_hold(j["name"]) or not j.get("est"):
+                continue
+            give = self.cpus_for(j)
+            c = cpu_over(j.get("use") or {}, give, now)
+            if c is not None:
+                over.append({"project": j.get("project"), "name": j["name"], "cores": round(c, 1), "give": give})
+        oc = self.other["cpu"]
+        return {"since": round(self.thr_since), "for": round(now - self.thr_since), "thr": (self.info.get("press") or {}).get("thr"),
+                "alert": now - self.thr_since >= THR_HOLD_S, "over": sorted(over, key=lambda o: -o["cores"]),
+                "other": None if oc is None else round(oc, 1)}
 
     def io_yield(self, key, now):
         """共享盘慢（nfs_slow）时推迟一件读写共享盘的事（扫描 "scan"、本地盘扫描 "lscan"、拷本地依赖 (请求 key, 任务)）：返回推迟的说明；不慢、或这件事已连着推迟满
@@ -4464,6 +4508,7 @@ class Worker:
             "gate": {"on": self.gate, "at": GATE}, "limits": limits, "overrides": self.ovr, "local": self.local, "storage": self.storage,
             "voided": self.voided,
             "kafight": dict(self.fight, n=len(hits), hits=hits) if hits else None,
+            "throttle": self.throttle(now),       # 这一段 CPU 限流与超核的任务（Worker.throttle）；没在限流为 None
             "ka_stop": self.ka_stop_t if self.ka_off else None,   # 要卡的这段里 worker 停着保活：停它的时刻（接管时找回，load_prev）
             "watchdogs": load_frozen(self.p),
             "guest": {"keep": self.keep(), "other": {"vram": self.other["vram"], "ram": self.other["ram"] and round(self.other["ram"], 2),
@@ -5790,6 +5835,10 @@ def main(argv=None):
         print("  找到的保活看门狗（没动）：" + wd_text(wd["seen"]))
     if st.get("kafight"):
         print("  GPU 保活 %d 小时内被拉起 %d 次（最近 %s）：%s" % (FIGHT_S // 3600, st["kafight"]["n"], now_str(st["kafight"]["t"])[5:16], st["kafight"]["who"]))
+    th = st.get("throttle")
+    if th:
+        print("  CPU 被配额限流 %s%%（%s 起，%d 分钟%s）%s" % (th.get("thr"), now_str(th["since"])[5:16], th["for"] // 60, "，已告警" if th["alert"] else "",
+                                                    "；超核：" + "、".join("%s/%s %.1f 核（给 %d）" % (o["project"], o["name"], o["cores"], o["give"]) for o in th["over"]) if th["over"] else ""))
     if (st.get("limits") or {}).get("tags"):
         print("  tag 限额 " + "，".join("%s=%d" % kv_ for kv_ in sorted(st["limits"]["tags"].items())))
     for q in st.get("queues", []):

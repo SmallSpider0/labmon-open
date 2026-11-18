@@ -109,8 +109,8 @@ def _host_a() -> dict:
                  "nproc": 144, "mem": {"limit": 122.0, "used": 19.9, "anon": 4.5, "src": "cgroup", "peak": 31.5, "failcnt": 0.0, "oom_kill": None},
                  "cpu_quota": 17.0, "cpu_ns": 201382373909614, "disk": [{"path": "/data/me", "free": 200.6, "total": 1024.0}],
                  "started": NOW - 2 * 86400, "cpu_used": 3.2, "rootfs": {"used": 27.4, "total": 750.0, "fs": "overlay", "ok": True, "shm": 0.3},
-                 # 主机压力（Worker.press）：共享盘此刻比基线慢、样本还不够一天（基线取 20 ms）；本地盘有点忙；3.10 内核没有 PSI
-                 "press": {"thr": 1.5, "psi": None,
+                 # 主机压力（Worker.press）：CPU 被限流 38.5%；共享盘此刻比基线慢、样本还不够一天（基线取 20 ms）；本地盘有点忙；3.10 内核没有 PSI
+                 "press": {"thr": 38.5, "psi": None,
                            "nfs": {"path": "/data", "addr": "192.0.2.7", "ms": 31.4, "ops": 12.3, "mib": 40.2, "base": 20.0, "n": 120, "need": 288, "floor": 20, "min_ops": 2, "slow": True},
                            "disk": {"dev": "nvme0n1", "busy": 37.5, "await": 0.8}}},
         "gpu_procs": [{"hpid": 1001, "pid": 2001, "mb": 20500.0, "uuid": "GPU-aaaa-0", "comm": "python", "owner": "job", "job": "alpha_train_s1"},
@@ -129,6 +129,8 @@ def _host_a() -> dict:
                     "projects": {"/data/me/proj-a": "proj-a", "/data/me/proj-b": "proj-b"}},
         "voided": [{"name": "beta_x", "project": "proj-b", "t": NOW - 9 * H, "why": "独占期间同卡出现别的进程", "how": "void", "kind": "queue"}],
         "kafight": None, "watchdogs": {"frozen": [], "seen": []},
+        # CPU 持续被配额限流 25 分钟（Worker.throttle，#39）：alpha_train_s1 给 4 核、1 分钟窗口实测 9.2 核
+        "throttle": {"since": NOW - 1504, "for": 1500, "thr": 38.5, "alert": True, "over": [{"project": "proj-a", "name": "alpha_train_s1", "cores": 9.2, "give": 4}], "other": 0.3},
         "guest": None, "util10": {"GPU-aaaa-0": 95, "GPU-aaaa-1": 3}, "disk": {"root": "/data/share", "mine": True, "now": None, "since": NOW - 100,
                                                                               "yield": "共享盘慢（此刻 31 ms/次，本机基线 20）"},
         "room": {"ram": 97.5, "margin": 8.0, "gpus": {"GPU-aaaa-0": 24000.0, "GPU-aaaa-1": 44000.0}, "cpu": 12.5, "cpu_cap": 17},
@@ -471,6 +473,7 @@ def overview_evil() -> dict:
     a["lw"]["scan"]["top"][0][0] = "/root/" + BAD
     b["lw"]["scan"]["top"][0][0] = "/root/" + BAD
     st["running"][0].update(io=BAD, cpus=BAD)
+    st["throttle"]["over"][0].update(name="任务" + BAD)
     a["log"].append("日志 " + BAD)
     a["done"][0]["name"] = "完" + BAD
     b["borrow"].update(holder="人" + BAD, why="由" + BAD)

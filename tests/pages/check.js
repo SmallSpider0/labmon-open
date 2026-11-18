@@ -329,7 +329,7 @@ t("overview", "主机页：借来的主机写借用、归还约定与留量；�
 });
 t("overview", "主机压力与任务读写：主机页的限流、共享盘读写与基线、本地盘读写；任务详情与跑完的悬停", () => {
   const a = page(O, "#/host/srv-a"), ta = tips(a);
-  has(a, "限流 1.5%"); has(a, "共享盘读写"); has(a, "31.4 ms/次"); has(a, "基线 20.0"); has(a, "本地盘读写"); has(a, "忙 38%");
+  has(a, "限流 38.5%"); has(a, "共享盘读写"); has(a, "31.4 ms/次"); has(a, "基线 20.0"); has(a, "本地盘读写"); has(a, "忙 38%");
   has(a, "background:var(--bad)", "比基线慢标红"); has(ta, "样本 120 / 288 个，还不够，先取 20 ms"); has(ta, "nvme0n1"); has(ta, "192.0.2.7");
   const b = page(O, "#/host/srv-b"), tb = tips(b);
   has(b, "此刻没有读写"); has(b, "基线 26.8"); has(tb, "3900 个样本"); has(tb, "PSI：近 60 秒有任务在等读写的时间占 2.1%");
@@ -340,6 +340,26 @@ t("overview", "主机压力与任务读写：主机页的限流、共享盘读�
   const h = run(O, `jobDetail(${JSON.stringify({...OV.hosts[0].status.running[1], h: OV.hosts[0]})})`); ok(!h.includes("CPU 与读写") && !h.includes("资源提示"), "旧 worker 的任务没有这些字段也写了");
   has(tips(run(O, "doneTable(D.hosts[0].done.map(r => ({...r, h: D.hosts[0]})), false)")), "读 48.0 GiB（峰值 210.5 MiB/s）、写 3.0 GiB（峰值 12.0 MiB/s）");
   ok(run(O, `ioText({cores_mean: 1})`) === "", "旧用量行没有这些字段也写了");
+});
+t("overview", "CPU 被配额限流（#39）：工作台告警指出超核的任务，主机表写 GPU 利用率与限流比例，资源卡标红并在条的悬停写超核", () => {
+  const A = "srv-a（A6000）：容器 CPU 被配额限流 38.5%（已持续 25 分钟），超核的任务：Alpha 实验 的 alpha_train_s1 实测 9.2 核（给 4 核），线程数、进程数按 $LABMON_CPUS 设就不再抢核";
+  ok(run(O, "allAlerts()").includes(A), "工作台告警没有限流那句：" + JSON.stringify(run(O, "allAlerts()")));
+  ok(run(O, "alertsOf(D.hosts[0]).find(a => a.msg.includes('限流')).to") === "both");
+  const home = page(O, "#/");
+  has(home, "显存 · 利用率"); has(home, "46%<span class=\"mut\"> · 95%</span>"); has(home, "· 3%</span>");
+  has(home, 'style="color:var(--bad)"'); has(home, "限流 38.5%"); has(tips(home), "超核：Alpha 实验 的 alpha_train_s1 实测 9.2 核（给 4 核）");
+  ok(!/限流 —|限流 null/.test(home), "没有限流计数的主机也写了");
+  const a = page(O, "#/host/srv-a"); has(a, "限流 38.5%"); has(tips(a), "超核：给 4 核，1 分钟窗口实测 9.2 核"); has(tips(a), "持续限流 25 分钟");
+  // 还没持续满：不告警、琥珀色；没有超核的任务时说是 labmon 之外的还是配额本身不够；缓过来（throttle 为 null）只剩灰色小字
+  run(O, "D.hosts[0].status.throttle.alert = false");
+  ok(!run(O, "allAlerts()").some(x => x.includes("限流")), "还没持续满也告警了"); has(page(O, "#/"), 'style="color:var(--warn)"');
+  run(O, "D.hosts[0].status.throttle.over = []");
+  ok(run(O, "thrText(D.hosts[0])").endsWith("各任务都没超出给的核数，是配额本身不够"));
+  run(O, "D.hosts[0].status.throttle.other = 3.24");
+  ok(run(O, "thrText(D.hosts[0])").endsWith("labmon 之外的进程占 3.2 核"));
+  run(O, "D.hosts[0].status.throttle = null");
+  has(page(O, "#/"), '<span class="sm mut" style="" ');
+  run(O, `D.hosts[0].status.throttle = ${JSON.stringify(OV.hosts[0].status.throttle)}`);
 });
 t("overview", "本地盘开机以来的新写入（#149）：主机页的资源行、概况条与「本地盘」选项卡，组内卡片的小标与抽屉，续租、关机、换人、批量续租的确认，借用归还的确认", () => {
   const LA = "本地盘开机以来 labmon 之外写了 11.7 GiB（/root/.cache/huggingface/hub、/root/work/ckpt、/opt/conda/pkgs），续租会清空，要留的先挪到共享盘";
