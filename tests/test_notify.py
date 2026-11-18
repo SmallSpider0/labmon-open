@@ -252,7 +252,7 @@ class AudienceTest(NotifyBase):
             th = real(msgs)
             threads.append(th)
             return th
-        with mock.patch.object(SV.O, "collect", lambda projects: snap), mock.patch.object(SV.O, "relaunch", lambda s: []), \
+        with mock.patch.object(SV.O, "collect", lambda projects, **kw: snap), mock.patch.object(SV.O, "relaunch", lambda s: []), \
                 mock.patch.object(SV, "notify", spy), mock.patch.object(SV, "log", lambda m: None):
             SV.Overview([]).once()
         for th in threads:

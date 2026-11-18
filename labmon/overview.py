@@ -35,6 +35,7 @@ from . import fleetview as FV
 from . import hostcheck as HC
 from . import lan as L
 from . import lease as LS
+from . import pool as PO
 from . import rebalance as RB
 from . import renew as R
 from .projects import archived_rows, registered
@@ -656,7 +657,7 @@ def relaunch(snap: dict, start=None) -> list[str]:
     for h in snap["hosts"]:
         if not h.get("auto") or h.get("error") or h.get("status_error") or h.get("stopped") or (h.get("status") and h.get("worker_up")):
             continue
-        if (h.get("borrow") or {}).get("gone"):     # 算力池借着时换了容器（pool.tick 已还掉）：不在主人的新容器上拉起 worker（#25）
+        if (h.get("borrow") or {}).get("pool") and not PO.relaunch_ok(h):   # 算力池借着的（#25）：探到还是借来时那个容器才拉起，换了的由 pool.tick 还掉
             continue
         if time.time() - last.get(h["id"], 0) < RELAUNCH_GAP:
             continue

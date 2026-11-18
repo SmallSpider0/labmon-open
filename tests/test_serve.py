@@ -986,6 +986,19 @@ class AuthTest(unittest.TestCase):
                 self.assertEqual(self.call(self.lan + "/api/worker/add", data, tok=token)[0], 200)
                 self.assertEqual(run.call_args.kwargs["stop"], "file:signals/stop")
 
+    def test_reg_move_refuses_pool_lent_host(self):
+        # #25：借给算力池的主机上放什么由看板定：页面上的「换到其他主机」搬不过去（旧代码照搬）
+        admin = make_token()
+        PJ.put_config("exp", 'id = "exp"\n')
+        first = {"host": "a", "project": "exp", "root": "/root", "jobs": "q.txt", "stop": "term"}
+        save_json(state_dir() / "snapshot.json", {"regs": [{"host": "a", "queues": [first]}]})
+        with mock.patch.object(S.W, "run_out", return_value=(0, "完成")) as run, mock.patch.object(S.L, "check", return_value={"ok": True}), \
+                mock.patch.object(S.PO, "lent_ids", return_value={"g"}):
+            status, _, body = self.call(self.lan + "/reg/move", {"to": "g", "items": [first]}, tok=admin)
+        self.assertEqual(status, 409, body)
+        self.assertIn("算力池借来的", body.decode())
+        run.assert_not_called()
+
     def test_worker_and_override_authorize_executed_parameters(self):
         amy = make_token("amy", role="user", scopes=("project",))
         PJ.put_config("exp", 'id = "exp"\n', owner="amy")

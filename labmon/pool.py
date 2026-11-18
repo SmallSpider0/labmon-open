@@ -180,8 +180,7 @@ def _event(sid: str, holder: str | None, msg: str, t: float, **kw) -> None:
 def fit_head(item: dict, hosts: list[str]) -> dict | None:
     """问一次 worker：这条清单的队首（还会跑的第一行）要多少、在 hosts 上放不放得下（labmon worker fit --list --json，在池的代办主机上一条 ssh）。
     返回 {head, need {ngpu, vram 每卡 GiB, ram GiB, cpus}, dur 分钟, hosts {主机: {ok, why}}}；问不成为 None。"""
-    args = [item["root"], item["jobs"], "--list", "--json"] + (["--hosts", ",".join(hosts)] if hosts else [])
-    rc, out = run_out("fit", POOL, args, project=item["project"])
+    rc, out = run_out("fit", POOL, [item["root"], item["jobs"], "--json"], list=True, hosts=",".join(hosts), project=item["project"])
     line = next((x for x in reversed(out.strip().splitlines()) if x.startswith("{")), None)
     try:
         return json.loads(line) if line else None
@@ -216,6 +215,25 @@ def _todo(ws: dict, root: str, jobs: str) -> int | None:
     return None
 
 
+def _box(st: dict, m: dict) -> str | None:
+    """借来时的容器（borrow.json 这台 pool 子项的 started）与组内探测此刻看到的（state.json 的 started）比：same、new（差 60 秒以上，
+    同 health.container_step 认新容器的口径）；有一边不知道为 None。"""
+    if not (m.get("started") and st.get("started")):
+        return None
+    return "new" if abs(st["started"] - m["started"]) > 60 else "same"
+
+
+def relaunch_ok(e: dict, t: float | None = None) -> bool:
+    """算力池借着的主机 worker 不在时，看板能不能把它拉起来（overview.relaunch 问）：worker 不在多半是容器换了（主人续租或重启），
+    不能在主人的新容器里拉起；只有组内探测在 worker 停写状态之后探过、看到的还是借来时那个容器，才是 worker 自己没了、可以拉起。
+    换了容器的由 tick 的 R5 还掉。"""
+    sid = e["id"]
+    st = F._load_state().get(sid) or {}
+    m = (load_json(state_dir() / "borrow.json", {}).get(sid) or {}).get("pool") or {}
+    last = ((e.get("status") or {}).get("t")) or 0
+    return _box(st, m) == "same" and (st.get("last") or 0) > last and not st.get("error")
+
+
 def _returns(lent: list[dict], srv: dict, fst: dict, bst: dict, t: float, ret, fin) -> tuple[set, list[str]]:
     """池借着的各台该不该还：R1 主人回来（guest.owner）、R3 关了入池或出了时段、R4 连着 POOL_IDLE_S 没有池任务在跑、R5 换了容器
     （R2 约定时间与租期截止由 borrow.check 照旧管）。R1–R4 走 request_return（在跑的跑完就还），R5 直接 finish(gone=True)。
@@ -226,7 +244,7 @@ def _returns(lent: list[dict], srv: dict, fst: dict, bst: dict, t: float, ret, f
         s, b, st = srv[sid], e.get("borrow") or {}, fst.get(sid) or {}
         m = (bst.get(sid) or {}).get("pool") or {}
         ws = (e.get("status") or {}) if e.get("worker_up") else {}
-        if m.get("started") and st.get("started") and st["started"] != m["started"]:      # R5：主人续租或重启了，旧容器里的 worker 与任务已没了
+        if _box(st, m) == "new":                           # R5：主人续租或重启了，旧容器里的 worker 与任务已没了
             e["borrow"] = dict(b, gone=True)                  # overview.relaunch 不在主人的新容器上拉起 worker
             gone.append(sid)
             try:

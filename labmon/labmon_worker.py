@@ -7,6 +7,7 @@
     python3 labmon_worker.py ls    --host 29                     登记的队列、运行中与等待中的任务
     python3 labmon_worker.py fit   --host 29 NAME…               开并行车道前：与真放行同一份准入，放不放得下、卡吃不满是不是 CPU 受限
     python3 labmon_worker.py fit   --host 29 ROOT JOBS --list --project P [--hosts 29,30]   一条清单还会跑的行此刻能在这几台上再开几条车道
+    python3 labmon_worker.py fit   --host pool ROOT JOBS --list --json --project P --hosts 29,30   只看队首、打一行 JSON（算力池用，#25）
     python3 labmon_worker.py stop  --host 29                     停 worker；运行中的任务不受影响，下次启动时接管
     python3 labmon_worker.py thaw  --host 29                     恢复借来时暂停的保活看门狗（还卡时 borrow.finish 调）
 
@@ -2492,8 +2493,9 @@ class Worker:
         self.back_last = {key: v for key, v in self.back_last.items() if key in over or t - v < GUEST_QUIET_S}
         if away and self.away_base:                    # 说好不用：开始以前的超出（卡、内存、CPU）不再挡（guest_block 与快照的 owner 都看 back_last），这一轮起就放行
             self.back_last = {key: v for key, v in self.back_last.items() if key in over or v > self.away_base["t0"]}
-        # 主人回来（#25）：超出的几项里去掉只因 ka.sh 停不了的保活超出的卡（那张卡上除了它没有对方的进程：保活只占位、不算主人干活，#37）
-        self.owner = [v for key, v in over.items() if key in ("ram", "cpu") or o["gid"].get(key, set()) - set(o["ka"].get(key) or ())]
+        # 主人回来（#25）：超出的几项里去掉只因 ka.sh 停不了的保活超出的卡（那张卡上对方的进程都是它：保活只占位、不算主人干活，#37）
+        gid = o.get("gid") or {}
+        self.owner = [v for key, v in over.items() if key in ("ram", "cpu") or not (gid.get(key) and gid[key] <= set(o["ka"].get(key) or ()))]
         if bool(over) != bool(self.back):
             self.event("guest", "借来的主机上对方用得比预留多（%s）：这部分不再放新任务" % "；".join(over.values()) if over else
                        "对方说好 %s 前不用：不再按预留挡，照常放行" % now_str(away)[5:16] if away else
@@ -6015,12 +6017,15 @@ def fit(p, names, project=None):
     return 0
 
 
-def fit_list(p, root, jobs, project, hosts):
+def fit_list(p, root, jobs, project, hosts, as_json=False):
     """一条清单里还会跑、互不依赖的行此刻能在几台主机上再开几条车道（labmon worker fit 主机 ROOT JOBS --list --project P，#35 B）：
     行取清单文件里没标完（.done、.failed）、不在哪台跑着的（rows_left）；写了 after=/afterany=、gang=、占位任务的单列、不分。
     主机是 hosts（看板按共用 worker 目录的在用主机给，config.home_peers；不给只看这台），在这台上读它们的 status.json（共享 HOME，不多连 ssh），
     状态过期的写明没算。按清单顺序逐行，每行先在这次分到车道最少的那台上试（一样少的按 hosts 的顺序），判断同单行的 fit（FitHost.open）；
-    哪台都放不下的到此为止，其余排在后面。只回答此刻放得下多少：怎么拆清单、开不开由实验会话定。"""
+    哪台都放不下的到此为止，其余排在后面。只回答此刻放得下多少：怎么拆清单、开不开由实验会话定。
+    as_json（--json，算力池往哪台放，pool.fit_head，#25）：只看队首（还会跑、没在跑的第一行；依赖由 worker 状态的 pool_heads 管，这里不判），
+    打一行 JSON {head, need {ngpu, vram 每卡 GiB, ram GiB, cpus}, dur 分钟（不知道为 null）, hosts {主机: {ok, why}}}；
+    各台的判断同上（FitHost.open），没有能算的主机也给 need；没有还要跑的行 head 为 null。"""
     now = time.time()
     root = os.path.abspath(root)
     path = os.path.normpath(os.path.join(root, jobs))
@@ -6040,19 +6045,19 @@ def fit_list(p, root, jobs, project, hosts):
     if not rows and not os.path.exists(q["jobs_path"]):
         print("读不到清单 %s" % path)
         return 2
-    hist, fhs, skip = load_hist({}) or [], [], []
+    hist, fhs, skip = load_hist({}) or [], [], {}
     running = set()
-    for h in hosts or [p.host]:
+    for h in hosts if as_json else hosts or [p.host]:        # --json 只看给的几台（池目录没有 worker，不看这台）
         hp = Paths(h)
         st, why = fit_status(hp, h, now)
         if st is None:
-            skip.append(why)
+            skip[h] = why
             continue
         running |= {j["name"] for j in st.get("running") or [] if os.path.normpath(os.path.join(j.get("root") or "", j.get("queue") or "")) == path}
         fh = FitHost(h, st, hist, fit_eta(hp))
         hit = fh.w.override_hit({"project": q["project"], "name": ""}, ("drain", "guest", "pause"), lasting=True)
         if hit or not fh.cards:
-            skip.append("%s：%s" % (h, hit[1] if hit else "看不到 GPU"))
+            skip[h] = "%s：%s" % (h, hit[1] if hit else "看不到 GPU")
         else:
             fhs.append(fh)                        # 在限流的照样列出来（各行都写先减线程）
     cur = read_current(q["state"])                # 状态目录里在跑的：放它的主机状态过期了（worker 停了、崩了）任务照样可能在跑，不能再分
@@ -6061,6 +6066,10 @@ def fit_list(p, root, jobs, project, hosts):
     _, pend = rows_left(q["state"], rows, None)
     pend = first_rows(pend)
     pend = [(n, c) for n, c in pend.items() if n not in running]
+    if as_json:
+        print(json.dumps(fit_head(q, pend[0] if pend else None, fhs, skip, hist, now), ensure_ascii=False))
+        return 0
+    skip = list(skip.values())
     apart, todo = [], []
     for n, c in pend:
         h = job_of(n, c)
@@ -6109,6 +6118,22 @@ def fit_list(p, root, jobs, project, hosts):
     else:
         print("此刻哪台都不再开车道：%s" % ("这些行排在已有车道后面" if todo else "没有能分的行"))
     return 0
+
+
+def fit_head(q, head, fhs, skip, hist, now):
+    """fit --list --json 的那一行（fit_list）：清单 q 的队首 head（(任务名, 命令)，没有为 None）要多少、在各台（fhs：FitHost，skip：没算的 {主机: 原因}）放不放得下。
+    need 不看哪台（没有能算的主机也给）：按一台空的 FitHost 拼请求（与真放行同一个 job_spec，只是没有型号与在跑同类）。"""
+    if head is None:
+        return {"head": None, "need": None, "dur": None, "hosts": {h: {"ok": False, "why": "清单里没有还要跑的行"} for h in [f.host for f in fhs] + list(skip)}}
+    n, c = head
+    r, e, x = FitHost(q.get("_host") or "", {}, hist, {}).req(q, n, c, None)
+    out = {"head": n, "need": {"ngpu": x["ngpu"], "vram": round(x["vram"] or 0.0, 2), "ram": round(x["ram"] or 0.0, 2), "cpus": x["cpus"]},
+           "dur": x["dur"] and round(x["dur"]), "hosts": {h: {"ok": False, "why": why} for h, why in skip.items()}}
+    for fh in fhs:
+        r, e, x = fh.req(q, n, c, None)
+        say, why = fh.open(r, e, x, now)
+        out["hosts"][fh.host] = {"ok": bool(say), "why": say or why}
+    return out
 
 
 def hist_key(h, kind):
@@ -6271,6 +6296,7 @@ def main(argv=None):
     ap.add_argument("--keep", type=json.loads, help='override add guest：给对方留的量，JSON {"vram": 每张对方的卡 GiB, "ram": GiB, "cpu": 核, "hold": 预先留出, "away": 对方说好不用到几点（epoch 秒，那以前不留）}')
     ap.add_argument("--list", action="store_true", help="fit：位置参数是 ROOT JOBS，看这条清单还会跑的行能在几台上再开几条车道")
     ap.add_argument("--hosts", help="fit --list：看哪几台（逗号分隔；看板按共用 worker 目录的在用主机给，缺省只看这台）")
+    ap.add_argument("--json", action="store_true", help="fit --list：只看队首，打一行 JSON（算力池往哪台放用，#25）")
     ap.add_argument("--replace", action="store_true", help="run：已有 worker 时让它退出后接管（升级用）")
     ap.add_argument("--shared", help="run：组里共用的那块盘的挂载点（如 /root/data1），给了就参与统计它的用量")
     a = ap.parse_args(argv)
@@ -6281,7 +6307,7 @@ def main(argv=None):
         if a.list:
             if len(a.args) != 2:
                 ap.error("fit --list 需要 ROOT JOBS")
-            return fit_list(p, a.args[0], a.args[1], a.project, [h for h in (a.hosts or "").split(",") if h])
+            return fit_list(p, a.args[0], a.args[1], a.project, [h for h in (a.hosts or "").split(",") if h], a.json)
         if not a.args:
             ap.error("fit 需要任务名")
         return fit(p, a.args, a.project)

@@ -29,6 +29,7 @@ EVENT_KINDS = {
     "borrow": ("借用", "warn", "borrow"), "borrow_due": ("约定时间", "warn", "borrow"), "borrow_back": ("对方在用", "warn", "borrow"),
     "borrow_return": ("归还", "ok", "borrow"), "borrow_hit": ("挤到对方", "bad", "borrow"), "guest": ("对方超出预留", "warn", "borrow"),
     "owner_oom": ("挤到对方", "bad", "borrow"),
+    "pool": ("算力池", "mute", "borrow"),            # 算力池的放、搬、回池、借、还、收回（pool.tick、pool.reclaim，#25）
     "guard_restart": ("重开保活", "ok", "keepalive"), "guard_delay": ("延后保活", "mute", "keepalive"),
     "guard_start": ("开保活", "ok", "keepalive"), "guard_yield": ("让出", "mute", "keepalive"), "guard_fail": ("没开成", "bad", "keepalive"),
     "ka_fight": ("保活被拉起", "warn", "keepalive"), "watchdog": ("看门狗", "warn", "keepalive"),
