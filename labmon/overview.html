@@ -3323,7 +3323,7 @@ let FWIZ = null;           // 换人、开机向导：{kind: swap | open, sid, p
 let FPED = null;           // 添加组内人员的独立抽屉草稿
 const NAME_RE = /^[0-9A-Za-z_~-]{1,32}$/;      // 与 platform.py 一致
 async function startOp(act, body, pop = false) {          // 已登录就直接开始，否则先取验证码（pop：验证码出在发起处，true 是按钮旁的弹窗，"renew" 是批量续租抽屉的底部）
-  const anchor = POP, wiz = FWIZ;
+  const here = () => pop === "renew" ? RPICK : POP, anchor = POP, from = here(), wiz = FWIZ;   // from：发起的那个弹窗或批量续租抽屉的勾选，回来时已不是它就丢掉验证码
   if (act === "ka" || fops().session?.logged_in) {
     OPS = await fleetPost(act, body);
     if (FWIZ === wiz) FWIZ = null;
@@ -3332,7 +3332,7 @@ async function startOp(act, body, pop = false) {          // 已登录就直接�
   }
   else {
     const j = await fleetPost("captcha");
-    if (pop && POP !== anchor) return;
+    if (pop && here() !== from) return;
     FCAP = {code: j.code, tok: j.tok, input: "", t: Date.now(), next: {act, body}, pop}; FFOCUS = "fcapin";   // tok：这张验证码的标识，提交时带回去（别的页面换过就作废）
     if (route().kind === "fleet" && !pop) FSCROLL = "fpanel";
   }

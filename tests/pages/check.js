@@ -1263,6 +1263,16 @@ t("archive", "侧栏「已归档 N 个」与已归档的抽屉：路由、列出
   const S = ovCtx(OVS, RR); page(S, "#/"); ok(!el(S, "side").innerHTML.includes("已归档"), "没有归档的项目时不该有这一行");
   has(drw(S, "#/archived"), "没有归档的项目");
 });
+ta("overview", "批量续租：验证码回来前抽屉关了或换了一份勾选，旧回执作废（Codex 审查 #20）", async () => {
+  const C = accCtx(OV, ADMIN_ME, "#/fleet/renew/srv-d");
+  run(C, `render(true); OPS = {...fops(), session: {logged_in: false}}; RPICK.ack.add("srv-d");
+    fleetPost = async k => { if (k === "captcha") { RPICK = {key: DH.renew("srv-e"), sel: new Set(["srv-e"]), ack: new Set()}; return {code: "c1", tok: "t1"}; } return {}; }`);
+  await run(C, 'startOp("renew", rpBody(RPICK), "renew")');
+  ok(run(C, "FCAP") === null, "抽屉换了一份勾选，旧的验证码回执还是记进了 FCAP");
+  run(C, 'fleetPost = async k => k === "captcha" ? {code: "c2", tok: "t2"} : {}');
+  await run(C, 'startOp("renew", rpBody(RPICK), "renew")');
+  ok(run(C, 'FCAP?.next.body.ids.join()') === "srv-e", "同一份勾选的验证码该记下");
+});
 ta("archive", "永久删除要求管理员和当前归档批次的确认", async () => {
   const A = ovCtx(OV, RR, "#/archived"), U = ovCtx(OV, RR, "#/archived");
   run(U, 'ME = {...ME, admin: false, scopes: ["project", "read"], own: ["proj-old"]}');
