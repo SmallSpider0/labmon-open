@@ -14,7 +14,7 @@ from . import collect as C
 from . import fleet as F
 from . import projects as PJ
 from . import workerctl as W
-from .config import HOSTS_LOCK, ConfigError, active_hosts, fmt_time, hosts_file, set_returned, set_sched_ovr, user_hosts
+from .config import HOSTS_LOCK, ConfigError, active_hosts, all_hosts, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
 from .state import snapshot
 
 OVR = {"pause": ("add", "pause"), "resume": ("rm", "pause"), "focus": ("add", "focus"), "unfocus": ("rm", "focus"),
@@ -55,10 +55,16 @@ def unknown_project(pid: str, *, require: bool = False) -> str | None:
 
 
 def hosts() -> dict:
-    """GET /api/hosts：用户级主机清单里的主机（labmon host list、labmon borrow 不给参数时列）。没有清单时 missing 是它的路径。"""
+    """GET /api/hosts：用户级主机清单里的主机（labmon host list、labmon borrow 不给参数时列）。没有清单时 missing 是它的路径。
+    worker_home 已补缺省值；home_with 是与它共用 worker_home 的别的在用主机（config.home_peers，#35 A；已归还的为 []）。"""
     hf = hosts_file()
+    if not hf.exists():
+        return {"missing": str(hf), "hosts": []}
     keys = ("id", "returned", "ssh", "port", "label", "borrow")
-    return {"missing": None if hf.exists() else str(hf), "hosts": [{k: h.get(k) for k in keys} for h in user_hosts()] if hf.exists() else []}
+    act, home = active_hosts(), {str(h["id"]): h["worker_home"] for h in all_hosts()}
+    return {"missing": None, "hosts": [{**{k: h.get(k) for k in keys}, "worker_home": home.get(str(h.get("id"))),
+                                        "home_with": [x for x in home_peers(str(h.get("id")), act) if x != str(h.get("id"))]}
+                                       for h in user_hosts()]}
 
 
 def host(sub: str, target: str, at: float | None = None, now: bool = False) -> dict:
@@ -141,8 +147,10 @@ def override(verb: str, target: str, host_ids: list[str] | None, until: float | 
     return o.done(rc)
 
 
-def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project: str | None = None, stop: str | None = None, own: bool = False) -> dict:
-    """labmon worker start|stop|status|add|rm|limit|fit：经 workerctl.run_out 一次 ssh；输出是 worker 打印的原文。"""
+def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project: str | None = None, stop: str | None = None, own: bool = False,
+           may=None) -> dict:
+    """labmon worker start|stop|status|add|rm|limit|fit：经 workerctl.run_out 一次 ssh；输出是 worker 打印的原文。
+    status 成功时末尾补一行与这台共用 worker 目录的在用主机（home_text，#35 A）；may：普通用户能用哪台（None 不限），只列他能用的。"""
     if sub not in WORKER_ACTS or not hid:
         return usage(f"不认识的 worker 动作 {sub}")
     try:
@@ -153,7 +161,20 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
                                 **({"expect_project": project} if own and sub in ("add", "rm") else {}))
     except ConfigError as e:
         return {"rc": 3, "out": "", "err": f"[labmon] {e}\n"}
+    extra = home_text(hid, may) if sub == "status" and rc == 0 else ""
+    if extra:
+        out = out.rstrip("\n") + "\n" + extra
     return {"rc": rc, "out": out, "err": ""}
+
+
+def home_text(hid: str, may=None) -> str:
+    """worker status 末尾那一行：这台与哪几台在用主机共用 worker 目录（同一块共享盘）；只有它自己时为空。may 同 worker。"""
+    act = active_hosts()
+    ids = [x for x in home_peers(hid, act) if x != hid and (may is None or may(x))]
+    if not ids:
+        return ""
+    home = next(h["worker_home"] for h in act if str(h["id"]) == hid)
+    return f"  与 {'、'.join(ids)} 共用 worker 目录 {home}（同一块共享盘：放在这块盘上的文件各台都读得到）\n"
 
 
 def project_init(hid: str, name: str | None) -> dict:

@@ -182,8 +182,20 @@ def home_host(home: str, hosts: list[dict] | None = None) -> dict | None:
     """一个 worker_home（共享盘上各主机共用的 worker 目录）由哪台在用主机代读、代办：照主机清单顺序第一台 worker_home 相同的在用主机（hosts 缺省 active_hosts）。
     工作台读已归还主机留下的登记（overview.collect 挑给 _reg_cmd 的那台）、移除已归还主机上的登记（workerctl.run_out 的 rm）都经它：
     改的是共享盘上我们自己 worker_home 里的文件，不连已归还的主机。没有就是 None。"""
-    home = home.rstrip("/")
-    return next((h for h in (active_hosts() if hosts is None else hosts) if h["worker_home"].rstrip("/") == home), None)
+    return next((h for h in (active_hosts() if hosts is None else hosts) if _same_home(h, home)), None)
+
+
+def _same_home(h: dict, home: str) -> bool:
+    """主机 h 的 worker_home 是不是 home（末尾的 / 不算）：home_host、home_peers 共用。"""
+    return h["worker_home"].rstrip("/") == home.rstrip("/")
+
+
+def home_peers(hid: str, hosts: list[dict] | None = None) -> list[str]:
+    """与 hid 共用 worker_home 的在用主机 id（含 hid 自己，照主机清单顺序；hosts 缺省 active_hosts，含借来的）：同一块共享盘，
+    放在那里的文件各台都读得到（#35 A）。labmon host list 按它分组、worker status 补一行（api.hosts、api.worker）。hid 不在用时为 []。"""
+    act = active_hosts() if hosts is None else hosts
+    me = next((h for h in act if str(h["id"]) == str(hid)), None)
+    return [str(h["id"]) for h in act if _same_home(h, me["worker_home"])] if me else []
 
 
 def share_host(h: dict | None) -> bool:

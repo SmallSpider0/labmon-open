@@ -16,7 +16,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj [--gpu
                                                           # --project 必写（不写报错退出），是 monitor.toml 的 id：暂停、优先、借卡的
                                                           # “只给谁用”、作废的唤醒都按它认，看板不按目录猜；--gpus 限定只用某些卡
 labmon worker limit 29 heavy=2                           # 同 tag 同时运行数的上限（heavy= 删掉）：整台主机共用，各项目同名的 tag 合并计数
-labmon worker status 29                                  # 登记的队列（清单跑空的标“空着”）、运行中与等待中的任务（等待行带排第几、是不是屏障、预计开始）
+labmon worker status 29                                  # 登记的队列（清单跑空的标“空着”）、运行中与等待中的任务（等待行带排第几、是不是屏障、预计开始）；末尾一句与哪几台共用 worker 目录（看板按主机清单补）
 labmon worker fit 29 x4_s110_seed2 [--project a1]        # 开并行车道前：显存、内存、CPU 放不放得下，同卡并行时同类约要多久（见“资源估计”）
 labmon worker rm 29 /root/data1/alice/proj jobs/a6000.txt  # 按目录与清单认登记，只删这一条；已归还的主机经与它共用 worker_home 的在用主机代办（不连已归还的那台）
 labmon worker stop 29                                    # 停 worker；运行中的任务继续跑，下次启动时接管

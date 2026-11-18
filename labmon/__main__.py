@@ -117,6 +117,13 @@ def cmd_host(ap: argparse.ArgumentParser, a: argparse.Namespace) -> int:
         for h in r["hosts"]:
             st = f"已归还 {h['returned']}" if h.get("returned") else "在用"
             print(f"  {h['id']:<10} {st:<22} {h.get('ssh') or '本机'}:{h.get('port', 22)}  {h.get('label') or ''}  {_borrow_text(h.get('borrow'))}")
+        groups: dict = {}                   # 共用 worker 目录的在用主机按目录分组（#35 A；旧看板没有 home_with 时不打）
+        for h in r["hosts"]:
+            if h.get("home_with") and not h.get("returned"):
+                groups.setdefault(h.get("worker_home"), {str(h["id"])}).update(h["home_with"])
+        for home, ids in groups.items():
+            order = [str(h["id"]) for h in r["hosts"] if str(h["id"]) in ids]
+            print(f"  共用 worker 目录 {home}（同一块共享盘，放在这块盘上的文件各台都读得到）：{'、'.join(order)}")
         return 0
     if sub not in ("return", "restore") or not a.target:
         ap.error("用法：labmon host list | labmon host return <id> [--at 时间 | --now] | labmon host restore <id>（借来的：撤销跑完就还）")
