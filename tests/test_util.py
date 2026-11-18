@@ -148,6 +148,18 @@ class CollectTest(Tmp):
         append_row(f, {"t": t - 10, "s": t0, "n": "dup", "p": "p", "g": ["d"], "u": 50}, O.USAGE_KEEP_S, t)
         g2 = {"hosts": [{"id": "h", "status": {"running": [dict(glob["hosts"][0]["status"]["running"][0]), {"name": "dup", "project": "p", "gpus": ["d"], "t0": t0 + 0.4, "use": {"util_mean": 50}}]}}]}
         self.assertEqual(C.gpu_mine("p", ["h"], g2, t)["n"], 3)
+        # 同一台、同一秒开跑的同名任务，属于不同清单就是两次运行（#54 审查）：按目录与清单区分，两侧都不并
+        f2 = usage_file("k")
+        f2.parent.mkdir(parents=True, exist_ok=True)
+        s0 = round(t - 3600)
+        append_row(f2, {"t": t - 5, "s": s0, "n": "same", "p": "p", "root": "/r", "queue": "A.txt", "g": ["a"], "u": 0}, O.USAGE_KEEP_S, t)
+        append_row(f2, {"t": t - 5, "s": s0, "n": "same", "p": "p", "root": "/r", "queue": "B.txt", "g": ["b"], "u": 100}, O.USAGE_KEEP_S, t)
+        m = C.gpu_mine("p", ["k"], {"hosts": []}, t)
+        self.assertEqual((m["n"], m["util"]), (2, 50.0))
+        self.assertAlmostEqual(m["card_s"], 7200, delta=12)
+        g3 = {"hosts": [{"id": "k", "status": {"running": [
+            {"name": "same", "project": "p", "root": "/r", "queue": q, "gpus": [c], "t0": s0, "use": {"util_mean": u}} for q, c, u in (("C.txt", "c", 0), ("D.txt", "d", 100))]}}]}
+        self.assertEqual(C.gpu_mine("p", ["k"], g3, t)["n"], 4)
         # worker 不在、状态停在两天前（#54 审查）：在跑的只算到状态最后写的时刻，落在窗口外就不算
         stale = {"hosts": [{"id": "z", "worker_up": False, "status": {"t": t - 2 * 86400, "running": [
             {"project": "p", "gpus": ["c"], "t0": t - 3 * 86400, "use": {"util_mean": 80}}]}}]}
@@ -157,6 +169,12 @@ class CollectTest(Tmp):
         O._keep_usage(self.d, "h", [{"t0": 1, "t1": time.time(), "name": "a", "project": "p", "rc": "0", "gpus": ["G"], "gpu_util": 77}], time.time(), {"G": 0})
         from labmon.state import load_rows
         self.assertEqual(load_rows(usage_file("h"))[-1]["u"], 77)
+        # 同目录不同清单、同一秒开跑的同名任务是两次运行，两行都存（#54 审查）；同一行再送一次仍只存一遍
+        now = time.time()
+        rows = [{"t0": 5, "t1": now, "name": "s", "project": "p", "root": "/r", "queue": q, "rc": "0", "gpus": ["G"]} for q in ("A.txt", "B.txt")]
+        O._keep_usage(self.d, "k2", rows, now, {})
+        O._keep_usage(self.d, "k2", rows, now, {})
+        self.assertEqual([r["queue"] for r in load_rows(usage_file("k2"))], ["A.txt", "B.txt"])
 
 
 class FleetMineTest(unittest.TestCase):

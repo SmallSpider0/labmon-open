@@ -831,10 +831,10 @@ def gpu_mine(pid: str, hids: list, glob_snap: dict, t: float) -> dict | None:
     t0, acc, w, n = t - MINE_WIN_S, 0.0, 0.0, 0
     # 按 (主机, 任务, 开始时刻) 认一次运行：刚跑完的用量行已写、状态里还在 running 时只算一遍，用量行盖过在跑的（#54 审查）。
     # 在跑的算到现在；worker 不在（状态过期）的只算到状态最后写的时刻，停机后的时间不算
-    one = {(e["id"], j.get("name"), round(j.get("t0") or 0)): (len(j.get("gpus") or []), j.get("t0"), t if e.get("worker_up", True) else e["status"].get("t"),
+    one = {(e["id"], j.get("root"), j.get("queue"), j.get("name"), round(j.get("t0") or 0)): (len(j.get("gpus") or []), j.get("t0"), t if e.get("worker_up", True) else e["status"].get("t"),
                                                            (j.get("use") or {}).get("util_mean"))
            for e in glob_snap.get("hosts", []) if e["id"] in hids for j in (e.get("status") or {}).get("running") or [] if j.get("project") == pid}
-    one.update({(h, r.get("n"), round(r.get("s") or 0)): (len(r.get("g") or []), r.get("s"), r.get("t"), r.get("u"))
+    one.update({(h, r.get("root"), r.get("queue"), r.get("n"), round(r.get("s") or 0)): (len(r.get("g") or []), r.get("s"), r.get("t"), r.get("u"))
                 for h in hids for r in load_rows(usage_file(h)) if r.get("p") == pid})
     for k, s0, s1, u in one.values():
         d = min(s1 or 0, t) - max(s0 or 0, t0)

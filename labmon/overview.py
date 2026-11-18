@@ -685,21 +685,21 @@ USAGE_KEEP_S = 30 * 86400
 
 def _keep_usage(sd: Path, hid: str, rows: list[dict], t: float, idx: dict) -> None:
     """worker 的用量记录（任务结束时一行）续写进本机 usage/<主机>.jsonl，存 30 天，只留时间线与调度卡要的几项：
-    worker 那边的 usage.jsonl 每次只取最后 60 行，时间线画已跑的占用要更长的。按 开始|任务|目录 去重。起止 s、t 是 epoch 秒（worker 行的 t0、t1）。
+    worker 那边的 usage.jsonl 每次只取最后 60 行，时间线画已跑的占用要更长的。按 开始|任务|目录|清单 去重（同目录的两条清单可以有同名任务）。起止 s、t 是 epoch 秒（worker 行的 t0、t1）。
     idx：这台此刻各卡 uuid → 序号；用的卡除了 uuid（g）也存下序号（gi），换容器后 uuid 全变了还能按序号画。"""
     f = usage_file(hid)
     old = load_rows(f)
-    seen = {(r["s"], r["n"], r.get("root")) for r in old[-500:]}
+    seen = {(r["s"], r["n"], r.get("root"), r.get("queue")) for r in old[-500:]}
     for r in rows:
         s0, e = r.get("t0"), r.get("t1")
-        if s0 is None or e is None or (s0, r.get("name"), r.get("root")) in seen or e < t - USAGE_KEEP_S:
+        if s0 is None or e is None or (s0, r.get("name"), r.get("root"), r.get("queue")) in seen or e < t - USAGE_KEEP_S:
             continue
         st = "stop" if r.get("requeued") or r.get("void") else "done" if r.get("rc") == "0" or (r.get("rc") is None and r.get("kind") == "slot") else "failed"
         g = r.get("gpus") or []
         append_row(f, {"t": e, "s": s0, "n": r.get("name"), "p": r.get("project"), "root": r.get("root"), "queue": r.get("queue"),
                        "g": g, "gi": [idx[u] for u in g if u in idx], "st": st, "wait": r.get("wait"),
-                       "u": r.get("gpu_util")}, USAGE_KEEP_S, t)   # 所用卡的平均利用率（worker 的 util_mean）：项目近 24 小时的平均利用率（collect._gpu_mine）
-        seen.add((s0, r.get("name"), r.get("root")))
+                       "u": r.get("gpu_util")}, USAGE_KEEP_S, t)   # 所用卡的平均利用率（worker 的 util_mean）：项目近 24 小时的平均利用率（collect.gpu_mine）
+        seen.add((s0, r.get("name"), r.get("root"), r.get("queue")))
 
 
 def occupancy(hosts: list[dict], projects: list[dict], since: float, skip: str | None = None) -> dict:
