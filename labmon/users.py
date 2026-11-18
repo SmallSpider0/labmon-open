@@ -36,7 +36,7 @@ from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 
 from . import projects as PJ
-from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, drop_account_people, host_users, pause_by, sched, set_host_users, share_host, user_hosts
+from .config import CLIENT_HEADER, COMMIT_RE, POOL, ConfigError, drop_account_people, host_users, pause_by, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
 from .state import file_sig, snapshot, state_root, write_atomic
 
@@ -430,6 +430,9 @@ def me(who: Ident, entry: str) -> dict:
     if who.role != "admin":                           # 普通用户：自己的项目与能用的主机（#167；页面上按项目判能不能改，canWrite(pid)）
         acc = access(who)
         out["own"], out["hosts"] = sorted(acc.projects), sorted(acc.allowed)
+    from .pool import member, my_servers              # pool 在顶层 import 本模块
+    out["servers"] = my_servers(who)                  # 我持有的组内服务器与入池（#24，「我的账号 → 我的服务器」）
+    out["pool_member"] = member(who)
     if out["account"]:
         out["sessions"] = sorted(({**_sess_view(k, r), "this": k == who.key} for k, r in d["sessions"].items() if r.get("user") == who.name),
                                  key=lambda x: -(x["seen"] or 0))
@@ -707,9 +710,13 @@ def owns(who: Ident, pid: str) -> bool:
 
 
 def may_host(who: Ident, hid: str) -> bool:
-    """能不能用这台主机（worker add、status、fit、project init，只给某几台的暂停与优先）：管理员都能；普通用户要主机清单里这台的 users 列着他。"""
+    """能不能用这台主机（worker add、status、fit、project init，只给某几台的暂停与优先）：管理员都能；普通用户要主机清单里这台的 users 列着他；
+    保留主机 pool（算力池）问 pool.member。"""
     if who.role == "admin":
         return True
+    if str(hid) == POOL:                              # 算力池（#24）：池成员（有一台入池的组内服务器的持有人）能往里交清单
+        from .pool import member                      # pool 在顶层 import 本模块
+        return member(who)
     return any(str(h.get("id")) == str(hid) and who.name.lower() in host_users(h) for h in user_hosts())
 
 

@@ -185,7 +185,7 @@ const postJSON = (url, body = {}, how) => api(url, {method: "POST", headers: {"C
 const canOps = () => LIVE && !!ME?.ops;
 const canWrite = pid => LIVE && !!ME?.write && (!!ME.admin || !!ME.own?.includes(pid));
 const canWeight = () => canWrite();
-const canUseHost = id => LIVE && (!!ME?.admin || !!ME?.hosts?.includes(id));
+const canUseHost = id => LIVE && (!!ME?.admin || !!ME?.hosts?.includes(id) || id === "pool" && !!ME?.pool_member);   // pool：算力池（#24），池成员能交、能撤
 const OPS_NOTE = "请从内网入口操作，或为此管理员开启公网平台操作";
 const opsNote = (cls = "sm mut") => LIVE && ME?.admin && !ME.ops ? `<span class="${cls} opsn">${OPS_NOTE}</span>` : "";
 function toLogin() {
@@ -297,7 +297,7 @@ function alertBox(al, open = false) {
 }
 // 主机的名字只有三种写法：短名 hostShort（表格的主机列、小图与时间线的行名、车道名、KPI 的注；直接借来的叫「借 EVA」，其余用 id）；
 // 全名 h.label（主机清单里写的，借来的是「节点（借 EVA）」：告警、标题、悬停里的整句话）；组内服务器 fName「使用人（id）」（overview.html）
-const hostShort = h => h.borrow && !h.borrow.swap ? `借 ${h.borrow.holder}` : h.id;
+const hostShort = h => h.pool ? h.label || "算力池" : h.borrow && !h.borrow.swap ? `借 ${h.borrow.holder}` : h.id;   // pool：项目快照里的算力池（#24）
 // 车道名：车道的 label（采集时按主机编号的“车道 N”，接可选的用途），页面上有几台主机时前面加主机短名。lane {host: 主机 id, label}，hosts 是页面上的主机表
 const laneName = (lane, hosts) => (hosts.length > 1 ? hostShort(hosts.find(h => h.id === lane.host) || {id: lane.host}) + " " : "") + lane.label;
 // 按估计字宽截断（中文约 12px，其余约 6.6px），超出加省略号。mid 时头尾各留一半、省略中间（任务名能区分的种子、变体常在结尾）；

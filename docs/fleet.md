@@ -39,6 +39,8 @@ ssh = "root@198.51.100.29"
 port = 15158
 pool = "pool-private"
 # guard = true                       # 保活守护开不开（可省：公用池开、专用池关）
+# lend = true                        # 入池：空着时借给算力池（持有人在「我的账号」开，见「算力池」）
+# lend_hours = "22:00-09:00"         # 入池的时段，每天一段、可跨零点；不写是全天
 
 [[fleet.rules]]                      # 只写例外（可以一条都没有），按顺序取第一条命中的
 match = "/root/demo_eval/"                 # 正则，匹配 GPU 进程与各级父进程的命令行、工作目录
@@ -437,7 +439,7 @@ labmon 之外的按目录一段段斜纹，过门槛变紫），下面「本地�
   ka.sh 本身出错（跑不起来、输出认不出）另写一句，带上退出码与它的报错（#29：以前只看 `ka.sh running` 的退出码，认出一个就放过旁边停不了的，提示里也没写是哪个）。
   ka.sh 认保活的规则：python 跑它的保活脚本（`ka.env` 的 `AGRI_KA_DIR/AGRI_KA_SCRIPT`），命令行写完整路径，或相对路径按进程工作目录还原后是它（维护者 11-17 定，#29），worker 的 `ka_owned` 同一条。
   然后这台的块里写 `borrow_since`、`borrow_until`、`borrow_for`，下临时指令、拉起 worker。
-  借用中它同时是调度主机（`config.guest_host`：id 不变，照抄一台在用自用主机的 Python、共享盘、检查项，主机密钥沿用这里的 `known_hosts`），
+  借用中它同时是调度主机（`config.guest_host`：id 不变，照抄一台在用自用主机的 Python、共享盘、worker 目录（显式配了 `worker_home` 的照用）、检查项，主机密钥沿用这里的 `known_hosts`），
   侧栏里多一台“27（借 BOB）”。不在对方的容器里扫共享盘。
   worker 一起来就找一遍保活看门狗（会把 worker 停掉的保活又拉起来的进程），只列出来（确定的写明“要卡时它把保活拉起来就暂停，还卡时恢复”）；真把保活拉起来了才暂停确定的（它正持着平时不持的文件锁时等它放了再暂停），规则见 [worker.md「保活」](worker.md#保活)。
   出借方自己的保活管理器（如 BOB 的 `keepalive_control.py`）也按这条规则，不调用它的让路接口，见同一节。
@@ -481,6 +483,23 @@ labmon 之外的按目录一段段斜纹，过门槛变紫），下面「本地�
 借卡的几条决定（用户 11-06 定，设计时按它们来）：对方轻用时也可借，弹窗里“对方在轻用、已说好”缺省勾上；撞上容器内存上限时先牺牲我们的任务（`oom_score_adj`），保住对方的体验；
 给对方留的量按对方历史用量推荐，不用固定数；“留卡给对方”按卡，只对多卡有意义（现在组内每台一张卡，以后可能多卡）。
 以后要做真正的组内服务器共享（多人同机、对方优先、借出与收回），借卡的抽象按共享的概念来做：让路、预留、按卡。
+
+## 算力池
+
+组里各人把空着的组内服务器借给全组，组里人把清单交给池、由看板放到这些服务器上跑（#13）。池按借用的推广来做，复用借用、worker 调度与清单登记，不另起一套（[`labmon/pool.py`](../labmon/pool.py)）。
+这一节写清单怎么交、服务器怎么入池（B，#24）；放到哪台、收回、休息期由 C（#25）补。
+
+- **入池**：`[[fleet.servers]]` 里的 `lend`（开没开）与 `lend_hours`（每天一段 `HH:MM-HH:MM`，可跨零点，起止相同或不写是全天；`fleet.lend_span` 解析、`fleet.conf` 校验，此刻在不在时段里 `fleet.lend_open`）。
+  持有人本人在「我的账号 → 概览 → 我的服务器」开关、改时段；管理员在这台的抽屉里「算力池」那一行代开，要能做平台操作、勾「已和这人说好」（代关不用勾）。
+  都经 `POST /api/pool/lend`（`pool.set_lend`，记一条配置改动）。换人时（`config.set_fleet_holder`）这两行一并去掉：新持有人没同意过。组内卡片上入池的标「入池」。
+- **成员**：管理员，或账号对应的人（`fleet.account_person`）有一台开了入池的组内服务器（`pool.member`，不看此刻在不在时段）。成员才能往池里交清单（`users.may_host` 对 `pool` 问它）。
+- **交清单**：`labmon worker add pool ROOT JOBS --project P`。`pool` 是保留的主机 id（`config.POOL`，`[[hosts]]` 与组内服务器都不许叫它），
+  登记落在自用主机那份 worker 目录（`config.pool_home`：借来的主机照抄的那台，`config.guest_host` 同一个模板）的 `hosts/pool/queues/`，
+  经与它共用 worker 目录的在用主机代办（`workerctl.via`）。池里的清单要停得下来、换得了台：不许 `--stop boundary`、`--gpus`、成组（`gang=`）与占位任务，停法缺省 `term`（`labmon_worker.pool_refuse`）。
+  一条清单只归一台照旧：之后 `worker add <自用主机> …` 把它从池里搬回来。撤回 `labmon worker rm pool ROOT JOBS`（在清单此刻登记的地方撤，`pool.locate`）；`worker status|start|stop pool` 都不认。
+- **看得到**：全局快照的 `regs` 里 `host` 为 `pool`、`state` 为 `pool` 的一项（在用主机之后、已归还的之前；`added_t` 是登记文件的修改时刻）；
+  项目页多一张「算力池」小卡与池车道（`collect._lane` 标 `pool`，没有 worker 管：不报队列进程不在，等待原因“在算力池里等着放到某台”），车道经同一 worker 目录的在用主机代读，代读的那台不是本项目的主机时不进项目快照。
+  别处 `after=` 等池里的任务算还会跑（worker 的 `Worker.pool_todo` 随 `peers` 读进 `peer_todo`），不报找不到。
 
 ## 平台会话
 

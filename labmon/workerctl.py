@@ -27,7 +27,7 @@ from pathlib import Path
 
 from . import lan as L
 from . import lease as LS
-from .config import ConfigError, active_hosts, all_hosts, home_host, host_defaults, hosts_file, user_hosts
+from .config import POOL, ConfigError, active_hosts, all_hosts, home_host, host_defaults, hosts_file, pool_home, user_hosts
 
 from .labmon_worker import queue_stop_path
 
@@ -47,10 +47,15 @@ def host_conf(hid: str) -> dict:
 def via(hid: str, home: str | None = None) -> dict:
     """在哪台上操作这台目录下的登记（worker rm）：在用的就是它自己；已归还的、主机清单里已没有的（home 是它的 worker_home，
     全局快照 regs 里那一项的 home），经一台与它共用 worker_home 的在用主机代办（config.home_host，与 overview.collect 每轮代读登记挑的是同一台），
-    命令照样带 --host hid：改的是共享盘上我们自己 worker_home 里那台的登记文件，不连已归还的那台（借来还了的是别人的服务器）。找不到能代办的报 ConfigError。"""
+    命令照样带 --host hid：改的是共享盘上我们自己 worker_home 里那台的登记文件，不连已归还的那台（借来还了的是别人的服务器）。找不到能代办的报 ConfigError。
+    算力池（hid 是 config.POOL，#24）没有 home 时取 config.pool_home：worker add|rm pool 都经这里。"""
     act = active_hosts()
     if any(str(h["id"]) == hid for h in act):
         return host_conf(hid)
+    if hid == POOL and home is None:                 # 算力池（#24）：登记在 pool_home 下，同样经共用这个 worker_home 的在用主机代办
+        home = pool_home()
+        if home is None:
+            raise ConfigError("主机清单里没有自用主机：算力池的登记没有地方放（池登记放在自用主机的 worker 目录下）")
     if home is None:
         home = next((h["worker_home"] for h in all_hosts() if str(h["id"]) == hid), None)
     o = home_host(home, act) if home else None
@@ -117,7 +122,7 @@ CHANGE = ("start", "stop", "add", "rm", "limit")     # 改 worker 的子命令�
 
 def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: str | None = None, **opts) -> tuple[int, str]:
     """worker 的部署拉起、停、看状态、登记队列：返回 (退出码, 输出)。add 登记到这台（别的主机上同一条清单的登记搬过来，页面上的「搬到…」就是它）；
-    rm 对已归还的主机经共用 worker_home 的在用主机代办（via；home 同 via）。备用的看板服务上只许看（status、fit），改 worker 的到主那台做（#163）。"""
+    rm 对已归还的主机经共用 worker_home 的在用主机代办（via；home 同 via）；算力池（pool）的 add、rm 都经 via 代办。备用的看板服务上只许看（status、fit），改 worker 的到主那台做（#163）。"""
     if sub == "add":
         try:
             queue_stop_path(opts.get("stop"))
@@ -125,7 +130,7 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
             return 2, str(e)
     if sub in CHANGE:
         LS.need(f"worker {sub}")
-    h = via(hid, home) if sub == "rm" else host_conf(hid)
+    h = via(hid, home) if sub == "rm" or hid == POOL else host_conf(hid)
     home, py = h["worker_home"], h["python"]
     w = f"env {worker_env(h)} {shlex.quote(py)} {shlex.quote(home + '/labmon_worker.py')}"
     hq = shlex.quote(hid)

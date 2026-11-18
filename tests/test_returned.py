@@ -332,6 +332,18 @@ class RegLanesTest(Base):
         self.assertEqual({j["id"]: j["status"] for j in snap["jobs"]}["a_run"], "running")
         self.assertEqual(snap["alerts"], [])
 
+    def test_pool_lane(self):
+        # #24：交给算力池的清单（regs 里 host 为 pool）：项目页上一张「算力池」小卡与一条池车道，等着放到某台；
+        # 代读它的 here 不是本项目的主机，不进项目快照；池里没有 worker 管，不报队列进程不在
+        self.regs(("pool", "pool", [("p1", str(self.root), "jobs/q.txt")]), ("here", "active", []))
+        snap = C.collect(self.cfg())
+        self.assertEqual([(h["id"], h["label"], h.get("pool")) for h in snap["hosts"]], [("pool", "算力池", True)])
+        ln, = snap["lanes"]
+        self.assertEqual((ln["host"], ln.get("pool"), ln["alive"], ln["waiting"]), ("pool", True, False, C.POOL_WAIT))
+        self.assertIn("a_done", {j["id"] for j in snap["jobs"]})          # 清单状态经 here 代读到了
+        self.assertEqual([a["key"] for a in snap["alerts"]], [])
+
+
     def test_registration_overrides_returned_host(self):
         # monitor.toml 写着 host = 已还的 gone，清单已登记到 here：车道在 here 上、id 与用途沿用 monitor.toml 的，不报 returned_unfinished（旧代码会报）
         q = f'[[queues]]\nid = "q"\nlabel = "训练方"\nhost = "gone"\nroot = "{self.root}"\njobs = "jobs/q.txt"\n'

@@ -28,6 +28,8 @@ GIB = 2 ** 30                  # 页面与告警里的容量一律 GiB（探针�
 # 占位任务（清单里插的“等条件再放行”的 hold / pause）按名字里的词认：不计入计划项与项目的 实际/估时 比值，页面画成暂停块。
 # 与 worker 的 HOLD_RE 同一条规则（worker 在服务器上跑、不 import 本包，各自一份）；不再许项目另配，免得两边认的不一样
 HOLD_RE = re.compile(r"(?i)(?:^|[_.\-\d])(?:hold|pause)(?:$|[_.\-\d])")
+POOL = "pool"                  # 算力池的保留主机 id（#24）：池里待放的清单登记在共享盘 hosts/pool/queues/（worker 那边另有一份 POOL）；主机与组内服务器都不许叫它
+POOL_LABEL = "算力池"
 
 
 def pick_color(colors: dict, key: str, taken=()) -> str:
@@ -155,6 +157,8 @@ def user_hosts() -> list[dict]:
         return []
     d = _read_toml(hf)
     hosts = [dict(h) for h in d.get("hosts", [])]
+    if any(str(h.get("id")) == POOL for h in hosts):
+        raise ConfigError(f"{hf} 的 [[hosts]] 不能叫 {POOL}：它是算力池的保留 id")
     for h in hosts:
         if h.get("borrow_until"):
             h["borrow"] = {"holder": h.get("borrow_from"), "since": None, **_until(h["borrow_until"]), "for": None, "swap": True}
@@ -473,13 +477,28 @@ def expire_sched(t: float | None = None) -> list[str]:
     return out
 
 
+def _guest_tpl(hosts: list[dict]) -> dict:
+    """借来的主机与算力池照抄哪台自用主机（同一套镜像与共享盘）：第一台在用、不是换来借的；都不在用取第一台；没有为 {}。hosts：[[hosts]] 各块。"""
+    return next((h for h in hosts if not h.get("returned") and not h.get("borrow")), hosts[0] if hosts else {})
+
+
+def pool_home(hosts: list[dict] | None = None) -> str | None:
+    """算力池登记所在的 worker_home（#24）：池里的清单将来放到借来的组内服务器上跑，那些主机的 worker_home 照抄模板主机（guest_host），
+    池登记就放在同一个 worker_home 下（hosts/pool/queues/）。hosts 缺省读主机清单的 [[hosts]]；没有自用主机为 None。"""
+    if hosts is None:
+        hf = hosts_file()
+        hosts = [dict(h) for h in _read_toml(hf).get("hosts", [])] if hf.exists() else []
+    tpl = _guest_tpl(hosts)
+    return host_defaults({"id": POOL, **{k: tpl[k] for k in ("data_root", "worker_home") if k in tpl}})["worker_home"] if tpl else None
+
+
 def guest_host(s: dict, hosts: list[dict]) -> dict:
-    """借来的组内服务器当调度主机用时的样子：id 用组内服务器的，照抄一台在用自用主机的 python、data_root、shared、mounts、checks
+    """借来的组内服务器当调度主机用时的样子：id 用组内服务器的，照抄一台在用自用主机（_guest_tpl）的 python、data_root、worker_home（显式配的；与 pool_home 同一个目录选择）、shared、mounts、checks
     （同一套镜像与共享盘），ssh 主机密钥沿用组内服务器的 known_hosts。hosts：[[hosts]] 各块。"""
     from .fleet import state_file                 # fleet 在上层 import 本模块，这里只能延迟 import
-    tpl = next((h for h in hosts if not h.get("returned") and not h.get("borrow")), hosts[0] if hosts else {})
+    tpl = _guest_tpl(hosts)
     node = str(s.get("ssh", "")).rsplit(".", 1)[-1] or str(s["id"])
-    return {**{k: tpl[k] for k in ("python", "data_root", "ka_bin", "shared", "mounts", "checks") if k in tpl},
+    return {**{k: tpl[k] for k in ("python", "data_root", "worker_home", "ka_bin", "shared", "mounts", "checks") if k in tpl},
             "id": str(s["id"]), "label": f"{node}（借 {s.get('holder')}）", "ssh": s.get("ssh"), "port": s.get("port", 22),
             "known_hosts": str(state_file("known_hosts")), "worker": "auto", "returned": s.get("borrow_returned"),
             "borrow": {"holder": str(s.get("holder")), "since": parse_time(s.get("borrow_since")), **_until(s.get("borrow_until")),
@@ -540,8 +559,12 @@ def _resolve_hosts(cfg: dict) -> None:
 
 
 def _reader(q: dict, hosts: list[dict]) -> str | None:
-    """队列所在主机已归还时，找一台在用的、与它共用队列目录的主机代读队列状态（只读文件，不看进程）。"""
+    """队列所在主机已归还时，找一台在用的、与它共用队列目录的主机代读队列状态（只读文件，不看进程）。
+    算力池（h 的 pool，#24）：池里待放的清单由与池同一个 worker_home 的在用主机代读（home_host）。"""
     h = next(x for x in hosts if x["id"] == q["host"])
+    if h.get("pool"):
+        o = home_host(h["worker_home"], [x for x in hosts if not x["returned"] and not x.get("pool")])
+        return o["id"] if o else None
     if not h["returned"]:
         return None
     root = str(q.get("root", "")).split("*")[0]
@@ -572,8 +595,8 @@ def set_returned(hid: str, when: str | None) -> Path:
 
 @_hosts_edit
 def set_fleet_holder(sid: str, holder: str, job: str | None = None) -> Path:
-    """在用户级主机清单 [[fleet.servers]] 里把这一台的 holder 改掉（开机换人时），只改这一行，行尾注释与其余原样保留。
-    job：平台作业名与名字不同时（同名作业已在跑，加了后缀）写一行 job，相同就去掉。"""
+    """在用户级主机清单 [[fleet.servers]] 里把这一台的 holder 改掉（开机换人时），只改这一行，行尾注释与其余原样保留；
+    换了人时去掉入池的两行（lend、lend_hours：新持有人没同意过，#24）。job：平台作业名与名字不同时（同名作业已在跑，加了后缀）写一行 job，相同就去掉。"""
     p = hosts_file()
     lines = p.read_text().splitlines(keepends=True) if p.exists() else []
     for s, end, bid in _blocks(lines, "[[fleet.servers]]"):
@@ -585,8 +608,10 @@ def set_fleet_holder(sid: str, holder: str, job: str | None = None) -> Path:
         m = re.match(r"""(\s*holder\s*=\s*)("[^"]*"|'[^']*')(.*)$""", lines[k].rstrip("\n"))
         if not m:
             raise ConfigError(f"{p} 里 {sid} 的 holder 行看不懂：{lines[k].strip()}")
+        changed = m.group(2)[1:-1] != holder
         lines[k] = f'{m.group(1)}"{holder}"{m.group(3)}\n'
-        block = [l for l in lines[s + 1:end] if not re.match(r"\s*job\s*=", l)]
+        # 换了人：入池（lend、lend_hours，#24）是原持有人同意的，新持有人没同意过，一并去掉
+        block = [l for l in lines[s + 1:end] if not re.match(r"\s*job\s*=", l) and not (changed and re.match(r"\s*lend(_hours)?\s*=", l))]
         if job and job != holder:
             block.insert(next(i for i, l in enumerate(block) if re.match(r"\s*holder\s*=", l)) + 1, f'job = "{job}"   # 平台作业名（同名作业已在跑，加了后缀）\n')
         return _write_checked(p, "".join(lines[:s + 1] + block + lines[end:]), f"{sid} 的使用人改为 {holder}")
@@ -1050,7 +1075,8 @@ def _norm_queue(q: dict, hosts: list[dict], hide: float = 24) -> dict:
 def with_queues(cfg: dict, queues: list[dict]) -> dict:
     """项目配置换一组队列（collect.reg_queues 按 worker 登记拼的），返回新配置、不改原来的：队列用到、项目里还没有的主机
     从用户级主机清单取（同 _resolve_hosts），已在的主机不动；队列在已归还的主机上、项目里又没有能代读它的在用主机时，
-    也从清单里补一台（_reader 的规则）；队列补全同 load（主机换了，代读的主机跟着重算）。用户级主机清单里也没有的主机，它的队列丢掉。"""
+    也从清单里补一台（_reader 的规则）；队列补全同 load（主机换了，代读的主机跟着重算）。用户级主机清单里也没有的主机，它的队列丢掉。
+    算力池里的登记（host 为 POOL，#24）：补一台合成主机 {id: pool, pool: true}（不探测），代读它的在用主机项目里没有时补进来、标 reader_only。"""
     hosts, ids = list(cfg["hosts"]), {h["id"] for h in cfg["hosts"]}
     pool: list = []                                   # 用户级主机清单里、项目还没有的主机（补全过），要用时才读
 
@@ -1067,6 +1093,13 @@ def with_queues(cfg: dict, queues: list[dict]) -> dict:
     for q in queues:
         if q.get("host") is not None and q["host"] not in ids:
             add(q["host"])
+    home = pool_home() if any(q.get("host") == POOL for q in queues) and POOL not in ids else None
+    if home:                                          # 算力池（#24）：一台不探测的合成主机，池车道由同 worker_home 的在用主机只读代读
+        hosts.append(_norm_host({"id": POOL, "label": POOL_LABEL, "pool": True, "worker_home": home}))
+        ids.add(POOL)
+        if _reader({"host": POOL}, hosts) is None and (r := home_host(home, [h for h in more() if not h["returned"]])):
+            hosts.append(dict(r, reader_only=True))   # 不是本项目的主机，只替池代读：不进项目快照（collect._hosts）
+            ids.add(r["id"])
     for q in queues:
         if q.get("host") in ids and next(h for h in hosts if h["id"] == q["host"])["returned"] and _reader(q, hosts) is None:
             r = _reader(q, hosts + more())

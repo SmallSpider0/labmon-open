@@ -238,6 +238,7 @@ def _server(sid: str, holder: str, state: str | None, **kw) -> dict:
             "last": NOW - 300, "error": None, "down": None, "fails": 0, "since": None, "started": NOW - 3 * 86400, "lease_end": NOW + 4 * 86400, "off": None,
             "last_job": NOW - 100, "state": state, "sample": sample, "strip": _strip(state or "idle"), "h0": int(NOW // 3600 * 3600) - 167 * 3600, "idle_h": 0,
             "s7": _stats(0.2, 0.7), "s30": _stats(0.3, 0.6), "guard": {"on": False, "status": "off", "since": None}, "borrow": None, "using": "",
+            "lend": {"on": False, "hours": None, "open": False, "say": "没入池"},          # 入池（pool.lend_view，#24）
             "reserve": {"vram": 2.0, "ram": 6.6, "cpu": 1.0, "peak": {"vram": 7.5, "ram": 9.2, "cpu": 1.5}, "n": 208, "bump": 1.0}}
     base.update(kw)
     base["lease_cut"] = base["lease_end"] - H if base["lease_end"] else None     # 对方租期截止（borrow.cutoff：到期前 1 小时）
@@ -266,7 +267,8 @@ def _fleet(mine_host: dict) -> dict:
         _server("srv-e", "PERSON4", "down", down="连不上：timeout", since=NOW - H, last=NOW - H, fails=3, lease_end=NOW + 2 * 86400, strip=[None] * 168,
                 guard={"on": True, "status": "fail", "fail": {"msg": "ssh 失败"}, "at": NOW + 600, "since": NOW - H}, reserve=None),
         _server("srv-f", "PERSON5", "off", off={"t": NOW - 86400, "holder": "PERSON5"}, lease_end=None, guard={"on": False, "status": "off", "since": None}, reserve=None, idle_h=0, strip=[None] * 168),
-        _server("srv-g", "PERSON6", "idle", pool="pool-private", public=False, guard={"on": True, "status": "wait", "since": NOW - 30 * 60, "at": NOW + 30 * 60})]
+        _server("srv-g", "PERSON6", "idle", pool="pool-private", public=False, guard={"on": True, "status": "wait", "since": NOW - 30 * 60, "at": NOW + 30 * 60},
+                lend={"on": True, "hours": "22:00-09:00", "open": False, "say": "入池，22:00 开始"})]
     # 自用主机（#58）：字段与组内服务器同名，sample 与探针的 analyze 同形（fleet.from_worker 由 worker 状态换出：按任务归组、不带 pid、没有保活进程树单独的量）
     info = mine_host["status"]["info"]
     mine = [{"id": "srv-a", "holder": "ME", "job": "ME", "label": mine_host["label"], "pool": "pool-private", "ssh": "root@192.0.2.1", "port": 15155, "mine": True, "public": False,
@@ -349,6 +351,10 @@ def _regs(a: dict, b: dict) -> list[dict]:
             {"host": "srv-b", "label": b["label"], "state": "active", "returned": None, "home": "/data/me/labmon", "stale": False, "t": NOW - 6, "pool": None, "prev": None,
              # jobs/b4.txt 刚登记、项目快照里还没有这条车道：抽屉里写“下一轮采集后显示”；proj-b 的 jobs/b3.txt 反过来，monitor.toml 写了、没登记：“只显示”
              "queues": st(b) + [{"root": "/data/me/proj-b/q2/", "jobs": "jobs/b4.txt", "project": "proj-b", "stop": "file:STOP", "gpus": None, "empty": False}]},
+            # 交给算力池、还没放到哪台的（#24）：在用的之后、已归还的之前
+            {"host": "pool", "label": "算力池", "state": "pool", "returned": None, "home": "/data/me/labmon", "stale": False, "t": NOW,
+             "queues": [{"root": "/data/me/proj-a/pq", "jobs": "jobs/p.txt", "project": "proj-a", "stop": "term", "gpus": None, "added": "2026-11-17 09:00",
+                         "added_t": NOW - H, "key": "pq__jobs_p.txt__abcdef"}]},
             {"host": "srv-old2", "label": "srv-old2（借 X）", "state": "returned", "returned": NOW - 30 * H, "home": "/data/me/labmon", "stale": True, "t": NOW - 600,
              "queues": [{"root": "/data/me/proj-b/q9", "jobs": "jobs/b9.txt", "project": "proj-b", "stop": "term", "gpus": [0, 1], "added": "2026-11-08 10:00", "key": "q9__jobs_b9.txt__abcdef"}]},
             {"host": "srv-old3", "label": "srv-old3", "state": "returned", "returned": NOW - 50 * H, "home": "/data/me/labmon", "stale": False, "t": NOW,
@@ -587,14 +593,17 @@ def project() -> dict:
         {"id": "probe_s1", "est_min": 10.0, "status": "queued", "lane": lb, "hold": False, "group": "probe_", "dur_min": 10.0, "dur_src": "清单估时"},
         {"id": "alpha_eval_s7", "est_min": 180.0, "status": "queued", "lane": lc, "hold": False, "group": "eval_", "dur_min": None, "dur_src": None},
         {"id": "alpha_eval_s6", "est_min": 180.0, "status": "done", "end_ts": NOW - 30 * H, "start_ts": NOW - 32 * H, "lane": lc, "hold": False, "group": "eval_",
-         "dur_min": 120.0, "dur_src": "清单估时", "actual_min": 120.0}]
+         "dur_min": 120.0, "dur_src": "清单估时", "actual_min": 120.0},
+        {"id": "alpha_pool_s1", "est_min": 60.0, "status": "queued", "lane": "pq/jobs/p.txt", "hold": False, "group": None, "dur_min": 60.0, "dur_src": "清单估时"}]
     lane = lambda id_, label, host, root, queue, **kw: {  # noqa: E731
         "id": id_, "label": label, "host": host, "type": "gpu_queue", "stale": False, "root": root, "queue": queue, "alive": False, "pid": None,
         "state_dir": root + "/results/_queue", "paused": None, "managed": True, "waiting": None, "held": None, "stuck": None, "fs_skew": -184.1, "started": True,
         "holding": False, "has_hold": False, "overrun": False, "total": 0, "done": 0, "failed": 0, "unfinished": 0, "eta_ts": None, **kw}
     lanes = [lane(la, "车道 1", "srv-a", "/data/me/proj-a/q1", "jobs/q1.txt", total=5, done=1, failed=1, unfinished=3, eta_ts=NOW + 7 * H),
              lane(lb, "车道 2", "srv-a", "/data/me/proj-a/q2", "jobs/q2.txt", paused="临时指令 pause", held="pause", holding=True, has_hold=True, total=2, unfinished=2),
-             lane(lc, "车道 1", "srv-b", "/data/me/proj-a/b2", "jobs/b2.txt", waiting="等 beta_eval_s7 跑完", stuck="推演到 7 天后还没轮到", total=2, done=1, unfinished=1)]
+             lane(lc, "车道 1", "srv-b", "/data/me/proj-a/b2", "jobs/b2.txt", waiting="等 beta_eval_s7 跑完", stuck="推演到 7 天后还没轮到", total=2, done=1, unfinished=1),
+             # 交给算力池、还没放到哪台的（#24，collect._lane 的 pool）：没有 worker 管，等着放到某台
+             lane("pq/jobs/p.txt", "车道 1", "pool", "/data/me/proj-a/pq", "jobs/p.txt", pool=True, waiting="在算力池里等着放到某台", fs_skew=None, total=1, unfinished=1)]
     gpu = lambda i, used, util: {"index": i, "name": "NVIDIA RTX A6000", "util": util, "mem_used": used, "mem_total": 46068.0, "temp": 51.0, "power": 87.5, "power_limit": 300.0}  # noqa: E731
     hosts = [{"id": "srv-a", "label": "srv-a（A6000）", "ok": True, "error": None, "borrow": None, "gpus": [gpu(0, 21000.0, 95.0), gpu(1, 900.0, 3.0)],
               "gpu_procs": [{"pid": 2001, "mem": 20500.0, "cmd": "python train.py"}], "cgroup": {"cpu_usage_ns": 1, "cpu_quota": 17.0, "mem_used": 2.8e10, "mem_limit": 1.3e11, "mem_rss": 1.1e9},
@@ -604,7 +613,8 @@ def project() -> dict:
              {"id": "srv-b", "label": "srv-b", "ok": True, "error": None, "gpus": [gpu(0, 6754.0, 90.0)], "gpu_procs": [], "cgroup": {"cpu_quota": 7.0, "mem_used": 2e9, "mem_limit": 6.5e10, "mem_rss": 1e9},
               "loadavg": [1.0, 1.0, 1.0], "cpu_pct": 2.0, "mounts": [], "checks": [],
               "borrow": {"holder": "OWNER", "since": NOW - 16 * H, "until": None, "for": ["proj-a"], "light": True, "cutoff": NOW + 6 * 86400, "why": "OWNER 的租期到期，提前 1 小时",
-                         "returning": None, "now": False, "back": [], "tight": None, "overdue": False, "keep": {"vram": 2.0, "ram": 14.5, "cpu": 1.0, "bump": 1.0, "hold": False}, "swap": None}}]
+                         "returning": None, "now": False, "back": [], "tight": None, "overdue": False, "keep": {"vram": 2.0, "ram": 14.5, "cpu": 1.0, "bump": 1.0, "hold": False}, "swap": None}},
+             {"id": "pool", "label": "算力池", "pool": True, "ok": True, "error": None}]        # 算力池（collect._hosts 的 pool，#24）：一张小卡
     hist = []
     for k in range(144):
         t = NOW - (144 - k) * 600

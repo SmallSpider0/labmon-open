@@ -228,7 +228,8 @@ function topline() {
   const al = forUser(D.alerts);
   const age = Date.now() / 1000 - NOW, stale = age > (D.thresholds?.stale_s ?? 420);   // 与 labmon wait 的 collector_stale 同一门槛（config.stale_limit，缺省配置是 7 分钟）
   const gone = D.hosts.filter(h => h.returned && !retShown(h));
-  const hosts = D.hosts.filter(h => !gone.includes(h)).map(h => h.returned ? `<span class="nw mut" ${tip(`已归还（${ts(h.returned)}），不再连接；还有任务没跑完`)}><span class="cdot" style="background:var(--faint)"></span> ${esc(h.label)} · 已归还</span>`
+  const hosts = D.hosts.filter(h => !gone.includes(h)).map(h => h.pool ? `<span class="nw" ${tip("交给算力池、还没放到哪台的清单在这里等着；看板挑一台入池的组内服务器放过去" + (h.ok ? "" : "\n" + (h.error || "这一轮没读到池里的清单")))}><span class="cdot" style="background:${h.ok ? "var(--accent)" : "var(--bad)"}"></span> ${esc(h.label)}</span>`
+    : h.returned ? `<span class="nw mut" ${tip(`已归还（${ts(h.returned)}），不再连接；还有任务没跑完`)}><span class="cdot" style="background:var(--faint)"></span> ${esc(h.label)} · 已归还</span>`
     : `<span class="nw" ${tip(h.ok ? "探针正常" : h.error || "失败")}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}"></span> ${esc(h.label)}</span>${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}`).join(" ")
     + (gone.length ? ` <span class="nw mut" ${tip(gone.map(h => `${h.label}：${ts(h.returned)} 归还`).join("\n") + "\n它们的车道照常显示结果")}>已还 ${gone.length} 台</span>` : "");
   // 嵌在看板里：标题、更新时间、立即采集与连不上的提示都在看板顶栏上（看板经 embedState 取），这里只留主机与告警
@@ -736,6 +737,7 @@ function resourcesCard() {
   const out = [];
   // 每台主机一组：组头放状态与小标签（温度功耗、检查、本项目存储），组内小图不再重复主机名
   for (const h of D.hosts) {
+    if (h.pool) continue;                              // 算力池（#24）：没有 GPU 与挂载点，车道在下面照常列
     if (h.returned) {
       if (!retShown(h)) continue;                      // 已还、任务都跑完了：顶栏收成「已还 N 台」
       const ls = D.lanes.filter(l => l.host === h.id), via = ls.find(l => l.read_via)?.read_via;
@@ -770,7 +772,7 @@ function resourcesCard() {
       chips.push(`<span class="chip" ${tip([c.out, ...(c.detail || [])].filter(Boolean).join("\n") || "无输出")}><span class="cdot" style="background:${col}"></span> ${esc(c.label)}：${c.state === "ok" ? "是" : c.state === "fail" ? "否" : "不适用"}</span>`);
     }
     // 共享盘各服务器挂的是同一块，只在第一台主机上写一次；本地盘按主机
-    const sg = EV.storage || {}, sh = h === D.hosts[0] ? Object.entries(sg.dirs || {}) : [], loc = sg.local?.[h.id], lb = loc ? (loc.cache || 0) + (loc.scratch || 0) : 0;
+    const sg = EV.storage || {}, sh = h === D.hosts.find(x => !x.pool) ? Object.entries(sg.dirs || {}) : [], loc = sg.local?.[h.id], lb = loc ? (loc.cache || 0) + (loc.scratch || 0) : 0;
     if (sh.length || loc) {
       chips.push(`<span class="chip" ${tip([...(sh.length ? ["本项目在共享盘上的目录（看板的共享盘统计，限速轮流扫）", ...sh.map(([d, b]) => `${d}  ${f1(b / GIB, 2)} GiB（统计于 ${ts(sg.at?.[d])}）`),
         sg.free != null ? `共享盘剩 ${f1(sg.free / GIB, 0)} GiB；按人看在组内服务器的「共享盘」` : ""] : []),
