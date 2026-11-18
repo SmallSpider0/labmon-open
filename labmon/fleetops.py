@@ -810,15 +810,18 @@ def run_ka(cfg: dict, cli, code, ids: list[str], ssh_poll: float = 30, ssh_wait_
 
 
 def run_borrow(cfg: dict, cli, code, ids: list[str], until: float | None = None, projects=None, begin=None, light: bool = False,
-               away: bool = False, account: str | None = None) -> None:
-    """后台线程：借来用（borrow.begin），每做完一步写进 op.json，页面上和别的操作一样显示进度；借不了就停在那一步。"""
+               away: bool = False, account: str | None = None, pool: bool = False, failed=None) -> None:
+    """后台线程：借来用（borrow.begin），每做完一步写进 op.json，页面上和别的操作一样显示进度；借不了就停在那一步。
+    pool：算力池自动借（pool.want_borrow，#25）；failed(sid, 原因)：借不成时调（池记退避、通知管理员）。"""
     from . import borrow as B                     # borrow 在上层 import 本模块，这里只能延迟 import
     r = _Run(0)
     try:
         r.mark("run")
-        r.done((begin or B.begin)(ids[0], until, projects, step=r.step, light=light, away=away, account=account))
+        r.done((begin or B.begin)(ids[0], until, projects, step=r.step, light=light, away=away, account=account, **({"pool": True} if pool else {})))
     except Exception as x:  # noqa: BLE001
         r.fail(x)
+        if failed:
+            failed(ids[0], str(x))
 
 
 def _quota(jobs: list[dict], cfg: dict, pool: str) -> tuple[int, int | None, bool]:

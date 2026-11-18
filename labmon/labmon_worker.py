@@ -2029,6 +2029,7 @@ class Worker:
         # （内存与 CPU 不含任何保活的进程树：借来的主机上就是对方干活的用量，与算预留的组内探针同口径，#37）、各卡上 ka.sh 停不了的保活（宿主机 PID，只在借来的主机上认）、
         # 各卡上 labmon 之外的 GPU 进程（宿主机 PID）、ka.sh 停不了的保活进程树占的核（cpu_room 另扣；只在 worker 内存里，不写进状态）
         self.back, self.back_last = {}, {}    # 借来的主机：对方此刻超出预留的几项（卡 UUID、ram、cpu → 说明），各项最近一次超出的时刻
+        self.owner = []                       # 其中算主人回来的（去掉只因 ka.sh 停不了的保活超出的卡，#25）：状态的 guest.owner，算力池借来的整台不放
         self.cpu_hot = 0                      # 借来的主机：对方的 CPU 连着几轮超出预留（两轮才算超出，一轮的尖峰不算）
         self.ka_ticks = {}                    # 上一轮保活进程树的 CPU 累计之和 {树: (时刻, ticks)}（ka_cores；"all" 所有保活合起来，(pid, 启动时刻) 各棵保活树分开记）
         self.ka_roots = {}                    # 上一轮认作保活的 GPU 进程 {pid: (启动时刻, 是不是 ka.sh 停不了的)}：这一轮没认出来（nvidia-smi 超时等）但还在的照样算保活
@@ -2055,6 +2056,7 @@ class Worker:
         self.peer, self.peer_t = [], 0.0      # 别的主机在跑的任务（peers）
         self.peer_end = {}                    # 别的主机 plan 里各任务的预计结束 {(项目, 任务): 时刻}（peers 一起读）
         self.peer_todo = []                   # 别的主机还会跑的任务 [(主机, 状态已多久没更新, 状态时刻, 清单项)]（各自状态里的 todo，peers 一起读）
+        self.pool_heads = []                  # 算力池里待放的各清单的队首（pool_todo 读，pool_view 判依赖，#25）
         self.elsewhere = {}                   # 别的主机放行、这台不动的清单任务 {队列: (主机, 任务)}（run_elsewhere）：变了才记事件
         self.gone = set()                     # 看板说已归还的主机（returned.json，peers 一起读）：worker 不在时 offers 不把它的清单当说不准
         self.peer_st = {}                     # 别的在用主机的状态 {主机: status.json}（没过期、没 worker stop 过的；peers 一起读，offers 用）
@@ -2455,7 +2457,7 @@ class Worker:
         连着两轮都在才算对方回来了（end_away），这一轮起按普通规则；新起的 ka.sh 停不了的保活不算回来，只挡它那张卡（#37）。勾上前已记的超出（back_last 里早于这次开始的，卡也算）这一轮起不挡。
         基线在这次第一轮读到 GPU 表时取；到点、作废、指令不带 away 时清掉，下次重新取（约定时间相同也一样）。worker 重启后以重启时对方已有的进程为准。"""
         if not self.guest():
-            self.back, self.back_last, self.tight, self.cpu_hot, self.away_base = {}, {}, None, 0, None
+            self.back, self.back_last, self.tight, self.cpu_hot, self.away_base, self.owner = {}, {}, None, 0, None, []
             return
         k, o, over = self.keep(), self.other, {}
         new = set()                                    # 说好不用开始以后新出现对方 GPU 进程的卡
@@ -2490,6 +2492,8 @@ class Worker:
         self.back_last = {key: v for key, v in self.back_last.items() if key in over or t - v < GUEST_QUIET_S}
         if away and self.away_base:                    # 说好不用：开始以前的超出（卡、内存、CPU）不再挡（guest_block 与快照的 owner 都看 back_last），这一轮起就放行
             self.back_last = {key: v for key, v in self.back_last.items() if key in over or v > self.away_base["t0"]}
+        # 主人回来（#25）：超出的几项里去掉只因 ka.sh 停不了的保活超出的卡（那张卡上除了它没有对方的进程：保活只占位、不算主人干活，#37）
+        self.owner = [v for key, v in over.items() if key in ("ram", "cpu") or o["gid"].get(key, set()) - set(o["ka"].get(key) or ())]
         if bool(over) != bool(self.back):
             self.event("guest", "借来的主机上对方用得比预留多（%s）：这部分不再放新任务" % "；".join(over.values()) if over else
                        "对方说好 %s 前不用：不再按预留挡，照常放行" % now_str(away)[5:16] if away else
@@ -2497,7 +2501,10 @@ class Worker:
         self.back = over
 
     def guest_block(self):
-        """借来的主机上整台不放新任务的原因（对方的内存或 CPU 超出预留、或回到预留以内还不到 GUEST_QUIET_S）；没有为 None。"""
+        """借来的主机上整台不放新任务的原因（对方的内存或 CPU 超出预留、或回到预留以内还不到 GUEST_QUIET_S；
+        算力池借来的（guest 指令的 keep.pool，#25）主人回来了（owner）也整台不放：看板同一轮要还）；没有为 None。"""
+        if (self.keep() or {}).get("pool") and self.owner:
+            return "算力池借来的主机：主人回来了（%s），整台不放新任务，在跑的跑完就还" % "；".join(self.owner[:3])
         hit = [k for k in ("ram", "cpu") if k in self.back_last]
         if not hit:
             return None
@@ -2675,8 +2682,16 @@ class Worker:
                     where[k] = (host, age, ln.get("held"))
         idx.update((k, "pending") for k in where)
         self.dep_idx, self.dead, self.dep_where, self.dep_lanes = idx, {k for k, v in idx.items() if v == "failed"}, where, lanes
-        want = {(p, x) for ln in self.todo for ds in ln["deps"].values() for p, x in ds} | {k[:2] for r in reqs for k in dep_keys(r)}
+        want = ({(p, x) for ln in self.todo for ds in ln["deps"].values() for p, x in ds} | {k[:2] for r in reqs for k in dep_keys(r)}
+                | {k[:2] for r in self.pool_heads for k in dep_keys(r)})
         self.dep_miss = {k: t for k, t in self.dep_miss.items() if k in want and k not in idx}
+
+    def pool_view(self, now):
+        """算力池里待放的各清单还要跑的（#25）：{"目录|清单": {head 队首, n 还要跑几行, dep 队首的依赖没满足时 [状态, 原因]（dep_block），held 清单暂停}}；
+        都跑完了的不列。池目录没有 worker：同一 worker_home 下各台的 worker 都按自己的 dep_state 算一份写进状态的 pool_heads，
+        看板（pool.tick）挑最新的那份：有行要跑、依赖满足、没暂停的才放、才为它借。"""
+        return {"%s|%s" % (os.path.normpath(r["root"]), r["queue"]): {"head": r["name"], "n": r["n"], "held": r["held"],
+                                                                      "dep": list(self.dep_block(r, now) or ()) or None} for r in self.pool_heads}
 
     def dep_block(self, r, now):
         """请求写的依赖（dep_keys）还没都满足：返回 (状态, 原因)，状态 wait（等的还在排、在跑）、failed（after= 等的跑失败了）、
@@ -3262,7 +3277,7 @@ class Worker:
     def pool_todo(self, now):
         """算力池里待放的清单还会跑的行（#24）：peers 一起读，按别的主机的 todo 的样子 [("pool", 0, now, 清单项)] 记进 peer_todo，
         别处 after= 等它时算还会跑（不报找不到，dep_note 写在池里等）。池目录没有 worker、没有状态，按登记与清单的状态目录现读（清单按修改时间缓存）。"""
-        out = []
+        out, self.pool_heads = [], []
         for q in registry(os.path.join(HOME, "hosts", POOL, "queues"))[0]:
             rows = self.list_of(q["jobs_path"])
             if rows is None:
@@ -3270,6 +3285,9 @@ class Worker:
             ms, left = rows_left(q["state"], rows, None)
             if not left:
                 continue
+            n, h = left[0]                                  # 队首：看板放之前看它还有没有、依赖满足没有（pool_view）
+            self.pool_heads.append({"project": q["project"], "root": q["root"], "queue": q["jobs"], "name": n, "n": len(left),
+                                    "deps": h.get("deps"), "deps_any": h.get("deps_any"), "held": "paused" if ms and "paused" in ms else None})
             ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [n for n, _ in left], "gang": {},
                   "deps": {n: [[p, x] for p, x, _ in d] for n, h in left for d in [dep_keys(dict(h, project=q["project"]))] if d},
                   "held": "paused" if ms and "paused" in ms else None}
@@ -3487,11 +3505,14 @@ class Worker:
         依赖的状态取 dep_state，别的主机上写了依赖的行也算）：这台已有这个项目、与挪来的行同一种环境（list_env）的清单就接在预计最早跑完的那条后面
         （不建议同机多开车道），没有就当新的一条。这个项目在这台不能用（drain、只给别的项目用、暂停；对方此刻超出预留不算，几小时后的事推演不模拟它）
         或这台在预备续租的只写原因。别的主机的状态过期、worker stop 过（含已归还）的不读（peers）。held：本机等待请求被临时指令挡住的 (目录, 清单)。
+        算力池借来的主机（guest 指令的 keep.pool，#25）不给：池里的清单放到哪台由看板定。
         每项 {project, lane 接在本机哪条清单后面（[目录, 清单]，None 要新建）, free 本机这个项目原推演里何时跑完（没有为现在）,
         ends {"主机|目录|清单": 别的主机上这个项目各清单预计何时跑完（不知道为 None）}, jobs [{host, root, queue, name, there 原处预计结束,
         rest 挪走它之后原处那条清单何时跑完, end 挪来前几行时它们在这台何时都跑完, own 这时本机这个项目自己的清单何时跑完}], why 再往下挪不了的原因
         （只放原因本身）, stop 挪到这台排不上的那一行（why 是推演的原因；与具体某行无关的为 None）, idle 这台此刻空着（Worker.idle：挑行时跳过
         挪不动、说不出何时放行的清单，看板没有整批的挪法时按行比，#62）}：原因句由看板拼（rebalance.suggest，#25 B）。"""
+        if (self.keep() or {}).get("pool"):
+            return []
         mine = {(j["q"]["root"], j["q"]["jobs"]): j["name"] for j in self.running.values() if j.get("q")}
         own = self.proj_lanes(self.host, self.todo, self.plan, mine, held)
         others, waiters = [], {}
@@ -4807,6 +4828,7 @@ class Worker:
                                                      "cpu": self.other["cpu"] and round(self.other["cpu"], 2)},
                       "back": list(self.back.values()), "quiet": sorted(set(self.back_last) - set(self.back)), "tight": self.tight,
                       "hit": self.hit, "away": self.away_state(),
+                      "owner": self.owner,      # 其中算主人回来的（#25：不含只因停不了的保活超出的卡）；算力池借来的看板据此要还
                       "block": self.guest_block()} if self.guest() else None,        # 整台不放新任务的原因（guest_block）：fit 照它挡整台
             "util10": u10,                        # 「在用时多高」（fit 用）
             "gpu_busy": self.busy_view(now),      # 「吃满程度」（只有保活时按 0；页面上的利用率，#51）
@@ -4820,6 +4842,7 @@ class Worker:
                         "empty": q.get("empty", False), "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {})} for q in queues],
             "plan": self.plan,                    # 推演（forecast）：各队列与单元每个任务的预计开始、结束、用哪几张卡
             "todo": self.todo,                    # 还会跑的任务（list_state）：别的主机的依赖按它认谁还会跑、排在谁后面
+            "pool_heads": self.pool_view(now),    # 算力池里待放的各清单还要跑什么、队首依赖满足没有（#25）：看板据此放、借
             "dep_miss": [[p, n, int(t)] for (p, n), t in sorted(self.dep_miss.items())],   # 依赖等的、哪里都找不到的任务与起算时刻（dep_block；接管时找回，取整往前不往后）
             "offers": self.offer,                 # 能接别的主机上哪些任务、接来后几点跑完（offers）：看板汇总成挪法建议
             # 公平份额：生效的设置、这一轮开始时各项目衰减后的 GPU 用量（卡·时）、本机在跑的（别的主机读它算进用量）

@@ -22,6 +22,7 @@
     GET  /api/me            我是谁：名字、角色、作用域、入口、能不能做平台操作（ops）与写操作（write）；浏览器会话另有自己的会话与令牌
     POST /api/password {"old", "new"}、/api/tokens/add {"name", "scopes"}（回原文，只这一次）、/api/revoke {"id"}（自己的会话或令牌）：只认浏览器会话
     POST /api/pool/lend {"id", "on", "hours", "ok"}  入池开关（#24，pool.set_lend）：这台组内服务器的持有人本人；管理员代开要能做平台操作、ok 为真；回 {"msg", "servers"}
+    POST /api/pool/reclaim {"id"}  收回（#25，pool.reclaim）：按停法停下池任务、清单回池里重排；持有人本人，或能做平台操作的管理员；回 {"msg", "servers"}
     GET  /api/users、POST /api/users/add {"name", "person", "admin"}（person 是已登记的组内人员；回设置码）、role {"name", "admin"}、
                             reset {"name"}（回设置码；这人的会话与令牌一并失效，#18）、revoke {"name", "id"?}、remove {"name"}：管理员，只在内网入口（#17）
 
@@ -351,7 +352,7 @@ class Overview(_Collector):
                 if LS.tick() != "primary":
                     trouble("工作台", None)
                     return
-            snap = O.collect(self.proj_info())
+            snap = O.collect(self.proj_info(), pool_tick=lambda snap, sw: PO.tick(snap, sw, move=reg_move))   # 算力池的还、放、借（#25）
             if snap is None:                    # 这一轮读出租约在别人手里：已转为备用，什么都不做
                 trouble("工作台", None)
                 return
@@ -1111,6 +1112,16 @@ class Handler(BaseHTTPRequestHandler):
                 self.board.overview.wake.set()
                 log(f"账号：{msg}（{who.name}）")
                 return self._json(200, {"msg": msg})
+            if act == "pool/reclaim":                  # 收回（#25）：持有人本人，或能做平台操作的管理员（pool.reclaim 核）
+                if not L.check(force=True)["ok"]:
+                    return self._json(409, {"error": OFFLINE})
+                try:
+                    msg = PO.reclaim(s("id"), who, U.can_ops(who, self.entry), reg_move)
+                except ConfigError as x:
+                    return self._json(409, {"error": str(x)})
+                self.board.overview.wake.set()
+                log(f"算力池：{msg}（{who.name}）")
+                return self._json(200, {"msg": msg, "servers": PO.my_servers(who)})
             if act == "pool/lend":                     # 入池开关（#24）：持有人本人，或能做平台操作、勾了「已和这人说好」的管理员（pool.set_lend 核）
                 on, ok = body.get("on"), body.get("ok", False)
                 if not isinstance(on, bool) or not isinstance(ok, bool) or not isinstance(body.get("hours") or "", str):
@@ -1461,6 +1472,8 @@ class Handler(BaseHTTPRequestHandler):
         try:
             items = _reg_items(body, move=act == "move")
             own = who.role != "admin"
+            if act == "move" and str(body.get("to") or "") in PO.lent_ids():   # 借给算力池的主机上放什么由看板定（#25）
+                raise ConfigError(f"{body.get('to')} 是算力池借来的：要用池就让实验会话 labmon worker add pool，放到哪台由看板定")
             msg = reg_move(str(body.get("to") or ""), items, own=own) if act == "move" else \
                 reg_rm(str(body.get("host") or ""), items, body.get("home") or None, body.get("project") or None, own=own)
         except U.Denied as x:
@@ -1559,10 +1572,11 @@ def _qlist(qs: list[str]) -> str:
     return "、".join(qs[:3]) + (f" 等 {len(qs)} 条" if len(qs) > 3 else "")
 
 
-def reg_move(to: str, items: list, own: bool = False) -> str:
+def reg_move(to: str, items: list, own: bool = False, pool: str | None = None) -> str:
     """把几条登记搬到在用主机 to（项目抽屉的「整台搬到…」、主机页的接上卡）：逐条 workerctl.run_out("add")，带登记的 project 与 stop，不带 --gpus（原主机的卡号）。
     原主机上的那份由 worker add 删掉（原主机手上在跑的跑完后 to 接着放；别处刚登记了更晚的退出码 2，原样报错）。一条失败就停，前面搬成的照样记；
-    搬成的按项目各告诉一次实验会话（records.tell，中途失败也告诉已搬的）。返回给页面的一句话。"""
+    搬成的按项目各告诉一次实验会话（records.tell，中途失败也告诉已搬的）。返回给页面的一句话。
+    pool：算力池放、搬的（pool.tick、pool.reclaim，#25；值是为什么搬，可为空）：to 可以是 POOL（回池里待放），告诉会话的是 what 为 pool 的那句（来源「算力池」）。"""
     if not to or not items:
         raise ConfigError("没说搬到哪台、搬哪几条")
     done, moved = [], {}
@@ -1587,6 +1601,10 @@ def reg_move(to: str, items: list, own: bool = False) -> str:
             m["qs"].append(jobs)
     finally:
         for pid, m in moved.items():
+            if pool is not None:
+                tell(pid, "pool", f"{pid} 的 {_qlist(m['qs'])}" + (f"（{pool}）" if pool else "") + ("回到池里待放" if to == POOL else f"放到 {to}")
+                     + "：结果照旧写在共享盘上；撤回用 labmon worker rm pool ROOT JOBS，不用管它此刻在哪台", src="算力池")
+                continue
             tell(pid, "move", f"把 {pid}" + (f" 在 {'、'.join(m['from'])} 上" if m["from"] else "") + f"的 {len(m['qs'])} 条清单登记搬到 {to}（{_qlist(m['qs'])}）："
                  f"之后由 {to} 放行，原主机上在跑的跑完为止；再登记新清单写 {to}（labmon worker add {to} ROOT JOBS --project {pid}）")
     return "；".join(done)
@@ -1723,6 +1741,7 @@ ROUTES = [
     _R("POST", r"/api/wait", "project", own="wait"),                   # labmon wait 的长轮询（waits.wait）
     _R("POST", r"/api/project/init", "project", own="init"),
     _R("POST", r"/api/pool/lend", "project", own="holder"),            # 入池开关（#24）：持有人本人；管理员代开要能做平台操作（pool.set_lend 核）
+    _R("POST", r"/api/pool/reclaim", "project", own="holder"),         # 收回（#25）：持有人本人；管理员要能做平台操作（pool.reclaim 核）
     _R("POST", r"/api/project/[^/]+/check", "project", own="new"),
     _R("GET", r"/api/hosts", "read"),                                  # 普通用户只列他能用的（Handler.do_GET）
     _R("GET", PROJECT_CONFIG_PATH.pattern, "read", own="path"),
