@@ -285,7 +285,7 @@ html { scroll-behavior: smooth; }
   <div class="parts">
     <div class="part"><h3>服务器端 worker</h3><div class="where">labmon/labmon_worker.py</div><p>每台主机一个，调度这台上所有项目的队列：资源估计、准入、放行顺序、推演、保活、记用量。worker 被停或升级时任务照跑，新 worker 接管。</p></div>
     <div class="part"><h3>工作台</h3><div class="where">/ · overview.html</div><p>各主机的资源与任务、跨项目的放行顺序与推演、调度卡、租期与续租、记录页。权重、优先、续租、借卡都在这里点。</p></div>
-    <div class="part"><h3>账号与两个入口</h3><p>管理员账号详情可开启公网平台操作，允许在公网续租、借还和管理保活；其余账号默认关闭。部署仍经内网。</p><div class="where">users.py · /login · #/fleet/people</div><p>看板一律要登录：浏览器用口令，脚本用令牌。管理员能做全部；普通用户管理自己的项目，在获准的主机上登记任务。组内服务器仅供管理员查看。有一对一对应的账号与组内人员共用卡片和详情，可切换账号权限与服务器用量。内网入口在实验室内网（可配 HTTPS），公网入口经隧道挂在 TX 的 nginx 后面（随机路径前缀、要客户端证书），平台操作可在内网进行，管理员账号可另开启公网许可。TX 上的看门狗每 5 分钟探一次 <code>/healthz</code>，连不上或采集停了 15 分钟就推到手机。</p></div>
+    <div class="part"><h3>账号与两个入口</h3><p>管理员账号详情可开启公网平台操作，允许在公网续租、借还和管理保活；其余账号默认关闭。部署、冷备与账号管理只在内网入口。</p><div class="where">users.py · /login · #/fleet/people</div><p>看板一律要登录：浏览器用口令，脚本用令牌。管理员能做全部；普通用户管理自己的项目，在获准的主机上登记任务。组内服务器仅供管理员查看。有一对一对应的账号与组内人员共用卡片和详情，可切换账号权限与服务器用量。内网入口在实验室内网（可配 HTTPS），公网入口经隧道挂在 TX 的 nginx 后面（随机路径前缀、要客户端证书），平台操作可在内网进行，管理员账号可另开启公网许可。TX 上的看门狗每 5 分钟探一次 <code>/healthz</code>，连不上或采集停了 15 分钟就推到手机。</p></div>
     <div class="part"><h3>项目看板</h3><div class="where">/p/&lt;id&gt;/ · page.html</div><p>一个项目一张：时间线（已跑、在跑、推演的排队、依赖连线、空档原因）、计划项进度、运行中任务的速度与预计结束、告警。</p></div>
     <div class="part"><h3>组内服务器</h3><div class="where">#/fleet · fleet.py、fleetops.py</div><p>组里别人的服务器只读轮探，逐小时攒记录；保活守护；平台上的核对、续租、开关机、换人；借来用与归还；共享盘按人统计。</p></div>
     <div class="part"><h3>实验会话与 skill</h3><div class="where">skills/lab-experiments/SKILL.md</div><p>各项目的编码会话照这份规程接入项目、写清单、挂 <code>labmon wait</code> 等告警；租期、借卡、权重由你定，会话不碰。</p></div>
