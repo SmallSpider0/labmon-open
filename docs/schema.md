@@ -25,7 +25,9 @@
     "borrow": null,                             // 借来的主机（全局快照里 borrow.check 算好的）：{holder, since, until, for, light（借来时对方在轻用）, away（对方说好不用到几点，Unix 秒；没勾或已作废为 null）, swap（换给自己借来的）, cutoff（约定时间，Unix 秒）, why,
                                                 //   returning, now, back（对方超出预留）, tight（快撞上限）, overdue, keep（给对方留的量；说好不用的时段里带 away，keepText 据此写说好不用）, other（对方的用量 {vram 各卡 MB, ram GiB, cpu 核}：内存与 CPU 不含任何保活的进程树，`ka.sh` 停不了的对方保活也不算，与预留同口径（#37）；显存仍含停不了的保活（它是 labmon 之外的 GPU 进程，那张卡本来就不放），所以抽屉里“对方此刻”的三项口径不一）, late（约定归还挡住、这台不会再放的清单 [{project, root, queue, name, why, n}]，borrow.late_jobs；这一轮没拿到 worker 状态时沿用上一次的，back、tight 同样）, late_do（late 非空时该怎么办的一句，borrow.late_do，否则 null）}；页面上 borrowBadge、borrowText 读它
     "gpus": [{"index": 0, "name": "NVIDIA RTX A6000", "util": 99, "mem_used": 30720, "mem_total": 46068,
-              "temp": 84, "power": 284, "power_limit": 300}],          // 显存单位 MiB
+              "temp": 84, "power": 284, "power_limit": 300}],          // 显存单位 MiB；util 是探针此刻的值（不到 1 秒，含保活）
+    "busy": [{"i": 0, "now": 0, "m10": 12.5, "h1": 40.2, "cov": 3600, "ka": 99, "d1": 55.0, "d1cov": 86400}],
+                                                // 各卡的吃满程度（#51），与 gpus 一一对应：全局快照主机项的 busy 照搬（见下文工作台快照）；worker 不在时没有，页面退回 gpus 的 util
     "gpu_procs": [{"pid": 92352, "mem": 21197, "cmd": "…"}],
     "cgroup": {"cpu_usage_ns": 0, "cpu_quota": 17, "mem_used": 0, "mem_limit": 0, "mem_rss": 0},
     "cpu_pct": 12.3, "loadavg": [14.8, 15.4, 15.9],
@@ -90,13 +92,18 @@
                                                // msg 给实验会话（labmon wait 与命令行）；page 只在 both 时有：给用户的那句人话（collect.user_alerts、页面的 forUser 取它，
                                                // 没有就是 msg）；to=agent 的页面上不计数、只收在折叠的「给实验会话的提示」里
 
-  "history": [{"t": 0, "host": "29", "ok": true, "util": [99], "mem": [30720], "cpu_pct": 12.3, "ram": 0,
-               "disk": {"/tmp": 24.9}}],         // 近 24 小时；各挂载点余量（GiB；11-07 前存的按 GB，过了保留期自然没有）
+  "history": [{"t": 0, "host": "29", "ok": true, "util": [99], "busy": [12.5], "mem": [30720], "cpu_pct": 12.3, "ram": 0,
+               "disk": {"/tmp": 24.9}}],         // 近 24 小时；各挂载点余量（GiB；11-07 前存的按 GB，过了保留期自然没有）；
+                                               // util 是探针此刻的值，busy 是各卡近 10 分钟的吃满程度（worker 的 gpu_busy.m10，#51；worker 不在、样本不够时没有）：
+                                               // 时间线主机行的浅底、利用率小图、util_hourly 与 gpu_idle 告警按 busy
 
   "markers": [{"date": "2026-11-17", "label": "截稿", "ts": 1794931199}],   // 只写日期时 ts 取当天结束（23:59:59）
 
   "spans": [[1793780000, 1793857000]],          // labmon 在采集的区间（断开超过 3 个采集间隔、至少 10 分钟另起一段），存 30 天
-  "util_hourly": {"29": [[1793775600, 99.0]]}, // 各主机每小时的平均 GPU 利用率（整点时刻），存 30 天；逐次采样只在 history 里留 24 小时
+  "util_hourly": {"29": [[1793775600, 99.0]]}, // 各主机每小时的平均 GPU 利用率（整点时刻），存 30 天；逐次采样只在 history 里留 24 小时。
+                                               // 按 history 的 busy 平均（只有保活时按 0，#51）；11-17 之前的行是探针瞬时值、含保活，存满 30 天自然滚出
+  "gpu_mine": {"util": 63.2, "card_s": 52200, "n": 4},   // 本项目近 24 小时的平均 GPU 利用率（collect.gpu_mine，#51）：各任务所用卡的平均利用率（util_mean），
+                                               // 按 卡数 × 落在窗口里的秒数 加权；card_s 卡·秒，n 任务数；窗口里没有用卡的任务为 null
   "attempts": [{"name": "x4_s20_seed1", "lane": "r9_a6000", "t0": 1793850748, "t1": 1793850780}],
                                                // 30 天内失败的尝试（任务后来重跑成功的也在）：取工作台存的用量记录 overview/usage/<主机>.jsonl，
                                                // 按项目 id 与车道的 root、queue 对上（collect._attempts）；只有 worker 管的车道有
@@ -151,6 +158,9 @@
   `storage` 是本地盘扫描（`LocalDisk.summary`，[worker.md「本地目录与本地依赖」](worker.md#本地目录与本地依赖)）：`{t, local {项目: {cache, scratch}}, own labmon 目录的总占用, wrote labmon 之外的新写入 {since 起算时刻（开机，借来的是借来时）, b, n 文件数,
   top [[路径, 字节, 最近写入]] 前 8 处, more [其余几处, 字节], pending 还没扫的单位数, t 最近扫完一个单位的时刻}（测不准时为 null）, projects {项目目录: 项目}}`（字节）；
   主机项另有看板算的 `lw`（`fleet.local_writes`，GiB）：`{used, total, own, user labmon 之外的, shm, ok, risk 续租、关机、换人要先勾确认, scan {since, t, b, n, top [[路径, GiB, 最近写入]], more [几处, GiB], partial, pending, err} 或 null}`；
+  GPU 利用率两种口径（#51，worker 每 10 秒一个样本，`win_mean` 取窗口平均）：`util10 {UUID: %}` 是「在用时多高」，近 10 分钟、卡上有保活的那几轮不记（fit 列出来看）；
+  `gpu_busy {UUID: {now 此刻, m10 近 10 分钟, h1 近 1 小时, cov 1 小时窗口实际覆盖的秒数（worker 刚起时不满）, ka 此刻只有保活时保活顶出来的原值}}` 是「吃满程度」，卡上只有保活的那几轮记 0（页面上的利用率）；样本不到 3 个的平均为 null。
+  主机项另有看板算的 `busy`（`overview.gpu_busy`）：按 `info.gpus` 的顺序每卡一项 `{i, …gpu_busy 那几项, d1 近 24 小时平均, d1cov 它覆盖的秒数}`，`d1` 是 `series` 各行 `m10` 的平均；离线沿用旧状态、worker 不在（`worker_up` 为假）时没有，曲线那一行的 `m10` 也记 null。
   `room` 是按记账还能放多少：`{ram, margin, gpus {UUID: MB}, cpu 核, cpu_cap 记账上限（配额向下取整）, other_cpu, keep, owner}`，读不到配额时 `cpu`、`cpu_cap` 为 null；`other_cpu` 是认得准的 labmon 之外的核数（容器给 2 核以上时才有，否则 null），`keep` 是各卡给对方留着、对方还没用上的显存 `{UUID: MB}`（只列非 0 的），`owner` 是不放的卡（对方超出预留或刚回落、有停不了的保活），`worker fit` 按这几项判整机独占、整卡封顶与卡；借来的主机上 `guest.block` 是整台不放新任务的原因（对方内存或 CPU 超出预留、刚回落：`guest_block`，没有为 null）；
   `running[]` 的 `est` 是资源估计（`estimate`）：`vram`（每卡 GiB）与来源 `src`、`ram`（GiB）与来源 `ram_src`（#61 起 `src` 只指显存；之前放行、被接管的任务没有 `ram_src`，与 `src` 同一来源）、`util`，带 `cpus`（估计核数）、`cpu_src`（来源），`acct` 带 `cpu`（记账核数 = max(估计封顶到 `cpu_cap`, 实测)，开跑满 10 分钟后估计那份换成近 10 分钟窗口核数的最大值、不超过给的核数、不低于 1（#65），占位任务 0），`io_sus` 是记了“读写拥塞嫌疑”的时刻（没记为 null）；
   `waiting[]` 的 `est` 同样带 `ram_src`、`cpus`、`cpu_src`，`cpu_wait` 是一直因 CPU 被挡满 10 分钟后已挡的秒数（不到为 null）；`disk`（共享盘扫描，`mine` 为真的那台在扫）的 `yield` 是共享盘慢、推迟中的说明（没推迟为 null）；
@@ -223,8 +233,8 @@
 
 | 文件 | 内容 |
 |---|---|
-| `overview/usage/<主机>.jsonl` | worker 用量记录的尾巴（30 天，按 开始\|任务\|目录 去重）：`{t 结束, s 开始（都是 epoch 秒，取 worker 行的 t1、t0）, n 任务名, p 项目, root, queue, g 用的卡 UUID, gi 记下时的卡序号（换容器后 UUID 全变了还能按序号画）, st done\|failed\|stop, wait 放行前等了几分钟}`；时间线的已跑占用与调度卡的平均等待取它 |
-| `overview/series/<主机>.jsonl` | 主机曲线（7 天，每分钟一行）：`{t, mem, lim, cpu, thr, nfs, busy, gpu [[已用, 总量, 利用率]]}`；`thr`、`nfs`、`busy` 取状态的 `info.press`（11-08 前的行没有） |
+| `overview/usage/<主机>.jsonl` | worker 用量记录的尾巴（30 天，按 开始\|任务\|目录 去重）：`{t 结束, s 开始（都是 epoch 秒，取 worker 行的 t1、t0）, n 任务名, p 项目, root, queue, g 用的卡 UUID, gi 记下时的卡序号（换容器后 UUID 全变了还能按序号画）, st done\|failed\|stop, wait 放行前等了几分钟, u 所用卡的平均利用率（worker 行的 gpu_util；11-17 前的行没有）}`；时间线的已跑占用、调度卡的平均等待、项目的平均利用率（`gpu_mine`）取它 |
+| `overview/series/<主机>.jsonl` | 主机曲线（7 天，每分钟一行）：`{t, mem, lim, cpu, thr, nfs, busy, gpu [[已用, 总量, 此刻利用率, 吃满程度 m10]]}`；`thr`、`nfs`、`busy` 取状态的 `info.press`（11-08 前的行没有）；卡的第 4 项是 `gpu_busy` 的 `m10`（#51，11-17 前的行没有，主机页的利用率小曲线与 24 小时平均只用有它的行） |
 | `overview/health.json` | 各主机的连通状态，只留 `fails`、`down`、`since`、`warned`、`started`、`miss` 这几个键（`HEALTH_KEYS`），别的键不再写 |
 | `overview/events.jsonl` | 记录（一年）：`{t, kind, msg, host?, hosts?, who?, project?, target?, detail?}`；`relaunch`（自动拉起 worker）事件的 `detail` 是命令输出；`container_new`（换了新容器）带 `started`（容器启动时刻，epoch 秒），项目页的重启标记只画带它的 |
 | `overview/hostlog/<主机>.jsonl` | worker 事件续存（30 天，任务起止的不存） |

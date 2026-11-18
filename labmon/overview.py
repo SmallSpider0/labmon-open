@@ -272,22 +272,40 @@ _sig = lambda v: {k: x for k, x in v.items() if k != "t"}    # 比内容时不�
 _CLOCK: dict = {}                    # 主机 → 它的时钟比本机快多少秒（上一轮 fetch 的 date +%s 与本机比）；写给 worker 的时刻按它换算
 
 
-def _series(h: dict, info: dict, t: float) -> list[dict]:
+def _series(h: dict, st: dict, t: float) -> list[dict]:
+    """主机曲线（series/<主机>.jsonl，7 天）记这一轮一行，返回近 SHOW_S 的全部行（页面上的点由 _thin 抽稀，gpu_busy 的 24 小时平均用全部行）。"""
+    info = st["info"]
     f = state_dir() / "series" / f"{h['id']}.jsonl"
     f.parent.mkdir(parents=True, exist_ok=True)
-    mem, pr = info.get("mem") or {}, info.get("press") or {}
+    mem, pr, busy = info.get("mem") or {}, info.get("press") or {}, st.get("gpu_busy") or {}
     # mem 是工作集，anon 是收不回的内存（放行与内存闸门看它；旧 worker 没有为 None）
     row = {"t": round(t), "mem": round(mem.get("used", 0), 2) if mem else None, "lim": round(mem.get("limit", 0), 2) if mem else None,
            "anon": round(mem["anon"], 2) if mem.get("anon") is not None else None,
            "cpu": info.get("cpu_used"),
            # 主机压力（worker 的 info.press；旧 worker 没有为 None）：CPU 被限流的周期 %、共享盘每次读写 ms、本地盘忙 %
            "thr": pr.get("thr"), "nfs": (pr.get("nfs") or {}).get("ms"), "busy": (pr.get("disk") or {}).get("busy"),
-           "gpu": [[round(g.get("used") or 0), round(g.get("total") or 0), g.get("util")] for g in info.get("gpus", [])]}
+           # 各卡 [已用, 总量, 此刻利用率, 吃满程度近 10 分钟平均（worker 的 gpu_busy.m10，只有保活时按 0，#51）]
+           "gpu": [[round(g.get("used") or 0), round(g.get("total") or 0), g.get("util"), (busy.get(g.get("uuid")) or {}).get("m10")]
+                   for g in info.get("gpus", [])]}
     append_row(f, row, KEEP_S, t, 3600)                      # 一小时修剪一次
-    rows = load_rows(f)
-    rows = [r for r in rows if r["t"] >= t - SHOW_S]
+    return [r for r in load_rows(f) if r["t"] >= t - SHOW_S]
+
+
+def _thin(rows: list[dict]) -> list[dict]:
     step = max(1, len(rows) // 360)                          # 页面上最多约 360 个点
     return rows[::step] + ([rows[-1]] if rows and (len(rows) - 1) % step else [])
+
+
+def gpu_busy(st: dict, rows: list[dict]) -> list[dict]:
+    """主机项的 busy（#51）：各卡（info.gpus 的顺序）的「吃满程度」，worker 给的 gpu_busy {now, m10, h1, cov, ka} 加上
+    近 24 小时平均 d1 与它覆盖的秒数 d1cov（series 各行的 m10 求平均：每轮的 10 分钟窗口首尾相接，相当于全部 10 秒样本的平均）。
+    页面上 utilText 出字；项目快照的主机项照搬（collect._hosts）。"""
+    busy, out = st.get("gpu_busy") or {}, []
+    for k, g in enumerate((st.get("info") or {}).get("gpus") or []):
+        v = [(r["t"], r["gpu"][k][3]) for r in rows if len(r.get("gpu") or []) > k and len(r["gpu"][k]) > 3 and r["gpu"][k][3] is not None]
+        out.append({"i": g.get("i", k), **(busy.get(g.get("uuid")) or {}),
+                    "d1": round(sum(x[1] for x in v) / len(v), 1) if v else None, "d1cov": round(v[-1][0] - v[0][0]) if v else 0})
+    return out
 
 
 _EXPIRE_ERR = [None]
@@ -368,8 +386,12 @@ def _annotate(e: dict, h: dict, projects: list[dict], prog: dict, colors: dict, 
     sg = st.get("storage") or {}
     for p in list((sg.get("projects") or {}).values()) + list(sg.get("local") or {}):
         pick_color(colors, p)
-    if st.get("info") and not e["lan_off"]:   # 离线时沿用的旧状态不写进曲线
-        e["series"] = _series(h, st["info"], t)
+    if st.get("info") and not e["lan_off"]:   # 离线时沿用的旧状态不写进曲线，也不出平均利用率
+        # worker 不在（状态过期，与 worker_up 同一门槛）：状态里的平均值是停机前的，不记进曲线、不出 busy（页面与 gpu_idle 退回探针此刻值，#54 审查）
+        rows = _series(h, st if e["worker_up"] else dict(st, gpu_busy={}), t)
+        e["series"] = _thin(rows)
+        if e["worker_up"]:
+            e["busy"] = gpu_busy(st, rows)
 
 
 def _voided(hosts: list[dict], t: float) -> list[dict]:
@@ -663,20 +685,21 @@ USAGE_KEEP_S = 30 * 86400
 
 def _keep_usage(sd: Path, hid: str, rows: list[dict], t: float, idx: dict) -> None:
     """worker 的用量记录（任务结束时一行）续写进本机 usage/<主机>.jsonl，存 30 天，只留时间线与调度卡要的几项：
-    worker 那边的 usage.jsonl 每次只取最后 60 行，时间线画已跑的占用要更长的。按 开始|任务|目录 去重。起止 s、t 是 epoch 秒（worker 行的 t0、t1）。
+    worker 那边的 usage.jsonl 每次只取最后 60 行，时间线画已跑的占用要更长的。按 开始|任务|目录|清单 去重（同目录的两条清单可以有同名任务）。起止 s、t 是 epoch 秒（worker 行的 t0、t1）。
     idx：这台此刻各卡 uuid → 序号；用的卡除了 uuid（g）也存下序号（gi），换容器后 uuid 全变了还能按序号画。"""
     f = usage_file(hid)
     old = load_rows(f)
-    seen = {(r["s"], r["n"], r.get("root")) for r in old[-500:]}
+    seen = {(r["s"], r["n"], r.get("root"), r.get("queue")) for r in old[-500:]}
     for r in rows:
         s0, e = r.get("t0"), r.get("t1")
-        if s0 is None or e is None or (s0, r.get("name"), r.get("root")) in seen or e < t - USAGE_KEEP_S:
+        if s0 is None or e is None or (s0, r.get("name"), r.get("root"), r.get("queue")) in seen or e < t - USAGE_KEEP_S:
             continue
         st = "stop" if r.get("requeued") or r.get("void") else "done" if r.get("rc") == "0" or (r.get("rc") is None and r.get("kind") == "slot") else "failed"
         g = r.get("gpus") or []
         append_row(f, {"t": e, "s": s0, "n": r.get("name"), "p": r.get("project"), "root": r.get("root"), "queue": r.get("queue"),
-                       "g": g, "gi": [idx[u] for u in g if u in idx], "st": st, "wait": r.get("wait")}, USAGE_KEEP_S, t)
-        seen.add((s0, r.get("name"), r.get("root")))
+                       "g": g, "gi": [idx[u] for u in g if u in idx], "st": st, "wait": r.get("wait"),
+                       "u": r.get("gpu_util")}, USAGE_KEEP_S, t)   # 所用卡的平均利用率（worker 的 util_mean）：项目近 24 小时的平均利用率（collect.gpu_mine）
+        seen.add((s0, r.get("name"), r.get("root"), r.get("queue")))
 
 
 def occupancy(hosts: list[dict], projects: list[dict], since: float, skip: str | None = None) -> dict:

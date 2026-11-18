@@ -158,6 +158,8 @@ class ContractTest(unittest.TestCase):
         self.assertLessEqual({"cpus", "cpu_src"}, set(j["est"]))                                       # CPU 估计与记账（主机页 CPU 一行、任务详情）
         self.assertIsInstance(j["acct"]["cpu"], NUM)
         self.assertLessEqual({"ram", "margin", "gpus", "cpu", "cpu_cap", "other_cpu", "keep", "owner"}, set(st["room"]))   # 测试里读不到配额：cpu、cpu_cap 为 None；owner 不放的卡、other_cpu（fit 用）
+        self.assertLessEqual({"now", "m10", "h1", "cov"}, set(st["gpu_busy"]["GPU-aaa"]))               # 各卡的吃满程度（#51）：页面上的利用率
+        self.assertEqual([b["i"] for b in h["busy"]], [g["i"] for g in st["info"]["gpus"]])              # 主机项的 busy（overview.gpu_busy）与 info.gpus 一一对应
         w = st["waiting"][0]
         self.assertEqual((w["name"], w["project"], w["link"], w["held"], w["dep"]), (wait["name"], wait["project"], wait["project"], None, None))
         self.assertEqual(w["pos"]["n"], 1)                                                              # 排位：等待表“排第几”

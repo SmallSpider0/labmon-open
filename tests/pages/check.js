@@ -75,6 +75,17 @@ for (const tab of TABS) t("overview", `总览与主机页的记录卡：${tab}`,
   for (const r of ["#/", "#/host/srv-a", "#/host/srv-b"]) { const h = page(O, r); clean(h, r + " " + tab); if (tab === "events") has(h, 'class="rl', r); }
   O.RTAB = "done";
 });
+t("overview", "GPU 利用率（#51）：首页、主机表、资源卡、组内卡片都由 utilText 出字，保活按 0、带此刻值与 24 小时平均", () => {
+  const home = page(O, "#/");
+  has(home, "近 20 分钟利用率 54%");                                                         // 三张卡 h1 平均；srv-b 的 worker 才起 20 分钟，按覆盖最短的写
+  const a = page(O, "#/host/srv-a");
+  has(a, '72%<span class="mut">此刻 95% · 4.8 小时 74%</span>'); has(a, "只有保活（顶到 99%）");
+  has(run(O, `SPKG["h:srv-a"].at(${NOW})`), "近 10 分钟利用率 0%");                                // 曲线悬停按 series 卡的第 4 项
+  const m = run(O, "fUtil(D.fleet.mine[0])"); ok(m.span === "近 1 小时" && m.big === "38%", "自用主机该取 worker 的平均值：" + JSON.stringify(m));
+  const ka = run(O, "fUtil(D.fleet.servers.find(x => x.id === 'srv-d'))");
+  ok(ka.big === "0%" && ka.span === "此刻" && ka.sub.includes("只有保活（顶到 82%）") && ka.tip.includes("探针此刻的样本"), "组内服务器只有保活：" + JSON.stringify(ka));
+  has(run(O, "gpuTiles(D.fleet.mine[0].sample.gpus, 'job')"), "利用率 4%（近 1 小时）· 显存");
+});
 t("overview", "主机页：worker 停着（没有 GPU、曲线）、没有状态、连不上各有说明", () => {
   const S = ovCtx(OVS, RR);
   const old = page(S, "#/host/srv-old"); clean(old, "srv-old"); has(old, "数据还不够"); has(page(S, "#/host/srv-c"), "ssh: connect"); has(page(S, "#/host/srv-bad"), "status.json 解析不了");
@@ -346,7 +357,7 @@ t("overview", "CPU 被配额限流（#39）：工作台告警指出超核的任�
   ok(run(O, "allAlerts()").includes(A), "工作台告警没有限流那句：" + JSON.stringify(run(O, "allAlerts()")));
   ok(run(O, "alertsOf(D.hosts[0]).find(a => a.msg.includes('限流')).to") === "both");
   const home = page(O, "#/");
-  has(home, "显存 · 利用率"); has(home, "46%<span class=\"mut\"> · 95%</span>"); has(home, "· 3%</span>");
+  has(home, "显存 · 利用率"); has(home, "46%<span class=\"mut\"> · 72%</span>"); has(home, "· 4%</span>");     // 近 1 小时吃满程度（#51）
   has(home, 'style="color:var(--bad)"'); has(home, "限流 38.5%"); has(tips(home), "超核：Alpha 实验 的 alpha_train_s1 实测 9.2 核（给 4 核）");
   ok(!/限流 —|限流 null/.test(home), "没有限流计数的主机也写了");
   const a = page(O, "#/host/srv-a"); has(a, "限流 38.5%"); has(tips(a), "超核：给 4 核，1 分钟窗口实测 9.2 核"); has(tips(a), "持续限流 25 分钟");
@@ -743,7 +754,7 @@ t("overview", "自用主机抽屉（#58）：与组内服务器同一套模板�
   // 卡片：显存同一个口径（去掉保活），利用率取样本；worker 状态过期（没有样本）时写“—”，不拿旧数
   const fw = page(O, "#/fleet"), ca = fw.slice(fw.indexOf('id="fc-srv-a"'), fw.indexOf('id="fc-', fw.indexOf('id="fc-srv-a"') + 5));
   has(ca, "显存（去掉保活）"); ok(!fw.includes("显存（实验）"));
-  ok(run(O, "fUtil({...D.fleet.mine[0], sample: null}).u") === null, "没有样本时利用率该是空");
+  ok(run(O, "fUtil({...D.fleet.mine[0], sample: null}).v") === null, "没有样本时利用率该是空");
   // 首页只列一次（审查 B1）：自用主机的掉线、租期快到由主机自己的告警（alertsOf）报，组内提醒不再重复；「告警」指标卡同一口径
   const hm = run(O, `(() => { const m = D.fleet.mine[0], h = D.hosts.find(e => e.id === "srv-a"), om = {...m}, oh = {...h};
     Object.assign(m, {state: "down", down: "连不上", since: ${NOW - 600}, lease_end: ${NOW + 3 * H}});
@@ -1441,6 +1452,29 @@ t("project", "正常快照渲染不报错、不漏 NaN/undefined，各块都在"
   has(h, run(P, "rebalMark(D.rebalance)"), "全部完成旁的图标");
   ok((h.match(/⇄/g) || []).length === 1, "图标只一个");
   has(tips(h), run(P, "esc(\"可以挪：\" + D.rebalance.text)"), "悬停写那句");
+});
+t("project", "GPU 利用率（#51）：大字是近 1 小时的吃满程度（保活按 0），小字是各卡与本项目近 24 小时；没有 worker 数据的卡退回探针此刻值", () => {
+  const h = app(P), i0 = h.lastIndexOf('<div class="kpi"', h.indexOf("GPU 利用率 · ")), kpi = h.slice(i0, h.indexOf('<div class="kpi"', i0 + 1));
+  has(kpi, "GPU 利用率 · 3 卡 · 整机"); has(kpi, '56<small>% 近 1 小时 平均');                 // (72.3 + 4.2 + 90) / 3：srv-b 没有 busy，按探针此刻值逐卡补进平均（#54 审查）
+  has(kpi, "srv-a·0 72%"); has(kpi, "srv-a·1 4%"); has(kpi, "借 OWNER 90%"); has(kpi, "本项目近 24 小时 63%");
+  const tt = tips(kpi); has(tt, "近 1 小时平均 56%"); has(tt, "其中 1 张卡没有 worker 数据"); has(tt, "只有保活（顶到 99%）"); has(tt, "保活按 0 算"); has(tt, "14.5 卡·时，平均把所用的卡用到 63%");
+  has(h, '38%<span class="mut" style="font-weight:400"> 近 1 小时</span>');                    // 主机小图
+  ok(run(P, "utilText({now: 0, m10: 0, h1: 4.2, cov: 1200, ka: 99}).span") === "近 20 分钟", "worker 刚起不满 1 小时该写实际多久");
+  has(run(P, "utilText({now: 0, m10: 0, h1: 4.2, cov: 1200, ka: 99}).sub"), "只有保活（顶到 99%）");
+  const raw = run(P, "utilText(null, 55)"); ok(raw.span === "此刻" && raw.big === "55%" && raw.tip.includes("含保活"), "没有 worker 数据该退回探针此刻值并写明");
+  // 多卡里有卡没有 worker 数据（#54 审查）：那张按探针此刻值算进平均，悬停写明，不把部分卡当整机
+  const mix = run(P, "utilText(utilAvg([{now: 0, m10: 0, h1: 0, cov: 3600}, null], [0, 100]))");
+  ok(mix.big === "50%" && mix.tip.includes("1 张卡没有 worker 数据"), "混合时该逐卡回退：" + JSON.stringify(mix));
+  ok(run(P, "utilText(utilAvg([null], [40])).span") === "此刻", "全是探针值时按此刻写");
+  ok(run(P, "utilText(utilAvg([{now: 30, m10: null, h1: null, cov: 20}]))").span === "此刻", "样本不够时不该冒充 10 分钟平均");
+  ok(run(P, "utilText(null).big") === "—" && run(P, "utilMine(null)") === null, "没有数据该是空");
+  // 本项目刚跑完、卡此刻空着（近 1 小时平均还高）：不该说是别的项目在用（#54 审查：按此刻值判）
+  const Q = pjCtx({...PJ, jobs: PJ.jobs.filter(j => j.status !== "running"), hosts: PJ.hosts.map(x => ({...x, gpus: (x.gpus || []).map(g => ({...g, util: 0})),
+    busy: (x.busy || []).map(b => ({...b, now: 0, h1: 70}))}))}, EVN);
+  ok(!app(Q).includes("是别的项目或进程在用"), "历史平均高、此刻空着也说别的项目在用");
+  run(Q, "D.hosts[1].gpus[0].util = 60; render()"); has(app(Q), "是别的项目或进程在用");
+  // 时间线主机行的浅底、利用率小图按 history 的 busy：前一半旧行没有 busy，不画
+  ok(run(P, "HIST('srv-a').filter(r => r.busy).length") === 72, "history 的 busy 行数不对");
 });
 t("project", "单独打开的项目页顶栏有「管理」，链到工作台的管理抽屉；嵌在工作台里、file:// 打开时没有（#113）", () => {
   const top = app(P).split('class="project-feedback"')[0];

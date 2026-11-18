@@ -266,12 +266,13 @@ KEEP_LONG_S = 30 * 86400
 
 def _long_term(state: dict, snap: dict, hist: list, cfg: dict, t: float) -> None:
     """时间线看长期要的两样（存 30 天）：采集在跑的区间（没采的时段页面标灰，不当成主机空闲），
-    各主机每小时的平均 GPU 利用率（逐次采样只留 history_hours）。"""
+    各主机每小时的平均 GPU 利用率（逐次采样只留 history_hours）：吃满程度，即逐次采样的 busy（worker 的近 10 分钟平均，只有保活时按 0，#51）
+    再按小时平均；worker 不在、没有 busy 的那几次不记。11-17 之前的小时行是探针瞬时值、含保活，存满 30 天自然滚出。"""
     gap = max(3 * cfg["interval"], 600)
     if "spans" not in state:                        # 第一次：用现有的逐次采样（history_hours 内）补出区间与每小时利用率
         state["spans"], state["util_h"] = [], {}
         for x in sorted((x for x in hist if x["t"] < t), key=lambda x: x["t"]):
-            _add_util(state["util_h"], x.get("host"), x.get("util"), x["t"])
+            _add_util(state["util_h"], x.get("host"), x.get("busy"), x["t"])
             sp = state["spans"]
             if sp and x["t"] - sp[-1][1] <= gap:
                 sp[-1][1] = round(x["t"])
@@ -287,7 +288,7 @@ def _long_term(state: dict, snap: dict, hist: list, cfg: dict, t: float) -> None
     uh = state.setdefault("util_h", {})
     for h in snap["hosts"]:
         rec = next((x for x in reversed(hist) if x.get("host") == h["id"] and x["t"] == t), None)
-        _add_util(uh, h["id"], (rec or {}).get("util"), t)
+        _add_util(uh, h["id"], (rec or {}).get("busy"), t)
     for k in uh:
         uh[k] = [r for r in uh[k] if r[0] >= t - KEEP_LONG_S]
     snap["util_hourly"] = {k: [[r[0], round(r[1] / r[2], 1)] for r in v] for k, v in uh.items()}
@@ -324,6 +325,7 @@ def build(cfg: dict, probes: dict, out_dir: Path, lan: dict | None = None, glob_
     glob_snap = snapshot() if glob_snap is None else glob_snap   # 工作台的全局快照（上一轮的）：借来的主机现在怎样（borrow.check 算好的）、同机别的项目在 worker 上跑什么
     raw_by_host = _hosts(cfg, probes, lan is not None and not lan["ok"], glob_snap, snap, state, hist, sd, t)
     _history(cfg, snap, state, hist, hist_path, t)
+    snap["gpu_mine"] = gpu_mine(cfg["id"], [h["id"] for h in snap["hosts"]], glob_snap, t)
     snap["rebalance"] = (glob_snap.get("rebalance") or {}).get(cfg["id"])    # 挪法建议（rebalance.suggest 在工作台那一轮算好的）：_lane 的 borrow_cut 与 _rebalance 用
     ratios, quiet = _lanes(cfg, snap, state, raw_by_host, t)
     _groups(cfg, snap, state, ratios)
@@ -342,6 +344,7 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
     hstate, alerts = state.setdefault("hosts", {}), snap["alerts"]
     raw_by_host = {}
     lent = {e["id"]: e["borrow"] for e in glob_snap.get("hosts", []) if e.get("borrow")}   # 借来的主机：没有就用主机清单里记的
+    busy = {e["id"]: e["busy"] for e in glob_snap.get("hosts", []) if e.get("busy")}       # 各卡的吃满程度（工作台那一轮 overview.gpu_busy 算好的，#51）
     for h in cfg["hosts"]:
         p, err = probes[h["id"]]
         hs = hstate.setdefault(h["id"], {})           # 连通状态（health.link_step 记的 fails / since / down）与 idle_since
@@ -385,7 +388,12 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
             gp = p.get("gpu") or []
             cg = p.get("cgroup") or {}
             hd.update(gpus=gp, gpu_procs=p.get("gpu_procs") or [], cgroup=cg, loadavg=p.get("loadavg"))
+            bi = {b["i"]: b for b in busy.get(h["id"]) or []}
+            if bi:
+                hd["busy"] = [bi.get(g.get("index"), {"i": g.get("index")}) for g in gp]     # 与 gpus 一一对应；页面上 utilText 出字
             if hd["ok"]:
+                if any(b.get("m10") is not None for b in bi.values()):   # 各卡近 10 分钟的吃满程度（worker 刚起、样本不够时没有）：时间线主机行的浅底、利用率小图、每小时平均与 gpu_idle 都按它
+                    rec["busy"] = [bi.get(g.get("index"), {}).get("m10") for g in gp]
                 rec.update(util=[g.get("util") for g in gp], mem=[g.get("mem_used") for g in gp],
                            cpu_ns=cg.get("cpu_usage_ns"), cpu_quota=cg.get("cpu_quota"), ram=cg.get("mem_rss"))
                 prev = next((x for x in reversed(hist) if x.get("host") == h["id"] and x.get("cpu_ns")), None)
@@ -423,7 +431,7 @@ def _history(cfg: dict, snap: dict, state: dict, hist: list, hist_path: Path, t:
     """采样历史：写回 history.jsonl（只留 history_hours），长期的区间与每小时利用率（_long_term），快照里带近 24 小时的。"""
     write_atomic(hist_path, "".join(json.dumps(x, ensure_ascii=False) + "\n" for x in hist))
     _long_term(state, snap, hist, cfg, t)
-    keys = ("t", "host", "ok", "util", "mem", "cpu_pct", "ram", "disk")
+    keys = ("t", "host", "ok", "util", "busy", "mem", "cpu_pct", "ram", "disk")
     snap["history"] = [{k: x[k] for k in keys if x.get(k) is not None} for x in hist if t - x["t"] <= 24 * 3600]
 
 
@@ -683,8 +691,10 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
         unfinished = sum(ln.get("unfinished", 0) for ln in lanes if not ln.get("holding") and not ln.get("paused") and not ln.get("dep"))
         win = al_cfg["gpu_idle_min"] * 60
         recent = [x for x in hist if x.get("host") == hd["id"] and t - x["t"] <= win + 60 and x.get("ok")]
+        # 每次采样看各卡近 10 分钟的吃满程度（busy：只有保活时按 0，#51），不看瞬时值：数据加载的空档不会误报，保活也挡不住；
+        # 没有 worker 的主机（采样里没有 busy）只有探针的瞬时值
         if unfinished and hd.get("gpus") and recent and t - recent[0]["t"] >= win - 150 and \
-                all(max([u or 0 for u in x.get("util") or [0]]) < al_cfg["gpu_idle_util"] for x in recent):
+                all(max([u or 0 for u in x.get("busy") or x.get("util") or [0]]) < al_cfg["gpu_idle_util"] for x in recent):
             # 写明各车道当前在做什么，便于判断是有意让出 GPU 还是卡住了
             why = []
             for ln in lanes:
@@ -702,7 +712,7 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                     why.append(f"{j['id']} 日志 {(t - j['log_mtime']) / 60:.0f} 分钟前更新")
             why = [w for w in why if w]
             alerts.append(alert(f"gpu_idle:{hd['id']}", "agent", f"{hd['label']}：还有 {unfinished} 个任务未完成，"
-                                f"GPU 利用率已 {al_cfg['gpu_idle_min']} 分钟低于 {al_cfg['gpu_idle_util']:.0f}%"
+                                f"GPU 利用率（近 10 分钟平均，只有保活时按 0）已 {al_cfg['gpu_idle_min']} 分钟低于 {al_cfg['gpu_idle_util']:.0f}%"
                                 + (f"（{'；'.join(why)}）" if why else "")))
         # CPU 被配额限流（#39）：worker 判的（Worker.throttle，门槛只在那边），持续满时本项目有超核的任务才报；key 带这一段的起点，同一段只叫醒一次
         th = next(((e.get("status") or {}).get("throttle") for e in glob_snap.get("hosts", []) if e["id"] == hd["id"]), None)
@@ -809,6 +819,28 @@ def user_alerts(alerts: list[dict], keys: bool = False) -> list:
     只给实验会话的不列，页面上收在折叠的「给实验会话的提示」里（common.js 的 alertBox）。
     工作台的项目摘要（serve.proj_info）用它，页面上的 forUser（common.js）同一口径。keys：返回 (key, 文字)（推给项目主人按 key 去重，#167）。"""
     return [(a["key"], a.get("page") or a["msg"]) if keys else a.get("page") or a["msg"] for a in alerts if a.get("to") != "agent"]
+
+
+MINE_WIN_S = 86400
+
+
+def gpu_mine(pid: str, hids: list, glob_snap: dict, t: float) -> dict | None:
+    """这个项目近 MINE_WIN_S 秒的平均 GPU 利用率（#51）：各任务所用卡的平均利用率（worker 的 util_mean：跑完的取工作台存的用量记录的 u，
+    在跑的取全局快照 running[].use，worker 不在时只算到状态最后写的时刻），按 卡数 × 落在窗口里的秒数 加权。同卡有别的任务时 util_mean 是整卡合计。
+    返回 {util 平均 %, card_s 卡·秒, n 任务数}；窗口里没有用卡的任务为 None。"""
+    t0, acc, w, n = t - MINE_WIN_S, 0.0, 0.0, 0
+    # 按 (主机, 任务, 开始时刻) 认一次运行：刚跑完的用量行已写、状态里还在 running 时只算一遍，用量行盖过在跑的（#54 审查）。
+    # 在跑的算到现在；worker 不在（状态过期）的只算到状态最后写的时刻，停机后的时间不算
+    one = {(e["id"], j.get("root"), j.get("queue"), j.get("name"), round(j.get("t0") or 0)): (len(j.get("gpus") or []), j.get("t0"), t if e.get("worker_up", True) else e["status"].get("t"),
+                                                           (j.get("use") or {}).get("util_mean"))
+           for e in glob_snap.get("hosts", []) if e["id"] in hids for j in (e.get("status") or {}).get("running") or [] if j.get("project") == pid}
+    one.update({(h, r.get("root"), r.get("queue"), r.get("n"), round(r.get("s") or 0)): (len(r.get("g") or []), r.get("s"), r.get("t"), r.get("u"))
+                for h in hids for r in load_rows(usage_file(h)) if r.get("p") == pid})
+    for k, s0, s1, u in one.values():
+        d = min(s1 or 0, t) - max(s0 or 0, t0)
+        if k and u is not None and d > 0:
+            acc, w, n = acc + u * k * d, w + k * d, n + 1
+    return {"util": round(acc / w, 1), "card_s": round(w), "n": n} if w else None
 
 
 def _attempts(lanes: list[dict], pid: str, t: float) -> list[dict]:

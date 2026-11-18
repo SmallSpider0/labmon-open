@@ -832,7 +832,8 @@ def from_worker(st: dict, cfg: dict | None, holder: str | None = None) -> dict:
             "vram_total": vt, "vram_real": vr, "vram_ka": sum(p.get("mb") or 0 for p in gp if p.get("owner") == "keepalive"),
             "cpu": cr, "cpu_real": cr, "cpu_quota": info.get("cpu_quota"), "nproc": info.get("nproc"), "mem": m or None, "mem_real": mr, "mem_ka": None,
             "share": bool(cfg) and shareable(vr, vt, ur, cr, info.get("cpu_quota"), mu, m.get("limit"), cfg),
-            "gpus": [{k: g.get(k) for k in ("i", "uuid", "name", "used", "total", "util")} for g in gs],
+            # 各卡带上 worker 的吃满程度（gpu_busy：只有保活时按 0 的近 10 分钟、1 小时平均，#51）：组内页卡片与抽屉上的利用率按它（页面 fUtil、fCardU）
+            "gpus": [{**{k: g.get(k) for k in ("i", "uuid", "name", "used", "total", "util")}, "busy": (st.get("gpu_busy") or {}).get(g.get("uuid"))} for g in gs],
             "root": info.get("rootfs"), "started": info.get("started")}
 
 

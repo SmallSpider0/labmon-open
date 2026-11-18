@@ -235,7 +235,7 @@ def fake_status(**kw) -> dict:
     st = {"t": now, "pid": 1, "host": "h", "info": {"gpus": [], "mem": {}, "disk": [], "started": now - 3600,
                                                     "press": {"thr": None, "psi": None, "nfs": None, "disk": None}}, "gpu_procs": [],
           "gate": {"on": False, "at": 0.92}, "limits": {}, "overrides": [], "local": None, "storage": None, "voided": [], "kafight": None, "ka_stop": None, "watchdogs": {"frozen": [], "seen": []}, "guest": None,
-          "util10": {}, "disk": None, "room": {"ram": None, "margin": None, "gpus": {}, "cpu": None, "cpu_cap": None, "other_cpu": None, "keep": {}, "owner": []}, "queues": [], "plan": {"t": now, "lanes": []}, "todo": [], "dep_miss": [], "offers": [],
+          "util10": {}, "gpu_busy": {}, "disk": None, "room": {"ram": None, "margin": None, "gpus": {}, "cpu": None, "cpu_cap": None, "other_cpu": None, "keep": {}, "owner": []}, "queues": [], "plan": {"t": now, "lanes": []}, "todo": [], "dep_miss": [], "offers": [],
           "share": {"wait_cap_min": 30.0, "half_life_h": 24.0, "weight": {}, "use": {}, "run": []},
           "running": [], "external": [], "waiting": []}
     st.update(kw)
