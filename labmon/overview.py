@@ -415,7 +415,11 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
     colors = load_json(sd / "colors.json", {})
     sw = sched(t)
     # 按人的公平份额（#23）：各项目算在谁名下（含已归档的：它们的用量还在半衰期里），随 sched.json 发给 worker（owner：人员名的短哈希）
-    people = F.project_people(sorted({*registered(), *(p["id"] for p in projects)}))
+    try:
+        fcfg = F.conf() or {}
+    except Exception:  # noqa: BLE001  [fleet] 写错了：_notices 照样报这条错；认人按没有 [fleet] 降级（账号库的绑定照用），不挡整轮采集与调度设置的下发
+        fcfg = {}
+    people = F.project_people(sorted({*registered(), *(p["id"] for p in projects)}), fcfg)
     sw = dict(sw, owner={p: F.share_key(n) for p, n in people.items()}) if people else sw
     prog, put = _to_worker(projects, t, sw)
     hcfg = {h["id"]: h for h in active_hosts()}
@@ -466,7 +470,8 @@ WAIT_WINDOW_S = 86400
 def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | None = None, people: dict | None = None) -> dict | None:
     """工作台的调度卡：生效的设置与各项目的用量取最新一份 worker 状态的 share（各 worker 都按所有主机算，缺省值只在 worker）；
     各项目算在谁名下（people：fleet.project_people，缺省现算；#23 份额按人）：person 是名字、pk 是 sched.json 里的人员键（同一个 pk 的合起来算一份），
-    看板上没有的项目两者都为 None（worker 里它们合起来算一份）；
+    看板上没有的项目两者都为 None（worker 里它们合起来算一份）；puse 是这人名下各项目的用量合计，取完整的 share.use（含已归档、卡上不列的项目），
+    与 worker 的 person_use 同一口径（worker 不 import 本包，各一份）；use_sum 是 share.use 的总和（页面各占比的分母）；
     各项目此刻占几张卡（各主机 share.run 加起来）、排队几个（推演里还没开始的）、在等几个（有排位的）、
     近 1 天平均等多久（放行时记的 wait，按开始时刻取窗口：跑完的取本机存的用量记录 _keep_usage，在跑的取状态）、
     优先、暂停：null 或 {until（None 为无期限）, hosts}：项目级的（sw，主机清单 [sched.focus]、[sched.pause]，缺省现读）hosts 为 None，
@@ -494,18 +499,22 @@ def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | Non
         on = [(h["id"], o.get("until")) for h in hosts for o in (h.get("status") or {}).get("overrides") or []
               if o["kind"] == kind and o.get("target") == pid and not o.get("global")]
         return {"until": max((u for _, u in on), key=lambda u: u or float("inf")), "hosts": sorted({h for h, _ in on})} if on else None
+    keys = {p: F.share_key(n) for p, n in people.items() if n}
+    puse = {}
+    for q, v in sh["use"].items():
+        puse[keys.get(q)] = puse.get(keys.get(q), 0.0) + v
     out = []
     for pid in ids:
         waits = [w for p, w in recent if p == pid and w is not None]
-        who = people.get(pid)
-        out.append({"id": pid, "person": who, "pk": F.share_key(who) if who else None, "w": sh["weight"].get(pid, 1), "use": sh["use"].get(pid, 0.0),
+        who, pk = people.get(pid), keys.get(pid)
+        out.append({"id": pid, "person": who, "pk": pk, "puse": round(puse.get(pk, 0.0), 3), "w": sh["weight"].get(pid, 1), "use": sh["use"].get(pid, 0.0),
                     "cards": round(sum(r[1] for st in allst for r in (st.get("share") or {}).get("run") or [] if r[0] == pid), 2),
                     "queued": sum(1 for st in allst for ln in (st.get("plan") or {}).get("lanes") or [] if ln.get("project") == pid
                                   for j in ln["jobs"] if not j.get("run")),
                     "waiting": sum(1 for st in allst for w in st.get("waiting") or [] if w.get("project") == pid and w.get("pos")),
                     "wait_avg": round(sum(waits) / len(waits), 1) if waits else None, "wait_n": len(waits),
                     "focus": flag("focus", pid), "paused": flag("pause", pid)})
-    return {"cap_min": sh["wait_cap_min"], "hl_h": sh["half_life_h"], "projects": out}
+    return {"cap_min": sh["wait_cap_min"], "hl_h": sh["half_life_h"], "use_sum": round(sum(sh["use"].values()), 3), "projects": out}
 
 
 def platform_ok(url: str) -> bool:

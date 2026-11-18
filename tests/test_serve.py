@@ -75,6 +75,28 @@ class PersonShareTest(unittest.TestCase):
         self.assertEqual(sv["pc"]["pk"], sp["pc"]["pk"])
         self.assertEqual(v["projects"][2]["person"], "bob")                                # 不改原快照
 
+    def test_person_total_counts_hidden_projects(self):
+        # 人的用量合计取 worker 完整的 share.use（与 worker 的 person_use 同一口径）：已归档、调度卡上不显示的项目的用量也算在原主人名下
+        from labmon import fleet as F
+        people = {"pa": "amy", "parch": "amy", "pc": "bob"}                               # parch 已归档：不在 projects 里，用量还在半衰期里
+        hosts = [fake_host("x", status=dict(share={"wait_cap_min": 30.0, "half_life_h": 24.0, "weight": {}, "use": {"parch": 10.0, "pc": 1.0, "zz": 0.5}, "run": []}))]
+        v = O.sched_view(hosts, [{"id": "pa"}, {"id": "pc"}], time.time(), {}, people)
+        sp = {p["id"]: p for p in v["projects"]}
+        self.assertNotIn("parch", sp)
+        self.assertEqual((sp["pa"]["use"], sp["pa"]["puse"], sp["pc"]["puse"]), (0.0, 10.0, 1.0))
+        self.assertEqual(v["use_sum"], 11.5)                                               # 各项目占比的分母也是完整的合计
+        self.assertEqual(F.share_key("amy"), sp["pa"]["pk"])
+
+    def test_collect_survives_bad_fleet_conf(self):
+        # [fleet] 写错了（无效正则）：认人按没有 [fleet] 降级，整轮采集照样出快照、写调度设置；错误仍由 _notices 报出来
+        hf = Path(self.tmp.name) / "hosts.toml"
+        hf.write_text('[fleet]\n[[fleet.rules]]\nmatch = "["\nkind = "job"\n')
+        PJ.put_config("pa", 'id = "pa"\n', owner="amy")
+        with mock.patch.dict(os.environ, {"LABMON_HOSTS": str(hf)}):
+            snap = O.collect([{"id": "pa"}], use_ssh=False)
+        self.assertIsNotNone(snap)
+        self.assertTrue(any("正则" in n for n in snap.get("notices") or []), snap.get("notices"))
+
 
 class TellTest(unittest.TestCase):
     """页面上的改动告诉实验会话（#121）：records.tell 记一行，told 进全局快照的 wake（按项目、不按主机）；labmon wait 报一次，

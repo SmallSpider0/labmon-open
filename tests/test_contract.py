@@ -207,10 +207,11 @@ class ContractTest(unittest.TestCase):
         S = snap["sched"]
         self.assertIsInstance(S["cap_min"], NUM)
         self.assertIsInstance(S["hl_h"], NUM)
+        self.assertIsInstance(S["use_sum"], NUM)
         sp = {p["id"]: p for p in S["projects"]}
         self.assertEqual(set(sp), {"pa", "pb"})
         for p in sp.values():
-            self.assertEqual(set(p), {"id", "person", "pk", "w", "use", "cards", "queued", "waiting", "wait_avg", "wait_n", "focus", "paused"})
+            self.assertEqual(set(p), {"id", "person", "pk", "puse", "w", "use", "cards", "queued", "waiting", "wait_avg", "wait_n", "focus", "paused"})
         self.assertEqual((sp[wait["project"]]["waiting"], sp[wait["project"]]["queued"]), (1, 1))
         self.assertGreater(sp[run["project"]]["cards"], 0)
         self.assertEqual((sp["pa"]["wait_n"], sp["pa"]["wait_avg"]), (1, 0.0))                             # a0 一来就放行：等待 0 分钟

@@ -2168,13 +2168,13 @@ function schedFlag(p, k) {
       ${whenPick("schp", "到期", POP.until, "无期限", "无期限：用完点「恢复」", {fresh: POP.wnow})}${err()}`, go("pgo", "暂停"), true);
 }
 const schedBtns = p => schedFlag(p, "focus") + " " + schedFlag(p, "paused");
-// 份额（调度卡与项目「管理」抽屉共用；#23 按人）：近期在用的项目 on（用过卡、占着卡、排着队），它们的用量和 su；同一人（pk，看板上没有的项目 pk 为 null、合起来算一份）
+// 份额（调度卡与项目「管理」抽屉共用；#23 按人）：近期在用的项目 on（用过卡、占着卡、排着队）；su 是所有项目的用量和（use_sum，含已归档、卡上不列的）；同一人（pk，看板上没有的项目 pk 为 null、合起来算一份）
 // 的几个项目合起来算一份，应得是 1 ÷ 近期在用的人数 n，再按权重分给这人的项目（sw(pk) 是这人在用项目的权重和）；who 是这人的名字（普通用户看别人的为 null）
 const pkOf = p => p.pk ?? null;
 const who = p => p.person || (p.pk ? "其他人" : "看板上没有的项目");
 function schedOn() {
   const on = (D.sched?.projects || []).filter(p => p.use > 0.005 || p.cards || p.queued || p.waiting);
-  return {on, su: on.reduce((a, p) => a + p.use, 0), n: new Set(on.map(pkOf)).size,
+  return {on, su: D.sched?.use_sum || 0, n: new Set(on.map(pkOf)).size,
           sw: pk => on.filter(p => pkOf(p) === pk).reduce((a, p) => a + p.w, 0)};
 }
 // 几个人在用卡（调度卡按人分组、排位解释写不写人都看它）：近期在用的人超过一个
@@ -2186,11 +2186,12 @@ function shareBar(p) {
     `近期用量 ${g1(p.use)} 卡·时，占 ${Math.round(u)}%；权重 ${wtxt(p.w)}，应得 ${Math.round(d)}%（${split}）\n先比人：这人几个项目的用量合起来比别人小的先放；同一人的项目之间比用量 ÷ 权重（${g1(p.use / p.w)}），小的先\n竖线是应得的位置`)}><i style="width:${u}%;background:${color(p.id)}"></i><b class="due" style="left:${d}%"></b></div>
     <span class="sm num nw">${Math.round(u)}% <span class="mut">/ ${Math.round(d)}%</span></span></div>`;
 }
-// 一个人的「已用 / 应得」（调度卡按人分组时人那一行）：颜色条是这人几个项目合起来的用量占比，竖线是 1 ÷ 近期在用的人数
+// 一个人的「已用 / 应得」（调度卡按人分组时人那一行）：颜色条是这人名下各项目合起来的用量占比（puse：看板按完整的用量算，含已归档、卡上不列的项目，
+// 与 worker 先比人时用的同一个数），竖线是 1 ÷ 近期在用的人数
 function personBar(ps) {
-  const {on, su, n} = schedOn(), use = ps.reduce((a, p) => a + p.use, 0), u = su ? 100 * use / su : 0, d = ps.some(p => on.includes(p)) ? 100 / n : null;
+  const {on, su, n} = schedOn(), use = ps[0].puse, u = su ? 100 * use / su : 0, d = ps.some(p => on.includes(p)) ? 100 / n : null;
   return d == null ? `<span class="sm mut">近期没用卡</span>` : `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1;min-width:90px" ${tip(
-    `${who(ps[0])} 名下近期用量合计 ${g1(use)} 卡·时，占 ${Math.round(u)}%；份额按人算，近期在用的 ${n} 人各应得 ${Math.round(d)}%\n竖线是应得的位置`)}><i style="width:${u}%;background:var(--muted)"></i><b class="due" style="left:${d}%"></b></div>
+    `${who(ps[0])} 名下近期用量合计 ${g1(use)} 卡·时（含已归档的项目），占 ${Math.round(u)}%；份额按人算，近期在用的 ${n} 人各应得 ${Math.round(d)}%\n竖线是应得的位置`)}><i style="width:${u}%;background:var(--muted)"></i><b class="due" style="left:${d}%"></b></div>
     <span class="sm num nw">${Math.round(u)}% <span class="mut">/ ${Math.round(d)}%</span></span></div>`;
 }
 function schedCard() {
@@ -2200,7 +2201,7 @@ function schedCard() {
   // 按人分组（#23）：pk 相同的排在一起，组按这人近期用量合计从小到大（与放行的先后一致），组内照原顺序
   const groups = [];
   for (const p of ps) { const g = groups.find(g => pkOf(g[0]) === pkOf(p)); g ? g.push(p) : groups.push([p]); }
-  const gUse = g => g.reduce((a, p) => a + p.use, 0);
+  const gUse = g => g[0].puse;
   if (many) groups.sort((a, b) => gUse(a) - gUse(b));
   const list = g => (g.some(p => on.includes(p)) ? g.filter(p => on.includes(p)) : g).map(p => `${esc(pname(p.id))} ×${wtxt(p.w)}`).join("、");
   // 标题行只留短句（谁优先、按份额轮流、谁暂停），算法细节在旁边的 ⓘ 里
