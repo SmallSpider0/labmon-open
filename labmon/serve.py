@@ -1593,7 +1593,8 @@ def reg_move(to: str, items: list, own: bool = False, pool: str | None = None) -
     """把几条登记搬到在用主机 to（项目抽屉的「整台搬到…」、主机页的接上卡）：逐条 workerctl.run_out("add")，带登记的 project 与 stop，不带 --gpus（原主机的卡号）。
     原主机上的那份由 worker add 删掉（原主机手上在跑的跑完后 to 接着放；别处刚登记了更晚的退出码 2，原样报错）。一条失败就停，前面搬成的照样记；
     搬成的按项目各告诉一次实验会话（records.tell，中途失败也告诉已搬的）。返回给页面的一句话。
-    pool：算力池放、搬的（pool.tick、pool.reclaim，#25；值是为什么搬，可为空）：to 可以是 POOL（回池里待放），告诉会话的是 what 为 pool 的那句（来源「算力池」）。"""
+    pool：算力池放、搬的（pool.tick、pool.reclaim，#25；值是为什么搬，可为空）：to 可以是 POOL（回池里待放）。只记事件、不告诉会话（#88：会话不用动手，
+    wait --job 按快照车道认任务，去向在 kind=pool 的事件里，labmon records 与项目页时间线看得到；要会话动手的有 pool_wait: 兜着）。"""
     if not to or not items:
         raise ConfigError("没说搬到哪台、搬哪几条")
     done, moved = [], {}
@@ -1620,12 +1621,9 @@ def reg_move(to: str, items: list, own: bool = False, pool: str | None = None) -
             m["qs"].append(jobs)
     finally:
         for pid, m in moved.items():
-            if pool is not None:
-                tell(pid, "pool", f"{pid} 的 {_qlist(m['qs'])}" + (f"（{pool}）" if pool else "") + ("回到池里待放" if to == POOL else f"放到 {to}")
-                     + "：结果照旧写在共享盘上；撤回用 labmon worker rm pool ROOT JOBS，不用管它此刻在哪台", src="算力池")
-                continue
-            tell(pid, "move", f"把 {pid}" + (f" 在 {'、'.join(m['from'])} 上" if m["from"] else "") + f"的 {len(m['qs'])} 条清单登记搬到 {to}（{_qlist(m['qs'])}）："
-                 f"之后由 {to} 放行，原主机上在跑的跑完为止；再登记新清单写 {to}（labmon worker add {to} ROOT JOBS --project {pid}）")
+            if pool is None:
+                tell(pid, "move", f"把 {pid}" + (f" 在 {'、'.join(m['from'])} 上" if m["from"] else "") + f"的 {len(m['qs'])} 条清单登记搬到 {to}（{_qlist(m['qs'])}）："
+                     f"之后由 {to} 放行，原主机上在跑的跑完为止；再登记新清单写 {to}（labmon worker add {to} ROOT JOBS --project {pid}）")
     return "；".join(done)
 
 

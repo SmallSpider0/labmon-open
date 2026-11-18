@@ -253,7 +253,7 @@
 | `overview/hostcheck.json` | 看板服务所在机的体检状态（`hostcheck.tick` 写，#166）：上一轮读到的 `win`、`wsl`，`since`（各项从何时起）、`upd`（待装更新与各条第一次看到的 `seen`）、`oom`（计数与近 24 小时的增量）、`warn`、`sent`（各 key 推过的本地日期）、`err` |
 | `overview/maint.json` | 计划维护（`labmon server maint`，#165）：`{until 到何时（epoch 秒；提前结束写 null）, by 谁开的, t 何时开的}`，到期自然失效；`/healthz` 的 `maint_until`、体检与全局快照的 `hostcheck.maint` 经 `maint.until` 读它 |
 | `overview/borrow.json` | 借用的提醒与看板的记忆（`borrow.check` 写，字段见 `labmon/borrow.py` 头部）；算力池借的那台另有 `pool` 子项（#25，`pool._mem` 写，再借时保留）：`{started 借来时的容器启动时刻, since 借来的时刻, busy 最近一次有池任务在跑, rest 休息到几点, rest_why, fail 最近一次借不成, fail_day 那天通知过管理员, nofit [[卡数, 单卡显存, 到期]], want 为哪个形状借的 {ngpu, vram}}` |
-| `overview/tell.jsonl` | 页面上的改动给实验会话的消息（7 天，`records.tell` 写）：`{t, what（move、rm、restore、pause、resume、config、pool（算力池放、搬、回池，`src` 为「算力池」，#25）；看板升级时的 upgrade）, project, msg}`；`records.told` 每轮并进全局快照的 `wake`（#121） |
+| `overview/tell.jsonl` | 页面上的改动给实验会话的消息（7 天，`records.tell` 写）：`{t, what（move、rm、restore、pause、resume、config；看板升级时的 upgrade）, project, msg}`（算力池放、搬、回池只记事件、不写这里，#88）；`records.told` 每轮并进全局快照的 `wake`（#121） |
 
 状态根目录的 `server.json`（`lease.py`，#163，不进备份）：`{id 这台看板服务（机器名-随机串）, primary 本机标记（读不到租约时照它）, role, since, t, homes {worker_home: {holder, renew, ttl, now 共享盘此刻的时刻, at 本机读到的时刻, bad}}}`。
 每个 `worker_home` 下的 `labmon_server.json` 是服务租约本身：`{holder 持有的看板服务 id（释放后为空串）, renew 最后续约（共享盘时钟的 epoch 秒）, ttl 秒}`，旁边 `labmon_server.json.lock` 是互斥用的锁（它的修改时刻就是读共享盘时钟用的）；worker 不读它们。

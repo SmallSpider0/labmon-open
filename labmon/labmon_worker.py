@@ -4243,7 +4243,7 @@ class Worker:
 
     def cpu_hints(self, cap, util):
         """运行中任务开跑核数给少、给多（cpu_fit，#46）：同一次运行一旦判出来就留到跑完（j 的 cpu_fit，写进状态、接管时找回）。
-        测量在门槛两侧来回时不反复出现、消失：看板的 cpu_low:、cpu_high: 只在条件出现时叫醒一次，消失再出现会再叫醒（waits._new_alerts）。
+        测量在门槛两侧来回时不反复出现、消失：看板的 cpu_low:、cpu_high: 只在条件出现时叫醒一次，消失后 6 小时内再出现不再叫醒（waits._new_alerts）。
         fit 开车道（gpu_slack）要的是此刻的样子，照旧现算，不用这份。"""
         for j in self.running.values():
             if not j.get("cpu_fit"):

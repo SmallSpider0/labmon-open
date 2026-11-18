@@ -74,8 +74,9 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
     登记没了的再按上次见到的主机留 REG_KEEP_S，之后 monitor.toml 写了的回到它写的主机，没写的收起。
     通配符队列不动：登记过的清单进探针的 explicit_jobs，自动发现跳过它们。
     同一清单两台都登记时比的登记时刻各是那台容器的时钟（状态里的 added_t、登记文件的 added），差几分钟，只在两份登记相隔较久时分得准。
-    只在登记里有的车道带 reg（跑完久了收起，_quiet）、reg_t（在用主机上的登记时刻）与 reg_live（这一轮登记还在）。
-    mem：{清单路径: {id（只在登记里有的车道定下的 id，之后一直沿用）, host, root, jobs, first, seen, reg_t}}（项目状态目录的 reg_lanes.json，看板的时刻）。"""
+    只在登记里有的车道带 reg（跑完久了收起，_quiet）、reg_t（在用主机上的登记时刻）与 reg_live（这一轮登记还在）；登记了的都带 reg_stop（登记的停法：
+    算力池借过的主机还掉后，池的清单（pool._ours）看板搬回池里，别的照报 returned_unfinished）。
+    mem：{清单路径: {id（只在登记里有的车道定下的 id，之后一直沿用）, host, root, jobs, first, seen, reg_t, reg_stop}}（项目状态目录的 reg_lanes.json，看板的时刻）。"""
     found: dict = {}
     for x in regs or []:
         if x.get("state") == "unlisted" or x.get("queues") is None:
@@ -89,13 +90,13 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
             if k not in found or rank > found[k][0]:
                 found[k] = (rank, x["host"], q)
     new = {k: {"id": (mem.get(k) or {}).get("id"), "host": hid, "root": q["root"], "jobs": q["jobs"], "first": (mem.get(k) or {}).get("first", t), "seen": t,
-               "reg_t": q.get("added_t")} for k, (_, hid, q) in found.items()}
+               "reg_t": q.get("added_t"), "reg_stop": q.get("stop")} for k, (_, hid, q) in found.items()}
     new.update({k: m for k, m in mem.items() if k not in new and t - m.get("seen", 0) <= REG_KEEP_S})
     out, used = [], set()
     for q in cfg["queues"]:
         k = None if q["discover"] else _qpath(q.get("root"), q.get("jobs"))
         used.add(k)
-        out.append(dict(q, host=new[k]["host"]) if k in new else q)
+        out.append(dict(q, host=new[k]["host"], reg_stop=new[k].get("reg_stop")) if k in new else q)
     extra = sorted((k for k in new if k not in used), key=lambda k: (new[k]["first"], k))
     # 车道 id 定下来就记在 mem 里一直沿用（撞名的那条先没了，后一条也不改名：进度采样、挂起累计按 车道/任务 记）
     ids = {q["id"] for q in cfg["queues"]} | {new[k]["id"] for k in extra if new[k].get("id")}
@@ -109,7 +110,8 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
             new[k] = m = dict(m, id=lid)
         # reg：只在登记里有的车道，跑完久了收起（_quiet）；reg_t：登记时刻（在用主机上的，刚登记的空清单不马上收）；
         # reg_live：这一轮登记还在（登记没了、按 REG_KEEP_S 留着的为 False：已经 worker rm 了，_idle_regs 不再提示）
-        out.append({"id": m["id"], "host": m["host"], "root": m["root"], "jobs": m["jobs"], "reg": True, "reg_t": m.get("reg_t"), "reg_live": k in found})
+        out.append({"id": m["id"], "host": m["host"], "root": m["root"], "jobs": m["jobs"], "reg": True, "reg_t": m.get("reg_t"), "reg_live": k in found,
+                    "reg_stop": m.get("reg_stop")})
     return out, new
 
 
@@ -468,8 +470,14 @@ def _lanes(cfg: dict, snap: dict, state: dict, raw_by_host: dict, t: float) -> t
             "running": set(),                                        # 运行中任务的 车道/任务 键
             "hcfg": {h["id"]: h for h in cfg["hosts"]}}
     specs, quiet, snap["quiet"] = _lane_specs(cfg, raw_by_host, t)
+    work["pool_wait"] = []
     for q in specs:
         _lane(q, cfg, snap, raw_by_host, work, t)
+    if work["pool_wait"]:
+        # 池里待放满 2 小时的清单：每个项目一条、列出各条（#88：key 不带清单与起点，清单回池重新计时、别的清单跟着等满都不再叫醒），只给会话：池里排队是常态，不标红
+        snap["alerts"].append(alert(f"pool_wait:{cfg['id']}", "agent",
+                                    f"有 {len(work['pool_wait'])} 条清单在算力池里等了 {PO.POOL_TELL_S // 3600} 小时以上：{'；'.join(work['pool_wait'])}。"
+                                    "不急就接着等；要早点跑可以登记到自己能用的主机（labmon worker add <主机> ROOT JOBS --project <项目>，一条清单只归一台，它就出了池）"))
     for k in list(work["prog"]):                       # 只为运行中的任务保留进度采样
         if k not in work["running"]:
             del work["prog"][k]
@@ -550,12 +558,9 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     snap["lanes"].append(lane)
     pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {} if lane.get("pool") else {}
     if pv.get("since") and unfinished and not lane.get("paused") and t - pv["since"] >= PO.POOL_TELL_S:
-        # 池里待放满 2 小时（同一次待放只报一次：key 带开始等的时刻），只给会话：池里排队是常态，不标红
-        alerts.append(alert(f"pool_wait:{q['id']}:{round(pv['since'])}", "agent",
-                            f"{where} 在算力池里等了 {fmt_dur(t - pv['since'])}：{pv.get('why') or '还没放到哪台'}；"
-                            "要早点跑可以登记到自己能用的主机（labmon worker add <主机> ROOT JOBS --project <项目>，一条清单只归一台，它就出了池）"))
-    if returned and (hcfg[q["host"]].get("borrow") or {}).get("pool"):
-        pass                                         # 算力池借过的主机还掉了：剩下的清单由看板搬回池里（pool.tick），不叫会话换主机
+        work["pool_wait"].append(f"{q.get('jobs')} 等了 {fmt_dur(t - pv['since'])}（{pv.get('why') or '还没放到哪台'}）")   # 项目一条，_lanes 汇总
+    if returned and (hcfg[q["host"]].get("borrow") or {}).get("pool") and PO._ours({"stop": q.get("reg_stop")}):
+        pass                                         # 算力池借过的主机还掉了：池的清单由看板搬回池里（pool.tick），不叫会话换主机；借给池之前留下的旧登记池不收，照下面报（#88 E）
     elif returned:
         if unfinished:
             left = f"{hcfg[q['host']]['label']} 已归还，{q['name']} 还有 {unfinished} 个任务没跑完"

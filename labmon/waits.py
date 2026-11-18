@@ -25,13 +25,28 @@ POLL_S = 30           # 挂着时文件没变也至少这么久再判一次（co
 SLOTS = 32            # 同时挂着的长轮询最多几个：每个占一个处理线程
 ACCOUNT_SLOTS = 8     # 一个普通账号同时最多挂几个（#18）：一个人占不满 SLOTS，别人照样能等；管理员只受 SLOTS 限
 RID_KEEP_S = 120      # 请求号记多久
+REWAKE_S = 6 * 3600   # 报过的告警消失后这么久内再出现不再叫醒（#88：门槛两侧来回、清单回池重新计时、主机掉线又回来，会话不用再读一遍）
+SAME_KIND = ("idle_regs:",)   # key 末段是代数（条数变了加一）的告警：去掉末段比，代数变了不算新告警（#88）
+EACH_TIME = ("failed:",)      # 每次出现都是新的一次、不受 REWAKE_S 挡：删了 .failed 重跑又失败，会话要再处理
 
 
-def _new_alerts(sf: Path, current: dict) -> list[str]:
-    """与上次已报的告警比，返回新出现的 key 并记账；条件消失的告警清掉，再次出现时会再报。"""
-    reported = set(load_json(sf, {}).get("reported", [])) & set(current)
-    new = [k for k in current if k not in reported]
-    save_json(sf, {"reported": sorted(reported | set(new)), "t": time.time()})
+def _kind(k: str) -> str:
+    """比“报没报过”用的 key：SAME_KIND 的去掉末段（代数），其余原样。"""
+    return k.rsplit(":", 1)[0] if k.startswith(SAME_KIND) else k
+
+
+def _new_alerts(sf: Path, current: dict, t: float | None = None) -> list[str]:
+    """与已报的告警比，返回新出现的 key 并记账（wait_state.json：reported 是此刻还在、报过的；last 是报过的各 key（按 _kind）最后一次在场的时刻）。
+    条件消失的告警从 reported 去掉，REWAKE_S 内再出现（last 里还在）不再报、照样记成报过；过了 REWAKE_S 再出现才再报（#88）。EACH_TIME 的消失再出现照报。"""
+    t = time.time() if t is None else t
+    st = load_json(sf, {})
+    last = {k: v for k, v in (st.get("last") or {}).items() if t - v < REWAKE_S}
+    reported = set(st.get("reported", [])) & set(current)
+    seen = {_kind(k) for k in reported} | set(last)
+    new = [k for k in current if k not in reported and (_kind(k) not in seen or k.startswith(EACH_TIME))]
+    keep = reported | set(current)                    # 此刻在场的都算报过：新报的与 REWAKE_S 内再出现的
+    last.update({_kind(k): t for k in keep})
+    save_json(sf, {"reported": sorted(keep), "last": last, "t": t})
     return new
 
 
@@ -50,7 +65,8 @@ def check_told(cfg: dict, sf: Path, overview: Path | None = None, *, remember: b
     seen = set(st.get("reported", []))
     new = {k: m for k, m in _wakes(cfg["id"], None, overview).items() if k.startswith("page:") and k not in seen}
     if new and remember:
-        save_json(sf, {**st, "reported": sorted(seen | set(new)), "t": time.time()})
+        t = time.time()
+        save_json(sf, {**st, "reported": sorted(seen | set(new)), "last": {**(st.get("last") or {}), **{k: t for k in new}}, "t": t})
     return ([gone] if gone else []) + list(new.values())
 
 
@@ -65,7 +81,7 @@ def collector_stale(cfg: dict, snap: dict | None, out: Path) -> str | None:
 
 
 def wait_check(cfg: dict, out: Path, sf: Path, overview: Path | None = None, extra: dict | None = None) -> dict:
-    """读一次快照，返回新告警 {key: msg}。快照太旧（采集停了）也算一条告警。
+    """读一次快照，返回新告警 {key: msg}（只报给会话看的：to 为 agent、both 的；报过的消失后 REWAKE_S 内再出现不再报，_new_alerts）。快照太旧（采集停了）也算一条告警。
     全局快照的 wake（借到卡、到了约定时间、对方在用、已归还、独占任务作废）里与本项目有关的也当告警报。overview：测试换一份全局快照用。
     extra：另外要一起报的 {key: msg}（wait --job 的被等项目采集停了 JobWatch.stale；客户端同步配置的冲突、推不上），同样只报一次。"""
     pid = cfg["id"]
@@ -73,7 +89,7 @@ def wait_check(cfg: dict, out: Path, sf: Path, overview: Path | None = None, ext
     if gone:                                          # 已归档：每次都报、不记账（会话再跑 wait 也立刻知道），不报 collector_stale
         return {"archived": gone}
     snap = load_json(out / "snapshot.json", None)
-    current = {a["key"]: a["msg"] for a in (snap or {}).get("alerts", [])}
+    current = {a["key"]: a["msg"] for a in (snap or {}).get("alerts", []) if a.get("to") != "user"}   # 只给用户的（ssh_fail:）不叫醒会话，labmon status 照列（#88）
     hosts = {h["id"] for h in (snap or {}).get("hosts", [])}     # 本项目的主机（与 serve.proj_events 同一口径）：登记所在的都算，车道跑完收起了也算（#117）
     current.update(_wakes(pid, hosts, overview))
     current.update(extra or {})

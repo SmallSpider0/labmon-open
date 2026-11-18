@@ -28,6 +28,7 @@ from labmon import config as K  # noqa: E402
 from labmon import overview as O  # noqa: E402
 from labmon import projects as PJ  # noqa: E402
 from labmon.waits import wait_check  # noqa: E402
+from labmon import waits as W  # noqa: E402
 from labmon.config import load, stale_limit  # noqa: E402
 from labmon.health import DOWN_S, link_step  # noqa: E402
 from labmon.records import log_events, records, told  # noqa: E402
@@ -995,6 +996,19 @@ class AuthTest(unittest.TestCase):
             self.assertEqual(run.call_args.kwargs.get("expect_from"), "pool")
             S.reg_move("g", [it])
             self.assertIsNone(run.call_args.kwargs.get("expect_from"))
+
+    def test_reg_move_pool_no_tell(self):
+        # #88：算力池放、搬、回池只记事件，不写 tell.jsonl（不叫醒会话；旧代码每搬一次写一条 page:pool:…）；页面上的搬照旧告诉
+        PJ.put_config("exp", 'id = "exp"\n')
+        it = {"host": "pool", "project": "exp", "root": "/root", "jobs": "q.txt", "stop": "term"}
+        n0 = len(records(cat="config"))
+        with mock.patch.object(S.W, "run_out", return_value=(0, "完成")):
+            S.reg_move("g", [it], pool="")
+            S.reg_move("pool", [dict(it, host="g")], pool="g 已还")
+            self.assertEqual(told(), [])
+            self.assertEqual(len(records(cat="config")) - n0, 2)          # 事件照记
+            S.reg_move("g", [it])
+        self.assertEqual([x["key"].split(":")[1] for x in told()], ["move"])
 
     def test_reg_move_refuses_pool_lent_host(self):
         # #25：借给算力池的主机上放什么由看板定：页面上的「换到其他主机」搬不过去（旧代码照搬）
@@ -2160,7 +2174,33 @@ class WaitTest(unittest.TestCase):
             self.assertEqual(wait(), {})                                   # 同一条不重复报
             snap["generated"] -= 3600
             save_json(d / "snapshot.json", snap)
-            self.assertEqual(list(wait()), ["collector_stale"])
+            self.assertEqual(list(wait()), [])                             # 报过的 collector_stale 消失后 6 小时内再出现：不再叫醒（#88）
+            st = json.loads(sf.read_text())
+            st["reported"].remove("collector_stale")                      # 又消失过一次、最后一次在场是 6 小时前
+            sf.write_text(json.dumps(dict(st, last=dict(st["last"], collector_stale=st["last"]["collector_stale"] - W.REWAKE_S))))
+            self.assertEqual(list(wait()), ["collector_stale"])            # 过了 6 小时再出现照报
+
+    def test_user_only_and_rewake(self):
+        """#88：只给用户的告警（ssh_fail:）不叫醒会话；报过的消失后 REWAKE_S 内再出现不叫醒、过了再报；带代数的 idle_regs: 代数变了不算新告警；
+        failed: 每次出现都报（删了 .failed 重跑又失败）。旧代码：ssh_fail 照报，消失再出现、代数变了都再叫醒。"""
+        with tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            (d / "m.toml").write_text(f'out_dir = "{d}"\n')
+            cfg = load(d / "m.toml")
+            sf = d / "wait_state.json"
+
+            def wait(*alerts):
+                save_json(d / "snapshot.json", {"generated": time.time(), "alerts": [{"key": k, "to": to, "msg": k} for k, to in alerts]})
+                return sorted(wait_check(cfg, d, sf, d / "overview.json"))
+            self.assertEqual(wait(("ssh_fail:a", "user"), ("disk:x", "both"), ("idle_regs:p:1", "agent"), ("failed:j", "agent")),
+                             ["disk:x", "failed:j", "idle_regs:p:1"])
+            self.assertEqual(wait(("ssh_fail:a", "user"), ("idle_regs:p:2", "agent")), [])          # 代数变了；disk、failed 消失
+            self.assertEqual(wait(("disk:x", "both"), ("idle_regs:p:2", "agent"), ("failed:j", "agent")), ["failed:j"])   # disk 6 小时内回来：不报
+            st = json.loads(sf.read_text())
+            self.assertNotIn("ssh_fail:a", st["reported"])
+            old = {k: v - W.REWAKE_S - 1 for k, v in st["last"].items()}
+            sf.write_text(json.dumps(dict(st, reported=[], last=old)))
+            self.assertEqual(wait(("disk:x", "both"), ("idle_regs:p:3", "agent")), ["disk:x", "idle_regs:p:3"])    # 过了 REWAKE_S：照报
 
     def test_stale_limit(self):
         """collector_stale 的门槛 max(3×interval, stale_min) + 1 分钟（config.stale_limit；项目页标红、配置抽屉的说法同一个，#141）。"""
