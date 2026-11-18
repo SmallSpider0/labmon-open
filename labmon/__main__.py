@@ -170,8 +170,9 @@ def cmd_user(argv: list[str]) -> int:
     p = sub.add_parser("bind", help="给未关联的存量账号补关联已登记的组内人员")
     p.add_argument("name")
     p.add_argument("person")
-    p = sub.add_parser("reset", help="重置口令（忘了口令时用），打出新的设置码；这人已登录的浏览器都要重新登录，令牌不动")
+    p = sub.add_parser("reset", help="重置口令（忘了口令时用），打出新的设置码；这人已登录的浏览器都要重新登录，令牌一并吊销")
     p.add_argument("name")
+    p.add_argument("--keep-tokens", action="store_true", help="令牌留着（只是忘了口令、令牌没泄露时：部署令牌与实验会话照常用）")
     p = sub.add_parser("remove", help="删账号：连同它的会话与令牌（最后一个管理员删不掉）")
     p.add_argument("name")
     p = sub.add_parser("public-ops", help="设置管理员公网平台操作")
@@ -193,7 +194,7 @@ def cmd_user(argv: list[str]) -> int:
         elif a.act == "bind":
             print(f"[labmon] {U.bind_person(a.name, a.person, '本机命令行')}")
         elif a.act in ("add", "reset"):
-            code = U.add(a.name, "admin" if a.admin else "user", "本机命令行", person=a.person) if a.act == "add" else U.reset(a.name, "本机命令行", self_ok=True)
+            code = U.add(a.name, "admin" if a.admin else "user", "本机命令行", person=a.person) if a.act == "add" else U.reset(a.name, "本机命令行", self_ok=True, keep_tokens=a.keep_tokens)
             print(f"[labmon] {'加了' if a.act == 'add' else '重置了'} {a.name}。设置码 {code}（24 小时内有效，用一次作废）：\n"
                   f"  打开看板 http://127.0.0.1:{PORT}/ → 登录页「用设置码设口令」，填名字、设置码与新口令（至少 {U.PW_MIN} 个字符）")
         elif a.act == "remove":
@@ -350,7 +351,7 @@ def _wait_update(commit: str | None, cfg_path: str, jobs: list[str], watch: dict
     """装好才 exec（不返回）。commit：要装的版本（刚收到的看板回话给的；None 时取看板发的那份）。
     已是看板的版本返回 None；更新失败返回原因，由调用处决定继续等（可更新时）还是退出（426）。"""
     try:
-        got, inst = client.install_update(commit)
+        got, inst = client.install_update(commit, auto=True)
         if inst is None:
             return None
         executable = inst.fixed.resolve()

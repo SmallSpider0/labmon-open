@@ -324,8 +324,11 @@ def _download_wheel() -> tuple[str, bytes, str]:
     raise Unreachable("取不到客户端（试过 " + "；".join(why) + "）")
 
 
-def install_update(expected: str | None = None) -> tuple[str, dist.Installed | None]:
-    """从看板安装更新包。自动更新时下载必须与刚收到的主看板响应同一版本。已是这一版时回 None（labmon update、wait 共用）。"""
+def install_update(expected: str | None = None, auto: bool = False) -> tuple[str, dist.Installed | None]:
+    """从看板安装更新包。自动更新时下载必须与刚收到的主看板响应同一版本。已是这一版时回 None（labmon update、wait 共用）。
+    auto（wait 的自动更新）：这一版最近装不上、还没到再试的时候（dist.failed_wait），不下载、抛 Unavailable（#18）。装不上记下、装成清掉。"""
+    if auto and (why := dist.failed_wait(expected)):
+        raise dist.Unavailable(why)
     name, data, commit = _download_wheel()
     if expected and commit != expected:
         raise dist.Unavailable("下载的版本与刚收到的看板版本不同，等下一轮再试")
@@ -334,7 +337,13 @@ def install_update(expected: str | None = None) -> tuple[str, dist.Installed | N
     with tempfile.TemporaryDirectory() as d:
         wheel_path = Path(d) / name
         wheel_path.write_bytes(data)
-        return commit, dist.install_wheel(wheel_path, commit)
+        try:
+            got = dist.install_wheel(wheel_path, commit)
+        except (OSError, subprocess.SubprocessError, dist.Unavailable) as e:
+            dist.note_failure(commit, e)
+            raise
+    dist.clear_failure()
+    return commit, got
 
 
 def update() -> int:

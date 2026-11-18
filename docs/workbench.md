@@ -6,7 +6,7 @@
 ## 看板服务
 
 ```bash
-labmon serve [--port 8765] [--public-port 8766]           # 内网入口 http://127.0.0.1:8765/（要登录，见下）；--public-port 另起公网入口（只绑 127.0.0.1，给隧道接；没有平台操作）；项目按登记加载
+labmon serve [--port 8765] [--public-port 8766]           # 内网入口 http://127.0.0.1:8765/（要登录，见下）；--public-port 另起公网入口（只绑 127.0.0.1，给隧道接；平台操作要管理员账号开了公网许可，部署与账号管理只在内网入口）；项目按登记加载
 labmon service install [--port 8765] [--public-port P] [--interval 秒]  # 交给 macOS launchd 或 Linux systemd（docs/deploy.md）：自启、挂了自动拉起；--public-port 0 去掉公网入口，--interval 改采集间隔，不写的保持原样
 labmon service status                                     # 状态、登记的项目与两个入口的地址
 labmon user person <人员名>，再 labmon user add <账号> --person <人员名> --admin                            # 看板账号：建第一个管理员、忘了口令时 reset、给脚本建令牌（docs/api.md）
@@ -344,7 +344,7 @@ NFS 服务器与主机的时钟可能不一致，文件修改时间因而偏早�
   在这 24 小时里取消预备的，这一期不再自动预备（`renew.json` 的 `kept` 记着这一期的到期时刻），取消前先确认，之后概况条标“不自动预备”；再点“预备续租”照常预备，续租后的新一期照常自动预备。
 - **续租**：与组内服务器同一条操作（`fleetops.run_renew`，流程、核对与出错时的状态见 [fleet.md「续租」](fleet.md#续租)）。自用主机上不同的只有：worker 有任务在跑的要勾“确认可以中断”（按钮是红框，确认键是“中断并续租”），本地盘 labmon 之外写了 1 GiB 以上的要勾“确认本地盘可以清空”（同样红框），确认里列出续租后会丢的本地文件；最后一步是等 ssh、拉起 worker、撤掉预备时下的指令（`renew.after`）；出错时新作业已在运行的只给“继续”（等 ssh、拉起 worker，不再碰平台）。总览页主机表与侧边栏的状态点也显示预备、可续租、续租中。组内服务器页的批量续租也列出自用主机，可以和组里的一起续。
 - **本地盘**：续租会重启容器、清空本地盘。自动预备、可以续租的通知与预备、续租的确认都列出受影响的任务（worker 算的本地依赖，见 [worker.md「本地目录与本地依赖」](worker.md#本地目录与本地依赖)），并写 labmon 之外开机以来写了多少、大头在哪（过 1 GiB 才写，[fleet.md「本地盘」](fleet.md#本地盘)）；有不能自愈的，续租完先下 drain 再拉 worker、不恢复放行（概况条的按钮换成“恢复放行”），免得这些任务一格格失败、拖停队列。
-- 续租与预备续租只给管理员、只在内网入口（公网入口上 404，见 [api.md](api.md#两个入口)）。接口记录见 [platform_scm.md](platform_scm.md)。
+- 续租与预备续租只给管理员；从公网入口来的还要这个管理员账号开了公网平台操作（见 [api.md](api.md#两个入口)）。接口记录见 [platform_scm.md](platform_scm.md)。
 
 ## 借用与归还主机
 

@@ -22,7 +22,8 @@
     GET  /api/me            我是谁：名字、角色、作用域、入口、能不能做平台操作（ops）与写操作（write）；浏览器会话另有自己的会话与令牌
     POST /api/password {"old", "new"}、/api/tokens/add {"name", "scopes"}（回原文，只这一次）、/api/revoke {"id"}（自己的会话或令牌）：只认浏览器会话
     POST /api/pool/lend {"id", "on", "hours", "ok"}  入池开关（#24，pool.set_lend）：这台组内服务器的持有人本人；管理员代开要能做平台操作、ok 为真；回 {"msg", "servers"}
-    GET  /api/users、POST /api/users/add {"name", "admin"}（回设置码）、role {"name", "admin"}、reset {"name"}（回设置码）、revoke {"name", "id"?}、remove {"name"}：管理员，只在内网入口（#17）
+    GET  /api/users、POST /api/users/add {"name", "person", "admin"}（person 是已登记的组内人员；回设置码）、role {"name", "admin"}、
+                            reset {"name"}（回设置码；这人的会话与令牌一并失效，#18）、revoke {"name", "id"?}、remove {"name"}：管理员，只在内网入口（#17）
 
 部署（#164，deploy.py；管理员的 deploy 作用域）：
     GET  /api/admin/deploy  在跑的提交（commit）、checkout 现在的（head）、启动时刻、正在做的平台操作（busy）、这次启动以来日志里的 Traceback
@@ -128,7 +129,7 @@ from . import dist as DI
 from . import service as S
 from .config import ALERT_KEYS, HOSTS_LOCK, POOL, ConfigError, active_hosts, cfg_spec, check_future, host_pair, host_users, hosts_file, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
     stale_limit, user_hosts, STALE_PAD_S, STALE_RUNS
-from .records import cat_of, log_events, project_mine, records, report, report_headers, schedule_project, tell
+from .records import ReportQuota, cat_of, log_events, project_mine, records, report, report_headers, schedule_project, tell
 from .service import log, notify, rotate_log
 from .state import file_sig, load_json, snapshot, state_dir
 
@@ -1016,7 +1017,7 @@ class Handler(BaseHTTPRequestHandler):
         base = (self.headers.get("If-Match") or "").strip().strip('"') or None
         try:
             r = PJ.put_config(pid, body["text"], files, base, owner=who.name, by=f"经看板接口（{who.name}）",
-                              ops=U.can_ops(who, self.entry), check_owner=lambda: U.need_project(who, pid, new_ok=True))
+                              ops=U.can_ops(who, self.entry), check_owner=lambda: (U.need_project(who, pid, new_ok=True), U.need_room(who, pid)))
         except U.Denied as x:
             return self._json(x.code, {"error": x.msg})
         except PJ.Refused as x:
@@ -1073,7 +1074,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"msg": U.set_role(s("name"), "admin" if body.get("admin") else "user", who.name)})
             if act == "users/reset":
                 return self._json(200, {"code": U.reset(s("name"), who.name),
-                                        "msg": f"重置了 {s('name')} 的口令：这人已登录的浏览器都要重新登录，令牌没动"})
+                                        "msg": f"重置了 {s('name')} 的口令：这人已登录的浏览器都要重新登录，令牌一并吊销（命令行与实验会话要重新 labmon login）"})
             if act == "users/revoke":
                 return self._json(200, {"msg": U.revoke(s("name"), who.name, ids=[s("id")] if body.get("id") else None)})
             if act == "users/remove":
@@ -1124,7 +1125,10 @@ class Handler(BaseHTTPRequestHandler):
             occurred = body.get("occurred")
             if occurred is not None and (type(occurred) not in (int, float) or not 0 <= occurred <= time.time() + 300):
                 raise U.Denied(400, "发生时刻要是已过去的时刻")
-            rid = report(who.name, title, evidence, pid, hid, occurred)
+            try:
+                rid = report(who.name, title, evidence, pid, hid, occurred, capped=who.role != "admin")
+            except ReportQuota as x:
+                raise U.Denied(429, str(x)) from x
             return 201, {"rc": 0, "out": f"[labmon] 已提交问题报告 {rid}\n", "report_id": rid}
         if act == "wait":
             try:
@@ -1134,7 +1138,10 @@ class Handler(BaseHTTPRequestHandler):
                     raise U.Denied(400, "extra 要是对象")
                 rid = json.dumps([who.key, s("project"), jobs, s("rid")]) if s("rid") else None
                 r = WT.wait(s("project"), jobs, body.get("watch") if isinstance(body.get("watch"), dict) else None,
-                            num("hold") or 0, {str(k): str(v) for k, v in (extra or {}).items()}, rid)
+                            num("hold") or 0, {str(k): str(v) for k, v in (extra or {}).items()}, rid,
+                            account=None if who.role == "admin" else who.name)
+            except WT.AccountBusy as x:
+                return 429, {"error": str(x)}
             except WT.Busy as x:
                 return 503, {"error": str(x)}
             running = DP.RUNNING["commit"]

@@ -263,6 +263,25 @@ class BoardTest(_Base):
             with self.assertRaises(W.Busy):
                 W.wait("p1")
 
+    def test_wait_slots_per_account(self):
+        # 一个普通账号同时挂着的 wait 最多 ACCOUNT_SLOTS 个（#18）：再来回 429（是他自己挂多了，不当看板忙退避）；挂着的回了就让出；管理员只受全局 SLOTS 限
+        board(self, name="amy", role="user")
+        PJ.set_owner("p1", "amy", "测试")
+        with mock.patch.object(W, "ACCOUNT_SLOTS", 1):
+            held = threading.Thread(target=client.call, args=("POST", "/api/wait", {"project": "p1", "hold": 3}), kwargs={"timeout": 30, "idem": True})
+            held.start()
+            time.sleep(0.5)
+            with self.assertRaises(client.Failed) as e:
+                client.call("POST", "/api/wait", {"project": "p1", "hold": 0}, idem=True, patience=0)
+            self.assertEqual(e.exception.code, 429)
+            self.assertIn("这个账号同时挂着", e.exception.msg)
+            boss = threading.Thread(target=W.wait, args=("p1",), kwargs={"hold": 0, "account": None})   # 管理员（account=None）不按账号数
+            boss.start()
+            boss.join()
+            held.join()
+            self.assertEqual(client.call("POST", "/api/wait", {"project": "p1", "hold": 0}, idem=True)["new"], {})
+        self.assertEqual(W._HELD, {})
+
     def test_wait_first_round_config_error(self):
         # 第一轮推上去就被看板拒（配置不对，400）：同以前读配置出错，退出 3
         board(self)

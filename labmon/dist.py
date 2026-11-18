@@ -35,7 +35,8 @@ from pathlib import Path
 from typing import NamedTuple
 from urllib.parse import urlsplit
 
-from .config import COMMIT_RE
+from .config import COMMIT_RE, fmt_time
+from .state import load_json, save_json
 from .workerctl import DEPLOY_REF
 
 HERE = Path(__file__).resolve().parent
@@ -352,6 +353,7 @@ def install_wheel(wheel_path: Path, commit: str) -> Installed:
             except (OSError, subprocess.SubprocessError, Unavailable):
                 shutil.rmtree(venv, ignore_errors=True)
                 raise
+        prev = _version_dir(fixed, versions)
         _swap(fixed, cmd)
         pkg = next(venv.glob(f"lib/python*/site-packages/{NAME}"), None)
         skill = skill_of(pkg) if pkg and (skill_of(pkg) / "SKILL.md").is_file() else None
@@ -360,7 +362,60 @@ def install_wheel(wheel_path: Path, commit: str) -> Installed:
             short_path.symlink_to(fixed)
         except FileExistsError:
             pass
+        _prune(versions, {commit, prev, _version_dir(skill_entry(), versions), _version_dir(HERE, versions)})
     return Installed(fixed, short_path, skill, notes)
+
+
+def _version_dir(p: Path, versions: Path) -> str | None:
+    """p（入口软链，或包目录）落在 versions/<提交>/ 下的哪一版；不在下面为 None。"""
+    try:
+        rel = p.resolve().relative_to(versions.resolve())
+    except (OSError, ValueError):
+        return None
+    return rel.parts[0] if rel.parts else None
+
+
+def _prune(versions: Path, keep: set) -> None:
+    """删掉 versions/ 下不在 keep 里的旧版本目录（#18：每装一版留一个 venv，以前从不删）；持 install.lock 调，装到一半断了的也一并删。
+    keep：这次装的、切换前命令入口指着的（别的会话里还在跑的旧 wait 要跑完这一轮，再自己 exec 到新版）、skill 入口指着的、当前进程这版。"""
+    for d in versions.iterdir():
+        if d.is_dir() and not d.is_symlink() and d.name not in keep:
+            shutil.rmtree(d, ignore_errors=True)
+
+
+FAIL_FILE = "update_failed.json"
+FAIL_FIRST_S, FAIL_MAX_S = 3600, 86400      # 装不上的同一版：自动更新隔 1 小时再试，每再失败一次翻倍，最多隔 1 天（#18）
+
+
+def _failed() -> dict | None:
+    d = load_json(_data_root() / FAIL_FILE, None)
+    return d if isinstance(d, dict) and isinstance(d.get("t"), (int, float)) and isinstance(d.get("n"), int) else None
+
+
+def note_failure(commit: str, err: Exception, t: float | None = None) -> None:
+    """记下这一版装不上（数据根下的 update_failed.json：{commit, t, n 连着失败几次, err}）；同一版接着失败的 n 加一。"""
+    t = time.time() if t is None else t
+    old = _failed()
+    n = old["n"] + 1 if old and old.get("commit") == commit else 1
+    _data_root().mkdir(parents=True, exist_ok=True)
+    save_json(_data_root() / FAIL_FILE, {"commit": commit, "t": round(t), "n": n, "err": str(err)[:300]})
+
+
+def clear_failure() -> None:
+    (_data_root() / FAIL_FILE).unlink(missing_ok=True)
+
+
+def failed_wait(commit: str | None, t: float | None = None) -> str | None:
+    """自动更新下载前查：这一版（commit 为 None 时不论哪版）最近装不上、还没到再试的时候，回那句原因；否则 None。手动 labmon update 不查。"""
+    d = _failed()
+    if not d or (commit and d.get("commit") != commit):
+        return None
+    t = time.time() if t is None else t
+    again = d["t"] + min(FAIL_FIRST_S * 2 ** (d["n"] - 1), FAIL_MAX_S)
+    if t >= again:
+        return None
+    return (f"{short(d.get('commit'))} 上次没装成（{d.get('err') or '原因没记下'}），{fmt_time(again)} 再自动试；"
+            "要现在重试跑 labmon update")
 
 
 HEAD_RE = re.compile(r"#{1,6}\s+(.+?)\s*")

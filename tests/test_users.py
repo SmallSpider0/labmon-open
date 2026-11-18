@@ -405,13 +405,22 @@ class AdminTest(UsersBase):
         fixtures.add_account("amy", "user", "boss", t=T0)
         amy, _ = U.setup("amy", U.reset("amy", "boss", t=T0), "amy password", "lan", t=T0)
         tok, _ = U.token_add("amy", "读", ["read"], t=T0)
+        boss_tok, _ = U.token_add("boss", "部署", ["deploy"], t=T0)
         code = U.reset("amy", "boss", t=T0 + 1)
         with self.assertRaises(U.Denied):
             U.check(hdr(cookie=amy), "read", t=T0 + 2)
         with self.assertRaises(U.Denied):
             U.login("amy", "amy password", "lan", t=T0 + 2)
-        U.check(hdr(token=tok), "read", t=T0 + 2)                          # 令牌不动
+        with self.assertRaises(U.Denied) as e:                             # 令牌一并吊销（#18：口令泄露时重置要把令牌也收回）
+            U.check(hdr(token=tok), "read", t=T0 + 2)
+        self.assertEqual(e.exception.code, 401)
+        U.check(hdr(token=boss_tok), "read", t=T0 + 2)                     # 别人的令牌不动
+        self.assertTrue(any("1 个令牌" in r["msg"] for r in records(cat="config") if "重置了账号 amy" in r["msg"]))
         U.setup("amy", code, "new amy pw", "lan", t=T0 + 3)
+        tok2, _ = U.token_add("amy", "读", ["read"], t=T0 + 3)
+        U.reset("amy", "本机命令行", self_ok=True, keep_tokens=True, t=T0 + 4)   # 本机命令行找回口令：可留着令牌
+        U.check(hdr(token=tok2), "read", t=T0 + 5)
+        U.setup("amy", U.reset("amy", "boss", t=T0 + 5), "new amy pw", "lan", t=T0 + 6)
         with self.assertRaises(U.Denied) as e:                             # 页面上不能重置自己
             U.reset("boss", "boss", t=T0)
         self.assertEqual(e.exception.code, 409)

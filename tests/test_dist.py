@@ -236,6 +236,69 @@ class ClientDistTest(unittest.TestCase):
         self.assertEqual(entry, claude.readlink())
         self.assertTrue(original.is_file())
 
+    def test_install_prunes_old_versions(self):
+        # 装好新版、切换入口后删掉没有入口指着的旧版本目录（#18）；切换前那版（别的会话里还在跑的旧 wait 要跑完这一轮）与当前进程这版留着
+        home, data = self.root / "home", self.root / "data"
+        versions = data / "labmon/versions"
+        def version(c, ready=True):
+            venv = versions / c
+            pkg = venv / "lib/python3.11/site-packages/labmon"
+            pkg.mkdir(parents=True)
+            (venv / "bin").mkdir()
+            for f in ("python", "labmon"):
+                (venv / "bin" / f).touch()
+            if ready:
+                (venv / "ready").touch()
+            return venv, pkg
+        old, mine, prev, new = "1" * 40, "2" * 40, "3" * 40, "4" * 40
+        version(old)
+        _, pkg = version(mine)
+        version(prev)
+        version(new)
+        version("5" * 40, ready=False)                  # 装到一半断了的
+        fixed = data / "labmon/bin/labmon"
+        fixed.parent.mkdir(parents=True)
+        fixed.symlink_to(versions / prev / "bin/labmon")
+        with patch.dict(os.environ, {"HOME": str(home), "XDG_DATA_HOME": str(data)}), patch.object(dist, "HERE", pkg):
+            dist.install_wheel(self.root / f"labmon-0.1.0+g{new[:7]}-py3-none-any.whl", new)
+        self.assertEqual(versions / new / "bin/labmon", fixed.readlink())
+        self.assertEqual(sorted(p.name for p in versions.iterdir()), [mine, prev, new])
+
+    def test_auto_update_backs_off_after_failed_install(self):
+        # 装不上（venv、pip 出错，装出来的版本不对）：自动更新（wait）同一个提交过一阵才再试、不先下载（#18；以前每 5 分钟重下一次）；
+        # 手动 labmon update 照常试，装成了清掉标记
+        from labmon import client
+        data = self.root / "data"
+        new = "4" * 40
+        name = f"labmon-0.1.0+g{new[:7]}-py3-none-any.whl"
+        got = []
+        def download():
+            got.append(1)
+            return name, b"wheel", new
+        broken = patch.object(dist, "install_wheel", side_effect=dist.Unavailable("安装后的客户端版本不对"))
+        with patch.dict(os.environ, {"XDG_DATA_HOME": str(data)}), patch.object(client, "_download_wheel", download), \
+                patch.object(dist, "version", lambda: "0" * 40):
+            with broken, self.assertRaises(dist.Unavailable):
+                client.install_update(new, auto=True)
+            self.assertEqual(len(got), 1)
+            with self.assertRaises(dist.Unavailable) as e:
+                client.install_update(new, auto=True)
+            self.assertEqual(len(got), 1)                                     # 没再下载
+            self.assertIn("安装后的客户端版本不对", str(e.exception))
+            self.assertIn("labmon update", str(e.exception))
+            t0 = dist._failed()["t"]
+            with broken, patch("labmon.dist.time.time", return_value=t0 + 3700), self.assertRaises(dist.Unavailable):
+                client.install_update(new, auto=True)                       # 过了 1 小时再试一次，又没装成：下一次要等 2 小时
+            self.assertEqual((len(got), dist._failed()["n"]), (2, 2))
+            with patch("labmon.dist.time.time", return_value=t0 + 3700 + 3600), self.assertRaises(dist.Unavailable):
+                client.install_update(new, auto=True)
+            self.assertEqual(len(got), 2)
+            ok = dist.Installed(Path("/x"), Path("/x"), None, [])
+            with patch.object(dist, "install_wheel", return_value=ok):
+                self.assertEqual(client.install_update(), (new, ok))            # 手动不看标记
+            self.assertEqual(len(got), 3)
+            self.assertIsNone(dist._failed())
+
     def test_skill_changes_by_section(self):
         old, new = self.root / "old", self.root / "new"
         for d in (old, new):

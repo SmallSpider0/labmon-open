@@ -47,6 +47,7 @@ SESSION_S = 30 * 86400         # 会话 30 天，滑动续期
 TOUCH_S = 3600                 # 会话、令牌的“最后用”至多每小时落盘一次（会话同时续期、重发 Cookie）
 SETUP_S = 86400                # 设置码 24 小时有效，用一次作废
 ADMIN_TOKEN_S = 3600           # admin 令牌 1 小时过期
+USER_PROJECTS = 20             # 普通用户名下最多几个项目（含已归档的，#18；need_room）
 FAIL_MAX, LOCK_S = 5, 900      # 同一名字连着输错 5 次（口令、设置码一起算）锁 15 分钟
 PW_MIN = 8
 COOKIE = "labmon_s"
@@ -587,9 +588,9 @@ def set_role(name: str, role: str, by: str) -> str:
     return f"{k} 现在是{ROLES[role]}"
 
 
-def reset(name: str, by: str, self_ok: bool = False, t: float | None = None) -> str:
-    """重置口令：原口令立即失效、这人已登录的浏览器都要重新登录，令牌不动（要一起收回另吊销）；返回新的设置码（24 小时）。
-    页面上管理员不能重置自己（self_ok=False：改自己的口令在「我的账号」）；本机命令行能（忘了口令时的找回办法）。"""
+def reset(name: str, by: str, self_ok: bool = False, keep_tokens: bool = False, t: float | None = None) -> str:
+    """重置口令：原口令立即失效、这人已登录的浏览器都要重新登录，令牌一并吊销（口令泄露时一次收回，#18）；返回新的设置码（24 小时）。
+    页面上管理员不能重置自己（self_ok=False：改自己的口令在「我的账号」）；本机命令行能（忘了口令时的找回办法），那时可 keep_tokens 留着令牌。"""
     t = time.time() if t is None else t
     with _edit() as d:
         k = _key(d["users"], name)
@@ -600,7 +601,10 @@ def reset(name: str, by: str, self_ok: bool = False, t: float | None = None) -> 
         code, st = _new_code(t)
         d["users"][k].update(pw=None, setup=st, fails=0, lock=0)
         d["sessions"] = {s: r for s, r in d["sessions"].items() if r.get("user") != k}
-    _log(f"{by} 重置了账号 {k} 的口令，设置码 24 小时内有效")
+        n = 0 if keep_tokens else sum(r.get("user") == k for r in d["tokens"].values())
+        if not keep_tokens:
+            d["tokens"] = {h: r for h, r in d["tokens"].items() if r.get("user") != k}
+    _log(f"{by} 重置了账号 {k} 的口令，设置码 24 小时内有效；" + ("令牌留着" if keep_tokens else f"吊销了 {n} 个令牌"))
     return code
 
 
@@ -745,6 +749,16 @@ def need_project(who: Ident, pid: str, new_ok: bool = False) -> None:
     raise Denied(403, f"项目 {pid} 不是你的：只有它的主人与管理员能动它（要接手找管理员在项目「管理」里换主人）")
 
 
+def need_room(who: Ident, pid: str) -> None:
+    """普通用户第一次推、要登记新项目 pid 时：名下（projects.owner 是他）已有 USER_PROJECTS 个（含已归档的：登记目录与看板缓存还占着）抛 Denied(409)。
+    已登记的、管理员不核。调用方持 projects._reg_locked（put_config 的 check_owner），数与登记之间别人加不进来。"""
+    if who.role == "admin" or PJ.cfg_file(pid).is_file():
+        return
+    n = sum(_is(PJ.owner(p), who.name) for p in PJ.registered())
+    if n >= USER_PROJECTS:
+        raise Denied(409, f"你名下已有 {n} 个项目（含已归档的，上限 {USER_PROJECTS} 个）：用不着的先归档，再找管理员永久删除，或请管理员登记")
+
+
 def need_host(who: Ident, hid: str) -> None:
     if not may_host(who, hid):
         raise Denied(403, f"主机 {hid} 没开给你用：找管理员在「组内服务器 → 人员」里给你开（主机清单这台的 users）")
@@ -774,11 +788,11 @@ def _nrm(root: str) -> str:
     return posixpath.normpath(str(root or ""))
 
 
-def reg_projects(snap: dict, root: str, jobs: str, host: str | None = None, *, normalize_jobs: bool = False) -> set:
-    """全局快照的 regs 里这条清单（ROOT、JOBS）登记在哪些项目名下；host 给了只看那一台。"""
-    job_path = _nrm if normalize_jobs else lambda path: path
+def reg_projects(snap: dict, root: str, jobs: str, host: str | None = None) -> set:
+    """全局快照的 regs 里这条清单（ROOT、JOBS）登记在哪些项目名下；host 给了只看那一台。ROOT 与 JOBS 两边都归一化后比
+    （./q.txt、a/../q.txt 与 q.txt 是同一条，#18：不然换个写法就绕过 need_list）。"""
     return {q.get("project") for x in snap.get("regs") or [] if host is None or x.get("host") == host
-            for q in x.get("queues") or [] if _nrm(q.get("root")) == _nrm(root) and job_path(q.get("jobs")) == jobs}
+            for q in x.get("queues") or [] if _nrm(q.get("root")) == _nrm(root) and _nrm(q.get("jobs")) == _nrm(jobs)}
 
 
 def need_list(who: Ident, root: str, jobs: str, pid: str, snap: dict | None = None) -> None:
@@ -789,7 +803,7 @@ def need_list(who: Ident, root: str, jobs: str, pid: str, snap: dict | None = No
         raise Denied(400, "清单目录 ROOT 要用绝对路径")
     other = reg_projects(snapshot() if snap is None else snap, root, jobs) - {pid}
     if other:
-        raise Denied(403, f"{_nrm(root)}/{jobs} 已登记在别的项目名下：换一条清单，或找管理员")
+        raise Denied(403, f"{_nrm(root)}/{_nrm(jobs)} 已登记在别的项目名下：换一条清单，或找管理员")
 
 
 def need_reg(who: Ident, hid: str, root: str, jobs: str, pid: str | None = None, snap: dict | None = None) -> str | None:
@@ -798,9 +812,9 @@ def need_reg(who: Ident, hid: str, root: str, jobs: str, pid: str | None = None,
         return
     ps = reg_projects(snapshot() if snap is None else snap, root, jobs, hid)
     if not ps:
-        raise Denied(403, f"看板上 {hid} 还没有 {_nrm(root)}/{jobs} 这条登记（刚登记的等下一轮采集，约 1 分钟后再试）")
+        raise Denied(403, f"看板上 {hid} 还没有 {_nrm(root)}/{_nrm(jobs)} 这条登记（刚登记的等下一轮采集，约 1 分钟后再试）")
     if len(ps) != 1 or (pid and ps != {pid}) or not all(p and owns(who, p) for p in ps):
-        raise Denied(403, f"{hid} 上的 {_nrm(root)}/{jobs} 登记归属不一致或不属于你的项目")
+        raise Denied(403, f"{hid} 上的 {_nrm(root)}/{_nrm(jobs)} 登记归属不一致或不属于你的项目")
     return next(iter(ps))
 
 

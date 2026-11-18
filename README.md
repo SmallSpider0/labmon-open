@@ -50,7 +50,7 @@
 
 安装与更新会一并装好配套 skill（见下面「配套 skill」）。
 
-安装默认提供 `~/.local/bin/labmon`。如果那里已有其他安装，脚本会提示新命令的固定路径，默认是 `~/.local/share/labmon/bin/labmon`，也可移开旧命令后重新运行安装脚本。各版本的虚拟环境默认在 `~/.local/share/labmon/versions/` 下（设置 `XDG_DATA_HOME` 时改用它）。更新后可以等旧版的 `labmon wait` 等进程退出，再手动清理固定入口已不再指向的旧环境。
+安装默认提供 `~/.local/bin/labmon`。如果那里已有其他安装，脚本会提示新命令的固定路径，默认是 `~/.local/share/labmon/bin/labmon`，也可移开旧命令后重新运行安装脚本。各版本的虚拟环境默认在 `~/.local/share/labmon/versions/` 下（设置 `XDG_DATA_HOME` 时改用它）。每次更新切换入口后自动删掉入口已不再指向的旧环境，只留新版、切换前那版与正在跑更新的那版（[api.md「客户端分发」](docs/api.md#客户端分发)）。
 
 维护者要在本机运行看板服务或开发时，可在仓库里运行 `python3 -m pip install -e .`。
 
