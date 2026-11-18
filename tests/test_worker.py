@@ -873,6 +873,22 @@ class AdmissionUnitTest(UnitBase):
         self.assertIn("可以开车道并行：卡 1 可用 43.9 GiB，要 11.0 GiB（提示值", out["v1"])
         self.assertIn("没有实测的只放空卡、不与别的任务同卡：卡上都有任务在跑", out["v2"])
 
+    def test_fit_measured_row_after_hint_row(self):
+        # Codex 审 #49 第五轮：同一次 fit 先把只有提示值的 new 分到空卡，后面有实测的 old_s1 也不与它同卡（旧代码只看当前行是不是提示值，两行都放卡 1）；
+        # 不用卡、只有提示值的 cpu_new 分到这台后，同一次 fit 后面的行这台都不开
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("old_s0", "bp", now - 3600, now - 1800, ram_peak=1.0, vram_peak=1000.0, cores_peak=1.0)])
+        self.hosts.queues({"g": ["new|true   # vram=10", "old_s1|true", "cpu_new|true   # gpus=0 ram=2", "old_s2|true"]}, project="bp")
+        self.hosts.register("t", "g", "bp")
+        self.fit_two_cards(room={"gpus": {"GPU-a": 500.0, "GPU-b": 45000.0}})          # 卡 0 放不下，old_s1 只能去卡 1
+        out = self.fit_out(["new", "old_s1"])
+        self.assertIn("可以开车道并行：卡 1", out["new"])
+        self.assertIn("这次已把没有实测的 new 分到卡 1 → 不与它同卡", out["old_s1"])
+        self.fit_two_cards(running=[])
+        out = self.fit_out(["cpu_new", "old_s2"])
+        self.assertIn("可以开车道并行：不用 GPU", out["cpu_new"])
+        self.assertIn("这次已把没有实测的 cpu_new 分到这台", out["old_s2"])
+
     def test_fit_full_overrides_and_foreign_cards(self):
         # Codex 审 #49：截止前跑不完的（续租、约定归还）、借来的主机上对方此刻用得比预留多的整台，与真放行一样不开；
         # 只有提示值的行不放到有 labmon 之外进程（或旧队列任务）的卡上（旧代码只看 labmon 在跑的）

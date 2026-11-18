@@ -5534,6 +5534,7 @@ class FitHost:
         self.cards = [dict(c, util=u10.get(c["uuid"])) for c in self.S["cards"]]
         self.slack = gpu_slack(self.cards, st.get("running") or [], st.get("throttle"), self.S["cpu_cap"])
         self.lanes, self.say, self.why = [], [], None     # 这次假设开的 [(任务, 卡号)] 与各行的说明；最近一行没开成的原因
+        self.solo, self.solo_host = {}, None              # 这次分给只有提示值的行的卡 {uuid: 任务}（之后哪一行都不与它同卡）；不用卡的那种占了整台：任务名
 
     def card_lines(self):
         """各卡此刻的样子（可用显存、利用率、在跑谁、CPU 受限）与限流：fit 先列出来。"""
@@ -5585,12 +5586,15 @@ class FitHost:
 
     def open(self, r, e, x, t, row=True):
         """为这一行再开一条车道放不放得下：放得下返回说明并把它记进快照（acct_job）；放不下返回 (None, 原因)。
-        判断就是 place；fit 只多两条：估计只有提示值的（没有实测）只放空卡、不与别的任务同卡（不用卡的只在这台没有 labmon 任务时开）；
+        判断就是 place；fit 只多两条：估计只有提示值的（没有实测）只放空卡、不与别的任务同卡（不用卡的只在这台没有 labmon 任务时开；
+        这次 fit 先分了它，后面的行也不与它同卡、同台：solo）；
         利用率低的卡上在跑的任务被 CPU 卡住时不在那张卡上开（gpu_slack）。"""
         why = self.blocked(x["project"])
         hit = None if why else self.w.override_hit(x, ("deadline",), lasting=True)    # 续租、约定归还的截止前跑不完的不放（同真放行，按这一行的预计时长）
         if why or hit:
             return None, why or hit[1]
+        if self.solo_host:
+            return None, "这次已把没有实测的 %s 分到这台（只在这台没有别的 labmon 任务时开） → 不再与它同开" % self.solo_host
         S, gpu = self.S, x["ngpu"] > 0
         hint = e["src" if gpu else "ram_src"] == "提示值"
         # 有别的任务的卡：labmon 在跑的、旧 gpu_queue.sh 的、卡上 labmon 之外的进程（保活不算：放任务前 worker 先停它）
@@ -5600,8 +5604,11 @@ class FitHost:
         full = place(dict(x), dict(S, holds={}), t)
         if gpu:
             sel = [c["i"] for c in S["cards"] if (x["allowed"] is None or c["i"] in x["allowed"])
-                   and c["uuid"] not in self.slack["bound"] and not (hint and c["uuid"] in busy)]
+                   and c["uuid"] not in self.slack["bound"] and c["uuid"] not in self.solo and not (hint and c["uuid"] in busy)]
             cs, why, _ = place(dict(x, allowed=sel), dict(S, holds={}), t)
+            solo = [self.solo[u] for u in (c["uuid"] for c in (full[0] or [])) if u in self.solo]
+            if cs is None and solo and not hint:
+                return None, "这次已把没有实测的 %s 分到卡 %s → 不与它同卡" % ("、".join(solo), ",".join(str(c["i"]) for c in full[0] if c["uuid"] in self.solo))
         elif hint and any(not j["hold"] for j in S["jobs"]):
             cs, why = None, None
         else:
@@ -5638,6 +5645,9 @@ class FitHost:
             say = "不用 GPU，内存要 %.0f GiB（%s）、%d 核（%s）" % (rneed, rsrc, need, csrc)
         S["jobs"].append(acct_job(x, cs, t, None, S["cpu_cap"]))
         self.lanes.append((r["name"], [y["i"] for y in cs]))
+        if hint:                                          # 没有实测的不与别的同卡（同一次 fit 后面分的也算）
+            self.solo.update({y["uuid"]: r["name"] for y in cs})
+            self.solo_host = None if gpu else r["name"]
         return say, None
 
 
