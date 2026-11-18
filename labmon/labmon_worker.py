@@ -2714,15 +2714,9 @@ class Worker:
             why.append("在 %s 上，那台 worker 已 %d 分钟没更新" % (host, age / 60))
         return "%s %s" % (dep_names([k + (False,)], project), "，".join(why)) if why else None
 
-    def dep_cycle(self, r, pend, mates=()):
-        """依赖成环（清单顺序也算依赖：一行要等它前面的都跑完）：从 r 等的还会跑的任务 pend（与 r 成组的 mates）出发，沿“等谁”（写的依赖）、
-        “排在谁后面”与“和谁成组”（gang=：要一起开跑，等于等同伴能开跑）找回 r 自己，返回最短的一圈的文字（“B 等 A，A 排在 B 后面”），没有为 None。
-        只由“成组”连起来的一圈不算（几个成员本来就互相等着一起开跑）：圈里至少要有一条“等”或“排”（等谁跑完）。
-        清单项取 dep_lanes（本机的与别的主机 todo 里的；在跑的排最前、不等谁）。dep_block 与 gang_block 共用。"""
-        me = (r["project"], r["name"])
-        name = lambda k: k[1] if k[0] == r["project"] else "%s/%s" % k
-        if me in pend:
-            return "%s 等它自己" % name(me)
+    def dep_next(self):
+        """依赖图里一个任务 (项目, 任务) 在等谁：返回 nxt(k) → [(等的任务, "等" 写的依赖里还会跑的 | "排" 同一条清单里排在它前面的 | "组" 与它成组的)]。
+        清单项取 dep_lanes（本机的与别的主机 todo 里的）。dep_cycle（成环）与 dep_reaches（offers 插行防成环）共用。"""
         pos, grp = {}, {}
         for i, (_, _, _, ln) in enumerate(self.dep_lanes):
             for j, n in enumerate(ln["jobs"]):
@@ -2737,6 +2731,33 @@ class Worker:
                 yield from (((p, x), "等") for p, x in (ln.get("deps") or {}).get(k[1], []) if (p, x) in self.dep_where)
                 yield from (((ln["project"], x), "排") for x in ln["jobs"][:j])
             yield from ((x, "组") for x in sorted(mate.get(k, ())) if x != k)
+        return nxt
+
+    def dep_reaches(self, starts, goal):
+        """从 starts 里的任务沿“等”“排”“组”走（dep_next），能不能走到 goal 里的任务：offers 把挪来的行插在 goal 那几行前面之前问它，
+        走得到就是挪来的行（间接）在等它们，插在前面会成环（#43，Codex 审 #63）。"""
+        nxt, todo = self.dep_next(), list(starts)
+        seen = set(todo)
+        while todo:
+            k = todo.pop()
+            if k in goal:
+                return True
+            for x, _ in nxt(k):
+                if x not in seen:
+                    seen.add(x)
+                    todo.append(x)
+        return False
+
+    def dep_cycle(self, r, pend, mates=()):
+        """依赖成环（清单顺序也算依赖：一行要等它前面的都跑完）：从 r 等的还会跑的任务 pend（与 r 成组的 mates）出发，沿“等谁”（写的依赖）、
+        “排在谁后面”与“和谁成组”（gang=：要一起开跑，等于等同伴能开跑）找回 r 自己，返回最短的一圈的文字（“B 等 A，A 排在 B 后面”），没有为 None。
+        只由“成组”连起来的一圈不算（几个成员本来就互相等着一起开跑）：圈里至少要有一条“等”或“排”（等谁跑完）。
+        清单项取 dep_lanes（本机的与别的主机 todo 里的；在跑的排最前、不等谁）。dep_block 与 gang_block 共用。"""
+        me = (r["project"], r["name"])
+        name = lambda k: k[1] if k[0] == r["project"] else "%s/%s" % k
+        if me in pend:
+            return "%s 等它自己" % name(me)
+        nxt = self.dep_next()
         # 广度优先，状态是 (任务, 走过的路上有没有“等”“排”)：找到的一圈最短
         prev, todo, end = {}, [], None
         for k, how in [(k, "等") for k in pend] + [(k, "组") for k in mates]:
@@ -3516,10 +3537,9 @@ class Worker:
             o["lane"] = [info[tgt[0]["key"]]["root"], info[tgt[0]["key"]]["queue"]] if tgt and cands else None
             # 接在后面的清单里有写了 after= 的行：挪来的插在它前面（它要等别的任务，清单顺序也算依赖，接在它后面会被它堵住，#43）
             o["before"] = next((x["name"] for x in tgt[0]["jobs"] if x["deps"] or x["deps_any"]), None) if o["lane"] else None
-            if o["before"]:                          # 挪来的有等它或它后面哪一行的：插在前面就成环（清单顺序也算依赖），接在末尾（Codex 审 #63）
+            if o["before"]:                          # 挪来的有（间接）等它或它后面哪一行的：插在前面就成环（清单顺序也算依赖），接在末尾（Codex 审 #63）
                 tj = [x["name"] for x in tgt[0]["jobs"]]
-                later = set(tj[tj.index(o["before"]):])
-                if any(q == p and n in later for c in cands for q, n, _ in dep_keys(dict(c["h"], project=p))):
+                if self.dep_reaches([k[:2] for c in cands for k in dep_keys(dict(c["h"], project=p))], {(p, n) for n in tj[tj.index(o["before"]):]}):
                     o["before"] = None
             for k in range(1, len(cands) + 1):
                 got = self.try_move(p, cands[:k], tgt[0]["key"] if tgt else None, cx, before=o["before"])
