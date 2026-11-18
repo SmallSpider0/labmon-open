@@ -150,7 +150,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/users/role {"name", "admin"}` | 设为或撤销管理员 |
 | `POST /api/users/reset {"name"}` | `{"code", "msg"}`：原口令与这人的会话立即失效，令牌不动 |
 | `POST /api/users/revoke {"name", "id"?}` | 吊销这人的一个会话或令牌；不给 `id` 是全部 |
-| `POST /api/users/remove {"name"}` | 删账号，连同它的会话、令牌与推送配置 |
+| `POST /api/users/remove {"name"}` | 删账号，连同它的会话、令牌、推送配置与主机清单 `[fleet.account_people]` 里它的对应（同名新账号不继承，#17）；`account_people` 写成 `[fleet]` 里的内联表且含这个账号时回 409，改成段落写法再删 |
 | `POST /api/users/hosts {"name", "hosts": [...]}` | 更新这名普通用户可用的主机 |
 | `POST /project/owner {"project", "owner"}` | 换项目主人；`owner` 为空时归管理员 |
 | `POST /api/push {"push", "bark" 或 "ntfy"}` | 保存自己的推送，回 `{msg, push}`；`push` 为空时移除。Bark 段填 `key`，可选 `server`、`encrypt_key`；ntfy 段填 `topic`，可选 `server`、`token`；服务地址限于渠道的官方地址或管理员在 `notify.toml` 配置的同渠道地址 |

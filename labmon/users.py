@@ -36,7 +36,7 @@ from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 
 from . import projects as PJ
-from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, host_users, pause_by, sched, set_host_users, share_host, user_hosts
+from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, drop_account_people, host_users, pause_by, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
 from .state import snapshot, state_root, write_atomic
 
@@ -603,7 +603,8 @@ def reset(name: str, by: str, self_ok: bool = False, t: float | None = None) -> 
 
 
 def remove(name: str, by: str) -> str:
-    """删掉一个账号（这人不再用看板）：连同它的会话与令牌，下一次请求就失效。删不了自己，也删不了最后一个管理员。"""
+    """删掉一个账号（这人不再用看板）：连同它的会话与令牌（下一次请求就失效）、能用的主机、项目归属、推送配置与主机清单 [fleet.account_people] 里的对应。
+    删不了自己，也删不了最后一个管理员。"""
     from .config import HOSTS_LOCK
     with HOSTS_LOCK, PJ._reg_locked(), _edit() as d:
         k = _key(d["users"], name)
@@ -614,6 +615,10 @@ def remove(name: str, by: str) -> str:
         if d["users"][k].get("role") == "admin" and _admins(d) == [k]:
             raise Denied(409, f"{k} 是最后一个管理员，删不掉：先把别人设为管理员")
         from .service import set_user_push
+        try:
+            drop_account_people(k, by)               # 主机清单里这人的人员对应（#17）：先做，写不了就整件不做
+        except ConfigError as e:
+            raise Denied(409, str(e)) from e
         set_host_users(k, [], by)
         for pid in PJ.registered():
             PJ._set_owner(pid, None, by, previous=k)

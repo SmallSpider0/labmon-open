@@ -232,6 +232,33 @@ def set_host_users(name: str, hosts: list[str], by: str) -> str:
     return f"{name} {what}"
 
 
+@_hosts_edit
+def drop_account_people(account: str, by: str) -> bool:
+    """删账号时（users.remove，#17）删掉主机清单 [fleet.account_people] 里这个账号的对应（键按大小写不敏感比），同名新账号不继承这人的人员名。
+    只删那几行，改完校验再写、记一条配置改动；没有对应时不写，返回 False。写成内联表（[fleet] 里 account_people = {…}）又含这个账号时抛 ConfigError。"""
+    p, low = hosts_file(), account.casefold()
+    if not p.exists():
+        return False
+    mapping = (_read_toml(p).get("fleet") or {}).get("account_people")
+    if not isinstance(mapping, dict) or not any(str(k).casefold() == low for k in mapping):
+        return False
+    lines = p.read_text().splitlines(keepends=True)
+    b = _blocks(lines, "[fleet.account_people]")
+    if not b:
+        raise ConfigError(f"{p} 里 [fleet] 的 account_people 写成了内联表：改成 [fleet.account_people] 段（每个账号一行）再删账号")
+
+    def mine(line: str) -> bool:
+        try:
+            row = tomllib.loads(line)
+        except tomllib.TOMLDecodeError:
+            return False
+        return len(row) == 1 and next(iter(row)).casefold() == low
+    s, end, _ = b[0]
+    block = [line for line in lines[s + 1:end] if not mine(line)]
+    _write_checked(p, "".join(lines[:s + 1] + block + lines[end:]), f"{by} 删了账号 {account}：去掉 [fleet.account_people] 里它的对应")
+    return True
+
+
 HOST_RE = re.compile(r"(\[[0-9a-f:.]+\]|[a-z0-9.\-]+)(?::(\d{1,5}))?")    # Host 头与 [server] 里的“主机[:端口]”：名字或 IP（IPv6 带方括号），可带端口
 
 

@@ -339,6 +339,29 @@ class AdminTest(UsersBase):
             U.remove("amy", "boss")
         self.assertEqual(e.exception.code, 404)
 
+    def test_remove_drops_account_people(self):
+        """#17：删账号时连同主机清单 [fleet.account_people] 里这个账号的对应（大小写不敏感）一起删，同名新账号不继承；别的行、别的段不动。"""
+        import tomllib
+        hosts = Path(os.environ["LABMON_HOSTS"])
+        hosts.write_text('[fleet]\nme = "BOSS"   # 旧写法\n\n[fleet.account_people]\nboss = "BOSS"\nAmy = "AMY"   # 这人\n"bob" = "BOB"\n\n[[hosts]]\nid = "a"\nssh = "remote-a"\n')
+        self.admin()
+        fixtures.add_account("amy", "user", "boss", t=T0)
+        U.remove("amy", "boss")
+        text = hosts.read_text()
+        self.assertEqual(tomllib.loads(text)["fleet"]["account_people"], {"boss": "BOSS", "bob": "BOB"})
+        self.assertIn('me = "BOSS"   # 旧写法', text)
+        self.assertIn('[[hosts]]\nid = "a"', text)
+        fixtures.add_account("bob", "user", "boss", t=T0)
+        hosts.write_text('[fleet]\naccount_people = {bob = "BOB"}\n')               # 写成内联表的：不删账号，说清楚怎么改
+        with self.assertRaises(U.Denied) as e:
+            U.remove("bob", "boss")
+        self.assertEqual(e.exception.code, 409)
+        self.assertIn("[fleet.account_people]", e.exception.msg)
+        self.assertIn("bob", [u["name"] for u in U.listing(t=T0)["users"]])
+        hosts.write_text('[fleet]\naccount_people = {boss = "BOSS"}\n')              # 没有这个账号的对应：照常删，主机清单不动
+        U.remove("bob", "boss")
+        self.assertEqual(hosts.read_text(), '[fleet]\naccount_people = {boss = "BOSS"}\n')
+
     def test_first_account_must_be_admin(self):
         with self.assertRaises(U.Denied) as e:
             fixtures.add_account("amy", "user", "本机命令行", t=T0)

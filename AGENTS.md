@@ -113,7 +113,7 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 项目暂时没实验（队列清单跑空标“空着”、项目标“暂时没实验”，这时不报主机的事） | worker 状态里队列的 `empty`（`tick` 里 `next_job` 为空时标）；`collect.build` 算 `no_work_since`；页面上 `NO_WORK`、`noWorkTip`、`noWorkBadge`（common.js） |
 | 改配置文件（用户级主机清单与项目的 monitor.toml：只改相关行、改完校验再写；读 → 改 → 写整段互斥） | `config._blocks`、`config._set_keys`、`config._write_checked`（项目配置传 `check` 用 `config.load(path, text)` 整套校验）；锁 `config.HOSTS_LOCK`，改配置文件的函数都加 `config._hosts_edit` |
 | 占位任务的认定（名字里按词含 hold / pause） | worker 的 `is_hold`（`HOLD_RE`）；看板 `config.HOLD_RE`（同一条正则；worker 在服务器上跑、不 import 本包，各自一份，项目不能另配） |
-| 登录账号在组内人员表里的名字、主机上的使用人；后台与历史记录按已登记的人员统计（#70） | `fleet.account_person`、`fleet.account_people`（批量对应与一对一核对）、`fleet.check_account_binding`（开通与补绑定共用）、`users.add`、`users.bind_person`（账号库同一把锁）；`fleet.host_holder`；旧数据 `fleet.legacy_person`；登记人员 `fleet.registered_people`、`fleetboot.set_person`，人员卡与账号详情共用 `personCard`、`directoryDrawer`（overview.html） |
+| 登录账号在组内人员表里的名字、主机上的使用人；后台与历史记录按已登记的人员统计（#70） | `fleet.account_person`、`fleet.account_people`（批量对应与一对一核对）、`fleet.check_account_binding`（开通与补绑定共用）、删账号时去掉 `[fleet.account_people]` 里的对应 `config.drop_account_people`（#17）、`users.add`、`users.bind_person`（账号库同一把锁）；`fleet.host_holder`；旧数据 `fleet.legacy_person`；登记人员 `fleet.registered_people`、`fleetboot.set_person`，人员卡与账号详情共用 `personCard`、`directoryDrawer`（overview.html） |
 | 组内服务器的状态文件；这一台正借着；借给了谁（借用中的用量算给他） | `fleet.state_file`；`fleet.borrowed`；`fleet.borrower` |
 | 租期到期时刻；租期提醒的档（到期前 24、6 小时各一次，已进更近一档不补远的；相近到期合成一组） | `health.lease_end`；`health.lease_due` |
 | 掉线与恢复判定（连续至少 2 次、持续 `DOWN_S` 秒连不上才算掉线；工作台主机、组内服务器、项目页同一条）；换了新容器（续租或重启） | `health.link_step`；`health.container_step` |
