@@ -249,6 +249,18 @@ class ClientDistTest(unittest.TestCase):
             self.assertEqual([f"已把 skill 装到 {home / '.claude/skills/lab-experiments'}（指向 {entry}，随命令行更新）"], dist.ensure_skill())
             self.assertEqual(pkg / "skills/lab-experiments", entry.readlink())
             self.assertEqual([], dist.ensure_skill())       # 第二次：都已就位，不再提示
+            # 智能体的入口建不了（skills 是个文件）：只提示，固定入口照样切换，不让已切换好的命令被报成装失败
+            (entry.parent / "x").mkdir()
+            (entry.parent / "x/SKILL.md").write_text(SKILL_MD)
+            claude = home / ".claude/skills"
+            (claude / "lab-experiments").unlink()
+            claude.rmdir()
+            claude.write_text("")
+            with patch.object(dist, "_agent_entries", lambda: [claude / "lab-experiments"]):
+                notes = dist._link_skill(entry.parent / "x")
+            self.assertEqual(entry.parent / "x", entry.readlink())
+            self.assertEqual(1, len(notes))
+            self.assertIn(f"{claude / 'lab-experiments'} 建不了", notes[0])
 
     def test_install_address_and_secret(self):
         for base in ("https://user@example.com/", "https://example.com/a/../b", "https://example.com/?a=b",

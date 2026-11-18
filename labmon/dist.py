@@ -278,8 +278,11 @@ def _link_skill(src: Path) -> list[str]:
     fixed = skill_entry()
     if os.path.lexists(fixed) and not fixed.is_symlink():
         return [f"skill 入口 {fixed} 已被占用，没有更新；移开后跑 labmon update"]
-    fixed.parent.mkdir(parents=True, exist_ok=True)
-    _swap(fixed, src)
+    try:
+        fixed.parent.mkdir(parents=True, exist_ok=True)
+        _swap(fixed, src)
+    except OSError as err:
+        return [f"skill 入口 {fixed} 没能更新（{err.strerror or err}）"]
     entries, notes = _agent_entries(), []
     for e in entries:
         if e.is_symlink() and e.readlink() == fixed:
@@ -288,8 +291,12 @@ def _link_skill(src: Path) -> list[str]:
             now = f"指向 {e.readlink()}" if e.is_symlink() else "是目录或文件"
             notes.append(f"{e} 已有（{now}），没改；要用随命令行更新的 skill，移开它再跑 labmon update")
         else:
-            e.parent.mkdir(parents=True, exist_ok=True)
-            e.symlink_to(fixed)
+            try:
+                e.parent.mkdir(parents=True, exist_ok=True)
+                e.symlink_to(fixed)
+            except OSError as err:                     # 建不了只提示：命令已切换好，不能因此报成装失败
+                notes.append(f"{e} 建不了（{err.strerror or err}），把 {fixed} 软链到所用客户端的 skills 目录")
+                continue
             notes.append(f"已把 skill 装到 {e}（指向 {fixed}，随命令行更新）")
     if not entries:
         notes.append(f"skill 在 {fixed}（随命令行更新）：没找到 ~/.claude 或 ~/.agents，把它软链到所用客户端的 skills 目录")
