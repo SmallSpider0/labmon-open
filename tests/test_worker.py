@@ -709,7 +709,7 @@ class AdmissionUnitTest(UnitBase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(self.m.fit(self.m.Paths(host), list(names), project), 0)
-        return {ln.split("：", 1)[0]: ln.split("：", 1)[1] for ln in out.getvalue().splitlines() if not ln.startswith("卡 ")}
+        return {ln.split("：", 1)[0]: ln.split("：", 1)[1] for ln in out.getvalue().splitlines() if not ln.startswith(("卡 ", "容器 CPU 在限流"))}
 
     def fit_status(self, host="t", cpu=6.0):
         """一张 44 GiB 空闲的卡、内存与 CPU 都够（cpu 为还能给的核数），卡上有一个任务在跑。"""
@@ -860,7 +860,9 @@ class AdmissionUnitTest(UnitBase):
         self.fit_two_cards(util={"GPU-a": 80, "GPU-b": 0}, running=[r0])
         self.assertIn("可以开车道并行", self.fit_out(["x_s1", "x_s2"])["x_s2"])
         self.fit_two_cards(util={"GPU-a": 30}, running=[r0], info={"press": {"thr": 35.0}})
-        self.assertIn("容器 CPU 在限流（近 1 分钟 35% 的周期被限流） → 不开新车道：先减线程", self.fit_out(["x_s1"])["x_s1"])
+        self.assertIn("可以开车道并行", self.fit_out(["x_s1"])["x_s1"])          # 一轮的 thr 不算：门槛只在 thr_step，fit 读状态的 throttle（#39）
+        self.fit_two_cards(util={"GPU-a": 30}, running=[r0], throttle={"since": now - 600, "for": 600, "thr": 35.0, "alert": True, "over": [], "other": None})
+        self.assertIn("容器 CPU 在限流（近 1 分钟 35% 的周期被限流，已持续 10 分钟） → 不开新车道：先减线程", self.fit_out(["x_s1"])["x_s1"])
 
     def test_fit_hint_only_takes_an_empty_card(self):
         # 只有清单提示值（没有实测）的行：只放空卡、不与别的任务同卡（旧 fit 一律不开）；空卡用掉后下一行不开

@@ -136,7 +136,6 @@ OVER_FRAC, OVER_MIN_S = 0.2, 600   # 剩余时长说不准时（超了预计；�
 UTIL_WIN_S = 600         # 各卡利用率取近这么久的平均（状态的 util10，fit 列出来看）
 UTIL_LOW = 50            # 卡近 UTIL_WIN_S 的利用率低于这个 %，且上面在跑的被 CPU 卡住时，先加核、不在这张卡上开新车道（gpu_slack，#35、#37）
 CPU_BOUND_FRAC = 0.9     # 在跑任务近 CPU_WARM_S 各 1 分钟窗口核数的平均不少于给它的核数的这么多，算被 CPU 卡住（cpu_bound）
-THROTTLE_PCT = 20        # 容器近 1 分钟被限流的周期不少于这个 %（Worker.press 的 thr）：先减线程，不开新车道（gpu_slack；#39 的限流告警用同一个数）
 CONC_MAX = 12            # 按同卡并行数挑同类记录（duration 的 k）时封顶到这么多（推演里查表、缓存用）
 FORECAST_S = 7 * 86400   # 推演（simulate）往后排多远
 FORECAST_EVERY = 120     # 推演的输入没变时多久重算一次（在跑的超了预计，后面的跟着往后挪）
@@ -5476,11 +5475,11 @@ def cpu_bound(j, cap):
     return (avg, give) if avg >= give * CPU_BOUND_FRAC else None
 
 
-def gpu_slack(cards, jobs, thr, cap):
+def gpu_slack(cards, jobs, th, cap):
     """卡吃不满是不是真有余量（fit 开车道、offers 同机多开车道共用一条规则，#35、#37）：
     cards [{uuid, util 近 10 分钟利用率 %（样本不够为 None）}]；jobs 在跑的（状态 running 的形状：name、gpus、est、use）；
-    thr 容器近 1 分钟被限流的周期 %（Worker.press 的 thr，状态的 info.press.thr）；cap 记账上限（cpu_cap）。
-    返回 {throttle: thr 不低于 THROTTLE_PCT 时的那个数、否则 None（这台先减线程，不开新车道）,
+    th 是状态的 throttle（Worker.throttle：这一段限流，门槛 THR_HOT、THR_COOL 只在 thr_step；没在限流为 None）；cap 记账上限（cpu_cap）。
+    返回 {throttle: 限流时的那句说明、否则 None（这台先减线程，不开新车道）,
     bound: {卡 uuid: [(任务, 平均核数, 给的核数)]}：利用率低于 UTIL_LOW 的卡上被 CPU 卡住的在跑任务（先给它们加核，不在这张卡上开新车道）}。"""
     low = {c["uuid"] for c in cards if c.get("util") is not None and c["util"] < UTIL_LOW}
     bound = {}
@@ -5489,7 +5488,9 @@ def gpu_slack(cards, jobs, thr, cap):
         for u in j.get("gpus") or []:
             if b and u in low:
                 bound.setdefault(u, []).append((j["name"], b[0], b[1]))
-    return {"throttle": thr if thr is not None and thr >= THROTTLE_PCT else None, "bound": bound}
+    thr = None if th is None else th.get("thr")
+    return {"throttle": None if th is None else "容器 CPU 在限流（%s，已持续 %d 分钟）" % (
+        "近 1 分钟 %.0f%% 的周期被限流" % thr if thr is not None else "近 1 分钟被限流的周期过了门槛", th.get("for", 0) // 60), "bound": bound}
 
 
 def fit_snapshot(st):
@@ -5531,7 +5532,7 @@ class FitHost:
         self.S = fit_snapshot(st)
         u10 = st.get("util10") or {}
         self.cards = [dict(c, util=u10.get(c["uuid"])) for c in self.S["cards"]]
-        self.slack = gpu_slack(self.cards, st.get("running") or [], ((self.w.info.get("press") or {}).get("thr")), self.S["cpu_cap"])
+        self.slack = gpu_slack(self.cards, st.get("running") or [], st.get("throttle"), self.S["cpu_cap"])
         self.lanes, self.say, self.why = [], [], None     # 这次假设开的 [(任务, 卡号)] 与各行的说明；最近一行没开成的原因
 
     def card_lines(self):
@@ -5545,7 +5546,7 @@ class FitHost:
                 "（在跑 %s）" % "、".join(jobs) if jobs else "（空着）",
                 "；%s 跑满了给的核（CPU 受限）" % "、".join("%s %.1f/%d 核" % x for x in b) if b else ""))
         if self.slack["throttle"] is not None:
-            out.append("容器 CPU 在限流：近 1 分钟 %.0f%% 的周期被限流" % self.slack["throttle"])
+            out.append(self.slack["throttle"])
         return out
 
     def req(self, q, n, cmd, project):
@@ -5579,7 +5580,7 @@ class FitHost:
         if block:
             return block + " → 这台不开新车道"
         if self.slack["throttle"] is not None:
-            return "容器 CPU 在限流（近 1 分钟 %.0f%% 的周期被限流） → 不开新车道：先减线程（按 LABMON_CPUS 设线程数与 DataLoader 进程数）" % self.slack["throttle"]
+            return self.slack["throttle"] + " → 不开新车道：先减线程（按 LABMON_CPUS 设线程数与 DataLoader 进程数）"
         return None
 
     def open(self, r, e, x, t, row=True):
