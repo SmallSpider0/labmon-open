@@ -681,7 +681,7 @@ def _groups(cfg: dict, snap: dict, state: dict, ratios: dict) -> None:
 
 
 def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict, t: float) -> None:
-    """主机级告警：GPU 空转（还有任务未完成、利用率却一直低，写明各车道在做什么）、CPU 持续被限流且本项目有超核的任务、drain 挡住本项目的任务、空闲关机风险（when_idle 检查）。"""
+    """主机级告警：GPU 空转（还有任务未完成、利用率却一直低，写明各车道在做什么）、CPU 持续被限流且本项目有超核的任务、开跑核数给少给多（只给会话）、drain 挡住本项目的任务、空闲关机风险（when_idle 检查）。"""
     al_cfg, alerts, hstate = cfg["alerts"], snap["alerts"], state.setdefault("hosts", {})
     for hd in snap["hosts"]:
         if not hd["ok"]:
@@ -715,7 +715,8 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                                 f"GPU 利用率（近 10 分钟平均，只有保活时按 0）已 {al_cfg['gpu_idle_min']} 分钟低于 {al_cfg['gpu_idle_util']:.0f}%"
                                 + (f"（{'；'.join(why)}）" if why else "")))
         # CPU 被配额限流（#39）：worker 判的（Worker.throttle，门槛只在那边），持续满时本项目有超核的任务才报；key 带这一段的起点，同一段只叫醒一次
-        th = next(((e.get("status") or {}).get("throttle") for e in glob_snap.get("hosts", []) if e["id"] == hd["id"]), None)
+        st = next((e.get("status") for e in glob_snap.get("hosts", []) if e["id"] == hd["id"]), None)   # 工作台快照里这台 worker 的状态
+        th = (st or {}).get("throttle")
         over = [o for o in (th or {}).get("over") or [] if o.get("project") == cfg["id"]] if (th or {}).get("alert") else []
         if over:
             who = "、".join(f"{o['name']} 实测 {o['cores']:g} 核（给 {o['give']} 核）" for o in over)
@@ -725,6 +726,24 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                                 f"{say}。没设的 OMP/MKL/OPENBLAS 线程数 worker 已缺省成 $LABMON_CPUS，仍超核的是别处写死了：查代码、.env 与清单行前缀里的线程数与进程数"
                                 "（OMP_NUM_THREADS 等、torch.set_num_threads、DataLoader num_workers、进程池；按 nproc 取的是宿主机的核数），改成按 $LABMON_CPUS；"
                                 "确实要更多核就在清单那一行写 cpus=，下次放行按它记账", say))
+        # 开跑给的核数给少了、给多了（#46）：worker 判的（运行中任务的 cpu_fit，门槛只在 worker 的 cpu_fit），本项目的清单任务才报、只给会话；
+        # key 按车道与任务；worker 同一次运行判出来就留到跑完（Worker.cpu_hints），所以只叫醒一次。给少的已给到配额（sug 为 None）写大也给不了，不报
+        # 车道按清单认（目录 + 清单，_qpath）：同一台上两条清单可以有同名任务
+        by_q = {_qpath(ln["root"], ln["queue"]): ln for ln in lanes if ln.get("root") and ln.get("queue")}
+        for r in (st or {}).get("running") or []:
+            f, lane = r.get("cpu_fit"), by_q.get(_qpath(r.get("root"), r.get("queue")))
+            if not f or not f.get("sug") or r.get("kind") != "queue" or r.get("project") != cfg["id"] or lane is None:
+                continue
+            ln, where = lane["id"], f"{hd['label']} {lane['label']}"
+            if f["how"] == "low":
+                alerts.append(alert(f"cpu_low:{ln}/{r['name']}", "agent",
+                                    f"任务 {r['name']}（{where}）近 10 分钟平均用了 {f['avg']:.1f} 核，给它的 {f['give']} 核基本用满，所在的卡利用率不到 50%：可能给少了。"
+                                    f"没开跑的同类任务在清单那一行写 cpus={f['sug']} 试试（cpus= 优先于历史；跑过以后可以删掉，历史只会往实测靠），"
+                                    "线程数、DataLoader 进程数按 $LABMON_CPUS 取；在跑的不必停"))
+            else:
+                alerts.append(alert(f"cpu_high:{ln}/{r['name']}", "agent",
+                                    f"任务 {r['name']}（{where}）清单写了 cpus={r.get('cpus')}（给 {f['give']} 核），跑到现在 1 分钟峰值只有 {f['peak']:.1f} 核：可以写小。"
+                                    f"没开跑的同类任务改成 cpus={f['sug']}，或删掉 cpus= 改按历史估（这次跑完就有），好让别的任务早点开跑；在跑的不必停"))
         # drain 是整台主机的（续租预备、跑完就还、别的会话手动下的）：挡住本项目的任务时报一次，免得会话一直睡着不知道
         dr = [ln for ln in lanes if ln.get("held") == "drain" and ln.get("unfinished")]
         if dr:
@@ -733,7 +752,7 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
         # 空闲关机风险：卡上有进程、或有任务在跑就不算空闲。任务看本项目的车道，同机别的项目的经工作台快照里 worker 的状态看
         # （刚起来还没占卡的也算）；暂停占位不算，它不占卡、只能靠保活。
         ids = {ln["id"] for ln in lanes}
-        wrun = next(((e.get("status") or {}).get("running") or [] for e in glob_snap.get("hosts", []) if e["id"] == hd["id"]), [])
+        wrun = (st or {}).get("running") or []
         busy = (any(ln.get("alive") for ln in lanes) or bool(hd.get("gpu_procs")) or any(not j.get("hold") for j in wrun)
                 or any(j["status"] == "running" and not j["hold"] and j["lane"] in ids for j in snap["jobs"]))
         hcfg = next(h for h in cfg["hosts"] if h["id"] == hd["id"])

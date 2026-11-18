@@ -154,8 +154,9 @@ class ContractTest(unittest.TestCase):
         self.assertIn("throttle", st)                                                                    # CPU 限流（#39）：测试里读不到 cpu.stat，没在限流为 None
         self.assertIsNone(st["throttle"])
         self.assertIsInstance(st["ka_stop"], NUM)                                                        # 有任务要卡：worker 停着保活，停它的时刻（重启时找回，#124）
-        for k in ("pid", "cmd", "tail", "log", "use", "est", "hold", "kind", "queue", "root", "cpus", "io", "io_sus"):   # 任务卡展开要用的
+        for k in ("pid", "cmd", "tail", "log", "use", "est", "hold", "kind", "queue", "root", "cpus", "io", "io_sus", "cpu_fit"):   # 任务卡展开要用的
             self.assertIn(k, j)
+        self.assertIsNone(j["cpu_fit"])                                                                  # 开跑不满 10 分钟：不判核数给多给少（#46）
         self.assertLessEqual({"cpus", "cpu_src"}, set(j["est"]))                                       # CPU 估计与记账（主机页 CPU 一行、任务详情）
         self.assertIsInstance(j["acct"]["cpu"], NUM)
         self.assertLessEqual({"ram", "margin", "gpus", "cpu", "cpu_cap", "other_cpu", "keep", "owner"}, set(st["room"]))   # 测试里读不到配额：cpu、cpu_cap 为 None；owner 不放的卡、other_cpu（fit 用）

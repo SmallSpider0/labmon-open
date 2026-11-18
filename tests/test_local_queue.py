@@ -329,6 +329,41 @@ class LocalQueueTest(unittest.TestCase):
         self.assertEqual(alerts(dict(th, alert=False)), {})                      # 还没持续满
         self.assertEqual(alerts(None), {})
 
+    def test_cpu_fit_alert(self):
+        """开跑核数给少、给多（worker 写的运行中任务 cpu_fit，#46）：本项目的清单任务才报，只给实验会话（agent）；
+        key 按车道与任务，给少的已到配额（sug 为 None）不报，别的项目、单元、旧 worker 没这个字段的都不报。"""
+        root, out = self.d / "proj", PJ.out_dir("out")
+        make_queue(root, dead_pid(), self.cur.pid)
+        cfg = write_config(self.d, root, out)
+        cfg.write_text(cfg.read_text().replace('label = "本机"', f'label = "本机"\nworker_home = "{self.d}/wh"'))
+        sf = self.d / "wh" / "hosts" / "here" / "status.json"
+        sf.parent.mkdir(parents=True)
+        sf.write_text(json.dumps({"t": time.time(), "queues": [{"root": str(root), "jobs": "jobs/q.txt"}], "waiting": []}))
+        low = {"how": "low", "avg": 0.98, "peak": 1.0, "give": 1, "sug": 2}
+        high = {"how": "high", "avg": 0.9, "peak": 1.2, "give": 5, "sug": 2}
+
+        def alerts(*running):
+            with mock.patch.object(C, "snapshot", lambda: {"hosts": [{"id": "here", "status": {"running": list(running)}}]}):
+                return {a["key"]: a for a in C.collect(load(cfg))["alerts"] if a["key"].startswith("cpu_")}
+        run = lambda f, **kw: dict({"kind": "queue", "project": "out", "name": "a_run", "cpus": None, "cpu_fit": f,   # noqa: E731
+                                    "root": str(root) + "/", "queue": "jobs/q.txt"}, **kw)
+        al = alerts(run(low))
+        self.assertEqual(list(al), ["cpu_low:q/a_run"])
+        a = al["cpu_low:q/a_run"]
+        self.assertEqual(a["to"], "agent")
+        self.assertIn("a_run（本机 车道 1 训练方）近 10 分钟平均用了 1.0 核，给它的 1 核基本用满", a["msg"])
+        self.assertIn("cpus=2", a["msg"])
+        al = alerts(run(high, cpus=5))
+        self.assertEqual(list(al), ["cpu_high:q/a_run"])
+        self.assertIn("清单写了 cpus=5（给 5 核），跑到现在 1 分钟峰值只有 1.2 核", al["cpu_high:q/a_run"]["msg"])
+        self.assertIn("cpus=2", al["cpu_high:q/a_run"]["msg"])
+        self.assertEqual(alerts(run(dict(low, sug=None))), {})                    # 已给到配额：写大也给不了
+        self.assertEqual(alerts(run(low, project="other")), {})                   # 别的项目的
+        self.assertEqual(alerts(run(low, kind="slot")), {})                       # 单元没有清单行可改
+        self.assertEqual(alerts(run(None)), {})
+        self.assertEqual(alerts(run(low, root=str(self.d / "other"))), {})        # 同名任务在本项目别的清单上（不是这条车道）：不算到 q 头上（Codex 审 #65）
+        self.assertEqual(alerts({"kind": "queue", "project": "out", "name": "a_run", "root": str(root), "queue": "jobs/q.txt"}), {})   # 旧 worker 没写这个字段
+
     def test_borrow_cut_alert(self):
         """借来的主机上队首被约定归还挡住（borrow.check 在全局快照里给的 late 非空）：报 borrow_cut:<车道>，写主机全名、车道名与还剩几个任务；
         自用主机被续租截止挡住的（没有 borrow）不报；约定延长、跑得完了（不再 held）就消失；归还后交给 returned_unfinished，不再报它。"""
