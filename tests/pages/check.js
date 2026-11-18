@@ -1273,6 +1273,9 @@ ta("overview", "批量续租：验证码回来前抽屉关了或换了一份勾�
   run(C, 'fleetPost = async k => k === "captcha" ? {code: "c2", tok: "t2"} : {}');
   await run(C, 'startOp("renew", rpBody(RPICK), "renew")');
   ok(run(C, 'FCAP?.next.body.ids.join()') === "srv-e", "同一份勾选的验证码该记下");
+  // 验证码已出来、不关抽屉直接换地址（换了一份勾选）：旧验证码作废，底部回到「续租所选」（Codex 审查 #20）
+  const h = run(C, 'RPICK = {key: DH.renew("srv-d"), sel: new Set(["srv-d"]), ack: new Set(["srv-d"])}; FCAP = {code: "c3", tok: "t3", input: "", t: Date.now(), next: {act: "renew", body: rpBody(RPICK)}, pop: "renew"}; renewDrawer("srv-e")');
+  ok(run(C, "FCAP") === null && h.includes('data-fop="renewgo"') && !h.includes("fcapin"), "换了抽屉地址，旧的验证码还留着");
 });
 ta("archive", "永久删除要求管理员和当前归档批次的确认", async () => {
   const A = ovCtx(OV, RR, "#/archived"), U = ovCtx(OV, RR, "#/archived");

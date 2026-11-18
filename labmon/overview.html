@@ -3644,7 +3644,10 @@ const rpList = () => [...D.fleet.servers, ...D.fleet.mine];
 const rpBody = R => { const ids = rpList().filter(x => R.sel.has(x.id) && !x.off).map(x => x.id); return {ids, ack: ids.filter(i => R.ack.has(i))}; };
 function renewDrawer(id) {
   const key = DH.renew(id), op = fops().op, sv = rpList(), ops = canOps();
-  if (RPICK?.key !== key) RPICK = {key, sel: new Set(id ? [id] : fleetDue().filter(x => !FRISKY(x)).map(x => x.id)), ack: new Set()};   // 缺省勾上 24 小时内到期、没在跑实验的
+  if (RPICK?.key !== key) {                         // 换了地址就是另一份勾选：缺省勾上 24 小时内到期、没在跑实验的；上一份的验证码作废（要提交的记在 FCAP.next 里，不跟着变）
+    RPICK = {key, sel: new Set(id ? [id] : fleetDue().filter(x => !FRISKY(x)).map(x => x.id)), ack: new Set()};
+    if (FCAP?.pop === "renew") FCAP = null;
+  }
   const R = RPICK, lock = !ops || FCAP?.pop === "renew" || R.busy, {ids} = rpBody(R), need = sv.filter(x => ids.includes(x.id) && FRISKY(x) && !R.ack.has(x.id));
   const row = x => { const on = R.sel.has(x.id) && !x.off, w = x.off ? ["已关机：要用就开机"] : renewWarn(x), nm = x.mine ? x.label : x.holder;
     return `<div class="rp-row"><input type="checkbox" data-rsel="${esc(x.id)}" ${on ? "checked" : ""} ${x.off || lock ? "disabled" : ""} aria-label="续租 ${esc(nm)}">
