@@ -36,7 +36,7 @@ from . import lan as L
 from . import lease as LS
 from . import rebalance as RB
 from . import renew as R
-from .projects import archived_rows
+from .projects import archived_rows, registered
 from .collect import write_page
 from .config import STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, parse_time, pause_by, pick_color, sched, user_hosts
 from .health import container_step, lease_due, lease_end, link_step
@@ -302,7 +302,7 @@ def _to_worker(projects: list[dict], t: float, sw: dict):
     """给 worker 的文件（eta.json、sched.json、returned.json；overview.fetch 变了才写）：运行中任务的预计结束（项目看板按日志进度算的）给 worker 推演，
     整分钟取整，免得每轮都写。写的时刻 t 是 worker 拿来与任务开始时刻（服务器时钟）比的，按这台的时钟差换算（第一轮还不知道，按本机的）。
     returned.json 是主机清单里已归还的主机（host return，平台上关了机的自用主机也标成归还）：worker 不在时负载均衡的提示不让它们挡（#25）。
-    sched.json 是这一轮读的调度设置 sw（config.sched：权重与项目级的暂停、优先），各在用主机同一份，后加入的主机下一轮就有。"""
+    sched.json 是这一轮读的调度设置 sw（config.sched：权重与项目级的暂停、优先；collect 加上 owner：各项目算在谁名下，#23），各在用主机同一份，后加入的主机下一轮就有。"""
     prog = {(p["id"], j["id"]): j for p in projects for j in p.get("running") or []}
     jobs = {f"{p}|{j}": round(x["eta_ts"] / 60) * 60 for (p, j), x in prog.items() if x.get("eta_ts")}
     gone = {"hosts": sorted({str(h["id"]) for h in user_hosts() if h.get("returned")})}
@@ -414,6 +414,9 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
     sd.mkdir(parents=True, exist_ok=True)
     colors = load_json(sd / "colors.json", {})
     sw = sched(t)
+    # 按人的公平份额（#23）：各项目算在谁名下（含已归档的：它们的用量还在半衰期里），随 sched.json 发给 worker（owner：人员名的短哈希）
+    people = F.project_people(sorted({*registered(), *(p["id"] for p in projects)}))
+    sw = dict(sw, owner={p: F.share_key(n) for p, n in people.items()}) if people else sw
     prog, put = _to_worker(projects, t, sw)
     hcfg = {h["id"]: h for h in active_hosts()}
     by = {h["id"]: dict(h, put=put(h), lease="renew") if use_ssh else dict(h, ssh=None, put=put(h), lease="renew") for h in hcfg.values()}
@@ -445,7 +448,7 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
             # 各项目的挪法建议（worker 的 offers 汇的；项目看板据此告警）；不在内网时沿用上一轮的，回来后不重复叫醒
             "rebalance": RB.suggest(hosts, old.get("rebalance"), t) if lan["ok"] else old.get("rebalance") or {},
             "event_kinds": EVENT_KINDS, "event_cats": EVENT_CATS,
-            "fleet": fleet, "disk": disk, "occ": occupancy(hosts, projects, t - KEEP_S), "sched": sched_view(hosts, projects, t, sw),
+            "fleet": fleet, "disk": disk, "occ": occupancy(hosts, projects, t - KEEP_S), "sched": sched_view(hosts, projects, t, sw, people),
             "regs": _regs(hosts, {k: v for k, v in by.items() if k in hcfg}, got, old, t, fleet_cfg),   # 登记的全局视图：项目「管理」抽屉的主机与队列
             # 各项目的摘要：页面要的字段只在 serve.Overview.proj_info 一处定，这里照带；running 只给 _to_worker 写 eta.json，不进快照（#139）
             "projects": [{k: v for k, v in p.items() if k != "running"} for p in projects],
@@ -460,8 +463,10 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
 WAIT_WINDOW_S = 86400
 
 
-def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | None = None) -> dict | None:
+def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | None = None, people: dict | None = None) -> dict | None:
     """工作台的调度卡：生效的设置与各项目的用量取最新一份 worker 状态的 share（各 worker 都按所有主机算，缺省值只在 worker）；
+    各项目算在谁名下（people：fleet.project_people，缺省现算；#23 份额按人）：person 是名字、pk 是 sched.json 里的人员键（同一个 pk 的合起来算一份），
+    看板上没有的项目两者都为 None（worker 里它们合起来算一份）；
     各项目此刻占几张卡（各主机 share.run 加起来）、排队几个（推演里还没开始的）、在等几个（有排位的）、
     近 1 天平均等多久（放行时记的 wait，按开始时刻取窗口：跑完的取本机存的用量记录 _keep_usage，在跑的取状态）、
     优先、暂停：null 或 {until（None 为无期限）, hosts}：项目级的（sw，主机清单 [sched.focus]、[sched.pause]，缺省现读）hosts 为 None，
@@ -482,6 +487,7 @@ def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | Non
     recent += [(r.get("project"), r.get("wait")) for st in allst for r in st.get("running") or [] if (r.get("t0") or 0) >= t - WAIT_WINDOW_S]
     sw = sched(t) if sw is None else sw
     by = pause_by()
+    people = F.project_people(ids) if people is None else people
     def flag(kind, pid):
         if pid in (sw.get(kind) or {}):
             return {"until": sw[kind][pid], "hosts": None, **({"by": by.get(pid)} if kind == "pause" else {})}
@@ -491,7 +497,8 @@ def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | Non
     out = []
     for pid in ids:
         waits = [w for p, w in recent if p == pid and w is not None]
-        out.append({"id": pid, "w": sh["weight"].get(pid, 1), "use": sh["use"].get(pid, 0.0),
+        who = people.get(pid)
+        out.append({"id": pid, "person": who, "pk": F.share_key(who) if who else None, "w": sh["weight"].get(pid, 1), "use": sh["use"].get(pid, 0.0),
                     "cards": round(sum(r[1] for st in allst for r in (st.get("share") or {}).get("run") or [] if r[0] == pid), 2),
                     "queued": sum(1 for st in allst for ln in (st.get("plan") or {}).get("lanes") or [] if ln.get("project") == pid
                                   for j in ln["jobs"] if not j.get("run")),

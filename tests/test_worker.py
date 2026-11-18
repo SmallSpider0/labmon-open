@@ -1108,7 +1108,30 @@ class AdmissionUnitTest(UnitBase):
             self.assertIsNotNone(w["start"])                                      # 推演里 b1 跑完就轮到它
             self.assertEqual(st["running"][0]["wait"], 0.0)                        # 一来就放行
             Path(self.w.p.sched).write_text(json.dumps({"weight": {"a": 100}, "wait_cap_min": 10}))
-            self.assertEqual(self.w.policy(), {"cap": 600.0, "hl": 86400.0, "w": {"a": 100.0}})
+            self.assertEqual(self.w.policy(), {"cap": 600.0, "hl": 86400.0, "w": {"a": 100.0}, "own": {}})
+            Path(self.w.p.sched).write_text(json.dumps({"owner": {"a": "k1", "b": "k1", "c": ""}}))      # 看板写的人员键（#23）；空的当没写
+            self.assertEqual(self.w.policy()["own"], {"a": "k1", "b": "k1"})
+        finally:
+            os.environ.pop("LABMON_GPUS")
+            for j in self.w.running.values():
+                os.killpg(j["pid"], 9)
+
+    def test_person_share_across_hosts(self):
+        # 按人的份额跨主机（#23）：别的主机上 amy 的 b 正跑着（它状态里的 share.run），这台 amy 的 a 与 bob 的 c 都在等、卡上一次只放得下一个：
+        # 按项目比 a 没用过、该先放；按人比 amy 已经在用，先放 bob 的 c
+        qs = self.hosts.queues({n: [n + "1|sleep 5   # vram=30 est_min=10"] for n in "ac"})
+        now = time.time()
+        self.hosts.status("o", share={"run": [["b", 1.0, now - 3600, now + 3600]]})
+        Path(self.w.p.sched).write_text(json.dumps({"owner": {"a": "k-amy", "b": "k-amy", "c": "k-bob"}}))
+        os.environ["LABMON_GPUS"] = "GPU-aaa:40000:40000"
+        try:
+            self.w.tick(qs, True)
+            st = json.loads(Path(self.w.p.status).read_text())
+            self.assertEqual([j["name"] for j in st["running"]], ["c1"])
+            w = st["waiting"][0]
+            self.assertEqual((w["name"], w["pos"]["n"]), ("a1", 1))
+            self.assertGreater(w["pos"]["puse"], 1.0)                             # amy 的用量是 b 在别的主机上跑的
+            self.assertEqual(w["pos"]["ratio"], 0.0)                              # a 自己没用过
         finally:
             os.environ.pop("LABMON_GPUS")
             for j in self.w.running.values():
@@ -1730,6 +1753,33 @@ class AdmitTest(UnitBase):
         self.m.admit(reqs, set(), self.m.POLICY, {"a": 1.0, "b": 4.0}, self.NOW, place)
         self.assertEqual(order, ["c1", "a2", "b1", "a1"])
 
+    def test_person_share(self):
+        # 按人的份额（#23）：先比人（同一人的几个项目用量合起来），同一人的项目之间才看优先与 用量 ÷ 权重
+        order = []
+        place = lambda r: order.append(r["key"])
+        pol = dict(self.m.POLICY, own={"a": "amy", "b": "amy", "c": "bob"})
+        reqs = [self.rq("a1", "a", 100), self.rq("b1", "b", 50), self.rq("c1", "c", 10)]
+        use = {"a": 1.0, "b": 1.0, "c": 1.5}                                               # amy 合计 2 > bob 1.5：按项目比 a、b 都比 c 小
+        self.assertEqual(self.m.admit(reqs, set(), pol, use, self.NOW, place), [])
+        self.assertEqual(order, ["c1", "a1", "b1"])                                         # bob 先；amy 的两个之间同为 1.0、先来的 a1 先
+        order.clear()
+        self.m.admit(reqs, {"b"}, pol, use, self.NOW, place)
+        self.assertEqual(order, ["c1", "b1", "a1"])                                         # 优先只在同一人的项目之间排前，不越过 bob（维护者 2026-11-17 定）
+        order.clear()
+        self.m.admit(reqs, set(), dict(pol, w={"a": 4.0}), use, self.NOW, place)
+        self.assertEqual(order, ["c1", "a1", "b1"])                                         # 权重只在 amy 的项目之间起作用
+        order.clear()
+        self.m.admit(reqs, set(), dict(pol, w={"b": 4.0}), use, self.NOW, place)
+        self.assertEqual(order, ["c1", "b1", "a1"])
+        order.clear()
+        reqs[2]["charge"] = 1.0                                                             # c1 放行记 1 卡·时：bob 变成 2.5 > amy 2，下一个仍是 amy 的
+        self.m.admit(reqs + [self.rq("c2", "c", 5)], set(), pol, use, self.NOW, place)
+        self.assertEqual(order, ["c1", "a1", "b1", "c2"])
+        # 排位带这人的用量；没写人员键的项目合起来算一份（旧看板、看板上没有的项目），全都没写时与按项目比一样（test_order）
+        out = self.m.admit([self.rq("a1", "a", 100), self.rq("z1", "z", 1)], set(), pol, {"a": 1.0, "b": 1.0, "z": 0.5}, self.NOW, lambda r: ("放不下", False))
+        self.assertEqual([(r["key"], pos["puse"]) for r, _, pos in out], [("z1", 0.5), ("a1", 2.0)])
+        self.assertEqual(self.m.fair_key(self.rq("z1", "z", 1), set(), pol, {"a": 1.0, "y": 0.25, "z": 0.5})[0], 0.75)
+
     def test_barrier_backfill_and_pos(self):
         cap, shadows = self.m.POLICY["cap"], []
         place = lambda r: ("显存不够", True) if r["key"] == "big" else None
@@ -1741,7 +1791,7 @@ class AdmitTest(UnitBase):
         reqs = [big, self.rq("small", "b", 60, dur=10), self.rq("slow", "c", 30, dur=60), self.rq("hold_x", "d", 5)]
         out = self.m.admit(reqs, set(), self.m.POLICY, {}, self.NOW, place, shadow)
         self.assertEqual([(r["key"], pos["n"]) for r, _, pos in out], [("big", 1), ("slow", 2)])     # small 回填（10×1.2 分钟内跑完），占位任务不受屏障管
-        self.assertEqual(out[0][2], {"n": 1, "focus": False, "ratio": 0.0, "barrier": True})
+        self.assertEqual(out[0][2], {"n": 1, "puse": 0.0, "focus": False, "ratio": 0.0, "barrier": True})
         self.assertEqual(out[1][2]["behind"], ["a", "big"])
         self.assertEqual(out[1][1], "让位：a 的 big 已等 31 分钟（等了 30 分钟以上的不再被越过；它预计 %s 能放行，这之前跑得完的才放）"
                          % self.m.now_str(self.NOW + cap)[5:16])

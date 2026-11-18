@@ -169,6 +169,7 @@ svg.spark { flex: 1; min-width: 0; width: 100%; height: 22px; cursor: crosshair;
 .rtab .mut { font-weight: 400; }
 .bar { position: relative; height: 10px; background: var(--soft); border-radius: 4px; display: flex; gap: 2px; }
 .bar.thin { height: 6px; }
+tr.sch-pp td { background: var(--soft); }          /* 调度卡按人分组时人那一行（#23） */
 .bar.big { height: 16px; }
 .bar > i > span { display: block; font-size: 10px; line-height: 16px; color: #fff; padding: 0 4px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bar > i.resv { opacity: .35; background-image: repeating-linear-gradient(135deg, rgba(255,255,255,.6) 0 2px, transparent 2px 5px); }
@@ -2147,7 +2148,7 @@ function schedW(p) {
   const e = swCur(p), w = e ? e.w : p.w;
   const b = (act, d, ch, what) => { const to = wStep(w, d);
     return `<button class="btn wb" data-sch="${act}" data-p="${esc(p.id)}" aria-label="权重${what}" ${to == null || e?.post ? "disabled" : ""} ${tip(to == null ? `已是最${d < 0 ? "低" : "高"}的一档` : `${what}到 ×${wtxt(to)}`)}>${ch}</button>`; };
-  return `<span class="flag wcap"><span class="k" ${tip("近期用量除以它再和别的项目比，小的先放，所以权重大的能多用。没写的项目为 1；写进主机清单的 [sched.weight]，各 worker 约 1 分钟内生效")}>权重</span>`
+  return `<span class="flag wcap"><span class="k" ${tip("同一人的几个项目之间：近期用量除以它再比，小的先放，所以权重大的能在这人的份额里多用（不改这人和别人之间的份额）。没写的项目为 1；写进主机清单的 [sched.weight]，各 worker 约 1 分钟内生效")}>权重</span>`
     + (canWeight() ? b("wd", -1, "−", "调低") : "") + `<b class="num">×${wtxt(w)}</b>` + (canWeight() ? b("wu", 1, "+", "调高") : "") + `</span>`;
 }
 // 一个项目的优先或暂停按钮（k：focus / paused）与弹窗（调度卡每行末尾、项目「管理」抽屉的调度节）：项目级的有了就换成撤销、恢复；暂停、恢复会给实验会话一条消息。
@@ -2156,9 +2157,9 @@ function schedFlag(p, k) {
   const sb = (...a) => schSb(p, ...a), go = (...a) => schGo(p, ...a), err = schErr, glob = p[k] && !p[k].hosts;
   if (k === "focus" && !canWeight() || k === "paused" && glob && !canWeight() && !pauseMine(p[k])) return "";
   if (k === "focus") return glob ? popConfirm(sb("uf", "undo", "undo", "撤销优先", "各主机下一轮起按份额排"), popIs("su", p.id),
-      `撤销 ${esc(pname(p.id))} 的优先：各主机下一轮起按份额排。${err()}`, go("ufgo", "撤销优先"))
-    : popConfirm(sb("f", "", "flag", "优先", "排到不优先的项目前面（所有主机，含之后加入的），如截稿前"), popIs("sf", p.id), !popIs("sf", p.id) ? "" :
-      `<div class="rn-note"><b>${esc(pname(p.id))} 优先</b>：在所有主机上（含之后加入的）排到不优先的项目前面（同 <code>labmon focus</code>）。不停正在跑的，只影响之后放谁。</div>
+      `撤销 ${esc(pname(p.id))} 的优先：各主机下一轮起在同一人的项目之间按份额排。${err()}`, go("ufgo", "撤销优先"))
+    : popConfirm(sb("f", "", "flag", "优先", "排到同一人不优先的项目前面（所有主机，含之后加入的），如截稿前；不越过别人的项目"), popIs("sf", p.id), !popIs("sf", p.id) ? "" :
+      `<div class="rn-note"><b>${esc(pname(p.id))} 优先</b>：在所有主机上（含之后加入的）排到同一人不优先的项目前面（同 <code>labmon focus</code>）；份额按人算，不越过别人的项目。不停正在跑的，只影响之后放谁。</div>
       ${whenPick("schu", "到期", POP.until, "无期限", "无期限：用完点「撤销优先」", {fresh: POP.wnow})}${err()}`, go("fgo", "优先"), true);
   return glob ? popConfirm(sb("ur", "undo", "play", "恢复", "各主机下一轮起照常放行它的任务"), popIs("sr", p.id),
       `恢复 ${esc(pname(p.id))}：各主机下一轮起照常放行它的任务。${err()}`, go("urgo", "恢复"))
@@ -2167,27 +2168,47 @@ function schedFlag(p, k) {
       ${whenPick("schp", "到期", POP.until, "无期限", "无期限：用完点「恢复」", {fresh: POP.wnow})}${err()}`, go("pgo", "暂停"), true);
 }
 const schedBtns = p => schedFlag(p, "focus") + " " + schedFlag(p, "paused");
-// 份额（调度卡与项目「管理」抽屉共用）：近期在用的项目 on（用过卡、占着卡、排着队），它们的用量和 su 与权重和 sw；
-// shareBar 是一个项目的「已用 / 应得」条：颜色条是近期用量占的比例，竖线是按权重应得的比例（近期没用卡的不画）
+// 份额（调度卡与项目「管理」抽屉共用；#23 按人）：近期在用的项目 on（用过卡、占着卡、排着队），它们的用量和 su；同一人（pk，看板上没有的项目 pk 为 null、合起来算一份）
+// 的几个项目合起来算一份，应得是 1 ÷ 近期在用的人数 n，再按权重分给这人的项目（sw(pk) 是这人在用项目的权重和）；who 是这人的名字（普通用户看别人的为 null）
+const pkOf = p => p.pk ?? null;
+const who = p => p.person || (p.pk ? "其他人" : "看板上没有的项目");
 function schedOn() {
   const on = (D.sched?.projects || []).filter(p => p.use > 0.005 || p.cards || p.queued || p.waiting);
-  return {on, su: on.reduce((a, p) => a + p.use, 0), sw: on.reduce((a, p) => a + p.w, 0)};
+  return {on, su: on.reduce((a, p) => a + p.use, 0), n: new Set(on.map(pkOf)).size,
+          sw: pk => on.filter(p => pkOf(p) === pk).reduce((a, p) => a + p.w, 0)};
 }
+// 几个人在用卡（调度卡按人分组、排位解释写不写人都看它）：近期在用的人超过一个
+const schedPeople = () => schedOn().n > 1;
 function shareBar(p) {
-  const {on, su, sw} = schedOn(), u = su ? 100 * p.use / su : 0, d = on.some(x => x.id === p.id) && sw ? 100 * p.w / sw : null;
+  const {on, su, n, sw} = schedOn(), u = su ? 100 * p.use / su : 0, ws = sw(pkOf(p)), d = on.some(x => x.id === p.id) && ws ? 100 / n * p.w / ws : null;
+  const split = n > 1 ? `${who(p)} 应得 1 ÷ ${n} 人，在这人近期在用的项目之间按权重分（${wtxt(p.w)} ÷ ${wtxt(ws)}）` : `${wtxt(p.w)} ÷ ${wtxt(ws)}`;
   return d == null ? `<span class="sm mut">近期没用卡</span>` : `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1;min-width:90px" ${tip(
-    `近期用量 ${g1(p.use)} 卡·时，占 ${Math.round(u)}%；权重 ${wtxt(p.w)}，应得 ${Math.round(d)}%（${wtxt(p.w)} ÷ ${wtxt(sw)}）\n用量 ÷ 权重 = ${g1(p.use / p.w)}：比别的项目小的先放；已用低于应得的，有任务时排在前面\n竖线是应得的位置`)}><i style="width:${u}%;background:${color(p.id)}"></i><b class="due" style="left:${d}%"></b></div>
+    `近期用量 ${g1(p.use)} 卡·时，占 ${Math.round(u)}%；权重 ${wtxt(p.w)}，应得 ${Math.round(d)}%（${split}）\n先比人：这人几个项目的用量合起来比别人小的先放；同一人的项目之间比用量 ÷ 权重（${g1(p.use / p.w)}），小的先\n竖线是应得的位置`)}><i style="width:${u}%;background:${color(p.id)}"></i><b class="due" style="left:${d}%"></b></div>
+    <span class="sm num nw">${Math.round(u)}% <span class="mut">/ ${Math.round(d)}%</span></span></div>`;
+}
+// 一个人的「已用 / 应得」（调度卡按人分组时人那一行）：颜色条是这人几个项目合起来的用量占比，竖线是 1 ÷ 近期在用的人数
+function personBar(ps) {
+  const {on, su, n} = schedOn(), use = ps.reduce((a, p) => a + p.use, 0), u = su ? 100 * use / su : 0, d = ps.some(p => on.includes(p)) ? 100 / n : null;
+  return d == null ? `<span class="sm mut">近期没用卡</span>` : `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1;min-width:90px" ${tip(
+    `${who(ps[0])} 名下近期用量合计 ${g1(use)} 卡·时，占 ${Math.round(u)}%；份额按人算，近期在用的 ${n} 人各应得 ${Math.round(d)}%\n竖线是应得的位置`)}><i style="width:${u}%;background:var(--muted)"></i><b class="due" style="left:${d}%"></b></div>
     <span class="sm num nw">${Math.round(u)}% <span class="mut">/ ${Math.round(d)}%</span></span></div>`;
 }
 function schedCard() {
   const S = D.sched;
   if (!S) return "";
-  const ps = S.projects, {on} = schedOn(), fo = ps.filter(p => p.focus), pa = ps.filter(p => p.paused);
+  const ps = S.projects, {on} = schedOn(), fo = ps.filter(p => p.focus), pa = ps.filter(p => p.paused), many = schedPeople();
+  // 按人分组（#23）：pk 相同的排在一起，组按这人近期用量合计从小到大（与放行的先后一致），组内照原顺序
+  const groups = [];
+  for (const p of ps) { const g = groups.find(g => pkOf(g[0]) === pkOf(p)); g ? g.push(p) : groups.push([p]); }
+  const gUse = g => g.reduce((a, p) => a + p.use, 0);
+  if (many) groups.sort((a, b) => gUse(a) - gUse(b));
+  const list = g => (g.some(p => on.includes(p)) ? g.filter(p => on.includes(p)) : g).map(p => `${esc(pname(p.id))} ×${wtxt(p.w)}`).join("、");
   // 标题行只留短句（谁优先、按份额轮流、谁暂停），算法细节在旁边的 ⓘ 里
-  const rule = [fo.length ? `${fo.map(p => esc(pname(p.id) + flagText("focus", p))).join("、")} 优先` : "",
-    `${fo.length ? "其余" : ""}按份额轮流（${(on.length ? on : ps).map(p => `${esc(pname(p.id))} ×${wtxt(p.w)}`).join("、")}）`,
+  const rule = [fo.length ? `${fo.map(p => esc(pname(p.id) + flagText("focus", p))).join("、")} 优先${many ? "（在各自主人的项目里）" : ""}` : "",
+    many ? `按人轮流（${groups.filter(g => g.some(p => on.includes(p))).map(g => `${esc(who(g[0]))}：${list(g)}`).join("；")}）`
+      : `${fo.length ? "其余" : ""}按份额轮流（${(on.length ? on : ps).map(p => `${esc(pname(p.id))} ×${wtxt(p.w)}`).join("、")}）`,
     pa.length ? `${pa.map(p => esc(pname(p.id) + flagText("paused", p))).join("、")} 暂停中` : ""].filter(Boolean).join("；");
-  const how = `份额：比的是近期 GPU 用量 ÷ 权重，小的先放（用量是所有主机上的卡·时，${wtxt(S.hl_h)} 小时减半）。卡在资源上等满 ${wtxt(S.cap_min)} 分钟的成为屏障，后面只放它放行前跑得完的。`;
+  const how = `份额按人算：先比人，同一人的几个项目的近期 GPU 用量合起来算一份，小的先放；同一人的项目之间优先的先，再比用量 ÷ 权重，小的先（用量是所有主机上的卡·时，${wtxt(S.hl_h)} 小时减半）。卡在资源上等满 ${wtxt(S.cap_min)} 分钟的成为屏障，后面只放它放行前跑得完的。`;
   const edit = ps.some(p => canWrite(p.id));
   const row = p => {
     const now = [p.cards ? `占 ${wtxt(p.cards)} 张卡` : "", p.queued ? `排队 ${p.queued}` : "", p.waiting ? `${p.waiting} 个在等` : ""].filter(Boolean).join(" · ");
@@ -2198,11 +2219,13 @@ function schedCard() {
       <td class="sm nw" ${p.wait_n ? tip(`近 1 天开始的 ${p.wait_n} 个任务，从排到队首（单元：申请）到放行平均等的时间`) : ""}>${p.wait_avg == null ? `<span class="mut">—</span>` : dur(p.wait_avg * 60)}</td>
       ${edit ? `<td class="r nw">${canWrite(p.id) ? schedBtns(p) : ""}</td>` : ""}</tr>`;
   };
+  const head = g => `<tr class="sch-pp"><td><b>${esc(who(g[0]))}</b> <span class="sm mut">${g.length} 个项目</span></td><td></td><td style="min-width:170px">${personBar(g)}</td>
+      <td class="sm mut" colspan="${edit ? 3 : 2}">合计 ${g1(gUse(g))} 卡·时</td></tr>`;
   return `<div class="card"><div class="chd wrap"><b>调度</b><span class="sm mut">${rule}
       <span class="ii" ${tip(how + "\nworker 每轮按这套规则放行，推演也用它（排位与预计开始见任务卡的等待）。不抢占：正在跑的不停。\n权重、优先与暂停由你定：都写在主机清单的 [sched]（[sched.weight]、[sched.focus]、[sched.pause]），所有主机生效、含之后加入的（同不带 --host 的 labmon focus / pause）。")}>ⓘ</span></span></div>
     ${SMSG ? `<div class="rn-state">${esc(SMSG)}</div>` : ""}
-    <div class="scroll"><table><tr><th>项目</th><th ${tip("用量除以它再和别的项目比；没写的为 1")}>权重</th><th ${tip("颜色条：近期用量（衰减后的卡·时）占的比例；竖线：按权重应得的比例")}>已用 / 应得</th><th>此刻</th><th>平均等</th>${edit ? "<th></th>" : ""}</tr>
-    ${ps.map(row).join("")}</table></div></div>`;
+    <div class="scroll"><table><tr><th>项目</th><th ${tip("同一人的项目之间，用量除以它再比；没写的为 1")}>权重</th><th ${tip("颜色条：近期用量（衰减后的卡·时）占的比例；竖线：应得的比例（份额按人算，再按权重分给这人的项目）")}>已用 / 应得</th><th>此刻</th><th>平均等</th>${edit ? "<th></th>" : ""}</tr>
+    ${many ? groups.map(g => head(g) + g.map(row).join("")).join("") : ps.map(row).join("")}</table></div></div>`;
 }
 // 调度的写回（POST /sched/<what>）：回执写进 SMSG（smsg），1 分钟后收起
 let SMT = 0;
@@ -2247,14 +2270,18 @@ async function schedAct(act, pid) {
   }
   render(false);
 }
-// 等待表的排位解释：worker 的 admit 逐条比的（优先、用量 ÷ 权重、先来先跑、屏障），同一台主机上排在它前面的是谁
+// 等待表的排位解释：worker 的 admit 逐条比的（fair_key：这人的用量、同一人里的优先、用量 ÷ 权重、先来先跑；屏障），同一台主机上排在它前面的是谁
 function rankTip(x, ws) {
   if (!x.pos) return x.held ? "被临时指令挡住，不参与排队" : x.dep ? "依赖还没满足，不参与排队（满足后从那时起排）" : "";
   const P = x.pos, cap = D.sched?.cap_min ?? 30, same = ws.filter(y => y.h === x.h && y.pos), prev = same.find(y => y.pos.n === P.n - 1);
-  const w = D.sched?.projects.find(p => p.id === x.project)?.w ?? 1;
-  const ahead = !prev ? "没有排在它前面的" : prev.pos.focus && !P.focus ? `前面的 ${pname(prev.project)} 优先`
+  const sp = y => D.sched?.projects.find(p => p.id === y.project), w = sp(x)?.w ?? 1, many = schedPeople();
+  const mate = prev && pkOf(sp(prev) || {}) === pkOf(sp(x) || {});      // 前面那个与它同一人（或都不知道是谁）
+  const ahead = !prev ? "没有排在它前面的" : !mate && (prev.pos.puse ?? 0) < (P.puse ?? 0) - 1e-9 ? `前面的 ${pname(prev.project)} 是${who(sp(prev) || {})}的，这人近期用得更少（${g1(prev.pos.puse)} < ${g1(P.puse)} 卡·时）`
+    : prev.pos.focus && !P.focus ? `前面的 ${pname(prev.project)} 优先`
     : prev.project === x.project ? `前面的 ${prev.name} 是同一项目、先来的` : prev.pos.ratio < P.ratio ? `前面的 ${pname(prev.project)} 是 ${prev.pos.ratio}，更小` : `前面的 ${pname(prev.project)} 也是 ${prev.pos.ratio}，它先来`;
-  return [`${hostShort(x.h)} 上在等的 ${same.length} 个里排第 ${P.n}`, P.focus ? `${pname(x.project)} 优先（focus），排在不优先的前面` : "没有优先（focus）",
+  return [`${hostShort(x.h)} 上在等的 ${same.length} 个里排第 ${P.n}`,
+    ...(many && P.puse != null ? [`先比人：${who(sp(x) || {})}名下几个项目的用量合计 ${g1(P.puse)} 卡·时，比别人小的先`] : []),
+    P.focus ? `${pname(x.project)} 优先（focus），排在${many ? "同一人" : ""}不优先的项目前面` : "没有优先（focus）",
     `轮到它时 ${pname(x.project)} 的用量 ÷ 权重 = ${P.ratio}（权重 ${wtxt(w)}）；${ahead}`,
     `已等 ${x.since ? dur(D.generated - x.since) : "—"}` + (P.barrier ? `，等满 ${cap} 分钟又卡在资源上，成了屏障：后面的只放它放行前跑得完的`
       : P.behind ? `；${pname(P.behind[0])} 的 ${P.behind[1]} 等满 ${cap} 分钟成了屏障，这个在它放行前跑不完，让它先` : D.generated - x.since < cap * 60 ? `，还没等满 ${cap} 分钟` : ""),

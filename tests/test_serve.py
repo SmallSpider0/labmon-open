@@ -37,6 +37,45 @@ from labmon import serve as S  # noqa: E402
 from labmon.serve import Handler, Listener, Overview, Project, Server  # noqa: E402
 
 
+class PersonShareTest(unittest.TestCase):
+    """按人的公平份额（#23）：项目算在谁名下（fleet.project_people）、调度卡的 person 与 pk、普通用户看不到别人项目的主人名。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        os.environ["LABMON_STATE"] = str(Path(self.tmp.name) / "state")
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_people_and_sched_view(self):
+        from labmon import fleet as F
+        make_token("amy", role="user", scopes=("project",))
+        make_token("bob", role="user", scopes=("project",))
+        PJ.put_config("pa", 'id = "pa"\n', owner="amy")
+        PJ.put_config("pb", 'id = "pb"\n', owner="amy")
+        PJ.put_config("pc", 'id = "pc"\n', owner="bob")
+        PJ.put_config("pd", 'id = "pd"\n')                                              # 没有主人：归管理员
+        people = F.project_people(["pa", "pb", "pc", "pd"])
+        self.assertEqual(people, {"pa": "amy", "pb": "amy", "pc": "bob", "pd": F.ADMIN_PERSON})
+        now = time.time()
+        hosts = [fake_host("x", status=dict(share={"wait_cap_min": 30.0, "half_life_h": 24.0, "weight": {}, "use": {"pa": 1.0, "pc": 2.0, "zz": 0.5}, "run": []},
+                                            waiting=[waiting_job("w1", "zz", pos={"n": 1})]))]
+        v = O.sched_view(hosts, [{"id": p} for p in ("pa", "pb", "pc", "pd")], now, {}, people)
+        sp = {p["id"]: p for p in v["projects"]}
+        self.assertEqual({k: p["person"] for k, p in sp.items()}, {"pa": "amy", "pb": "amy", "pc": "bob", "pd": F.ADMIN_PERSON, "zz": None})
+        self.assertEqual(sp["pa"]["pk"], sp["pb"]["pk"])
+        self.assertNotEqual(sp["pa"]["pk"], sp["pc"]["pk"])
+        self.assertEqual((sp["pa"]["pk"], sp["zz"]["pk"]), (F.share_key("amy"), None))   # 看板上没有的项目没有人员键（worker 里合起来算一份）
+        self.assertNotIn("amy", F.share_key("amy"))                                      # 共享盘上写的是短哈希，不是名字
+        # 普通用户：别人项目的主人名去掉，分组用的 pk 照留
+        amy = U.Ident("amy", "user", frozenset({"read", "project"}), "token", "k")
+        out = U.view(amy, {"sched": v, "hosts": [], "projects": []}, U.Access({"pa", "pb"}, set(), set()))
+        sv = {p["id"]: p for p in out["sched"]["projects"]}
+        self.assertEqual({k: p["person"] for k, p in sv.items()}, {"pa": "amy", "pb": "amy", "pc": None, "pd": None, "zz": None})
+        self.assertEqual(sv["pc"]["pk"], sp["pc"]["pk"])
+        self.assertEqual(v["projects"][2]["person"], "bob")                                # 不改原快照
+
+
 class TellTest(unittest.TestCase):
     """页面上的改动告诉实验会话（#121）：records.tell 记一行，told 进全局快照的 wake（按项目、不按主机）；labmon wait 报一次，
     labmon check 列出还没报过的、记成已报（只加不删），之后 wait 不重报；7 天后不再给。"""
@@ -1299,7 +1338,10 @@ class OverviewTest(unittest.TestCase):
                 for k, v in old.items():
                     os.environ.pop(k) if v is None else os.environ.__setitem__(k, v)
             self.assertGreater(json.loads((wh / "eta.json").read_text())["t"], now + 3000)
-            self.assertEqual(json.loads((wh / "sched.json").read_text()), {"half_life_h": 12, "weight": {"a1": 2}})   # [sched] 原样下发，不是正数的不发
+            sj = json.loads((wh / "sched.json").read_text())
+            own = sj.pop("owner")
+            self.assertEqual(sj, {"half_life_h": 12, "weight": {"a1": 2}})   # [sched] 原样下发，不是正数的不发
+            self.assertEqual((set(own), len(set(own.values()))), ({"a1", "demo-b"}, 1))   # 各项目算在谁名下（#23）：都没主人，归管理员、算一个人
             self.assertEqual(json.loads((wh / "returned.json").read_text()), {"hosts": ["gone"]})   # 主机清单里已归还的（#25 非阻塞 1）
             occ = {r["n"]: r for r in snap["occ"]["here"]}
             self.assertEqual((occ["old2"]["st"], occ["old2"]["g"], occ["old2"]["p"]), ("done", [0], "a1"))

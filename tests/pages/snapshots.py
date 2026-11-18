@@ -388,8 +388,8 @@ def overview() -> dict:
             "fleet": _fleet(a), "disk": _disk(), "occ": {"srv-a": occ_a, "srv-b": occ_b}, "regs": _regs(a, b),
             "rebalance": {"proj-a": dict(REBAL), "proj-b": {"why": ["srv-a 上本项目 11-10 22:59 后没活，接不了：srv-b 上 jobs/b3.txt 的队尾 hold_b 是占位任务，不挪"], "from": NOW + 9 * H}},
             "sched": {"cap_min": 30.0, "hl_h": 24.0, "projects": [
-                {"id": "proj-a", "w": 1, "use": 18.9, "cards": 1.0, "queued": 2, "waiting": 2, "wait_avg": 12.5, "wait_n": 3, "focus": {"until": NOW + 6 * H, "hosts": None}, "paused": None},
-                {"id": "proj-b", "w": 2, "use": 3.2, "cards": 1.0, "queued": 1, "waiting": 1, "wait_avg": None, "wait_n": 0, "focus": None, "paused": {"until": None, "hosts": ["srv-a"]}}]},
+                {"id": "proj-a", "person": "amy", "pk": "5a1c0e7d9b2f", "w": 1, "use": 18.9, "cards": 1.0, "queued": 2, "waiting": 2, "wait_avg": 12.5, "wait_n": 3, "focus": {"until": NOW + 6 * H, "hosts": None}, "paused": None},
+                {"id": "proj-b", "person": "amy", "pk": "5a1c0e7d9b2f", "w": 2, "use": 3.2, "cards": 1.0, "queued": 1, "waiting": 1, "wait_avg": None, "wait_n": 0, "focus": None, "paused": {"until": None, "hosts": ["srv-a"]}}]},
             "projects": [
                 {"id": "proj-a", "title": "Alpha 实验", "owner": "amy", "alerts": 1, "alert_msgs": ["srv-a 数据盘 只剩 12.5 GiB"],
                  "generated": NOW - 120, "no_work_since": None,
@@ -497,7 +497,7 @@ def overview_evil() -> dict:
     d["colors"]["evil"] = "#123456"
     d["rebalance"]["proj-a"]["text"] = "挪" + BAD
     d["rebalance"]["proj-b"]["why"] = ["因" + BAD]
-    d["sched"]["projects"].append({"id": "evil", "w": 2, "use": 1.0, "cards": 0, "queued": 1, "waiting": 1, "wait_avg": None, "wait_n": 0, "focus": {"until": None, "hosts": None}, "paused": {"until": None, "hosts": None, "by": "人" + BAD}})
+    d["sched"]["projects"].append({"id": "evil", "person": "人" + BAD, "pk": "e" + BAD, "w": 2, "use": 1.0, "cards": 0, "queued": 1, "waiting": 1, "wait_avg": None, "wait_n": 0, "focus": {"until": None, "hosts": None}, "paused": {"until": None, "hosts": None, "by": "人" + BAD}})
     F = d["fleet"]
     F["servers"][1].update(holder="人" + BAD, job="作业" + BAD)
     F["servers"][1]["sample"]["work"][0].update(label="负载" + BAD, names=["名" + BAD], cwd="/d/" + BAD, chain=["链" + BAD])
