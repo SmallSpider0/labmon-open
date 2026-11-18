@@ -15,7 +15,9 @@
 3. 改的文件不全在文档、测试、工具里（labmon.deploy.is_doc）就重启服务（本机：重启前再等一次平台操作做完，再 kickstart；远端由服务端做），
    等服务答得上、报出新提交；
 4. POST /collect?fresh 两次（fresh：不受节流，等请求之后开始的那一轮做完）；
-5. 改了 labmon_worker.py 的，各台没 stop 过、连得上的主机拉起 worker，再采集一次；
+5. 改了 labmon_worker.py 的，各台没 stop 过、连得上的主机拉起 worker，再采集；
+   第 4、5 步的最后一次采集后，快照不晚于采集请求、拉起成了的主机状态不晚于拉起的（新 worker 还没写出第一份状态），
+   每 SETTLE_POLL_S 秒再采一次，最多等 SETTLE_S 秒（#70），等不到照样往下核对、由核对报没过；
 7. 核对：没有进行中的平台操作；服务日志重启以来（没重启就是最后一次「服务启动」以来）没有 Traceback；
    各主机 worker 在写状态（worker_up、age 不超过 AGE_OK 秒，拉起过的状态晚于拉起时刻）；
    看板上的工作台与项目页下载下来，在 node 里用 tests/pages 的桩按路由渲染，不报错、不漏 NaN/undefined（tests/pages/smoke.js）。
@@ -62,6 +64,8 @@ ARTIFACTS = {"docs/workflow.html": "流程总览", "docs/intro.html": "项目介
 POLL_S = 15            # 等平台操作做完时多久看一次
 UP_S = 60              # 重启后最多等多久服务答得上（远端另加服务端的 2 秒延迟）
 AGE_OK = 90            # worker 状态多旧还算在写（worker 每 10 秒写一次）
+SETTLE_S = 120         # 采集、拉起之后最多等这么久，等出晚于采集请求的快照、晚于拉起的 worker 状态（#70）
+SETTLE_POLL_S = 10     # 其间多久再采一次（worker 每 10 秒写一次状态）
 MAX_LINES = 15         # 结论最多几行（带上去的提交多了只列几个）
 SMOKE = ROOT / "tests" / "pages" / "smoke.js"
 TEST_ENV = ("LABMON_STATE", "LABMON_HOSTS", "LABMON_LAN")   # 测试用的变量：带着它们跑，平台操作会从临时目录判断、拉 worker 按假清单，一律拒绝
@@ -236,6 +240,34 @@ def wait_idle(wait_min: float) -> str:
     return ""
 
 
+def state_after(snap: dict, h: dict, t: float) -> bool:
+    """这台 worker 的状态时刻（按 generated − age 换到看板时钟）不早于 t。"""
+    return snap.get("generated", 0) - h["age"] >= t
+
+
+def fresh(snap: dict | None, mark: float | None, started: dict) -> bool:
+    """快照不早于 mark（采集请求前的时刻）、started 里的各台在写状态且状态不早于拉起：核对读得到这次部署之后的样子。"""
+    if snap is None or mark is not None and snap.get("generated", 0) < mark:
+        return False
+    hs = {h["id"]: h for h in snap.get("hosts") or []}
+    return all((h := hs.get(hid)) and h.get("worker_up") and h.get("age") is not None and h["age"] <= AGE_OK and state_after(snap, h, t)
+               for hid, t in started.items())
+
+
+def settle(mark: float | None, started: dict) -> dict | None:
+    """带 fresh 采集，直到 fresh(...) 成立；不成立每 SETTLE_POLL_S 秒再采，最多 SETTLE_S 秒，返回最后一份快照（没采到是 None）。
+    拉起 worker 只等到新进程起来，它写出第一份状态要再过几秒；采集超时（504）时看板上还是旧快照（#70）。"""
+    t0, said = _now(), False
+    while True:
+        snap = collect()
+        if fresh(snap, mark, started) or _now() - t0 >= SETTLE_S:
+            return snap
+        if not said:
+            say("等新的快照与 worker 状态" + (f"（{'、'.join(started)}）" if started else ""))
+            said = True
+        _sleep(SETTLE_POLL_S)
+
+
 def host_check(snap: dict, started: dict) -> tuple[bool, str]:
     """各主机 worker 在不在写状态：一行文字。stop 过的不查；拉起过的状态时刻（按 generated − age 换到本机时钟）要晚于拉起时刻。"""
     good, parts = True, []
@@ -249,7 +281,7 @@ def host_check(snap: dict, started: dict) -> tuple[bool, str]:
             why = h.get("error") or h.get("status_error") or ("没有状态" if not h.get("status") else f"状态停在 {config.fmt_dur(h.get('age') or 0)} 前")
             parts.append(f"{hid} 不在（{why}）")
             continue
-        ok = hid not in started or snap.get("generated", 0) - h["age"] >= started[hid]
+        ok = hid not in started or state_after(snap, h, started[hid])
         good &= ok
         parts.append(f"{hid} 在写状态（{round(h['age'])} 秒前" + ("" if hid not in started else "，晚于拉起" if ok else "，早于拉起：新 worker 没写状态") + "）")
     return good, "；".join(parts) or "没有主机"
@@ -438,7 +470,7 @@ def deploy(wait_min: float) -> tuple[int, list[str]]:
     if (restart and u["up"]) or pend:
         say("采集两次")
         collect()
-        snap = collect()
+        snap = settle(mark, {})
         if snap is None:
             checks.append((False, "采集没完成（POST /collect 没回快照）"))
         if (wk or pend) and snap:
@@ -461,7 +493,7 @@ def deploy(wait_min: float) -> tuple[int, list[str]]:
                 checks.append((False, "；".join(bad) + "（下次跑部署脚本补上）"))
             set_pending(left)
             mark = clock()
-            collect()
+            settle(mark, {hid: t for hid, t in started.items() if hid not in left})
     n_doc = sum(map(D.is_doc, files))
     out.append("重启看板：" + ("没重启（平台操作在做）" if u["held"] else "是" if restart else "否") + (f"（改了 {len(files) - n_doc} 个代码文件）" if restart or u["held"] else f"（只改了文档、测试或工具，{len(files)} 个文件）" if files else "（没有新提交）")
                + "｜worker：" + ("改了，拉起 " + ("、".join(started) or "没有主机") if wk else "补拉起上次没成的 " + ("、".join(started) or "（都连不上）") if pend

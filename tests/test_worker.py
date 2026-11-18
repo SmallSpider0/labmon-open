@@ -5507,14 +5507,18 @@ class LocalDiskTest(UnitBase):
         w.info = {"started": st, "rootfs": {"ok": True}}
         s = go()
         self.assertEqual((s["wrote"]["since"], s["wrote"]["n"], s["projects"]), (round(st), 1, {}))
-        time.sleep(1.1)                                                                                 # scan_local 把时刻取整：前后各留出余量
-        g = time.time() - 0.5
-        w.ovr = [{"kind": "guest", "target": None, "t": g}]
+        # 借来的时刻取文件自己的 ctime 往前 0.1 秒，不靠 time.time() 与文件时刻的先后（文件时刻按内核粗时钟，可能早几毫秒，#70）；
+        # 写在一秒的后段：借来时刻四舍五入会进到下一秒、晚于文件，往下取整才数得到它
+        time.sleep(1.2)                                                                                 # w.bin 与借来时刻隔开一秒以上
+        while not 0.7 <= time.time() % 1 < 0.8:
+            time.sleep(0.01)
         self.put("root/ours.bin", 4096)
+        g = (self.root / "root" / "ours.bin").stat().st_ctime - 0.1
+        w.ovr = [{"kind": "guest", "target": None, "t": g}]
         s = go()
-        self.assertEqual((s["wrote"]["since"], s["wrote"]["n"]), (round(g), 1))                       # 借来以前的 w.bin 不算
+        self.assertEqual((s["wrote"]["since"], s["wrote"]["n"]), (int(g), 1))                         # 借来以前的 w.bin 不算，借来之后的 ours.bin 算
         w.ovr = [{"kind": "guest", "target": None, "t": g + 30}]                                          # 指令重下：沿用最早的
-        self.assertEqual(go()["wrote"]["since"], round(g))
+        self.assertEqual(go()["wrote"]["since"], int(g))
         w.info = {"started": st, "rootfs": {"ok": False}}
         self.assertIsNone(go()["wrote"])
 
@@ -6406,7 +6410,8 @@ class LocalDepsTest(WorkerBase):
         # 目录里增删过东西、有任务跑完的提前；扫得太慢的拆成子目录；别的主机不扫
         root = self.d / "data1"
         W = load_worker({"LABMON_HOME": str(root / "alice" / "labmon"), "LABMON_LOCAL": str(self.d / "local")})
-        for p, n in (("alice/a1/x.bin", 5000), ("alice/a1/sub/y.bin", 3000), ("bob/ckpt/z.bin", 9000), ("bob/readme", 10), ("top.sh", 10)):
+        # x.bin 占 12 KiB，sub 是目录块加 y.bin：ext4 上 8 KiB。x.bin 写 5000 字节时两边都是 8 KiB，同样大的顺序随 scandir，偶发互换（#70）
+        for p, n in (("alice/a1/x.bin", 9000), ("alice/a1/sub/y.bin", 3000), ("bob/ckpt/z.bin", 9000), ("bob/readme", 10), ("top.sh", 10)):
             f = root / p
             f.parent.mkdir(parents=True, exist_ok=True)
             f.write_bytes(b"x" * n)

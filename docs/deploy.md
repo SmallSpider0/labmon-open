@@ -37,6 +37,8 @@ labmon secret rm platform [--user 账号]    # 删掉（连同存着的平台登
 - **本机模式**（缺省，搬家前一直用它）：看板服务就在这台，pull 主 checkout 本身、重启服务、读本机日志。
 - **远端模式**：写了 `~/.config/labmon/deploy.toml` 或给了 `--to` 时。脚本不 ssh：确认本地 main 与 `origin/main` 一致，按服务端 checkout 现在的提交打增量 git bundle（服务端的提交本地没有就打整份），经 `POST /api/admin/deploy` 传过去；服务端校验、快进，改了代码的等平台操作做完后自己重启（[api.md「部署接口」](api.md#部署接口)）。脚本等 `GET /api/me` 报出新提交，采集两次（响应体未收全时，该次采集重试一次），改了 worker 的逐台 `POST /api/worker/start`，核对与本机模式同一套（平台操作与日志 Traceback 读 `GET /api/admin/deploy`）。
 
+两种模式核对前都先等结果落地（#70）：最后一次采集后，快照早于采集请求（采集超时）、或拉起成了的主机状态还早于拉起（新 worker 还没写出第一份），就每 10 秒再带 `fresh` 采一次，最多等 2 分钟（`SETTLE_S`）；等不到照样核对，由核对报没过。
+
 ```toml
 # ~/.config/labmon/deploy.toml（笔记本上；迁移那天写，#171）
 url = "https://<dashboard-host 内网 IP>:8443/"

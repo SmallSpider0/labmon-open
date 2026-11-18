@@ -76,6 +76,8 @@ class Rig:
         self.pending = tmp / "deploy_pending.json"
         self.log.write_text("[labmon] 11-09 10:00:00 服务启动：http://127.0.0.1:8765/ ；项目 a\n")
         self.age_after_start = 3        # 拉起之后的采集里，worker 状态的 age
+        self.lag = 0                    # 拉起之后还有几次采集读到的是旧 worker 的状态（新 worker 还没写出第一份，#70）
+        self.timeouts = 0               # 接下来几次采集超时（504，看板上还是旧快照）
         self.tok, self.me = "lm_部署令牌", 200   # 部署令牌（#160）与看板认不认它（/api/me 的状态码）
 
     # ---- 假的外部动作 ----
@@ -98,12 +100,12 @@ class Rig:
             return "\n".join(self.files)
         raise AssertionError(f"没想到的 git {a}")
 
-    def snap(self):
+    def snap(self, stale=False):
         hs = []
         for h in self.hosts:
             h = dict(h)
             if h["id"] in self.started:
-                h["age"] = self.age_after_start
+                h["age"] = self.t - self.started[h["id"]] + 1 if stale else self.age_after_start
             hs.append(h)
         return {"generated": self.t, "hosts": hs, "projects": []}
 
@@ -113,9 +115,15 @@ class Rig:
             return (self.me, b"{}") if self.up else (0, b"")
         if method == "POST" and path == "/collect?fresh":
             self.t += 5
-            return 200, json.dumps(self.snap()).encode()
-        if path == "/overview.json":
-            return 200, json.dumps(self.snap()).encode()
+            if self.timeouts:
+                self.timeouts -= 1
+                return 504, '{"error": "采集超时"}'.encode()
+            stale = bool(self.started) and self.lag > 0
+            self.lag -= stale
+            self.last = self.snap(stale)
+            return 200, json.dumps(self.last).encode()
+        if path == "/overview.json":                     # 看板上的是最后一次采完的那份
+            return 200, json.dumps(self.last).encode()
         raise AssertionError(f"没想到的请求 {method} {path}")
 
     def kickstart(self):
@@ -137,6 +145,7 @@ class Rig:
 
     def run(self, wait=30):
         self.started = {}
+        self.last = self.snap()
         orig = self.worker_start
 
         def ws(hid):
@@ -201,10 +210,40 @@ class DeployTest(unittest.TestCase):
     def test_worker_status_older_than_start_fails(self):
         """拉起之后 worker 状态的时刻（generated − age）早于拉起时刻：新 worker 没写状态，不过。"""
         r = self.rig(files=["labmon/labmon_worker.py"])
-        r.age_after_start = 60           # 状态停在拉起之前
+        r.lag = 10 ** 6                  # 状态一直停在拉起之前
+        with mock.patch.object(DP, "SETTLE_S", 0):          # 不等：采一次就核对（旧状态还不到 AGE_OK）
+            rc, out = r.run()
+        self.assertEqual(rc, 1, out)
+        self.assertIn("早于拉起：新 worker 没写状态", "\n".join(out))
+
+    def test_waits_for_new_worker_state(self):
+        """拉起之后头两次采集读到的还是旧 worker 的状态：再采、等到新状态才核对，核对通过（#70）。"""
+        r = self.rig(files=["labmon/labmon_worker.py"])
+        r.lag = 2
+        rc, out = r.run()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(r.calls.count("POST /collect?fresh"), 5)
+        self.assertIn("a 在写状态（3 秒前，晚于拉起）", "\n".join(out))
+
+    def test_waits_for_collect_after_timeout(self):
+        """拉起之后那次采集超时（看板上还是拉起前的快照）：再采一次，拿到新快照再核对（#70）。"""
+        r = self.rig(files=["labmon/labmon_worker.py"])
+        orig = r.worker_start
+        r.worker_start = lambda hid: (setattr(r, "timeouts", 1), orig(hid))[1]
+        rc, out = r.run()
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn("不是新的", "\n".join(out))
+
+    def test_wait_for_new_state_is_bounded(self):
+        """新 worker 一直不写状态：最多等 SETTLE_S 秒，之后照样核对、报不过。"""
+        r = self.rig(files=["labmon/labmon_worker.py"])
+        r.lag = 10 ** 6
+        t0 = r.t
         rc, out = r.run()
         self.assertEqual(rc, 1, out)
-        self.assertIn("早于拉起", "\n".join(out))
+        self.assertIn("✗ worker：a 不在", "\n".join(out))
+        self.assertLess(r.t - t0, DP.SETTLE_S + 120)
+        self.assertGreater(r.calls.count("POST /collect?fresh"), 3)
 
     def test_stale_worker_fails(self):
         """worker 不在（age 太大）：不过，写出停了多久。"""
