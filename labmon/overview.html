@@ -2595,8 +2595,6 @@ function sharedBar(x, thin) {
 const G = b => b == null ? "—" : b >= GIB ? g1(b / GIB) + " GiB" : Math.round(b / 2 ** 20) + " MiB";
 
 /* ---------- 共享盘（组内服务器 · 共享盘、人员卡与抽屉）：D.disk 是按人汇总好的；各人的颜色记在看板里，不随排名变 ---------- */
-const GB = b => b == null ? "—" : Math.abs(b) >= 100 * GIB ? String(Math.round(b / GIB)) : g1(b / GIB);
-const dGB = b => !b || Math.abs(b) < GIB / 20 ? "0" : (b > 0 ? "+" : "−") + GB(Math.abs(b));
 const DKC = n => n === "公共" ? "var(--faint)" : D.disk?.colors?.[n] || "var(--muted)";
 const diskOf = n => (D.disk?.owners || []).find(o => o.name === n);
 const ago = t => t ? dur(D.generated - t) + "前" : "—";

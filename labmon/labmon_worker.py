@@ -1145,6 +1145,7 @@ class Disk:
         self.ixf = os.path.join(self.dir, "index.json")
         self.ix, self.job, self.mine, self.lease_t, self.wait = None, None, False, 0.0, None   # wait：共享盘慢、推迟中的说明
         self.rate, self.saved, self.dirty = {}, 0.0, False   # 接连几件共用的限速计数（Pace）；索引上次写盘的时刻、有没有没写的
+        self.roots, self.lsplit = set(), set()   # 登记了清单的项目根（want）；这次列目录用的拆开的目录（列完并进索引的 split）
 
     def lease(self, now):
         """每分钟看一次租约：别的主机 SCAN_LEASE_S 内续过就不扫；否则（或本来就是本机）续上。"""
@@ -1167,6 +1168,21 @@ class Disk:
             self.ix = json.loads(read(self.ixf, "") or "{}")
         except ValueError:
             self.ix = {}
+
+    def want(self, roots):
+        """登记了清单的项目根（各台状态的 storage.projects，Worker.scan_local 合起来给）：下一次列目录时把它们连同在二级以下的各级父目录
+        一起拆开（与扫得太慢拆开的同一个 split），项目根下的一级目录各成一个单位、按项目分开统计（#53）。只记下来，列目录时才用。"""
+        self.roots = set(roots)
+
+    def forced(self):
+        """want 的项目根要拆开的目录：根下第二级起到项目根本身（第一级本来就进）。不在这块盘上的不管。"""
+        out = set()
+        for r in self.roots:
+            rel = os.path.relpath(os.path.normpath(r), self.root)
+            parts = [x for x in rel.split("/") if x and x != "."]
+            if parts and parts[0] != "..":
+                out.update(os.path.join(self.root, *parts[:k]) for k in range(2, len(parts) + 1))
+        return out
 
     def hint(self, d):
         """有任务在 d 下跑完：d 里的单位尽快重扫（仍守 SCAN_COST）。"""
@@ -1200,12 +1216,14 @@ class Disk:
         """挑下一件：先列目录（到点了），再扫到期的单位里最早到期的那个。"""
         ix = self.ix
         due = [(r.get("due", 0), u) for u, r in ix["units"].items() if r.get("due", 0) <= now]
-        listing = now - ix.get("listed", 0) >= SCAN_LIST_S
+        split = set(ix["split"]) | self.forced()
+        # 到点了列目录；有新的项目根要拆开时提前列（列失败的隔一分钟再试）
+        listing = now - ix.get("listed", 0) >= (60 if split - set(ix["split"]) else SCAN_LIST_S)
         self.wait = (listing or due) and defer(self.key, now) or None
         if self.wait:
             return
         if listing:
-            split = set(ix["split"])
+            self.lsplit = split
             self.start(now, "list", lambda pace: self.lister(split, pace), None)
             return
         if due:
@@ -1264,6 +1282,7 @@ class Disk:
             ix["listed"] = round(now)
             got = out.get("r") or {}
             if got:
+                ix["split"] = sorted(set(ix["split"]) | self.lsplit)   # 新拆开的与列出的子单位同一次写进索引：看板按它认“新拆开的”（disk.absorb）
                 for u in list(units):
                     if u not in got:
                         units.pop(u)
@@ -1969,6 +1988,7 @@ class Worker:
         self.oom_n, self.oom_ours, self.hit = None, 0, None   # 容器 oom_kill 计数（上一轮）、其间被杀的我们的任务数、最近一次杀了别人进程的时刻
         self.squeezed = {}                    # 任务名 → 借来的主机上被对方挤掉、重新排队的次数
         self.hist_cache, self.hist, self.hist_v = {}, [], 0   # 各主机的用量记录（load_hist），hist_v 每次有变化加一
+        self.hinted, self.hint_v, self.hint_ix = set(), -1, None   # 已按跑完提前重扫过的用量行（disk_ends）、那时的 hist_v 与索引
         self.reload_hist()
         self.qlists, self.durs, self.durs_key = {}, {}, None   # 各清单的 (fsig, [(名称, 资源提示)])、预计时长（queue_durs）
         self.durk = {}                                        # (项目, 任务, 清单估时, 同卡任务数 k) → duration 的结果（dur_k；queue_durs 重算时清掉）
@@ -3729,8 +3749,6 @@ class Worker:
                 self.qlog(q, "停下 %s（暂停，退出码 %s），恢复后重跑" % (name, rc or "未知"))
                 self.event("stop", "已停下 %s，恢复后重跑" % name, name=name, project=j["project"])
             elif rc == "0" and not gs and not j.get("void"):
-                if self.disk and project_dir(q["root"]):
-                    self.disk.hint(project_dir(q["root"]))
                 open(os.path.join(q["state"], name + ".done"), "w").close()
                 self.publish(j)
                 shutil.rmtree(scratch_dir(j["project"], name), ignore_errors=True)   # 失败的留着查
@@ -4505,7 +4523,32 @@ class Worker:
             self.storage = dict(d.summary(), projects={p: q["project"] for q in queues for p in [project_dir(q["root"])] if p})
         self.disk_do("本地盘", local)
         if self.disk:
-            self.disk_do("共享盘", lambda: self.disk.step(now, self.io_yield))
+            def shared():
+                # 项目根取本机登记的与别的主机状态里的（peers 读好的 peer_st，同一个 worker_home 才同一个扫描者）合起来（#53）
+                self.disk.want({p for q in queues for p in [project_dir(q["root"])] if p}
+                               | {d for st in self.peer_st.values() for d in ((st.get("storage") or {}).get("projects") or {})})
+                self.disk.step(now, self.io_yield)
+                self.disk_ends(now)
+            self.disk_do("共享盘", shared)
+
+    def disk_ends(self, now):
+        """有清单任务跑完（各主机的 usage.jsonl，load_hist 读的；成败都算）：它的项目目录下的单位尽快重扫（Disk.hint）。
+        看板拿跑完那次重扫与开跑前的扫描之差算任务写入量（disk.project_storage 的 jobs，#53）。只有拿着租约的那台有索引，hint 才起作用；
+        只认近一小时结束的（worker 重启后不把一天的旧记录都重扫一遍），已提前过的不再提前。没拿着租约时不记“提前过”，接手（读进新索引）后重新看近一小时的。"""
+        d = self.disk
+        if not (d.mine and d.ix is not None):
+            return
+        if self.hint_ix is not d.ix:
+            self.hint_ix, self.hinted, self.hint_v = d.ix, set(), -1
+        if self.hint_v == self.hist_v:
+            return
+        self.hint_v = self.hist_v
+        cur = {(h.get("host"), h.get("root"), h.get("name"), h.get("t0")): h for h in self.hist
+               if h.get("root") and (h.get("t1") or 0) >= now - 3600}
+        for k, h in cur.items():
+            if k not in self.hinted and project_dir(h["root"]):
+                self.disk.hint(project_dir(h["root"]))
+        self.hinted = set(cur)
 
     def scan_chain(self, now):
         """主循环拍与拍之间（每 0.5 秒）调：哪个扫描者的线程做完了一件，就马上收结果、开下一件，不等下一拍（#153）。

@@ -101,9 +101,34 @@
                                                // 30 天内失败的尝试（任务后来重跑成功的也在）：取工作台存的用量记录 overview/usage/<主机>.jsonl，
                                                // 按项目 id 与车道的 root、queue 对上（collect._attempts）；只有 worker 管的车道有
 
-  "thresholds": {"stale_s": 420}                // 页面据此标“N 分钟未更新”：config.stale_limit 算的秒数，与 labmon wait 的 collector_stale 同一门槛（#141）
+  "thresholds": {"stale_s": 420},               // 页面据此标“N 分钟未更新”：config.stale_limit 算的秒数，与 labmon wait 的 collector_stale 同一门槛（#141）
+
+  "storage": {                                 // 本项目的存储（#53，disk.project_storage，取上一轮全局快照的 disk）：项目页「本项目占用」、labmon disk 读它。容量都是字节，时刻 epoch 秒
+    "roots": ["/root/data1/alice/projects/a1"],  // 共享盘上本项目的项目根（各台 worker 按登记的清单记的 storage.projects）
+    "b": 61203283968, "d24": 35433480192, "d7": 44023414784,   // 合计占用、近 24 小时与 7 天的增量（含删掉的目录，按扫描记录插值）
+    "pending": 0,                              // 项目根下还没扫到的单位数（刚拆开时），合计只算扫过的
+    "burst": true,                             // 近 24 小时涨得快（同按人的 burst:：超过 burst_gb 且超过剩余的 10%），出 disk:<项目> 告警
+    "dirs": [{"path": "/root/data1/alice/projects/a1/cache", "name": "cache",   // 项目根下的一级目录（扫描单位）：name 相对项目根，「.」是项目根本层的文件，
+              "b": 45097156608, "d24": 33285996544, "d7": 41875931136,        // 空串是旧 worker 没拆开时的整个项目目录
+              "n": 1203, "m": 1793776000, "t": 1793775000,                      // 文件数、最新修改、扫描时刻
+              "top": [["feats", 42949672960, 1793776000]]}],                    // 直接子项里最大的几个 [名字, 占用, 最新修改]（最多 5 个）
+    "gone": [{"path": "…/a1/tmp_old", "name": "tmp_old", "d24": 0, "d7": -5368709120}],   // 7 天内删掉的目录（增量为负）
+    "jobs": [{"name": "x4_s146_seed0", "host": "29", "t0": 1793770000, "t1": 1793774000, "st": "done",   // 近 7 天结束的清单任务的写入量（近的在前，最多 30 个；
+              "b": 7408566272,                 // 只留净增 64 MiB 以上或还在等重扫的）：b 是开跑前最后一次扫描到跑完那次重扫，项目根下各单位之差的和（同期本项目别的任务写的也在内）
+              "top": [["cache", 6979321856]],  // 增量最大的几个目录 [name, 增量]（最多 3 个）
+              "from": 1793769000, "to": 1793775000,   // 用到的最早、最晚的扫描时刻（没有变化为 null）
+              "with": 0,                       // 这段时间本项目还有几个别的任务（跑完的与在跑的）
+              "pending": 0, "wait": false,     // 结束后还没重扫的单位数；wait：还在等重扫（满一天就按已扫到的算，不再等）
+              "big": true,                     // 算完了且 b 超过 bigwrite_gb：出 bigwrite:<grp> 告警（结束 24 小时内，只给实验会话）
+              "grp": "x4_s146_seed0:1793774000"}],   // 用的是同一组扫描（并行的）的几个任务里最早结束的那个「任务:t1」，bigwrite: 按它合成一条
+    "at": 1793775000, "free": 236223201280, "total": 1181116006400,   // 共享盘扫描索引的时刻、整块盘的剩余与总量
+    "eta": 6.3, "eta7": 9.1,                   // 按近 24 小时、近 7 天已用的增长速度约几天满（不涨为 null）
+    "warn_gb": 30, "burst_gb": 30, "bigwrite_gb": 5,   // 告警线（[fleet.disk] 可改）
+    "local": {"29": {"cache": 1.5e10, "scratch": 2e9}}  // 各主机本地盘上本项目的缓存与单格临时（worker 状态的 storage.local）
+  }
 }
 ```
+项目页的 `/p/<id>/events.json` 只给时间线的主机事件、同机别的项目的占用与配色；本项目的存储在项目快照的 `storage`（#53 起）。
 
 字段设计参照了 pueue `status --json` 的 task 与 group：车道对应 group，任务的状态与起止时间对应 task。以后接 pueue 时，适配器只需做字段映射。
 
@@ -150,7 +175,7 @@
 - 顶层 `rebalance` 是各项目的挪法建议 `{项目: …}`（`rebalance.suggest`，[workbench.md「挪法建议」](workbench.md#挪法建议)）：有建议的 `{key 告警 key（rebalance:<项目>）, target 挪到哪台, lane, jobs（offers 的前几项）,
   from 原来整批何时跑完（推不出为 null）, to 挪后, cut 其中被借用约定挡住的清单 ["主机|目录|清单"]（这句写进 borrow_cut，不另报）, text 那一句（句尾“按 HH:MM 的推演”）}`；
   只有原因的 `{why [每台一句：“主机 上本项目 X 后没活，接不了 任务：原因”，整批推不出时“主机 接不了 任务：原因”], from}`；都没有的项目不列。offers 里已不在原处的行这一轮截掉（[workbench.md「挪法建议」](workbench.md#挪法建议)）。
-- 顶层 `lan`（`lan.check` 的结果，总是有）、`wake`（给 `labmon wait` 的全局消息 `[{key, msg, projects, host}]`；作废与被挤掉的 `void:` 另带 `job: [项目, 任务]`（`overview._voided`，`labmon wait --job` 按它认等的任务被作废，#135）；页面上的改动 `records.told` 给的 key 是 `page:<what>:<项目>:<毫秒>`、不带 `host`，#121）、`sched`（调度卡；`use_sum` 是各项目用量（`share.use`）之和；`projects[]` 的 `person` 是项目算在谁名下、`pk` 是 `sched.json` 里的人员键，看板上没有的项目两者为 null，`puse` 是同一个 `pk` 名下各项目的用量合计（取完整的 `share.use`，含已归档的项目；与 worker 的 `person_use` 同一口径），普通用户看到的别人项目 `person` 为 null，#23）、`occ`（各卡被谁占着）、`fleet`、`disk`、`projects`（各项目看板的摘要）。
+- 顶层 `lan`（`lan.check` 的结果，总是有）、`wake`（给 `labmon wait` 的全局消息 `[{key, msg, projects, host}]`；作废与被挤掉的 `void:` 另带 `job: [项目, 任务]`（`overview._voided`，`labmon wait --job` 按它认等的任务被作废，#135）；页面上的改动 `records.told` 给的 key 是 `page:<what>:<项目>:<毫秒>`、不带 `host`，#121）、`sched`（调度卡；`use_sum` 是各项目用量（`share.use`）之和；`projects[]` 的 `person` 是项目算在谁名下、`pk` 是 `sched.json` 里的人员键，看板上没有的项目两者为 null，`puse` 是同一个 `pk` 名下各项目的用量合计（取完整的 `share.use`，含已归档的项目；与 worker 的 `person_use` 同一口径），普通用户看到的别人项目 `person` 为 null，#23）、`occ`（各卡被谁占着）、`fleet`、`disk`（共享盘，`disk.update`：其中 `ours` 是自己目录下的各单位 `dirs[]`（`u`、`name`、`b`、`t`、`p` 项目、`d24`、`d7`、`n`、`m`、`top`）与按项目的汇总 `projects{项目: {roots, b, d24, d7, pending, burst, gone, jobs}}`，项目快照的 `storage` 由它来，#53）、`projects`（各项目看板的摘要）。
   `sched.projects[]` 的 `focus`、`paused` 是 null 或 `{until（epoch 秒，null 为无期限）, hosts}`：`hosts` 为 null 是项目级的（主机清单 `[sched.focus]`、`[sched.pause]`，所有主机），否则是只在这几台单独下的（`--host`），`until` 取最晚的（#96）。项目级的暂停另带 `by`：谁下的（主机清单 `[sched.pause_by]`，`config.pause_by`；没记的为 null，当管理员下的，#16）；普通用户看到的快照只留他自己项目的 `by`。
   `hosts[].status.overrides[]` 里项目级的暂停、优先带 `global: true`（worker 从 `sched.json` 接上的，每台都有一份），`once: true` 的是不带 `--host` 的 `pause --now` 给各台下的“只停一次”：停完照样挡着，全局暂停送到就删（最多 30 分钟）。
 - 顶层 `regs` 是登记的全局视图（`overview._regs`，项目「管理」抽屉用，[workbench.md「项目的管理抽屉」](workbench.md#项目的管理抽屉)）：各主机目录下登记的清单，每台一项

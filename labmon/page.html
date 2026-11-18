@@ -306,8 +306,8 @@ function kpis() {
       <div class="meter">${seg("done", "var(--ok)")}${seg("running", "var(--accent)")}${seg("failed", "var(--bad)")}</div>
       <div class="s">运行 ${n("running")} · 排队 ${n("queued")}${n("failed") ? ` · <span style="color:var(--bad)">失败 ${n("failed")}</span>` : ""}</div></div>`);
   }
-  // 磁盘余量：各主机的挂载点（采集给的是 GB，换成 GiB，与主机页同一口径）加上组里共用的共享盘（看板的共享盘统计，经 serve 打开时才有），显示离告警线最近的一块，悬停列出全部
-  const ms = D.hosts.flatMap(h => (h.mounts || []).map(m => ({label: m.label, avail: m.avail_gb, total: m.total_gb, used_pct: m.used_pct, min: m.min_gb != null ? m.min_gb : null, host: h}))), sd = EV.storage || {};
+  // 磁盘余量：各主机的挂载点（采集给的是 GB，换成 GiB，与主机页同一口径）加上组里共用的共享盘（看板的共享盘统计，项目快照的 storage），显示离告警线最近的一块，悬停列出全部
+  const ms = D.hosts.flatMap(h => (h.mounts || []).map(m => ({label: m.label, avail: m.avail_gb, total: m.total_gb, used_pct: m.used_pct, min: m.min_gb != null ? m.min_gb : null, host: h}))), sd = D.storage || {};
   if (sd.total) ms.push({label: "共享盘", avail: sd.free / GIB, total: sd.total / GIB, used_pct: 100 * (1 - sd.free / sd.total), min: sd.warn_gb ?? null, host: null});
   if (ms.length) {
     const m = ms.sort((a, b) => (a.avail - (a.min || 0)) - (b.avail - (b.min || 0)))[0];
@@ -322,7 +322,7 @@ function kpis() {
 
 /* ---------- 时间线（GPU 利用率、主机事件带、车道；可拖动、缩放） ---------- */
 const GAP_S = 600;
-let EV = {events: {}, storage: {}, occ: {}, colors: {}};   // 经 serve 打开时取 events.json：主机 30 天事件、同机别的项目的占用与配色、本项目存储（共享盘目录 dirs/at/free，各主机本地盘 local）
+let EV = {events: {}, occ: {}, colors: {}};   // 经 serve 打开时取 events.json：主机 30 天事件、同机别的项目的占用与配色（本项目的存储在快照的 storage）
 const evs = h => EV.events?.[h] || [];
 tlInit({get: (k, d) => LS.get(k, d), set: (k, v) => LS.set(k, v), now: () => NOW, draw: () => drawTimeline(),
   all: () => tlSpan([...D.jobs.map(jobT0).filter(Boolean), ...(D.attempts || []).map(x => x.t0)], D.jobs.map(jobT1).filter(Boolean)),
@@ -772,12 +772,8 @@ function resourcesCard() {
       chips.push(`<span class="chip" ${tip([c.out, ...(c.detail || [])].filter(Boolean).join("\n") || "无输出")}><span class="cdot" style="background:${col}"></span> ${esc(c.label)}：${c.state === "ok" ? "是" : c.state === "fail" ? "否" : "不适用"}</span>`);
     }
     // 共享盘各服务器挂的是同一块，只在第一台主机上写一次；本地盘按主机
-    const sg = EV.storage || {}, sh = h === D.hosts.find(x => !x.pool) ? Object.entries(sg.dirs || {}) : [], loc = sg.local?.[h.id], lb = loc ? (loc.cache || 0) + (loc.scratch || 0) : 0;
-    if (sh.length || loc) {
-      chips.push(`<span class="chip" ${tip([...(sh.length ? ["本项目在共享盘上的目录（看板的共享盘统计，限速轮流扫）", ...sh.map(([d, b]) => `${d}  ${f1(b / GIB, 2)} GiB（统计于 ${ts(sg.at?.[d])}）`),
-        sg.free != null ? `共享盘剩 ${f1(sg.free / GIB, 0)} GiB；按人看在组内服务器的「共享盘」` : ""] : []),
-        loc ? `这台的本地盘：缓存 ${f1((loc.cache || 0) / GIB, 2)} GiB · 单格临时目录 ${f1((loc.scratch || 0) / GIB, 2)} GiB` : ""].filter(Boolean).join("\n"))}>${sh.length ? `本项目占用 ${f1(sum(sh.map(x => x[1])) / GIB, 1)} GiB${lb >= GIB ? ` · 本地 ${f1(lb / GIB, 1)} GiB` : ""}` : `本项目本地 ${f1(lb / GIB, 1)} GiB`}</span>`);
-    }
+    const sg = D.storage || {}, sh = h === D.hosts.find(x => !x.pool) ? sg.dirs || [] : [], loc = sg.local?.[h.id], lb = loc ? (loc.cache || 0) + (loc.scratch || 0) : 0;
+    if (sh.length || loc) chips.push(storageChip(sg, sh, loc, lb));
     const head = `<span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}" ${tip(h.ok ? "探针正常" : h.error || "失败")}></span> ${esc(h.label)}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}${h.stale ? ` <span class="sm" style="color:var(--bad)">（显示 ${ts(h.last_ok)} 的数据）</span>` : ""}`;
     out.push(block(head, chips, tiles.length ? tiles : [`<div class="sm mut">没有数据</div>`]));
   }
@@ -786,6 +782,28 @@ function resourcesCard() {
     ${out.join("")}</div>`;
   // 嵌在工作台里时主机资源与主机页重复，默认收起
   return EMBED ? `<details class="res" ${SS.get("resOpen", false) ? "open" : ""}><summary>资源（主机按任务的明细见工作台的主机页）</summary>${card}</details>` : card;
+}
+
+// 项目根下一个目录的叫法（storage.dirs 的 name）：「.」是项目根本层的文件，空串是还没拆开时的整个项目目录（collect.dir_name 同一口径）
+const dirName = n => n === "." ? "项目根下的文件" : n || "整个项目目录";
+// 「资源」里本项目的存储一格（项目快照的 storage，disk.project_storage，#53）：共享盘上本项目的合计与近 24 小时增量（涨得快时标色，同 disk: 告警），
+// 悬停按项目根下的一级目录列占用与增量，再列近来写得多的任务（跑的期间本项目目录净增，同期本项目别的任务也算在内）；本地盘这台的缓存与单格临时
+function storageChip(sg, sh, loc, lb) {
+  const dirs = [...sh].sort((a, b) => (b.b || 0) - (a.b || 0)), jobs = (sg.jobs || []).filter(j => j.wait || Math.abs(j.b) >= GIB).slice(0, 6);
+  const lines = [];
+  if (sh.length) {
+    lines.push(`本项目在共享盘上（${(sg.roots || []).join("、") || "项目目录"}；看板的共享盘统计，限速轮流扫）：`,
+      ...dirs.map(d => `${dirName(d.name)}  ${GB(d.b)} GiB · 24 小时 ${dGB(d.d24)} · 7 天 ${dGB(d.d7)}（${ts(d.t)} 扫）`),
+      ...(sg.gone || []).filter(g => g.d7).map(g => `${dirName(g.name)}（已删）  7 天 ${dGB(g.d7)}`));
+    if (sg.pending) lines.push(`还有 ${sg.pending} 个目录没扫到，合计只算扫过的`);
+    if (jobs.length) lines.push("", "近来写得多的任务（跑的期间本项目目录净增，同期别的任务写的也在内）：",
+      ...jobs.map(j => `${j.name}  ${dGB(j.b)} GiB${j.top?.[0] && j.top[0][1] > 0 ? `（${dirName(j.top[0][0])} ${dGB(j.top[0][1])}）` : ""}${j.wait ? " · 还在等重扫" : ""} · ${ts(j.t1)} 结束`));
+    if (sg.free != null) lines.push("", `共享盘剩 ${GB(sg.free)} GiB${sg.eta != null ? `，按近 24 小时约 ${sg.eta} 天满` : ""}；按人看在组内服务器的「共享盘」`);
+  }
+  if (loc) lines.push(`这台的本地盘：缓存 ${f1((loc.cache || 0) / GIB, 2)} GiB · 单格临时目录 ${f1((loc.scratch || 0) / GIB, 2)} GiB`);
+  const d24 = sg.d24 && Math.abs(sg.d24) >= GIB ? ` · 24 小时 ${dGB(sg.d24)}` : "";
+  const label = sh.length ? `本项目占用 ${GB(sg.b)} GiB${d24}${lb >= GIB ? ` · 本地 ${f1(lb / GIB, 1)} GiB` : ""}` : `本项目本地 ${f1(lb / GIB, 1)} GiB`;
+  return `<span class="chip" ${tip(lines.join("\n"))}${sg.burst ? ` style="color:var(--warn);font-weight:600"` : ""}>${esc(label)}</span>`;
 }
 
 /* ---------- 任务明细（默认折叠） ---------- */

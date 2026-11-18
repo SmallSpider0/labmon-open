@@ -15,15 +15,19 @@ from __future__ import annotations
 
 import bisect
 import json
+import math
 import re
 import time
 
 from . import fleet as F
 from .config import GIB, active_hosts, all_hosts, pick_color
 from .records import log_events
-from .state import append_row, file_sig, load_json, load_rows, save_json, snapshot
+from .state import append_row, file_sig, load_json, load_rows, save_json, snapshot, usage_file
 
 WARN_GB = 30            # 剩余低于这么多 GiB 告警（[fleet.disk] warn_gb 可改）
+BIGWRITE_GB = 5         # 一个任务跑的期间它的项目目录在共享盘上净增超过这么多 GiB，给实验会话提示（bigwrite_gb，#53）
+JOBS_S = 7 * 86400      # 任务写入量算多久以内结束的
+JOB_WAIT_S = 86400      # 任务结束后项目目录下还有单位没重扫的，最多等这么久就按已扫到的算
 SOON_D = 3              # 按近 24 小时的速度不到这么多天就满，且剩余已低于 SOON_FREE，告警（soon_days）
 SOON_FREE = 0.2
 BURST_GB = 30           # 一人近 24 小时增长超过这么多 GiB，且超过剩余的 BURST_FREE，告警（burst_gb）
@@ -69,7 +73,11 @@ def absorb(part: str, t: float) -> None:
     if (ix.get("t") or 0) < (old.get("t") or 0):
         return
     ou, nu, split = old.get("units") or {}, ix.get("units") or {}, set(ix.get("split") or [])
-    born = lambda u: ou and u not in ou and not any(u.startswith(s + "/") for s in split)
+    # 刚拆开、还没列过的目录（扫得太慢、新登记的项目根；上一份索引里它下面还没有单位）：下面的单位是原来那个拆出来的，不算新建。
+    # 不只比相邻两份索引的 split：worker 拆开时先并进 split、去掉父单位，子单位要等下一次列目录，看板可能在中间取回一份（PR #56 审查）。
+    # 代价是原来空着的目录拆开后第一次新建的不从 0 算，只漏一次。
+    fresh = [s for s in split if not any(o.startswith(s + "/") for o in ou)]
+    born = lambda u: ou and u not in ou and not any(u.startswith(s + "/") for s in fresh)
     rows = []
     for u, r in nu.items():
         if r.get("t") is None or r.get("b") is None or (ou.get(u) or {}).get("t") == r["t"]:
@@ -207,22 +215,25 @@ def update(hosts: list[dict], t: float | None = None, cfg: dict | None = None) -
     root, units, sets, names = ix.get("root") or "", ix.get("units") or {}, settings(), _names(cfg)
     ser, now = _series(), t
     by: dict = {}
+    grow: dict = {}                                # 各单位近 24 小时、7 天的增量（按人与按项目共用）
+    dead: dict = {}                                # 删掉的单位：最后一次是 0，增量里算负的
     for u, r in units.items():
         rel = u[len(root):].lstrip("/") if u.startswith(root) else u
         top = rel.split("/", 1)[0] or "."
         o = by.setdefault(owner_of(top, sets["owners"], names), {"dirs": set(), "units": []})
         o["dirs"].add(top)
         s = ser.get(u)
-        grow = lambda w: (r["b"] - _at(s, now - w)) if s and r.get("b") is not None else 0
+        g = grow[u] = tuple((r["b"] - _at(s, now - w)) if s and r.get("b") is not None else 0 for w in (86400, 7 * 86400))
         o["units"].append({"u": rel, "b": r.get("b"), "n": r.get("n"), "m": r.get("m"), "cold": sum((r.get("age") or [])[COLD:]),
-                           "d24": grow(86400), "d7": grow(7 * 86400), "t": r.get("t"), "s": r.get("s"), "due": r.get("due"),
+                           "d24": g[0], "d7": g[1], "t": r.get("t"), "s": r.get("s"), "due": r.get("due"),
                            "err": r.get("err"), "top": (r.get("top") or [])[:5]})
-    for u, s in ser.items():                       # 删掉的单位：最后一次是 0，增量里算负的
+    for u, s in ser.items():
         if u not in units and s[-1][1] == 0 and s[-1][0] >= now - 7 * 86400:
             rel = u[len(root):].lstrip("/") if u.startswith(root) else u
             top = rel.split("/", 1)[0] or "."
             o = by.setdefault(owner_of(top, sets["owners"], names), {"dirs": set(), "units": []})
-            o.setdefault("gone", []).append({"u": rel, "d24": -_at(s, now - 86400), "d7": -_at(s, now - 7 * 86400)})
+            g = dead[u] = (-_at(s, now - 86400), -_at(s, now - 7 * 86400))
+            o.setdefault("gone", []).append({"u": rel, "d24": g[0], "d7": g[1]})
     hrs = _rows("hours.jsonl")
     out = []
     for name, o in by.items():
@@ -250,9 +261,9 @@ def update(hosts: list[dict], t: float | None = None, cfg: dict | None = None) -
          "d24": sum(o["d24"] for o in out), "d7": sum(o["d7"] for o in out), "cold": sum(o["cold"] for o in out),
          "hist": [[r["t"], r["used"]] for r in hrs if r["t"] >= t - 30 * 86400],
          "warn_gb": dc.get("warn_gb", WARN_GB), "soon_days": dc.get("soon_days", SOON_D), "burst_gb": dc.get("burst_gb", BURST_GB),
-         "names": names, "owners_set": sets["owners"],
+         "bigwrite_gb": dc.get("bigwrite_gb", BIGWRITE_GB), "names": names, "owners_set": sets["owners"],
          "now": scan.get("now"), "yield": scan.get("yield")}       # 正在扫的单位；共享盘慢、推迟中的说明
-    v["ours"] = _ours(hosts, units, root)
+    v["ours"] = _ours(hosts, units, ser, grow, dead, t, v)
     st = load_json(_f("state.json"), {})
     cols, k = st.setdefault("colors", {}), len(st.get("colors") or {})
     for o in out:                                  # 只给名单里的人定颜色；对不上人的目录在页面上画灰色，免得和人撞色
@@ -265,22 +276,103 @@ def update(hosts: list[dict], t: float | None = None, cfg: dict | None = None) -
     return v, msgs
 
 
-def _ours(hosts: list[dict], units: dict, root: str) -> dict | None:
-    """自己的目录（自用主机的 data_root）下各单位，按 worker 记的项目目录分到项目：主机页的共享盘条、项目页的占用。"""
+def _ours(hosts: list[dict], units: dict, ser: dict, grow: dict, gone: dict, t: float, v: dict) -> dict | None:
+    """自己的目录（自用主机的 data_root）下各单位，按 worker 记的项目目录（状态的 storage.projects）分到项目：主机页的共享盘条、项目页的占用。
+    dirs 每项带近 24 小时、7 天的增量（grow）；projects 是各项目的合计（含删掉的单位 gone）、还没扫到的单位数、涨得快不快（_burst），
+    以及近来结束的任务的写入量（_job_writes），#53。worker 把登记了清单的项目根拆开扫（Disk.want），项目根下的一级目录各是一个单位。"""
     hc = {h["id"]: h for h in active_hosts()}
     base = next((hc[e["id"]]["data_root"].rstrip("/") for e in hosts if e["id"] in hc), None)
     if not base:
         return None
-    projects = {}
+    projects: dict = {}
     for e in hosts:
         projects.update(((e.get("status") or {}).get("storage") or {}).get("projects") or {})
-    dirs = []
+    roots: dict = {}
+    for d, p in projects.items():
+        roots.setdefault(p, set()).add(d.rstrip("/"))
+    of = lambda u: next((p for d, p in projects.items() if u == d.rstrip("/") or u.startswith(d.rstrip("/") + "/")), None)   # noqa: E731
+    dirs, pend = [], {}
     for u, r in units.items():
-        if not u.startswith(base + "/") or r.get("b") is None:
+        if not u.startswith(base + "/"):
             continue
-        p = next((p for d, p in projects.items() if u == d or u.startswith(d.rstrip("/") + "/")), None)
-        dirs.append({"u": u, "name": u[len(base) + 1:], "b": r["b"], "t": r.get("t"), "p": p})
-    return {"base": base, "dirs": sorted(dirs, key=lambda x: -x["b"])}
+        p = of(u)
+        if r.get("b") is None:
+            pend[p] = pend.get(p, 0) + 1
+            continue
+        d24, d7 = grow.get(u, (0, 0))
+        dirs.append({"u": u, "name": u[len(base) + 1:], "b": r["b"], "t": r.get("t"), "p": p, "d24": d24, "d7": d7,
+                     "n": r.get("n"), "m": r.get("m"), "top": (r.get("top") or [])[:5]})
+    rows = [dict(r, host=e["id"]) for e in hosts for r in load_rows(usage_file(e["id"]))
+            if r.get("t", 0) >= t - JOBS_S and r.get("p") in roots and r.get("root")]          # 只认清单任务：单元申请没有 root
+    running = [(e["id"], j.get("project"), j.get("name"), j.get("t0")) for e in hosts for j in (e.get("status") or {}).get("running") or []]
+    out = {}
+    for p, rs in roots.items():
+        mine = [x for x in dirs if x["p"] == p]
+        gn = [{"u": u, "d24": a, "d7": b} for u, (a, b) in gone.items() if of(u) == p]
+        d24 = sum(x["d24"] for x in mine + gn)
+        out[p] = {"roots": sorted(rs), "b": sum(x["b"] for x in mine), "d24": d24, "d7": sum(x["d7"] for x in mine + gn),
+                  "pending": pend.get(p, 0), "burst": _burst(d24, v), "gone": gn,
+                  "jobs": _job_writes(p, sorted(rs), ser, units, rows, running, t, v["bigwrite_gb"])}
+    return {"base": base, "dirs": sorted(dirs, key=lambda x: -x["b"]), "projects": out}
+
+
+def _burst(d24: float, v: dict) -> bool:
+    """近 24 小时涨得太快（按人的 burst: 与按项目的 disk: 告警同一条线）：超过 burst_gb，且超过剩余的 BURST_FREE。"""
+    return d24 > v["burst_gb"] * GIB and d24 > BURST_FREE * v["df"]["free"]
+
+
+def _write(sers: list, s: float, e: float, live=()) -> tuple:
+    """[s, e] 这段时间项目目录的净增：每个单位取开跑前最后一次扫描到结束后第一次扫描之差，加起来。
+    开跑前还没有的单位只在它从 0 算起（看板记了新建，absorb 的 born）时按 0 起算；拆出来的、结束以后才建的算不了，跳过；
+    结束以后还没重扫的记进 pend（最后一次是 0 的只有已不在索引里（不在 live）才算删掉了、之后一直是 0）。返回 (净增, [(单位, 增量)], 最早用到的扫描时刻, 最晚的, pend, 用到的那组扫描)。时刻都是 worker 写的（索引与用量行同一口径）。"""
+    tot, parts, lo, hi, pend, used = 0, [], None, None, 0, []
+    for u, sr in sers:
+        k0 = bisect.bisect_right(sr, (s, math.inf)) - 1
+        if k0 >= 0:
+            t0, b0 = sr[k0]
+        elif sr[0][1] == 0 and sr[0][0] <= e:
+            t0, b0 = sr[0]
+        else:
+            continue
+        k1 = bisect.bisect_left(sr, (e, -1))
+        if k1 < len(sr):
+            t1, b1 = sr[k1]
+        elif sr[-1][1] == 0 and u not in live:     # 删掉了：之后一直是 0
+            t1, b1 = sr[-1]
+        else:
+            pend += 1
+            continue
+        if b1 != b0:
+            tot += b1 - b0
+            parts.append((u, b1 - b0))
+            used.append((u, t0, t1))
+            lo, hi = min(lo or t0, t0), max(hi or t1, t1)
+    return tot, parts, lo, hi, pend, tuple(sorted(used))
+
+
+def _job_writes(p: str, roots: list[str], ser: dict, units: dict, rows: list[dict], running: list, t: float, big_gb: float) -> list[dict]:
+    """项目 p 近 JOBS_S 内结束的任务各写了多少（_write：项目根下各单位开跑前与跑完那次重扫之差；worker 在任务跑完时提前重扫，Worker.disk_ends）。
+    rows 是工作台存的用量记录（_keep_usage 的行加 host），running 是各主机在跑的 (主机, 项目, 任务, 开跑)。
+    同一段时间本项目别的任务写的也在里面，with 记同期还有几个本项目任务（用量记录与在跑的）。还有单位没重扫的标 pending，等满 JOB_WAIT_S 就按已有的算；
+    big：算完了、净增超过 big_gb GiB（collect 据此给实验会话 bigwrite: 提示）。用的是同一组扫描的几个任务（并行的）量出来是同一个数，
+    grp 记其中最早结束的那个（「名字:结束时刻」），collect 按它合成一条。只留净增 64 MiB 以上或还在等重扫的，近的在前，最多 30 个。
+    只看此刻索引里的单位（units）与删掉了的（最后一次是 0）：拆开以前整个扫的旧单位不再扫，不算等重扫。"""
+    sers = [(u, sr) for u, sr in ser.items() if any(u == r or u.startswith(r + "/") for r in roots) and (u in units or sr[-1][1] == 0)]
+    name = lambda u: next((u[len(r) + 1:] for r in roots if u == r or u.startswith(r + "/")), u)   # noqa: E731
+    mine = sorted((r for r in rows if r.get("p") == p), key=lambda r: r["t"])
+    out, grp = [], {}
+    for r in mine:
+        tot, parts, lo, hi, pend, used = _write(sers, r["s"], r["t"], units)
+        wait = pend > 0 and t - r["t"] < JOB_WAIT_S
+        if abs(tot) < 64 * 2 ** 20 and not wait:
+            continue
+        a, z = lo or r["s"], hi or r["t"]
+        n = sum(1 for o in mine if o is not r and o["s"] < z and o["t"] > a) + sum(1 for _, q, _, s0 in running if q == p and (s0 or 0) < z)
+        out.append({"name": r.get("n"), "host": r["host"], "t0": r["s"], "t1": r["t"], "st": r.get("st"), "b": tot,
+                    "top": [[name(u), d] for u, d in sorted(parts, key=lambda x: -x[1])[:3]], "from": lo, "to": hi,
+                    "pending": pend, "wait": wait, "with": n, "big": not wait and tot > big_gb * GIB,
+                    "grp": grp.setdefault(used, f"{r.get('n')}:{r['t']}") if used else f"{r.get('n')}:{r['t']}"})
+    return sorted(out, key=lambda x: -x["t1"])[:30]
 
 
 def _alerts(v: dict, t: float) -> list[str]:
@@ -292,7 +384,7 @@ def _alerts(v: dict, t: float) -> list[str]:
     if v["eta"] is not None and v["eta"] < v["soon_days"] and free < SOON_FREE * df["total"]:
         cur["soon"] = (f"共享盘按近 24 小时的速度约 {v['eta']} 天后满（剩 {free / GIB:.0f} GiB）", True)
     for o in v["owners"]:
-        if o["d24"] > v["burst_gb"] * GIB and o["d24"] > BURST_FREE * free:
+        if _burst(o["d24"], v):
             cur["burst:" + o["name"]] = (f"{o['name']} 近 24 小时共享盘 +{o['d24'] / GIB:.0f} GiB，按这个速度约 {free / o['d24']:.1f} 天占满剩余的 {free / GIB:.0f} GiB", True)
         if o["over"]:
             cur["over:" + o["name"]] = (f"{o['name']} 在共享盘上占 {o['b'] / GIB:.0f} GiB，超过提醒线 {o['limit']:g} GiB", False)
@@ -307,12 +399,24 @@ def _alerts(v: dict, t: float) -> list[str]:
 
 
 def project_storage(pid: str, snap: dict | None = None) -> dict:
-    """项目页要的项目 pid 的存储：共享盘上的目录与占用（dirs、at 是扫描时刻；free、total 是共享盘剩余与总量，都是字节；warn_gb 是告警线），
-    各主机本地盘的缓存与单格临时目录。"""
+    """项目 pid 的存储（项目快照的 storage：项目页「本项目占用」、labmon disk 读它，#53；字段见 docs/schema.md）。都是字节与 epoch 秒：
+    共享盘上的项目根 roots、合计 b、近 24 小时 d24 与 7 天 d7（含删掉的）、还没扫到的单位数 pending、涨得快不快 burst（disk: 告警），
+    项目根下各一级目录 dirs（name 是相对项目根的路径：「.」是项目根本层的文件，空串是还没拆开时的整个项目目录）、删掉的 gone、
+    近来结束的任务的写入量 jobs（_job_writes）；共享盘整块的 at（扫描索引的时刻）、free、total、eta（按近 24 小时约几天满）、eta7、warn_gb、burst_gb、bigwrite_gb；
+    各主机本地盘的缓存与单格临时 local。"""
     snap = snap if snap is not None else snapshot()
     dk = (snap or {}).get("disk") or {}
-    ds = [d for d in (dk.get("ours") or {}).get("dirs") or [] if d["p"] == pid]
+    ours = dk.get("ours") or {}
+    pr = (ours.get("projects") or {}).get(pid) or {}
+    roots = pr.get("roots") or []
+    rel = lambda u: next((u[len(r) + 1:] for r in roots if u == r or u.startswith(r + "/")), u)   # noqa: E731
+    dirs = [{"path": d["u"], "name": rel(d["u"]), **{k: d.get(k) for k in ("b", "d24", "d7", "n", "m", "t", "top")}}
+            for d in ours.get("dirs") or [] if d["p"] == pid]
     local = {h["id"]: loc for h in (snap or {}).get("hosts") or [] for loc in [(((h.get("status") or {}).get("storage") or {}).get("local") or {}).get(pid)] if loc}
     df = dk.get("df") or {}
-    return {"dirs": {d["u"]: d["b"] for d in ds}, "at": {d["u"]: d["t"] for d in ds}, "free": df.get("free"), "total": df.get("total"),
-            "warn_gb": dk.get("warn_gb"), "local": local}
+    return {"roots": roots, "b": pr.get("b", sum(d["b"] for d in dirs)), "d24": pr.get("d24"), "d7": pr.get("d7"),
+            "pending": pr.get("pending", 0), "burst": bool(pr.get("burst")), "dirs": dirs,
+            "gone": [{"path": g["u"], "name": rel(g["u"]), "d24": g["d24"], "d7": g["d7"]} for g in pr.get("gone") or []],
+            "jobs": pr.get("jobs") or [],
+            "at": dk.get("at"), "free": df.get("free"), "total": df.get("total"), "eta": dk.get("eta"), "eta7": dk.get("eta7"),
+            "warn_gb": dk.get("warn_gb"), "burst_gb": dk.get("burst_gb"), "bigwrite_gb": dk.get("bigwrite_gb"), "local": local}

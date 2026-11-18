@@ -21,6 +21,7 @@ import sys
 import time
 from pathlib import Path
 
+from . import disk as DK
 from . import lan as L
 from . import lease as LS
 from . import projects as PJ
@@ -328,6 +329,7 @@ def build(cfg: dict, probes: dict, out_dir: Path, lan: dict | None = None, glob_
     _groups(cfg, snap, state, ratios)
     _host_alerts(cfg, snap, state, hist, glob_snap, t)
     _no_work(cfg, snap, glob_snap, quiet, t)
+    _storage(cfg, snap, glob_snap, t)
     _rebalance(snap)
     snap["thresholds"] = {"stale_s": stale_limit(cfg["interval"], cfg["alerts"]["stale_min"])}      # 页面据此标“数据过期”，与 labmon wait 同一门槛
     save_json(sd / "state.json", state)
@@ -745,6 +747,41 @@ def _no_work(cfg: dict, snap: dict, glob_snap: dict, quiet: float, t: float) -> 
     snap["no_work_since"] = None if wjobs or any(ln.get("unfinished") for ln in snap["lanes"]) else max([j.get("end_ts") or 0 for j in snap["jobs"]] + [quiet]) or t
     if snap["no_work_since"]:
         snap["alerts"] = [a for a in snap["alerts"] if a["key"].split(":")[0] not in ("ssh_fail", "disk_low", "idle")]
+
+
+def dir_name(name: str) -> str:
+    """项目根下一个目录在文字里的叫法（disk.project_storage 的 name）：「.」是项目根本层的文件，空串是还没拆开时的整个项目目录。页面上 dirName（page.html）同一口径。"""
+    return "项目根下的文件" if name == "." else "整个项目目录" if not name else name
+
+
+def _storage(cfg: dict, snap: dict, glob_snap: dict, t: float) -> None:
+    """本项目的存储（disk.project_storage，取工作台上一轮的全局快照）进快照的 storage（项目页「本项目占用」、labmon disk 读它）；
+    共享盘上本项目近 24 小时涨得快（burst，与按人的 burst: 同一条线）报 disk:<项目>，两边都给；
+    单个任务跑的期间本项目目录净增超过 bigwrite_gb（big）报 bigwrite:<任务>:<结束时刻>，只给实验会话，结束 24 小时内报（#53）；
+    并行的几个同项目任务用的是同一组扫描、量出来是同一个数，按 grp 合成一条（key 取最早结束的那个，_job_writes 定）。
+    项目暂时没实验时照报：是项目自己的目录在涨，不是主机的事。"""
+    st = snap["storage"] = DK.project_storage(cfg["id"], glob_snap)
+    g = lambda b: f"{b / GIB:.1f}" if abs(b) < 10 * GIB else f"{b / GIB:.0f}"   # noqa: E731
+    if st["burst"] and st["d24"]:
+        top = max(st["dirs"], key=lambda d: d["d24"] or 0, default=None)
+        head = (f"共享盘上本项目近 24 小时 +{g(st['d24'])} GiB" + (f"（{dir_name(top['name'])} +{g(top['d24'])} GiB）" if top and top["d24"] > 0 else "")
+                + (f"，共享盘剩 {g(st['free'])} GiB，按这个速度约 {st['free'] / st['d24']:.1f} 天占满" if st.get("free") else ""))
+        snap["alerts"].append(alert(f"disk:{cfg['id']}", "both",
+                                    head + "：能重算的缓存放 $LABMON_CACHE（用 needs= 声明），不再用的中间结果清掉；删结果、旧 checkpoint 前先问用户", head))
+    groups: dict = {}
+    for j in st["jobs"]:
+        if j["big"] and t - j["t1"] < 86400:
+            groups.setdefault(j.get("grp") or f"{j['name']}:{j['t1']}", []).append(j)
+    for key, js in groups.items():
+        js.sort(key=lambda j: j["t1"])
+        j, top = js[0], (js[0]["top"] or [None])[0]
+        names = "、".join(x["name"] for x in js[:3]) + (f" 等 {len(js)} 个任务" if len(js) > 3 else "")
+        more = max(x["with"] for x in js) - (len(js) - 1)
+        snap["alerts"].append(alert(f"bigwrite:{key}", "agent",
+                                    f"{names} 跑的这段时间本项目在共享盘上净增 {g(j['b'])} GiB"
+                                    + (f"，大头 {dir_name(top[0])} +{g(top[1])} GiB" if top and top[1] > 0 else "")
+                                    + (f"（同期还有 {more} 个本项目任务，一起算在内）" if more > 0 else "")
+                                    + "：能重算的缓存放 $LABMON_CACHE（用 needs= 声明），共享盘只留数据集、代码与结果"))
 
 
 def _rebalance(snap: dict) -> None:

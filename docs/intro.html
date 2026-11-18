@@ -331,7 +331,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
     <div class="row"><div class="k">顶栏与指标</div><div>数据新旧、各主机连通、告警；全部完成的预计时间（离下一个里程碑还剩多少；别的主机接过几行能明显提前时，旁边标“⇄ 可提前”，悬停看挪法）、GPU 利用率、显存、完成比例、磁盘余量。借来的主机带借用小标签（到几点、跑完就还）。</div></div>
     <div class="row"><div class="k">时间线</div><div>按主机分组，每条车道一行。实心是已完成、运行中从开始画到预计结束（条上的百分比就是红色现在线落在条上的位置）、淡色是推演的排队；失败的尝试是车道底部的细红条加红标；斜纹块是占位任务；依赖画成从被等的任务结束连到它开始的细线；空档写最可能的原因（掉线、drain、让位某项目、等资源）。缺省的「近景」把红色现在线放在左起三分之一，按在跑与排队的任务自动缩放，任务短、车道多时自动放大；暂时没实验（没有在跑、排队的）时固定看前 8 小时、后 16 小时，不为已跑完的任务缩放。</div></div>
     <div class="row"><div class="k">计划项 | 运行中</div><div>每个计划项一根堆叠条（完成、运行、失败、排队）和预计完成，完成的收进一行（计划项多时全收），每项一个小方块、按跑完先后排，悬停看那一项、点它定位到展开后的那一行；右边是每条车道正在跑的任务、剩余时间与速度小图（步/分）。同时跑的多于 6 个时改成紧凑视图：按计划项分组，一个任务一行，速度放悬停，可切回详细。</div></div>
-    <div class="row"><div class="k">资源与任务明细</div><div>整台主机的小图（标“整机”：含同机别的项目与 labmon 之外的进程）；任务表可筛未完成 / 失败，“预计时长”与清单估时不同时悬停看依据。</div></div>
+    <div class="row"><div class="k">资源与任务明细</div><div>整台主机的小图（标“整机”：含同机别的项目与 labmon 之外的进程）；下面一格「本项目占用」是共享盘上本项目的合计与近 24 小时涨了多少（涨得快时标色），悬停按项目根下的一级目录（缓存、输出、代码……）分开列，再列近来写得多的任务：worker 把登记了清单的项目根拆开扫，不另扫一遍。任务表可筛未完成 / 失败，“预计时长”与清单估时不同时悬停看依据。</div></div>
   </div>
   <p class="src">细节：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/workbench.md">docs/workbench.md</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/fleet.md#页面">fleet.md「页面」</a></p>
 </section>
@@ -358,6 +358,8 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <tr><td><code>rebalance:</code></td><td>会话</td><td>别的在用主机接过本项目排得最晚的几行，整批能明显提前</td><td>照消息挪：从原清单剪掉那几行，追加到目标主机的清单（<a href="#a-rebal">见下</a>）</td></tr>
         <tr><td><code>void:</code></td><td>会话</td><td>独占任务被打扰作废，或被对方挤掉，已重新排队</td><td>不用删 <code>.failed</code>；反复作废的挪到自用主机</td></tr>
         <tr><td><code>borrow_due:</code> 等</td><td>会话</td><td>借来的主机要还了、对方用得多、已归还</td><td>别再往上加任务；还了后把没跑完的换主机</td></tr>
+        <tr><td><code>disk:</code></td><td>两边</td><td>共享盘上本项目近 24 小时涨得快（30 GiB 以上且超过剩余的 10%，与按人的同一条线）</td><td>能重算的缓存挪到 <code>$LABMON_CACHE</code>（<code>needs=</code> 声明），不用的中间结果清掉；删结果、旧 checkpoint 前先问你</td></tr>
+        <tr><td><code>bigwrite:</code></td><td>会话</td><td>一个任务跑的期间本项目目录在共享盘上净增 5 GiB 以上（开跑前与跑完那次重扫之差，同期别的任务写的也在内）</td><td>看大头是哪个目录；能重算的改写到 <code>$LABMON_CACHE</code>，共享盘只留数据集、代码与结果</td></tr>
         <tr><td><code>returned_unfinished:</code></td><td>两边</td><td>车道所在的主机已归还，还有任务没跑完</td><td>把清单换到别的主机</td></tr>
         <tr><td><code>collector_stale</code></td><td>会话</td><td>看板服务没在采集</td><td><code>labmon service status</code>，必要时 restart</td></tr>
       </tbody>

@@ -1791,11 +1791,25 @@ t("escape", "恶意项目快照与事件：转义", () => {
   const E = pjCtx(PJE, EVE); run(E, 'LS.get = (k, d) => k === "filter" ? "all" : d; render()');
   const h = app(E); ok(!raw(h), "项目页没转义"); has(h, BADESC);
   for (const s of ["题", "任务", "行", "组", "主机", "检", "盘", "道", "告警", "碑", "挪"]) has(h, s + BADESC, s);
+  for (const s of ["目录", "写", "顶"]) has(tips(h), s + BADESC, "本项目占用的悬停：" + s);
   const hb = run(E, 'hostBands("srv-a")'); ok(hb.iv.some(x => x.text.includes("事" + BAD)), "hostBands 的提示是纯文字，经 tip() 再转义");
   run(E, 'LS.set("tl", "all"); TL.v = null; render()'); ok(!raw(app(E)), "全部视图");
 });
+t("project", "本项目占用（#53）：项目快照的 storage，按项目根下的一级目录列占用与增量、删掉的、写得多的任务；涨得快标色；没有 storage 不画", () => {
+  const A = pjCtx(PJ, EVN), h = app(A), tp = tips(h);
+  has(h, "本项目占用 53.1 GiB · 24 小时 +32.6 · 本地 15.8 GiB");
+  has(h, 'style="color:var(--warn);font-weight:600">本项目占用', "burst 时标色");
+  has(tp, "本项目在共享盘上（/data/share/me/proj-a；");
+  has(tp, "cache  39.1 GiB · 24 小时 +30.7 · 7 天 +36.3");
+  has(tp, "项目根下的文件  0.9 GiB · 24 小时 0 · 7 天 0");
+  has(tp, "tmp_old（已删）  7 天 −4.7"); has(tp, "还有 1 个目录没扫到");
+  has(tp, "alpha_train_s0  +6.9 GiB（cache +6.4）"); has(tp, "alpha_probe_s9  +0.2 GiB（out +0.2） · 还在等重扫");
+  has(tp, "共享盘剩 205 GiB，按近 24 小时约 6.3 天满");
+  ok((h.match(/本项目占用/g) || []).length === 1, "共享盘只在第一台主机写一次");
+  const B = pjCtx({...PJ, storage: undefined}, EVN), hb = app(B); clean(hb, "旧快照没有 storage"); ok(!hb.includes("本项目占用"), "没有 storage 也画了占用");
+});
 t("sparse", "项目缺省快照：探针失败、已归还、缺清单、没有任务、暂时没实验", () => {
-  const Q = pjCtx(PJS, {colors: {}, events: {}, occ: {}, storage: {}}); const h = app(Q); clean(h, "项目页");
+  const Q = pjCtx(PJS, {colors: {}, events: {}, occ: {}}); const h = app(Q); clean(h, "项目页");
   has(h, "已归还"); has(h, run(Q, "NO_WORK")); has(h, "探针超时"); has(h, "没跑完");
   // 只有挪不了的原因：与「⇄ 可提前」同一个小徽章（不跟着时刻用大字），只换灰色；悬停写原因
   has(h, `<div class="v">—${run(Q, "rebalMark(D.rebalance)")}</div>`, "全部完成旁的灰图标");
@@ -1804,7 +1818,7 @@ t("sparse", "项目缺省快照：探针失败、已归还、缺清单、没有�
   const Q2 = pjCtx(PJS, {}); clean(app(Q2), "events 为空对象");
 });
 t("sparse", "车道都收起了（#117：清单都跑完一天以上，快照里一条车道、一个任务也没有，主机还在）：照常画、标暂时没实验", () => {
-  const Q = pjCtx({...PJS, lanes: [], jobs: [], alerts: []}, {colors: {}, events: {}, occ: {}, storage: {}}); const h = app(Q); clean(h, "项目页");
+  const Q = pjCtx({...PJS, lanes: [], jobs: [], alerts: []}, {colors: {}, events: {}, occ: {}}); const h = app(Q); clean(h, "项目页");
   has(h, run(Q, "NO_WORK")); has(h, "探针超时", "主机照列");
   run(Q, 'LS.get = (k, d) => k === "filter" ? "all" : d; render()'); clean(app(Q), "任务明细筛全部");
 });

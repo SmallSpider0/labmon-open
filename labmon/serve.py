@@ -396,7 +396,7 @@ class Fleet:
 
 
 def proj_events(proj: Project, days: int = 30) -> dict:
-    """项目页时间线要的主机事件（30 天）、同机别的项目的占用（occupancy，已跑的、在跑的与推演的排队）与配色，以及本项目的存储用量：
+    """项目页时间线要的主机事件（30 天）、同机别的项目的占用（occupancy，已跑的、在跑的与推演的排队）与配色（本项目的存储在项目快照的 storage，#53）：
     主机按项目快照里的主机（monitor.toml 写的加上登记所在的，collect.lanes_cfg）。同机别的项目的事件（它的任务作废、被挤掉，对它的暂停、优先）不给：会画进本项目的事件带、被当成本项目空档的原因；
     它们占卡的情况画在“同机别的项目”一行。本项目的项目级暂停、优先（所有主机的，记录里没有 host）并进每台主机的事件，暂停区间照画（#96）。"""
     since = time.time() - days * 86400
@@ -411,7 +411,6 @@ def proj_events(proj: Project, days: int = 30) -> dict:
     glob = [{**e, "glob": True} for e in records(cat="queue", since=since)          # glob：时间线与单台的同种指令分开配对增撤（Codex P2）
             if schedule_project(e) == proj.id and not e.get("host") and not e.get("hosts")]
     return {"events": {h: sorted([e for e in records(host=h, since=since)[::-1] if mine(e)] + glob[::-1], key=lambda e: e["t"]) for h in hosts},
-            "storage": DK.project_storage(proj.id),
             "occ": occ, "colors": ov.get("colors") or {}}
 
 

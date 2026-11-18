@@ -6,6 +6,9 @@ const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "
 const tip = s => `data-tip="${esc(s)}"`;
 const pad = n => String(n).padStart(2, "0");
 const GIB = 2 ** 30;
+// 共享盘上的量（字节 → GiB 的数字，不带单位）：100 GiB 以上取整，否则一位小数；dGB 是增量，带正负号，不到 0.05 GiB 写 0（工作台的共享盘与项目页的本项目占用共用）
+const GB = b => b == null ? "—" : Math.abs(b) >= 100 * GIB ? String(Math.round(b / GIB)) : (b / GIB).toFixed(1);
+const dGB = b => !b || Math.abs(b) < GIB / 20 ? "0" : (b > 0 ? "+" : "−") + GB(Math.abs(b));
 // 正在操作（定时刷新先不重画，免得冲掉输入、关掉选择器、取消选区）：正拖着排顺序（sortBind），焦点在输入框、文本框或下拉框上，或在 ids 这些元素里选着文字。
 // 勾选框、单选、按钮类的 input 不算：点过以后焦点留在上面，整页会一直停在旧数据上（#66）；
 // 选着字只挡 SEL_HOLD：复制完告警不取消选区，页面也照常换新（#66）
