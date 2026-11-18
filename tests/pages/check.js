@@ -597,6 +597,28 @@ t("overview", "组内服务器页：指标、各状态的卡片、未识别进�
   const p = page(O, "#/fleet/people"); has(p, "NEWBIE"); has(page(O, "#/fleet/people/NEWBIE"), "下个月来");
   const d = page(O, "#/fleet/disk"); has(d, "OWNER"); has(d, "stray_dir");
 });
+t("overview", "人员页（#15）：头像分得清人、卡上没有无字图标、账号与服务器分两行标、提醒在人员选项卡收成一行、设置浮窗够宽", () => {
+  const O = ovCtx(OV, RR);
+  const ab = run(O, '["PERSON3", "PERSON4", "PERSON12", "OWNER", "alice-2", "ab_cd", "张三丰", ""].map(pabbr).join(",")');
+  ok(ab === "P3,P4,P12,OW,A2,AC,张三,?", "缩写：" + ab);
+  const p = page(O, "#/fleet/people");
+  has(p, ">P3</span>"); has(p, ">P4</span>"); ok(!p.includes(">PER</span>"), "人员卡头像还是 PER");
+  has(p, 'style="--pc:', "共享盘上有配色的人，头像沿用那份配色");
+  const grid = p.slice(p.indexOf("people-grid"));
+  ok(!/class="ib"|data-place="card"/.test(grid), "人员卡上还有没文字的图标按钮");
+  has(grid, '<span class="pk sm">服务器</span>'); has(grid, '<span class="pk">看板账号</span>');
+  has(p, ">修改默认设置</button>", "默认设置是带文字的按钮");
+  has(page(O, "#/fleet/people/OWNER"), "分配一台</button>", "分配一台在人员抽屉里");
+  // 提醒：服务器选项卡完整显示、指标条在；人员与共享盘收成一行可展开，不放指标条
+  const sv = page(O, "#/fleet"); has(sv, '<div class="fsum">'); has(sv, '<div class="alerts"><div>⚠');
+  for (const r of ["#/fleet/people", "#/fleet/disk"]) {
+    const h = page(O, r); ok(!h.includes('<div class="fsum">'), r + " 还有指标条");
+    ok(/<details class="alerts fold fleet-al" data-fold="fleetal" ><summary>[\s\S]*?⚠ 组内 \d+ 条提醒/.test(h), r + " 的提醒没收成一行");
+  }
+  run(O, 'const G0 = ST.get; ST.get = (k, d) => k === "cardOpen" ? {fleetal: true} : G0(k, d)');
+  has(page(O, "#/fleet/people"), 'data-fold="fleetal" open>', "展开后重画又收起");
+  has(ovHtml, ".pop:has(> .pform) { width: min(560px", "人员设置浮窗的宽度");
+});
 t("overview", "人员卡按当前管理员显示我（#70）", () => {
   const O = ovCtx(OV, RR);
   run(O, 'ME = {...ME, fleet_person: "ME"}');
@@ -2180,7 +2202,7 @@ ta("auth", "可把自己项目的清单从未授权主机搬到获授权主机",
 
 t("auth", "刚加入的普通用户有入门提示，命令行下载保留公网路径前缀", () => {
   const U = accCtx({...OVU, hosts: [], projects: []}, {...OWNER_ME, own: [], hosts: [], entry: "public"}, "#/", {path: "/pfx/"});
-  const h = page(U, "#/"); has(h, "请管理员在「账号」里给你开主机"); has(h, "labmon project push");
+  const h = page(U, "#/"); has(h, "请管理员在「组内服务器 → 人员」里打开你"); has(h, "labmon project push"); ok(!h.includes("「账号」"), "入门提示还指向已并进人员的「账号」");
   run(U, "ACC.at.me = 1");
   const m = page(U, "#/me");
   has(m, "看板版本 <code>a1b2c3d</code>");
@@ -2195,7 +2217,16 @@ ta("auth", "同一轮概览刷新更新项目和主机权限", async () => {
     access: {own: [], hosts: []}, projects: [], archived: [], hosts: []})});`);
   await run(U, "poll()");
   ok(!run(U, 'canWrite("proj-a") || canUseHost("srv-a")'), "权限改动到下一轮仍没刷新");
-  has(page(U, "#/"), "请管理员在「账号」里给你开主机");
+  has(page(U, "#/"), "请管理员在「组内服务器 → 人员」里打开你");
+});
+
+t("auth", "已能用主机的普通用户不再看到「开始使用」的开主机提示（#15）", () => {
+  // 没单独分配主机、但自己项目的任务已在 srv-a 上（快照给他看 srv-a）：不算没有主机
+  const U = accCtx(OVU, {...OWNER_ME, hosts: []});
+  const h = page(U, "#/"); ok(!h.includes("开始使用") && !h.includes("还没有能用的主机"), "有可用主机仍提示开主机");
+  run(U, "ACC.at.me = 1");
+  const m = page(U, "#/me"); has(m, "没有单独分配"); has(m, "你的项目还在 srv-a 上有任务");
+  const A = accCtx(OVU, OWNER_ME); ok(!page(A, "#/").includes("开始使用"), "分配了主机仍有开始使用");
 });
 
 ta("auth", "管理员换主人、开主机走对应接口，普通用户可以试推", async () => {
@@ -2370,6 +2401,20 @@ ta("auth", "关闭口令浮窗后，迟到的错误不会显示在另一个浮�
   ok(!h.includes("迟到的口令错误") && !h.includes('data-accf="pw"'), "关闭后的请求改变了当前浮窗");
 });
 
+t("auth", "「我的账号」能做什么说人话、不列作用域名；项目归属写人员名、账号放悬停（#15）", () => {
+  const U = accCtx(OVU, OWNER_ME, "#/me"); run(U, "ACC.at.me = 1");
+  const h = page(U, "#/me"); has(h, "可以查看能用的主机，管理自己的项目"); ok(!/能做：|只读、项目/.test(h), "还在列作用域名");
+  has(h, '<div class="acc-name"><b>amy</b>', "角色、入口的标签与名字同一行");
+  const A = accCtx(OV, ADMIN_ME, "#/me"); run(A, "ACC.at.me = 1");
+  has(page(A, "#/me"), "可以管理全部项目、主机与账号");
+  ok(run(A, 'meCan({account: false, scopes: ["deploy", "read"]}, ME.scope_info)').startsWith("这个令牌能做：看页面与数据"), "令牌打开的说法");
+  run(A, `ACC.at.users = 1; ACC.users = ${JSON.stringify(USERS)}`);
+  const m = page(A, "#/p/proj-a/manage"); has(m, ">OWNER</b>", "项目归属写人员名"); has(m, "看板账号 amy");
+  run(A, 'popToggle("owner", "proj-a", {owner: "amy"})'); has(page(A, "#/p/proj-a/manage"), ">OWNER（账号 amy）</option>");
+  const N = accCtx(OV, ADMIN_ME, "#/p/proj-a/manage"); run(N, "ACC.at.users = 1; ACC.users = null");
+  has(page(N, "#/p/proj-a/manage"), ">amy</b>", "读不到账号库时写账号名");
+});
+
 t("auth", "「管理 → 账号」：自己不能重置、删除，最后一个管理员撤不掉；等设口令、锁定的状态；确认弹窗；转义", () => {
   const A = accCtx(OV, ADMIN_ME, "#/admin/users");
   run(A, `ACC.at.users = 1; ACC.users = ${JSON.stringify(USERS)}`);
@@ -2394,7 +2439,7 @@ t("auth", "人员目录：同一人只一张卡，双入口切换详情，冲突
   run(A, `ACC.at.users = 1; ACC.users = ${JSON.stringify(L)};`);
   const list = page(A, "#/admin/users");
   has(list, "OWNER"); has(page(A, "#/admin/users/bob"), "暂无可确认的组内人员");
-  has(list, "未开通账号"); has(list, "暂无用量记录");
+  has(list, '<span class="pk">看板账号</span><span class="mut">未开通</span>'); has(list, "暂无用量记录");
   ok((list.match(/data-drw="#\/fleet\/people\/OWNER"/g) || []).length === 1, "同一人重复列在目录");
   ok(!list.includes("candidate"), "仅有名字的候选人员被当成已有人员");
   const detail = page(A, "#/admin/users/amy");
