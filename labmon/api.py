@@ -109,9 +109,11 @@ def borrow(sid: str, until: float | None, projects: str | None, holder: str | No
     return o.done(0)
 
 
-def override(verb: str, target: str, host_ids: list[str] | None, until: float | None, now: bool, immediate_hosts: list[str] | None = None) -> dict:
+def override(verb: str, target: str, host_ids: list[str] | None, until: float | None, now: bool, immediate_hosts: list[str] | None = None,
+             by: str | None = None, check=None) -> dict:
     """labmon pause|resume|focus|unfocus|drain|undrain：项目的不带 --host 记在主机清单（所有主机，含之后加入的，#96），带 --host 的、drain 与 --now
-    经 workerctl.override_each 下给那几台。每台一行：worker 打印的“生效中：…”，或 ssh 连不上的原因。"""
+    经 workerctl.override_each 下给那几台。每台一行：worker 打印的“生效中：…”，或 ssh 连不上的原因。
+    by：谁下的（项目级暂停记进主机清单，#16）；check()：项目级暂停写之前在主机清单的锁里核能不能动（users.need_pause，不行抛 users.Denied）。"""
     o = Out()
     action, kind = OVR[verb]
     try:
@@ -126,7 +128,9 @@ def override(verb: str, target: str, host_ids: list[str] | None, until: float | 
                     o.err(f"[labmon] {bad}")
                     return o.done(3)
             if kind != "drain" and not host_ids:      # 项目级设置随 sched.json 发给各主机
-                o.p("[labmon] " + set_sched_ovr(kind, tgt, action == "add", until if action == "add" else None))
+                if kind == "pause" and check is not None:
+                    check()
+                o.p("[labmon] " + set_sched_ovr(kind, tgt, action == "add", until if action == "add" else None, by=by))
                 if not (now and kind == "pause" and action == "add"):
                     return o.done(0)
                 rs = W.override_each("add", "pause", tgt, hs if immediate_hosts is None else immediate_hosts, None, True, once=True)
@@ -166,8 +170,9 @@ def project_init(hid: str, name: str | None) -> dict:
     return {"rc": rc, "out": out, "err": ""}
 
 
-def check(pid: str, text: str) -> dict:
+def check(pid: str, text: str, may=None) -> dict:
     """labmon check：按看板这边的用户级主机清单整套校验项目目录里那份（还没推上来的也行），打出各主机的探针规格（带上全局快照里本项目的登记）；
+    may(主机 id)：看的人能不能用这台（普通用户经 users.may_host，#16）：不能用的只打一行，不打连接信息与探针规格（主机清单里有没有这台都一样）；None 全打。
     after 是同步状态那行（客户端打）之后的几行：不再生效的旧键、wait 还没报过的页面上的改动与归档（列了的 wait 不重报，waits.check_told）。
     校验不过抛 projects.Refused(400)：客户端打“配置错误：…”、退出 3。"""
     from . import waits
@@ -179,6 +184,9 @@ def check(pid: str, text: str) -> dict:
     cfg = C.lanes_cfg(cfg, snapshot(), out / ".labmon", time.time(), save=False)
     o, after = Out(), []
     for h in cfg["hosts"]:
+        if may is not None and not may(h["id"]):
+            o.p(f"# {h['id']}（没开给你用：不列连接信息与探针规格，要用找管理员开）")
+            continue
         o.p(f"# {h['id']}（{h['ssh'] or '本机'}）")
         o.p(json.dumps(C.probe_spec(cfg, h), ensure_ascii=False, indent=2))
     if ign:

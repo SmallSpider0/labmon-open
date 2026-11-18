@@ -149,7 +149,7 @@
   from 原来整批何时跑完（推不出为 null）, to 挪后, cut 其中被借用约定挡住的清单 ["主机|目录|清单"]（这句写进 borrow_cut，不另报）, text 那一句（句尾“按 HH:MM 的推演”）}`；
   只有原因的 `{why [每台一句：“主机 上本项目 X 后没活，接不了 任务：原因”，整批推不出时“主机 接不了 任务：原因”], from}`；都没有的项目不列。offers 里已不在原处的行这一轮截掉（[workbench.md「挪法建议」](workbench.md#挪法建议)）。
 - 顶层 `lan`（`lan.check` 的结果，总是有）、`wake`（给 `labmon wait` 的全局消息 `[{key, msg, projects, host}]`；作废与被挤掉的 `void:` 另带 `job: [项目, 任务]`（`overview._voided`，`labmon wait --job` 按它认等的任务被作废，#135）；页面上的改动 `records.told` 给的 key 是 `page:<what>:<项目>:<毫秒>`、不带 `host`，#121）、`sched`（调度卡）、`occ`（各卡被谁占着）、`fleet`、`disk`、`projects`（各项目看板的摘要）。
-  `sched.projects[]` 的 `focus`、`paused` 是 null 或 `{until（epoch 秒，null 为无期限）, hosts}`：`hosts` 为 null 是项目级的（主机清单 `[sched.focus]`、`[sched.pause]`，所有主机），否则是只在这几台单独下的（`--host`），`until` 取最晚的（#96）。
+  `sched.projects[]` 的 `focus`、`paused` 是 null 或 `{until（epoch 秒，null 为无期限）, hosts}`：`hosts` 为 null 是项目级的（主机清单 `[sched.focus]`、`[sched.pause]`，所有主机），否则是只在这几台单独下的（`--host`），`until` 取最晚的（#96）。项目级的暂停另带 `by`：谁下的（主机清单 `[sched.pause_by]`，`config.pause_by`；没记的为 null，当管理员下的，#16）；普通用户看到的快照只留他自己项目的 `by`。
   `hosts[].status.overrides[]` 里项目级的暂停、优先带 `global: true`（worker 从 `sched.json` 接上的，每台都有一份），`once: true` 的是不带 `--host` 的 `pause --now` 给各台下的“只停一次”：停完照样挡着，全局暂停送到就删（最多 30 分钟）。
 - 顶层 `regs` 是登记的全局视图（`overview._regs`，项目「管理」抽屉用，[workbench.md「项目的管理抽屉」](workbench.md#项目的管理抽屉)）：各主机目录下登记的清单，每台一项
   `{host, label, state active|returned|unlisted（在用、主机清单里已归还、主机清单里已没有）, returned 归还时刻（epoch 秒，没有为 null）, home 所在 worker_home, t 读到的时刻（在用的是那份状态的 t）,
@@ -188,7 +188,8 @@
 - `POST /reg/move|rm`（`project` 作用域，本机不在内网 409，#95，#121 按主机成批）：move `{"to", "items": [{"host", "root", "jobs", "project", "stop"}]}` 逐条在 `to` 上 `worker add`（不带 `--gpus`）；
   rm `{"host", "home", "project", "items": [{"root", "jobs"}]}` 逐条 `worker rm`（已不在用的主机经 `workerctl.via` 代办，`home` 给主机清单里已没有的那台的 worker_home），有一条在这台上有任务在跑就整批拒绝。
   每条记一条 `config` 记录，做成的按项目给实验会话一条消息（`records.tell`）；成功 `{"msg"}`，失败 409 `{"error"}`（中途失败的带已做了几条）。
-- `POST /sched/weight|focus|unfocus|pause|resume`（`project` 作用域，`weight` 只给管理员）：都只改主机清单的 `[sched]`（权重、`[sched.focus]`、`[sched.pause]`），不连服务器；成功 `{"msg"}`，失败 409 `{"error"}`。
+- `POST /sched/weight|focus|unfocus|pause|resume`（`project` 作用域，`weight`、`focus`、`unfocus` 只给管理员，#16）：都只改主机清单的 `[sched]`（权重、`[sched.focus]`、`[sched.pause]`；暂停同时记谁下的 `[sched.pause_by]`），不连服务器；成功 `{"msg"}`，失败 409 `{"error"}`。
+  普通用户只能加、改、撤自己下的暂停：已有管理员（或没记是谁）下的、还没到期的暂停时 403（`users.need_pause`）。
   暂停、恢复给那个项目的实验会话一条消息（`records.tell`；权重、优先不给）。
 
 状态目录里与它相关的文件：

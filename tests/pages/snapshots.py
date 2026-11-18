@@ -497,7 +497,7 @@ def overview_evil() -> dict:
     d["colors"]["evil"] = "#123456"
     d["rebalance"]["proj-a"]["text"] = "挪" + BAD
     d["rebalance"]["proj-b"]["why"] = ["因" + BAD]
-    d["sched"]["projects"].append({"id": "evil", "w": 2, "use": 1.0, "cards": 0, "queued": 1, "waiting": 1, "wait_avg": None, "wait_n": 0, "focus": {"until": None, "hosts": None}, "paused": {"until": None, "hosts": None}})
+    d["sched"]["projects"].append({"id": "evil", "w": 2, "use": 1.0, "cards": 0, "queued": 1, "waiting": 1, "wait_avg": None, "wait_n": 0, "focus": {"until": None, "hosts": None}, "paused": {"until": None, "hosts": None, "by": "人" + BAD}})
     F = d["fleet"]
     F["servers"][1].update(holder="人" + BAD, job="作业" + BAD)
     F["servers"][1]["sample"]["work"][0].update(label="负载" + BAD, names=["名" + BAD], cwd="/d/" + BAD, chain=["链" + BAD])

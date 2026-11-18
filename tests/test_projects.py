@@ -151,6 +151,23 @@ class ArchiveTest(unittest.TestCase):
         self.assertIn("p1 现在不能归档", str(e.exception))
         self.assertEqual(PJ.archived(), {})
 
+    def test_user_archive_keeps_admin_schedule(self):
+        """普通用户归档自己的项目（#16）：只撤自己下的暂停；管理员定的权重、优先与别人下的暂停留着，恢复后照旧生效，归档绕不过去。管理员归档照旧全撤。"""
+        K.set_sched_ovr("focus", "p1", True)
+        K.set_sched_ovr("pause", "p1", True, by="boss")
+        PJ.archive("p1", self.psnap(), self.glob(), user="amy")
+        sw = K.sched()
+        self.assertEqual((sw["weight"]["p1"], sw["pause"], sw["focus"]), (2, {"p1": None}, {"p1": None}))
+        self.assertEqual(K.pause_by(), {"p1": "boss"})
+        PJ.restore("p1")
+        K.set_sched_ovr("pause", "p1", True, by="amy")
+        PJ.archive("p1", self.psnap(), self.glob(), user="amy")
+        sw = K.sched()
+        self.assertEqual((sw["weight"].get("p1"), "pause" in sw, K.pause_by()), (2, False, {}))   # 自己下的暂停撤了，权重与优先留着
+        PJ.restore("p1")
+        PJ.archive("p1", self.psnap(), self.glob())
+        self.assertEqual(K.sched(), {"weight": {"p2": 3}})
+
     def test_archive_multi_host(self):
         # 两台在用 + 一台已归还共用 worker_home：三处 p1 的登记都移除（已归还的 c 经 a 代办，不连 c）；p2 的不动；
         # 主机清单里已没有、又没有共用 worker_home 的在用主机的 z 跳过并写明；按主机下的暂停只撤 p1 的；[sched] 里 p1 的权重与暂停撤掉

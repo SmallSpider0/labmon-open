@@ -179,7 +179,7 @@ const postJSON = (url, body = {}, how) => api(url, {method: "POST", headers: {"C
 
 /* ---------- 看板账号（#160）：ME 是看板服务发页面时填进来的“我是谁”（users.me，与 /api/me 同一份）；file:// 打开的、离线预览没填的是 null（只读）。
    canOps：平台操作（续租、关机、换人、开机、借卡、保活守护、探测、人员、共享盘归属：管理员、入口获准）；
-   canWrite：项目的写操作（project 作用域，普通用户只改自己的）；canWeight：调度权重（管理员）。
+   canWrite：项目的写操作（project 作用域，普通用户只改自己的）；canWeight：调度权重与优先（管理员，#16）。
    opsNote：管理员从公网入口来时，平台操作按钮的位置换成的那句；别的人那里什么都不出。
    会话过期、被吊销或退出了：取数据拿到 401 就回登录页（toLogin），带着当前地址与视图；嵌在工作台里的项目页带着工作台一起回 ---------- */
 const canOps = () => LIVE && !!ME?.ops;

@@ -480,7 +480,7 @@ class ServeTest(unittest.TestCase):
         a, b = v["projects"]
         # 优先、暂停：项目级的（主机清单，hosts 为 None）取 sw；只在几台单独下的列出主机、到期取最晚（None 为无期限）；状态里的 global 项不重复算
         self.assertEqual((a["w"], a["use"], a["cards"], a["wait_avg"], a["wait_n"], a["focus"], a["paused"]),
-                         (2.0, 3.0, 1.5, 15.0, 2, {"until": None, "hosts": ["x", "y"]}, {"until": now + 60, "hosts": None}))
+                         (2.0, 3.0, 1.5, 15.0, 2, {"until": None, "hosts": ["x", "y"]}, {"until": now + 60, "hosts": None, "by": None}))
         self.assertEqual((b["w"], b["queued"], b["waiting"], b["paused"], b["focus"]), (1, 2, 1, {"until": None, "hosts": ["x"]}, None))
         self.assertEqual((b["wait_avg"], b["wait_n"]), (1.0, 70))
 
@@ -889,6 +889,78 @@ class AuthTest(unittest.TestCase):
                 self.assertEqual(self.call(self.lan + "/reg/rm", {"host": "a", "home": "/fake", "project": "exp",
                                       "items": [{"root": "/root", "jobs": "own.txt"}]}, tok=amy)[0], 200)
             self.assertEqual(run.call_args.kwargs, {"home": None, "expect_project": "exp"})
+
+    def test_focus_is_admin_only(self):
+        """优先、撤销优先只给管理员（#16）：页面与命令行两个入口，带不带 --host 都一样；普通用户的项目也不行。"""
+        amy = make_token("amy", role="user", scopes=("project",))
+        admin = make_token("boss", role="admin", scopes=("admin", "project"))
+        PJ.put_config("exp", 'id = "exp"\n', owner="amy")
+        K.hosts_file().write_text('[[hosts]]\nid = "a"\nssh = "remote-a"\nusers = ["amy"]\n')
+        with mock.patch.object(S.W, "override_each", return_value=[]) as each:
+            for path, data in (("/sched/focus", {"project": "exp"}), ("/sched/unfocus", {"project": "exp"}),
+                               ("/api/override/focus", {"target": "exp"}), ("/api/override/unfocus", {"target": "exp"}),
+                               ("/api/override/focus", {"target": "exp", "hosts": ["a"]})):
+                self.assertEqual(self.call(self.lan + path, data, tok=amy)[0], 403, path)
+            each.assert_not_called()
+        self.assertNotIn("focus", K.sched())
+        self.assertEqual(self.call(self.lan + "/sched/focus", {"project": "exp"}, tok=admin)[0], 200)
+        self.assertIn("exp", K.sched()["focus"])
+        self.assertEqual(self.call(self.lan + "/api/override/unfocus", {"target": "exp"}, tok=admin)[0], 200)
+        self.assertNotIn("focus", K.sched())
+
+    def test_pause_records_who_and_user_cannot_undo_admin_pause(self):
+        """项目级暂停记谁下的（#16）：管理员下的普通用户撤不掉、也不能重下一次改成自己的；自己下的自己能撤。页面与命令行同一条规则。"""
+        amy = make_token("amy", role="user", scopes=("project",))
+        admin = make_token("boss", role="admin", scopes=("admin", "project"))
+        PJ.put_config("exp", 'id = "exp"\n', owner="amy")
+        K.hosts_file().write_text('[[hosts]]\nid = "a"\nssh = "remote-a"\nusers = ["amy"]\n')
+        later = time.time() + 3600
+        self.assertEqual(self.call(self.lan + "/sched/pause", {"project": "exp"}, tok=admin)[0], 200)
+        self.assertEqual(K.pause_by(), {"exp": "boss"})
+        for path, data in (("/sched/resume", {"project": "exp"}), ("/api/override/resume", {"target": "exp"}),
+                           ("/sched/pause", {"project": "exp", "until": later}), ("/api/override/pause", {"target": "exp", "until": later})):
+            self.assertEqual(self.call(self.lan + path, data, tok=amy)[0], 403, path)
+        self.assertEqual(K.sched()["pause"], {"exp": None})                  # 还是管理员那条：无期限、记着管理员
+        self.assertEqual(K.pause_by(), {"exp": "boss"})
+        self.assertEqual(self.call(self.lan + "/sched/resume", {"project": "exp"}, tok=admin)[0], 200)
+        self.assertEqual(K.pause_by(), {})
+        self.assertEqual(self.call(self.lan + "/sched/pause", {"project": "exp", "until": later}, tok=amy)[0], 200)
+        self.assertEqual(K.pause_by(), {"exp": "amy"})
+        self.assertEqual(self.call(self.lan + "/api/override/resume", {"target": "exp"}, tok=amy)[0], 200)
+        self.assertNotIn("pause", K.sched())
+        self.assertEqual(self.call(self.lan + "/api/override/pause", {"target": "exp"}, tok=amy)[0], 200)
+        self.assertEqual(self.call(self.lan + "/sched/resume", {"project": "exp"}, tok=amy)[0], 200)
+        K.set_sched_ovr("pause", "exp", True)                                   # 没记谁下的（手写、以前下的）：当管理员下的
+        self.assertEqual(self.call(self.lan + "/sched/resume", {"project": "exp"}, tok=amy)[0], 403)
+        snap = O.sched_view([{"id": "a", "status": {"t": 1, "share": {"weight": {}, "use": {}, "wait_cap_min": 30, "half_life_h": 24}}}],
+                            [{"id": "exp"}, {"id": "other"}], time.time())
+        self.assertEqual(snap["projects"][0]["paused"], {"until": None, "hosts": None, "by": None})
+        K.set_sched_ovr("pause", "other", True, by="boss")
+        snap = O.sched_view([{"id": "a", "status": {"t": 1, "share": {"weight": {}, "use": {}, "wait_cap_min": 30, "half_life_h": 24}}}],
+                            [{"id": "exp"}, {"id": "other"}], time.time())
+        self.assertEqual(snap["projects"][1]["paused"]["by"], "boss")
+        seen = U.view(U.Ident("amy", "user", frozenset({"project"}), "token", "k"), {"sched": snap, "projects": [], "hosts": []})
+        self.assertNotIn("by", seen["sched"]["projects"][1]["paused"])        # 别人项目的暂停：普通用户看不到是谁下的
+        self.assertIn("by", seen["sched"]["projects"][0]["paused"])
+
+    def test_check_hides_hosts_not_opened_to_user(self):
+        """普通用户的 labmon check（#16）：引用了没开给他的主机，照常校验，但不打那台的连接信息与探针规格；管理员照旧全打。"""
+        amy = make_token("amy", role="user", scopes=("project",))
+        admin = make_token("boss", role="admin", scopes=("admin", "project"))
+        K.hosts_file().write_text('[[hosts]]\nid = "a"\nssh = "remote-a"\nusers = ["amy"]\n'
+                                  '[[hosts]]\nid = "b"\nssh = "secret-b"\n[[hosts.checks]]\nid = "c"\ncmd = "secret-cmd"\n')
+        text = 'id = "fresh"\n[[hosts]]\nid = "a"\n[[hosts]]\nid = "b"\n[[hosts]]\nid = "nowhere"\n'
+        save_json(state_dir() / "snapshot.json", {"wake": []})
+        code, _, body = self.call(self.lan + "/api/project/fresh/check", {"text": text}, tok=amy)
+        self.assertEqual(code, 200, body)
+        out = json.loads(body)["out"]
+        self.assertIn("remote-a", out)
+        for leak in ("secret-b", "secret-cmd"):
+            self.assertNotIn(leak, out)
+        self.assertEqual(out.count("没开给你用"), 2)                          # 清单里有的 b 与没有的 nowhere 一个样
+        out = json.loads(self.call(self.lan + "/api/project/fresh/check", {"text": text}, tok=admin)[2])["out"]
+        self.assertIn("secret-b", out)
+        self.assertIn("secret-cmd", out)
 
     def test_wait_request_cache_isolated_by_account_and_project(self):
         amy = make_token("amy", role="user", scopes=("project",))

@@ -333,28 +333,36 @@ def _sched_ovr(d: dict, kind: str) -> list[tuple[str, float | None | bool]]:
     return [(str(p), None if u is True else parse_time(u) or False) for p, u in (v.items() if isinstance(v, dict) else [])]
 
 
-def _sched_set(sec: str, project: str, val, why: str, ev: dict | None = None) -> bool:
-    """改主机清单 [sched.<sec>] 里这个项目的一行（val 为 None 删掉；没有这一段就加在文件末尾）。权重、项目级暂停与优先共用。
-    写了返回 True；要删的本来就没有返回 False。ev：记录里替换的字段（暂停、优先记成 override 种类，时间线据此画区间）。"""
-    key = project if re.fullmatch(r"[A-Za-z0-9_-]+", project) else json.dumps(project, ensure_ascii=False)
-    p = hosts_file()
-    lines = p.read_text().splitlines(keepends=True) if p.exists() else []
+def _sched_rows(lines: list[str], sec: str, key: str, val) -> list[str] | None:
+    """主机清单 [sched.<sec>] 里 key 这一行改成 val（None 删掉；没有这一段就加在文件末尾）后的各行；没变返回 None。"""
     b = _blocks(lines, f"[sched.{sec}]")
     if not b and any(re.match(r"\s*%s\s*=" % sec, l) for s, end, _ in _blocks(lines, "[sched]") for l in lines[s + 1:end]):
-        raise ConfigError(f"{p} 里 [sched] 的 {sec} 写成了内联表，改成 [sched.{sec}] 段（每个项目一行）再在页面上改")
+        raise ConfigError(f"{hosts_file()} 里 [sched] 的 {sec} 写成了内联表，改成 [sched.{sec}] 段（每个项目一行）再在页面上改")
     if b:
         s, end, _ = b[0]
         block = _set_keys(lines[s + 1:end], {key: val})
-        if block == lines[s + 1:end]:
-            return False
-        text = "".join(lines[:s + 1] + block + lines[end:])
-    elif val is None:
-        return False
-    else:
-        v = _set_keys([], {key: val})[0]
-        text = "".join(lines) + ("\n" if lines and not lines[-1].endswith("\n") else "") + f"\n[sched.{sec}]\n{v}"
-    _write_checked(p, text, why, ev and {"host": None, "hosts": None, **ev})    # 项目级的指令不属于哪台（改动的行挨着哪台的块不算）
-    return True
+        return None if block == lines[s + 1:end] else lines[:s + 1] + block + lines[end:]
+    if val is None:
+        return None
+    v = _set_keys([], {key: val})[0]
+    return ("".join(lines) + ("\n" if lines and not lines[-1].endswith("\n") else "") + f"\n[sched.{sec}]\n{v}").splitlines(keepends=True)
+
+
+def _sched_set(sec: str, project: str, val, why: str, ev: dict | None = None, also: dict | None = None) -> bool:
+    """改主机清单 [sched.<sec>] 里这个项目的一行（val 为 None 删掉；没有这一段就加在文件末尾）。权重、项目级暂停与优先共用。
+    also：同一次写入里一起改的别的段 {段: 值}（暂停是谁下的 [sched.pause_by]，#16）。
+    sec 那行改了返回 True；要删的本来就没有返回 False（also 的行变了照样写）。ev：记录里替换的字段（暂停、优先记成 override 种类，时间线据此画区间）。"""
+    key = project if re.fullmatch(r"[A-Za-z0-9_-]+", project) else json.dumps(project, ensure_ascii=False)
+    p = hosts_file()
+    lines = p.read_text().splitlines(keepends=True) if p.exists() else []
+    main, cur = False, lines
+    for i, (s, v) in enumerate([(sec, val), *(also or {}).items()]):
+        new = _sched_rows(cur, s, key, v)
+        if new is not None:
+            cur, main = new, main or i == 0
+    if cur is not lines:
+        _write_checked(p, "".join(cur), why, ev and {"host": None, "hosts": None, **ev})    # 项目级的指令不属于哪台（改动的行挨着哪台的块不算）
+    return main
 
 
 @_hosts_edit
@@ -375,20 +383,30 @@ def sched_ovr_text(kind: str, project: str, until: float | None) -> str:
     return f"{SCHED_OVR[kind]} {project}，" + (f"到 {fmt_time(until)}" if until else "无期限")
 
 
+def pause_by() -> dict[str, str]:
+    """项目级暂停是谁下的（#16）：主机清单 [sched.pause_by]，{项目: 账号名}；看板随 [sched.pause] 一起写、一起删，worker 不读。
+    没有这一行的暂停（手写的、#16 之前下的）当管理员下的：普通用户撤不掉（users.need_pause）。"""
+    hf = hosts_file()
+    v = ((_read_toml(hf).get("sched") or {}) if hf.exists() else {}).get("pause_by")
+    return {str(p): str(b) for p, b in v.items() if isinstance(b, str)} if isinstance(v, dict) else {}
+
+
 @_hosts_edit
-def set_sched_ovr(kind: str, project: str, on: bool, until: float | None = None) -> str:
+def set_sched_ovr(kind: str, project: str, on: bool, until: float | None = None, by: str | None = None) -> str:
     """项目级的暂停（kind pause）、优先（focus）：加（on，until 为到期，None 无期限；已经过去的拒绝）或撤，写主机清单 [sched.<kind>] 里这一行。
+    暂停另在同一次写入里记 by（谁下的，[sched.pause_by]；撤的时候一起删，#16）。
     看板下一轮随 sched.json 写给各在用主机，之后加入的主机也有（#96）；命令行不带 --host 的 pause / focus 与页面调度卡都经它。返回说明。"""
     if kind not in SCHED_OVR:
         raise ConfigError(f"不认识的项目级指令 {kind}")
+    who = {"pause_by": by if on else None} if kind == "pause" else None
     if on:
         check_future(until)
         what = sched_ovr_text(kind, project, until)
         _sched_set(kind, project, fmt_time(until, year=True) if until else True, f"临时指令：{what}（所有主机）",
-                   {"kind": "override", "act": "add", "okind": kind, "target": project, "until": round(until) if until else None})
+                   {"kind": "override", "act": "add", "okind": kind, "target": project, "until": round(until) if until else None}, who)
         return f"{what}：所有主机（含之后加入的）约 1 分钟内生效"
     if not _sched_set(kind, project, None, f"撤销临时指令：{SCHED_OVR[kind]} {project}（所有主机）",
-                      {"kind": "override", "act": "rm", "okind": kind, "target": project}):
+                      {"kind": "override", "act": "rm", "okind": kind, "target": project}, who):
         return f"{project} 本来就没有{SCHED_OVR[kind]}（所有主机的）"
     return f"撤销 {project} 的{SCHED_OVR[kind]}：所有主机约 1 分钟内生效"
 
@@ -406,7 +424,7 @@ def expire_sched(t: float | None = None) -> list[str]:
             if u and u <= t:
                 what = f"{SCHED_OVR[kind]} {p}，到 {fmt_time(u)}"
                 _sched_set(kind, p, None, f"临时指令到期：{what}（所有主机）",
-                           {"kind": "override", "act": "expire", "okind": kind, "target": p, "until": round(u)})
+                           {"kind": "override", "act": "expire", "okind": kind, "target": p, "until": round(u)}, {"pause_by": None} if kind == "pause" else None)
                 out.append(what)
     return out
 

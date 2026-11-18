@@ -2169,6 +2169,13 @@ t("auth", "普通用户只改自己的项目，调度保留其他项目行和份
   ok(!sched.includes('href="#/p/proj-b"') && !/data-sch="[^"]*" data-p="proj-b"/.test(sched), "有别人项目的链接或写按钮");
   ok(/data-sch="[^"]*" data-p="proj-a"/.test(sched), "自己的项目没有调度按钮");
   ok(!/data-sch="(wu|wd)"|data-now/.test(sched + el(U, "top").innerHTML), "普通用户可以改权重或采集全局");
+  ok(!/data-sch="(f|uf)"/.test(sched + drw(U, "#/p/proj-a/manage")), "普通用户可以加撤优先（#16：只给管理员）");
+  const paused = by => run(U, `(() => { const x = D.sched.projects[0], p0 = x.paused; x.paused = {until: null, hosts: null, by: ${JSON.stringify(by)}};
+    const r = schedCard() + projSchedSec(D.projects[0]); x.paused = p0; return r; })()`);
+  const theirs = paused(null), mine = paused("AMY");
+  ok(!theirs.includes('data-sch="ur"'), "没记是谁（当管理员）下的暂停，普通用户有恢复按钮"); has(tips(theirs), "不是你下的，恢复找管理员");
+  ok(!paused("boss").includes('data-sch="ur"'), "管理员下的暂停，普通用户有恢复按钮"); has(tips(paused("boss")), "boss 下的");
+  has(mine, 'data-sch="ur" data-p="proj-a"', "自己下的暂停该能恢复"); ok(!tips(mine).includes("找管理员"), "自己下的暂停不该叫找管理员");
   const p = page(U, "#/p/proj-a/manage");
   has(p, "改了就写回看板上的 monitor.toml"); has(p, "归档这个项目");
   has(p, "<b>项目归属</b>"); ok(!p.includes('data-pj="owner"'), "普通用户可以换项目主人");
