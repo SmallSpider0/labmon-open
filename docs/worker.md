@@ -410,10 +410,11 @@ worker 把各清单每个任务的预计时长写进 `status.json`（队列的 `
 - 同机多开一条车道（#43，`local_offers`）：本机这个项目排得最晚的清单的队尾几行，同一套挑法（`move_cands`）与推演（`try_move` 从原队列拿掉这几行、
   原样放进一条新车道），每项带 `local: true`、`lane` 为 null，`jobs` 的 `rest` 是挪完后本机原清单何时跑完（新推演里，同卡变慢也算进去）。只在卡有真余量时算
   （`local_cards`，与 fit 同一条规则 `gpu_slack`）：容器在限流、各卡近 10 分钟利用率都不低于 `UTIL_FULL`（90%）、利用率低于 50% 的卡上在跑的被 CPU 卡住的都不出，
-  新车道只许用余下的卡；估计只有清单提示值的 GPU 行不挪（同卡并行怕 OOM）。同机不出的不写原因（`fit` 会说）。
+  新车道只许用余下的卡（不是全部卡时记在 `gpus`，建议的 `worker add` 带 `--gpus`）；估计只有清单提示值的 GPU 行不挪（同卡并行怕 OOM）。同机不出的不写原因（`fit` 会说）。
+  原推演里本机这个项目何时跑完推不出时算不了收益，只在要挪的行没有估时那样留一项 `nodur`（`jobs` 为空），看板据此出 `rebalance:<项目>:est`。
 - 这个项目在这台不能用（drain、只给别的项目用、暂停）或这台在预备续租（续租截止）的只写原因，不接；借来的主机上对方此刻超出预留不算（几小时后接不接得了，推演不模拟它）。
 - 只是提示：算 offers 出错时沿用上一次的（最多 3 分钟，`STATUS_STALE_S`，再错就清空）、worker.log 记一行（同一个错只记一次），放行与推演照常。
-- 字段：`[{project, local, lane, before, free, ends, jobs: [{host, root, queue, name, there, rest, end, own, dep}], why, stop, nodur}]`（`dep`：这一行写了依赖）：`why` 只放原因本身，`stop` 是挪到这台排不上的那一行
+- 字段：`[{project, local, gpus, lane, before, free, ends, jobs: [{host, root, queue, name, there, rest, end, own, dep}], why, stop, nodur}]`（`dep`：这一行写了依赖）：`why` 只放原因本身，`stop` 是挪到这台排不上的那一行
   （与具体某行无关的为 null），原因句由看板拼；见 [schema.md「工作台的全局快照与接口」](schema.md#工作台的全局快照与接口)。
 
 ## 保活

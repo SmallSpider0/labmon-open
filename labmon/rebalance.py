@@ -64,8 +64,10 @@ def _text(p: dict, proj: str, label: dict, t: float) -> str:
     dep = [j["name"] for j in p["jobs"] if j.get("dep")]
     tail = f"；写了 after= 的 {'、'.join(dep)} 排在挪来的几行最后（等别的任务的行在前会堵住后面的）" if dep and len(dep) < len(p["jobs"]) else ""
     if p.get("local"):                 # 同机多开一条车道（#43）：剪到新的长期清单，与原清单同目录、同环境
+        # 推演只在没吃满的卡上排（offer 的 gpus）：登记时照样限卡，否则真放行可能放到吃满的卡上（Codex 审 #63）
+        gp = f" --gpus {','.join(map(str, p['gpus']))}（只用这几张卡：别的卡已吃满）" if p.get("gpus") else ""
         return (f"在 {label.get(tid, tid)} 上多开一条车道：把 {what} 剪到一条新的长期清单（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；"
-                f"原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}，以后同类任务也往这条追加{tail}："
+                f"原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}{gp}，以后同类任务也往这条追加{tail}："
                 f"{when}{TAIL % fmt_time(t, date=False)}")
     lane = p.get("lane") and f"{p['lane'][0].rstrip('/')}/{p['lane'][1]}"
     where = (f"插在 {lane} 里 {p['before']} 前面（它写了 after=，要等别的任务；接在它后面会被它堵住）" if lane and p.get("before")
@@ -161,7 +163,7 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
                 new = _finish(o, k)
                 if new is None or (f is not None and f - new < _need(f, t) * (0.5 if was.get("key") else 1)):
                     continue
-                opts.append({"target": hid, "lane": o["lane"], "before": o.get("before"), "jobs": o["jobs"][:k], "from": f, "to": new, "local": bool(o.get("local"))})
+                opts.append({"target": hid, "lane": o["lane"], "before": o.get("before"), "jobs": o["jobs"][:k], "from": f, "to": new, "local": bool(o.get("local")), "gpus": o.get("gpus")})
             # 挪不了：这台这个项目早就没活（离整批跑完还够阈值），却一行也接不了，写明为什么
             idle = f is None or (o["free"] is not None and f - max(o["free"], t) >= _need(f, t))
             if not o["jobs"] and o.get("why") and idle and not o.get("local"):     # 同机多开不成的不写：fit 会说
@@ -185,6 +187,6 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
 
 def _est_text(est: list, proj: str, label: dict) -> str:
     """挪来的那一行没有估时、推演算不出能提前多少时给会话的一句（#43）：哪台有空、卡在哪几行，怎么补。"""
-    where = "；".join(f"{label.get(h, h)}" + ("（同机多开一条车道）" if o.get("local") else "") + f" 接 {o['stop']} 时" for h, o in est)
+    where = "；".join(f"{label.get(h, h)}" + ("（同机多开一条车道）" if o.get("local") else " ") + f"接 {o['stop']} 时" for h, o in est)
     return (f"有主机有空，但推演算不出挪过去能提前多少：{where}没有估时（同类没跑过，清单也没写 est_min）。"
             f"给这类行写 est_min=（分钟，粗估就行），或 labmon worker fit <主机> <目录> <清单> --list --project {proj} 看此刻能再开几条车道")

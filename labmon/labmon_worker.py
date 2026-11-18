@@ -3542,16 +3542,24 @@ class Worker:
             mine_p = [ln for ln in own if ln["project"] == p]
             free = None if None in [ln["end"] for ln in mine_p] else max([now] + [ln["end"] for ln in mine_p])
             cards, why = self.local_cards()
-            if why or free is None:
+            if why:
                 continue
-            cands, why = self.move_cands(lns, now, now, waiters)
+            # 原推演何时跑完推不出（free 为 None）时算不了收益，只看是不是因为行没有估时（那样的清单推演里排不上，state 是 trapped，也一起看）
+            cands, why = self.move_cands(lns if free is not None else mine_p, now, now, waiters)
             for i, c in enumerate(cands):           # 只有提示值的 GPU 行不挪：没有实测，同卡并行怕 OOM（同 fit）
                 e = estimate(self.hist, dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]))
                 if c["h"]["ngpu"] and e["src"] == "提示值":
                     cands, why = cands[:i], "%s 的显存只有清单提示值、还没有实测，不与别的任务同卡" % c["name"]
                     break
-            o = {"project": p, "local": True, "lane": None, "free": round(free), "jobs": [], "why": why, "stop": None,
+            # gpus：新车道只许用的卡（推演就按它排）；不是全部卡时建议的 worker add 带 --gpus，否则真放行可能放到吃满的卡上（Codex 审 #63）
+            o = {"project": p, "local": True, "lane": None, "free": free and round(free), "jobs": [], "why": why, "stop": None,
+                 "gpus": cards if cards and len(cards) < len(self.info.get("gpus") or []) else None,
                  "ends": {"%s|%s|%s" % (ln["host"], ln["root"], ln["queue"]): ln["end"] and round(ln["end"]) for ln in others if ln["project"] == p}}
+            if free is None:                         # 只在是因为要挪的行没有估时才留一条 nodur（看板出 :est，让会话写 est_min；Codex 审 #63）
+                nd = next((c["name"] for c in cands if (self.dur_k(p, c["name"], c["h"]["est_min"])(self.k_now()) or {}).get("min") is None), None)
+                if nd:
+                    out.append(dict(o, stop=nd, why=None, nodur=True))
+                continue
             for k in range(1, len(cands) + 1):
                 got = self.try_move(p, cands[:k], None, cx, local=cards)
                 if isinstance(got, dict):

@@ -2997,6 +2997,36 @@ class OffersTest(UnitBase):
         self.w.thr_since = self.now - 600
         self.assertNotIn("pa", self.offer([q], [r]))
 
+    def test_local_lane_pins_cards_used_in_forecast(self):
+        # #43（Codex 审 #63）：两张卡里 GPU-a 吃满了（近 10 分钟 95%）、只有 GPU-b 放：推演只在卡 1 上排新车道，
+        # 建议的登记命令要带 --gpus 1，否则真放行按空闲显存可能放到吃满的卡 0
+        self.cards(46000.0, 30000.0, total=46000.0)
+        self.hosts.usage("t", [usage_row("b_old", "pa", self.now - 9000, self.now - 1800, tag="bt", ram_peak=1.0, vram_peak=19000.0, gpus=["GPU-a"])])
+        self.w.reload_hist()
+        self.w.uwin = {"GPU-a": [(self.now - 60 * i, 95) for i in range(5)]}
+        q, r = self.local_lane(["b%d|true   # est_min=120 vram=20 tag=bt" % i for i in range(6)])
+        o = self.offer([q], [r])["pa"]
+        self.assertEqual((o["local"], o["gpus"]), (True, [1]))
+        s = RB.suggest([{"id": "t", "label": "t", "worker_up": True, "status": {"offers": self.w.offer, "todo": self.w.todo}}], None, self.now)["pa"]
+        self.assertTrue(s["local"])
+        self.assertIn("新清单 --project pa --gpus 1", s["text"])
+        self.cards(46000.0, 30000.0, total=46000.0)
+        self.w.uwin = {}                                                  # 两张卡都能放：不限卡，不写 --gpus
+        o = self.offer([q], [r])["pa"]
+        self.assertIsNone(o["gpus"])
+
+    def test_local_lane_without_duration_asks_for_est(self):
+        # #43（Codex 审 #63）：只在本机排队、显存有同 tag 实测、卡也放得下，但任务名没有时长历史又没写 est_min：原推演何时跑完推不出，
+        # 照样给一条同机的 nodur，看板出 rebalance:pa:est（旧代码 free 为 None 时整个项目跳过，什么都不出）
+        self.hosts.usage("t", [usage_row("b_old", "pa", self.now - 9000, self.now - 1800, tag="bt", ram_peak=1.0, vram_peak=19000.0, gpus=["GPU-a"])])
+        self.w.reload_hist()
+        q, r = self.local_lane(["n%d|true   # vram=20 tag=bt" % i for i in range(6)])
+        o = self.offer([q], [r])["pa"]
+        self.assertEqual((o["local"], o["jobs"], o["nodur"]), (True, [], True))
+        s = RB.suggest([{"id": "t", "label": "t", "worker_up": True, "status": {"offers": self.w.offer, "todo": self.w.todo}}], None, self.now)["pa"]
+        self.assertEqual((s["key"], s["est"]), ("rebalance:pa:est", True))
+        self.assertIn("t（同机多开一条车道）接 %s 时没有估时" % o["stop"], s["text"])
+
     def test_local_lane_skips_hint_only_rows(self):
         # 只有提示值（没有实测）的 GPU 行不作同机来源：同卡并行怕 OOM（同 fit）
         q, r = self.local_lane(["c%d|true   # est_min=120 vram=20" % i for i in range(4)], name="H")
