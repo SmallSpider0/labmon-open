@@ -136,7 +136,9 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 预备续租（取消时记下这一期，自动预备时段里取消过的不再自动预备）、续租后拉起 worker | `renew.reserve`、`renew.cancel`、`renew.begin`、`renew.after`；页面上自用主机的按钮 `renewBtns`，续租一台的确认 `goRenew`（overview.html，都由主机页与组内服务器抽屉共用） |
 | 后端看 worker 状态里运行中任务的预计结束（续租与借用的截止判断共用） | `renew.eta_of` |
 | 借用（借来、约定时间与对方租期取早、补齐指令、到点提醒、要还、归还） | `borrow.begin`（页面上点的经 `fleetops.run_borrow` 在后台跑、显示进度）、`borrow.cutoff`、`borrow.check`、`borrow.request_return`、`borrow.cancel_return`（撤销跑完就还）、`borrow.finish`；页面上 `borrowText`、`borrowBadge`（common.js，两个页面共用；项目快照的主机带上 `borrow.check` 算好的 borrow），操作按钮 `borrowBtns`（overview.html，抽屉与主机页共用） |
-| 按钮旁的小弹窗（确认、表单、验证码；同一时间一个，状态在 `POP`；点外面、Esc 取消，有输入的点外面不关；窄屏贴在屏幕底部，让出底栏与软键盘）与按钮配色（主色推荐、红框会中断、琥珀框撤销） | `popConfirm`、`popToggle`、`popClose`、`closePop`、`fitPops`；平台操作的弹窗 `opPop`（overview.html） |
+| 按钮旁的小弹窗（短确认、短表单、验证码；同一时间一个，状态在 `POP`；点外面、Esc 取消，有输入的点外面不关；窄屏贴在屏幕底部，让出底栏与软键盘）与按钮配色（主色推荐、红框会中断、琥珀框撤销，主色灰掉时灰底灰字） | `popConfirm`、`popToggle`、`popClose`、`closePop`、`fitPops`；平台操作的弹窗 `opPop`（overview.html） |
+| 平台操作确认的风险分层（#14：一句结论 → 要勾才动的风险与勾选框 → 折起来的细节，开合记在 `POP.more`；续租一台、关机的弹窗与换人向导共用）；会中断什么的那句 | `riskSay`、`riskNeed`、`riskMore`；`busyText`（批量续租的注意 `renewWarn` 也用它，overview.html） |
+| 批量续租（#14：右侧抽屉 `#/fleet/renew`，提醒条点的 `#/fleet/renew/<id>` 只勾那一台；一台一行，本行勾「已说好」；勾选在 `RPICK`；没登录时验证码在抽屉底部（`FCAP.pop = "renew"`），开始后进度在抽屉顶上） | `renewDrawer`（`rpList`、`rpBody`；`DH.renew`，overview.html） |
 | 弹窗里选一个将来的时刻（借卡与改约定的约定时间、优先的到期：日期框加时、分下拉，缺省现在（下一个 5 分钟档），小签在当前值上往后加、「现在」、清空，一句到几点还有多久；晚于租期截止的说明；过去的、没填完的、停在「现在」的标红，点确认时拦下） | `whenPick`（缺省 `whenInit`、`whenNow`，小签 `whenTap`、`whenAdd`（`WHEN_ADD`）、点前失焦 `whenBlur`，控件改了 `whenInput`、`whenRead`、`whenSync`，说明 `whenSay`，`whenT`、`whenPast`、`whenHalf`，提交前 `whenStop`；epoch 秒换成控件的值 `dtLocal`，overview.html） |
 | 主机的名字只有三种写法：短名（表格的主机列、小图、时间线、车道名；直接借来的叫“借 EVA”）、全名（主机清单的 `label`，借来的是「节点（借 EVA）」：告警、标题、悬停）、组内服务器「使用人（id）」 | `hostShort`（common.js）；`h.label` 直接取；`fName`（overview.html） |
 | 工作台上的项目名（几个项目时才写，配色点 + 标题；指令对象总写）与整台主机的操作波及哪些项目 | `projName`、`affects`（overview.html） |
@@ -429,7 +431,9 @@ Codex 派工时由总控自动选型（#281）：
 
 ## 页面二级操作
 
-- 按钮触发的小菜单、确认和短表单统一使用按钮旁浮窗（`popConfirm`、`popToggle`）。按钮写完整动作名。打开浮窗时保持原布局稳定。
+- 按钮旁浮窗（`popConfirm`、`popToggle`）只用于按钮触发的小菜单、短确认和短表单。按钮写完整动作名。打开浮窗时保持原布局稳定。
+- 多行列表、多项选择用右侧抽屉（窄屏从底部升起），如批量续租（维护者 2026-11-17 定，#14）。列表一项一行，各项要勾的确认放在本行，提交按钮固定在抽屉底部，灰着时旁边写原因。
+- 确认里有风险时按三层写：一句结论（会中断、清空、丢掉什么）→ 要勾才动的风险与勾选框（一个框）→ 其余折进「细节」（步骤、不用勾的提醒、明细）。长路径能断行，不撑出横向滚动。
 - 桌面浮窗跟随按钮，窄屏沿用贴底和软键盘避让。同一时间只开一个。带输入的用「取消」或 Esc 关闭，退出后清理输入，保留相应的成功或错误反馈。
 - 页面选项卡、详情抽屉、只读明细折叠、常驻设置区和多步向导内部的展开区继续沿用各自的组件。
 
