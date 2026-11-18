@@ -139,6 +139,7 @@ BUSY_WIN_S = 3600        # 各卡「吃满程度」（只有保活时按 0）留
 UTIL_LOW = 50            # 卡近 UTIL_WIN_S 的利用率低于这个 %，且上面在跑的被 CPU 卡住时，先加核、不在这张卡上开新车道（gpu_slack，#35、#37）
 CPU_BOUND_FRAC = 0.9     # 在跑任务近 CPU_WARM_S 各 1 分钟窗口核数的平均不少于给它的核数的这么多，算被 CPU 卡住、可能给少了（cpu_fit 的 low）
 CPU_SPARE_FRAC, CPU_SPARE_MIN = 0.5, 1.0   # 写了 cpus= 的在跑任务整段 1 分钟峰值不到给的核数的这么多、且少至少这么多核，算给多了（cpu_fit 的 high，#46）
+CPU_SHRINK_N = 3         # 写了 cpus= 的同类至少这么多次跑下来（近 HIST_N 次每次）都按上一行算给多了，没开跑的按实测记账（cpu_shrink，#91）
 UTIL_FULL = 90           # 卡近 UTIL_WIN_S 的利用率不低于这个 % 算吃满：offers 的同机多开车道不往它上面放（Worker.local_cards，#43；同卡 1 条车道常只到六七成，3–4 条才近满）
 CONC_MAX = 12            # 按同卡并行数挑同类记录（duration 的 k）时封顶到这么多（推演里查表、缓存用）
 FORECAST_S = 7 * 86400   # 推演（simulate）往后排多远
@@ -2352,8 +2353,9 @@ class Worker:
                 "cpu": 0.0 if is_hold(j["name"]) else max(give, u.get("cores") or 0.0)}
 
     def cpus_for(self, j):
-        """开跑时导出的 LABMON_CPUS：估计核数封顶到配额（cpu_give，与运行中记账开头 10 分钟的估计同一个数），至少 1（写 cpus=0 的不记账，也给 1）。"""
-        return cpus_export(j["est"]["cpus"], cpu_cap(self.info.get("cpu_quota")))
+        """开跑时导出的 LABMON_CPUS：给的核数（cpu_threads：一般就是估计核数，按实测收小了记账的仍按清单的 cpus=）封顶到配额（cpu_give），
+        至少 1（写 cpus=0 的不记账，也给 1）。"""
+        return cpus_export(cpu_threads(j["est"]), cpu_cap(self.info.get("cpu_quota")))
 
     def mem_room(self):
         """labmon 的任务全停时容器内存还能放多少（GiB）：上限 − labmon 之外收不回的内存 − 借来的主机上给对方留着、对方还没用上的部分。
@@ -4872,7 +4874,8 @@ class Worker:
             "running": [dict(self.job_view(j), t0=j["t0"], vram=j.get("vram"), excl=j.get("excl"), est_min=j.get("est_min"),
                              oom0=j.get("oom0"), fc0=j.get("fc0"), owner_gpu=j.get("owner_gpu"), wait=j.get("wait"), cpus=j.get("cpus"), io=j.get("io"),
                              io_sus=j.get("io_sus"),   # 记过读写拥塞嫌疑的时刻（io_suspect；接管时找回，同一任务不重复记）
-                             cpu_fit=j.get("cpu_fit"),   # 这一次运行判过的开跑核数给少、给多（cpu_hints，#46）：看板据此出只给实验会话的 cpu_low:、cpu_high:
+                             # 这一次运行判过的开跑核数给少、给多（cpu_hints，#46）：看板据此出只给实验会话的 cpu_low:、cpu_high:，按 cls 合并同类（#91）
+                             cpu_fit=dict(j["cpu_fit"], **cpu_cls(j)) if j.get("cpu_fit") else None,
                              # 成组（#180）：组名、人数、一起开跑的同伴 [[主机, 任务]]、跟着同伴停下的 {kind, why, sent}（接管时找回）
                              gang=j.get("gang"), gn=j.get("gn"), gang_with=j.get("gang_with"), gang_stop=j.get("gang_stop"))
                         for j in self.running.values()],
@@ -5179,6 +5182,12 @@ def cpu_warm(u):
     """运行中任务的 CPU 记账已按窗口核数回收（#65）：从开始量窗口核数（use 的 pk0）起满 CPU_WARM_S、量到了 pks。
     Worker.acct（回收）与 cpu_held（只把没回收的算“记账比实测多”）共用这一个判断。"""
     return bool(u.get("pks") and u.get("t") and u.get("pk0") and u["t"] - u["pk0"] >= CPU_WARM_S)
+
+
+def cpu_threads(e):
+    """估计 e（estimate 的结果）开跑时给几个核（导出 LABMON_CPUS、缺省线程数，判给多给少与超核都按它）：按实测收小了记账的（cpus_set，#91）
+    仍给清单写的 cpus=，项目的线程数、DataLoader 进程数不因记账收小而变；其余同记账的 cpus。"""
+    return e.get("cpus_set") or e.get("cpus", CPU_DEFAULT)
 
 
 def cpus_export(cpus, cap):
@@ -5631,6 +5640,7 @@ def estimate(hist, r):
     （显存用的是提示值时为 None，不拿别的任务的利用率）。
     CPU（cpus 整数核，job_cpus 取整；cpu_src 来源）：清单的 cpus= 优先（来源“提示值”），否则同类（同 tag › 同名 › 同队列）近几次 1 分钟峰值核数（cores_peak，
     期 1 起才记，旧行当没有历史）的最大值 × 1.1，都没有按 CPU_DEFAULT（#4 维护者定：cpus= 优先于历史，历史优先于缺省）。
+    写了的 cpus= 同类实测一直远低于它时只收小记账（cpu_shrink，#91）：cpus 是记账核数，cpus_set 记下清单写的值（开跑仍按它给，cpu_threads）。
     OOM 后抬高（#62 维护者定）：用量行标了 oom 的（finish 经 oom_of 记）不进历史（它的峰值是被当时可用的量截住的）；同 tag、同名两档里，
     各取这一档最近一次跑成功之后的 OOM 记录，给 OOM 的那一项（vram 或 ram）一个下限 max(那次放行时的估计 est × 2, 那次的峰值 × 1.1)，几条取大；
     这一项的估计 = max(上面按顺序取的值, 下限)，提示值写小了的同样抬高。连续 OOM 连续翻倍（每条的 est 已含上一次的下限），封顶照 card_need、ram_need；
@@ -5643,17 +5653,21 @@ def estimate(hist, r):
     peak = None                                   # 显存、内存取自的那一档历史：(档, 记录)
     floor = {"vram": (0.0, None), "ram": (0.0, None)}   # OOM 后的下限：(GiB, 来源)
     cpu = (job_cpus(r["cpus"]), "提示值") if r.get("cpus") is not None else None
+    shrink = None                                 # 写了 cpus= 时，同 tag › 同名第一档有峰值的历史（cpu_shrink 看）
     for k in keys:
         rows = [h for h in hist if hist_key(h, k[0]) == k]   # hist 按结束时刻排好（load_hist）
         same = [h for h in rows if ok(h)]
         hs = [h for h in same if h.get("ram_peak") is not None][-HIST_N:]
         if hs and peak is None:
             peak = (k[0], hs)
-        cs = [h["cores_peak"] for h in same if h.get("cores_peak") is not None][-HIST_N:]
+        cr = [h for h in same if h.get("cores_peak") is not None][-HIST_N:]
+        cs = [h["cores_peak"] for h in cr]
         if cs and cpu is None:
             cpu = (cpu_from_peak(max(cs)), "%s 近 %d 次峰值 ×1.1" % (label[k[0]], len(cs)))
         if k[0] == "queue":
             continue
+        if cr and shrink is None:
+            shrink = (label[k[0]], cr)
         last = max((i for i, h in enumerate(rows) if h.get("rc") == "0"), default=-1)   # 只认真跑成功的：跑了 5 分钟后被停下、别的错误退出的不算资源够了
         for h in rows[last + 1:]:
             f = h.get("oom")
@@ -5665,6 +5679,12 @@ def estimate(hist, r):
                 if round(v, 2) > floor[f][0]:
                     floor[f] = (round(v, 2), "%s 上次 OOM：%s" % (label[k[0]], s))
     cpu = cpu or (CPU_DEFAULT, "缺省 %d 核" % CPU_DEFAULT)
+    set_ = None
+    if cpu[1] == "提示值" and shrink:
+        n = cpu_shrink(cpu[0], shrink[1])
+        if n is not None:
+            set_, cpu = cpu[0], (n, "清单 cpus=%d 偏大：%s 近 %d 次峰值 %.1f 核 ×1.1（开跑仍给 %d 核）"
+                                 % (cpu[0], shrink[0], len(shrink[1]), max(h["cores_peak"] for h in shrink[1]), cpu[0]))
     if peak:
         kind, hs = peak
         src = "%s 近 %d 次峰值 ×1.1" % (label[kind], len(hs))
@@ -5681,7 +5701,23 @@ def estimate(hist, r):
         if floor[f][0] > out[f]:
             out[f], out[s] = floor[f]
     out["util"] = hv["util"] if peak and out["src"] == src else None
-    return dict(out, cpus=cpu[0], cpu_src=cpu[1])
+    return dict(out, cpus=cpu[0], cpu_src=cpu[1], **({"cpus_set": set_} if set_ else {}))
+
+
+def cpu_shrink(n, rows):
+    """清单写了 cpus=n、同类历史 rows（estimate 给的：同 tag › 同名第一档有峰值的近 HIST_N 条，跑成功或跑满 5 分钟、非 OOM）一直远低于它时，
+    没开跑的行按几核记账（#91）；不收小为 None。要至少 CPU_SHRINK_N 条，且每一条都满足：那次开跑给的核数（用量行 est 的 cpu_threads：
+    收小过的是 cpus_set）不少于 n——量到的峰值才是在至少这么多线程下跑出来的，把 cpus= 改大以后旧行不算数——
+    1 分钟峰值 cores_peak 不超过 n × CPU_SPARE_FRAC 且少至少 CPU_SPARE_MIN 核（与 cpu_fit 的“给多了”同一门槛）。
+    记账取峰值最大值按 cpu_from_peak 估，比 n 小才算收小。只收记账：开跑仍按 n 给（cpu_threads），运行中照旧 max(估计, 实测) 与 #65 回收。"""
+    if n < 2 or len(rows) < CPU_SHRINK_N:
+        return None
+    for h in rows:
+        e, pk = h.get("est") or {}, h["cores_peak"]
+        if e.get("cpus") is None or cpu_threads(e) < n or pk > n * CPU_SPARE_FRAC or n - pk < CPU_SPARE_MIN:
+            return None
+    m = cpu_from_peak(max(h["cores_peak"] for h in rows))
+    return m if m < n else None
 
 
 def rec_conc(h):
@@ -5774,6 +5810,16 @@ def list_row(lists, name, project=None):
     return None
 
 
+def shrunk_text(e):
+    """labmon worker status 的运行、等待行末尾：按实测收小了 CPU 记账的（cpu_shrink，#91）写一句，别的为空。"""
+    return "；CPU 按实测记 %d 核（清单 cpus=%d，开跑仍给这么多）" % (e["cpus"], e["cpus_set"]) if (e or {}).get("cpus_set") else ""
+
+
+def cpu_cls(j):
+    """同类任务的类（看板合并 cpu_low:、cpu_high: 用，#91）：有 tag 按 tag，否则去掉种子编号的名字（同 estimate 的同 tag › 同名）。"""
+    return {"by": "tag", "cls": j["tag"]} if j.get("tag") else {"by": "name", "cls": base_name(j["name"])}
+
+
 def cpu_from_peak(peak):
     """按 1 分钟峰值核数估几个核：峰值 ×1.1 取整（job_cpus）、至少 1。estimate 按同类历史估、cpu_fit 给“写小”的建议值共用。"""
     return max(1, job_cpus(1.1 * peak))
@@ -5781,17 +5827,17 @@ def cpu_from_peak(peak):
 
 def cpu_fit(j, cap, util):
     """在跑的任务 j（状态 running 的形状：name、gpus、est、use）开跑时给的核数是给少了还是给多了（#46；#37 的“被 CPU 卡住”也是它）。
-    从开始量窗口核数起满 CPU_WARM_S（cpu_warm）才判；给的核数 give 是开跑时导出的 LABMON_CPUS（cpus_export）；util 各卡近 UTIL_WIN_S 的利用率 {uuid: %}。
+    从开始量窗口核数起满 CPU_WARM_S（cpu_warm）才判；给的核数 give 是开跑时导出的 LABMON_CPUS（cpus_export(cpu_threads)）；util 各卡近 UTIL_WIN_S 的利用率 {uuid: %}。
     - low（给少了、被 CPU 卡住）：近 CPU_WARM_S 各 1 分钟窗口核数（use.pks）的平均不少于 give × CPU_BOUND_FRAC，且所用的卡里有利用率低于 UTIL_LOW 的
       （卡吃饱了加核也没用；不用卡的不判，单线程脚本本来就只用 1 核）。sug 建议写的 cpus= 是 give 的 2 倍封顶到记账上限 cap；已给到 cap 为 None。
-    - high（给多了）：估计来自清单的 cpus=（est.cpu_src 是“提示值”；按历史估的会往实测靠，不判），跑到现在的 1 分钟峰值 use.cores_peak
+    - high（给多了）：估计来自清单的 cpus=（est.cpu_src 是“提示值”；按历史估的会往实测靠、按实测收小了记账的已经让出，都不判），跑到现在的 1 分钟峰值 use.cores_peak
       不超过 give × CPU_SPARE_FRAC、且少至少 CPU_SPARE_MIN 核（看整段峰值：开头加载阶段用过的核不算多给）。sug 按峰值估（cpu_from_peak，同 estimate）。
     返回 {how, avg 近 10 分钟平均核数, peak 整段峰值, give, sug}，都不是为 None。占位任务、没有估计的不判。
     gpu_slack（fit 开车道）只取 low；状态里运行中任务的 cpu_fit 是它，看板据此出只给实验会话的 cpu_low:、cpu_high: 告警。"""
     u, e = j.get("use") or {}, j.get("est")
     if is_hold(j.get("name")) or not e or not cpu_warm(u):
         return None
-    give = cpus_export(e.get("cpus", CPU_DEFAULT), cap)
+    give = cpus_export(cpu_threads(e), cap)
     avg = round(sum(x[1] for x in u["pks"]) / len(u["pks"]), 2)
     peak = u.get("cores_peak") or max(x[1] for x in u["pks"])
     out = {"avg": avg, "peak": peak, "give": give}
@@ -6543,13 +6589,14 @@ def main(argv=None):
                                      "（空着：清单里没有待办，不占卡）" if q.get("empty") else ""))
     for j in st.get("running", []):
         gang = "，成组 %s（与 %s 一起开跑）" % (j["gang"], "、".join("%s（%s）" % (w[1], w[0]) for w in j.get("gang_with") or []) or "—") if j.get("gang") else ""
-        print("  运行 %s：%s（PID %d，%s 起，GPU %s%s）" % (j.get("queue") or "单元 " + str(j.get("project")), j["name"], j["pid"], now_str(j["t0"]),
-                                                     ",".join(j["gpus"]) or "无", gang))
+        print("  运行 %s：%s（PID %d，%s 起，GPU %s%s）%s" % (j.get("queue") or "单元 " + str(j.get("project")), j["name"], j["pid"], now_str(j["t0"]),
+                                                       ",".join(j["gpus"]) or "无", gang, shrunk_text(j.get("est"))))
     for w in st.get("waiting", []):               # 排位与预计开始取状态里的 pos、start，与看板的等待表一致；被临时指令挡住的没有排位
         pos, start = w.get("pos"), w.get("start")
         rank = "（排第 %d%s，预计开始 %s）" % (pos["n"], "，屏障" if pos.get("barrier") else "",
                                           ("马上" if start <= st.get("t", 0) + 60 else now_str(start)[5:16]) if start else "—") if pos else ""
-        print("  等待 %s%s：%s%s" % (w.get("queue") or "单元 " + str(w.get("project")), " 的 " + w["name"] if w["name"] else "", w["why"], rank))
+        print("  等待 %s%s：%s%s%s" % (w.get("queue") or "单元 " + str(w.get("project")), " 的 " + w["name"] if w["name"] else "", w["why"], rank,
+                                     shrunk_text(w.get("est"))))
     for ln in (st.get("plan") or {}).get("lanes", []):     # 推演里还没开始、写了依赖的：等谁、预计何时开始
         for j in ln.get("jobs", []):
             if j.get("deps") and not j.get("run"):

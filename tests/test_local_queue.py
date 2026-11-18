@@ -345,7 +345,7 @@ class LocalQueueTest(unittest.TestCase):
 
     def test_cpu_fit_alert(self):
         """开跑核数给少、给多（worker 写的运行中任务 cpu_fit，#46）：本项目的清单任务才报，只给实验会话（agent）；
-        key 按车道与任务，给少的已到配额（sug 为 None）不报，别的项目、单元、旧 worker 没这个字段的都不报。"""
+        key 按类（worker 给的 cls，#91），给少的已到配额（sug 为 None）不报，别的项目、单元、旧 worker 没这个字段的都不报。"""
         root, out = self.d / "proj", PJ.out_dir("out")
         make_queue(root, dead_pid(), self.cur.pid)
         cfg = write_config(self.d, root, out)
@@ -353,8 +353,8 @@ class LocalQueueTest(unittest.TestCase):
         sf = self.d / "wh" / "hosts" / "here" / "status.json"
         sf.parent.mkdir(parents=True)
         sf.write_text(json.dumps({"t": time.time(), "queues": [{"root": str(root), "jobs": "jobs/q.txt"}], "waiting": []}))
-        low = {"how": "low", "avg": 0.98, "peak": 1.0, "give": 1, "sug": 2}
-        high = {"how": "high", "avg": 0.9, "peak": 1.2, "give": 5, "sug": 2}
+        low = {"how": "low", "avg": 0.98, "peak": 1.0, "give": 1, "sug": 2, "by": "name", "cls": "a_run"}
+        high = {"how": "high", "avg": 0.9, "peak": 1.2, "give": 5, "sug": 2, "by": "name", "cls": "a_run"}
 
         def alerts(*running):
             with mock.patch.object(C, "snapshot", lambda: {"hosts": [{"id": "here", "status": {"running": list(running)}}]}):
@@ -362,21 +362,56 @@ class LocalQueueTest(unittest.TestCase):
         run = lambda f, **kw: dict({"kind": "queue", "project": "out", "name": "a_run", "cpus": None, "cpu_fit": f,   # noqa: E731
                                     "root": str(root) + "/", "queue": "jobs/q.txt"}, **kw)
         al = alerts(run(low))
-        self.assertEqual(list(al), ["cpu_low:q/a_run"])
-        a = al["cpu_low:q/a_run"]
+        self.assertEqual(list(al), ["cpu_low:a_run"])
+        a = al["cpu_low:a_run"]
         self.assertEqual(a["to"], "agent")
-        self.assertIn("a_run（本机 车道 1 训练方）近 10 分钟平均用了 1.0 核，给它的 1 核基本用满", a["msg"])
+        self.assertIn("任务 a_run（本机 车道 1 训练方）近 10 分钟平均用了 1.0 核，给的 1 核基本用满", a["msg"])
         self.assertIn("cpus=2", a["msg"])
-        al = alerts(run(high, cpus=5))
-        self.assertEqual(list(al), ["cpu_high:q/a_run"])
-        self.assertIn("清单写了 cpus=5（给 5 核），跑到现在 1 分钟峰值只有 1.2 核", al["cpu_high:q/a_run"]["msg"])
-        self.assertIn("cpus=2", al["cpu_high:q/a_run"]["msg"])
+        al = alerts(run(high, cpus=5.0))
+        self.assertEqual(list(al), ["cpu_high:a_run"])
+        self.assertIn("清单写了 cpus=5（给 5 核），跑到现在 1 分钟峰值只有 1.2 核", al["cpu_high:a_run"]["msg"])
+        self.assertIn("cpus=2", al["cpu_high:a_run"]["msg"])
+        self.assertIn("自动按实测记账", al["cpu_high:a_run"]["msg"])
+        # 同类（tag）的几个任务合成一条：key 不带任务名，消息列出都有谁、峰值范围，建议取大
+        tag = lambda n, pk, sug: run(dict(high, peak=pk, sug=sug, by="tag", cls="sm"), name=n, cpus=4.0)   # noqa: E731
+        al = alerts(tag("a_s1", 1.0, 1), tag("a_s2", 1.2, 2))
+        self.assertEqual(list(al), ["cpu_high:sm"])
+        self.assertIn("同 tag sm 的 2 个任务（本机 车道 1 训练方：a_s1、a_s2）清单写了 cpus=4（给 5 核），跑到现在 1 分钟峰值只有 1.0–1.2 核", al["cpu_high:sm"]["msg"])
+        self.assertIn("cpus=2", al["cpu_high:sm"]["msg"])
+        self.assertEqual(list(alerts(tag("a_s1", 1.0, 1), run(low, name="b_s1"))), ["cpu_high:sm", "cpu_low:a_run"])   # 给少、给多各报各的
         self.assertEqual(alerts(run(dict(low, sug=None))), {})                    # 已给到配额：写大也给不了
         self.assertEqual(alerts(run(low, project="other")), {})                   # 别的项目的
         self.assertEqual(alerts(run(low, kind="slot")), {})                       # 单元没有清单行可改
         self.assertEqual(alerts(run(None)), {})
         self.assertEqual(alerts(run(low, root=str(self.d / "other"))), {})        # 同名任务在本项目别的清单上（不是这条车道）：不算到 q 头上（Codex 审 #65）
         self.assertEqual(alerts({"kind": "queue", "project": "out", "name": "a_run", "root": str(root), "queue": "jobs/q.txt"}), {})   # 旧 worker 没写这个字段
+        old = {k: v for k, v in low.items() if k not in ("by", "cls")}
+        self.assertEqual(list(alerts(run(old, name="a_s1"), run(old, name="a_s2"))), ["cpu_low:a_s1", "cpu_low:a_s2"])   # 还没升级的 worker 不给 cls：按任务名各一条
+
+    def test_cpu_fit_alert_merged_across_hosts(self):
+        """#91：同一类分布在两台主机上的任务合成一条 cpu_high:，wait 只叫醒一次；同类后面的任务接着被判出来（key 不变）6 小时内不再叫醒（#88）。"""
+        from labmon.waits import _new_alerts
+        cfg = {"id": "out", "alerts": {"gpu_idle_min": 30, "gpu_idle_util": 5.0},
+               "hosts": [{"id": "a", "checks": []}, {"id": "b", "checks": []}]}
+        lane = lambda h, n: {"id": f"{h}{n}", "host": h, "label": f"车道 {n}", "root": "/r", "queue": "jobs/q.txt"}   # noqa: E731
+        snap = {"hosts": [{"id": "a", "ok": True, "label": "甲"}, {"id": "b", "ok": True, "label": "乙"}],
+                "lanes": [lane("a", 1), lane("b", 1)], "jobs": []}
+        fit = lambda pk: {"how": "high", "avg": 0.9, "peak": pk, "give": 4, "sug": 2, "by": "tag", "cls": "sm"}   # noqa: E731
+        run = lambda n, pk: {"kind": "queue", "project": "out", "name": n, "cpus": 4.0, "cpu_fit": fit(pk), "root": "/r", "queue": "jobs/q.txt"}   # noqa: E731
+
+        def alerts(a, b):
+            snap["alerts"] = []
+            C._host_alerts(cfg, snap, {}, [], {"hosts": [{"id": "a", "status": {"running": a}}, {"id": "b", "status": {"running": b}}]}, time.time())
+            return {x["key"]: x["msg"] for x in snap["alerts"]}
+        al = alerts([run("a_s1", 1.0), run("a_s2", 1.1)], [run("a_s3", 1.2)])
+        self.assertEqual(list(al), ["cpu_high:sm"])
+        self.assertIn("同 tag sm 的 3 个任务（甲 车道 1：a_s1、a_s2；乙 车道 1：a_s3）", al["cpu_high:sm"])
+        sf = self.d / "wait_state.json"
+        t = time.time()
+        self.assertEqual(_new_alerts(sf, al, t), ["cpu_high:sm"])
+        self.assertEqual(_new_alerts(sf, alerts([run("a_s1", 1.0)], []), t + 300), [])          # 有的跑完了：同一条，不再叫醒
+        self.assertEqual(_new_alerts(sf, alerts([], []), t + 600), [])                          # 都跑完了
+        self.assertEqual(_new_alerts(sf, alerts([], [run("a_s4", 1.0)]), t + 1200), [])         # 同类下一个又判出来：6 小时内不叫醒
 
     def test_borrow_cut_alert(self):
         """借来的主机上队首被约定归还挡住（borrow.check 在全局快照里给的 late 非空）：报 borrow_cut:<车道>，写主机全名、车道名与还剩几个任务；
