@@ -75,6 +75,29 @@ def schedule_project(e: dict) -> str | None:
     return None
 
 
+def project_mine(e: dict, pid: str) -> bool:
+    """项目 pid 所用主机上的一条记录算不算它的：问题报告不算；带了别的项目的不算（同机别的项目的作废、被挤掉、对它的暂停与优先）；
+    暂停与优先只认对 pid 下的。项目页时间线的事件（serve.proj_events）与 labmon records（project_rows）共用。"""
+    if e.get("kind") == "report" or (e.get("project") and e["project"] != pid):
+        return False
+    return schedule_project(e) in (None, pid)
+
+
+def project_rows(pid: str, hosts, host: str | None = None, cat: str | None = None, q: str | None = None,
+                 limit: int | None = None, see=None) -> list[dict]:
+    """labmon records（#52）：项目 pid 的记录，新的在前。hosts 是它所用的主机（项目快照里的）；给了 host 只看那台（不是它用的就没有）。
+    取 hosts 上算它的（project_mine），加上对它下的项目级暂停与优先（记录里没有主机）。see 同 records。"""
+    hs = {host} & set(hosts) if host else set(hosts)
+
+    def keep(e):
+        on = {e.get("host"), *(e.get("hosts") or [])} - {None}
+        if not on:
+            return not host and schedule_project(e) == pid
+        return bool(on & hs) and project_mine(e, pid)
+    out = [e for e in records(cat=cat, q=q, see=see) if keep(e)]
+    return out[:limit] if limit else out
+
+
 def cat_of(kind: str | None) -> str:
     """记录的分类（EVENT_CATS 里的键）；不认识的 kind 算队列（worker 新加的事件）。"""
     return EVENT_KINDS.get(kind, ("", "", "queue"))[2]

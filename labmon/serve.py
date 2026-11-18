@@ -35,6 +35,8 @@
     PUT  /api/project/<id>/config {"text", "files": {done_when 的路径: 内容或 null}}，头 If-Match: "<上次同步的版本>"（project）：
                             第一次推就是登记（不用 If-Match）；已登记的没带 428、对不上 412（回 {"error", "ver"}）、已归档 409、校验不过 400；
                             改了 [[hosts]]、[[queues]]（projects.GUARDED）要平台操作的权限（admin 作用域、入口获准），不然 403；成功回 {id, ver, created, changed, msg}
+    GET  /api/project/<id>/status|disk|records[?host=&cat=&q=&limit=]   实验会话的只读命令（#52，api.status、api.disk、api.records；read，普通用户只看自己的项目）：
+                            回 {rc, out, err, data}，命令行打 out，--json 打 data（status 是项目快照原样、disk 是 disk.project_storage、records 是记录行）；没登记 404
 
 路由：
     /                       全局调度页：各主机现读的容量与各任务用量（读 worker 的状态，只读），并列出全部项目
@@ -126,7 +128,7 @@ from . import dist as DI
 from . import service as S
 from .config import ALERT_KEYS, HOSTS_LOCK, POOL, ConfigError, active_hosts, cfg_spec, check_future, host_pair, host_users, hosts_file, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
     stale_limit, user_hosts, STALE_PAD_S, STALE_RUNS
-from .records import cat_of, log_events, records, report, report_headers, schedule_project, tell
+from .records import cat_of, log_events, project_mine, records, report, report_headers, schedule_project, tell
 from .service import log, notify, rotate_log
 from .state import file_sig, load_json, snapshot, state_dir
 
@@ -403,14 +405,9 @@ def proj_events(proj: Project, days: int = 30) -> dict:
     hosts = [h["id"] for h in (proj.snapshot() or {}).get("hosts", [])]
     ov = snapshot()
     occ = O.occupancy([h for h in ov.get("hosts", []) if h["id"] in hosts], ov.get("projects", []), since, skip=proj.id)
-
-    def mine(e):
-        if e.get("kind") == "report" or (e.get("project") and e["project"] != proj.id):
-            return False
-        return schedule_project(e) in (None, proj.id)
     glob = [{**e, "glob": True} for e in records(cat="queue", since=since)          # glob：时间线与单台的同种指令分开配对增撤（Codex P2）
             if schedule_project(e) == proj.id and not e.get("host") and not e.get("hosts")]
-    return {"events": {h: sorted([e for e in records(host=h, since=since)[::-1] if mine(e)] + glob[::-1], key=lambda e: e["t"]) for h in hosts},
+    return {"events": {h: sorted([e for e in records(host=h, since=since)[::-1] if project_mine(e, proj.id)] + glob[::-1], key=lambda e: e["t"]) for h in hosts},
             "occ": occ, "colors": ov.get("colors") or {}}
 
 
@@ -853,6 +850,9 @@ class Handler(BaseHTTPRequestHandler):
             except PJ.Refused as x:
                 return self._json(x.code, {"error": x.msg})
             return self._send(200, json.dumps(got, ensure_ascii=False), "application/json", extra={"ETag": f'"{got["ver"]}"'})
+        m = PROJECT_READ_PATH.fullmatch(path)
+        if m:
+            return self._project_read(unquote(m[1]), m[2], who)
         if path == "/api/admin/backup":                # 冷备（#163）：状态根与主机清单打一个包，不含秘密（backup.make）
             name, data = BK.make_bytes()
             log(f"备份由 {who.name} 取走：{name}，{len(data) // 1024} KiB")
@@ -931,6 +931,24 @@ class Handler(BaseHTTPRequestHandler):
                 ev["events"] = {h: [e for e in es if see(e)] for h, es in ev["events"].items()}
             return self._json(200, ev)
         return self._send(404, "not found", "text/plain; charset=utf-8")
+
+    def _project_read(self, pid: str, what: str, who: U.Ident):
+        """GET /api/project/<id>/(status|disk|records)（#52，api.status、api.disk、api.records）：回 {rc, out, err, data}；没登记 404。
+        项目主人已由 _own 核过；status 的 CPU 取看的人能看的全局快照（users.view），records 按 users.visible 筛。"""
+        try:
+            PJ.require(pid)
+        except PJ.Refused as x:
+            return self._json(x.code, {"error": x.msg})
+        if what == "status":
+            return self._json(200, A.status(pid, U.view(who, snapshot())))
+        if what == "disk":
+            return self._json(200, A.disk(pid))
+        q = {k: v[0] for k, v in parse_qs(urlsplit(self.path).query).items()}
+        try:
+            n = max(1, min(int(q.get("limit") or 30), 1000))
+        except ValueError:
+            return self._json(400, {"error": "limit 要写数字"})
+        return self._json(200, A.records(pid, q.get("host") or None, q.get("cat") or None, q.get("q") or None, n, U.visible(who)))
 
     def _standby(self, path: str) -> bool:
         """备用（#163）：写请求（POST、PUT）到主那台做，回 409；登录、账号、部署照收（standby_ok）。回了就是 True。
@@ -1628,7 +1646,8 @@ def live_snapshot() -> dict:
 
 # 备用时照收的写请求（#163）：登录与账号（只动本机的账号库）、部署（换代码、重启，主备都要能部署）。别的写请求回 409。
 PROJECT_CONFIG_PATH = re.compile(r"/api/project/([^/]+)/config")
-CLI_READS = re.compile(r"/api/(hosts|project/[^/]+/config|client/wheel|reports)")     # 命令行读的接口：备用上同样回 409 standby（_standby），命令行接着找主那台
+PROJECT_READ_PATH = re.compile(r"/api/project/([^/]+)/(status|disk|records)")   # 实验会话的只读命令（#52）：labmon status、disk、records
+CLI_READS = re.compile(r"/api/(hosts|project/[^/]+/(config|status|disk|records)|client/wheel|reports)")     # 命令行读的接口：备用上同样回 409 standby（_standby），命令行接着找主那台
 STANDBY_OK = re.compile(r"/api/(login|setup|logout|password|tokens/add|revoke|users/.*|admin/deploy)")
 
 
@@ -1680,6 +1699,7 @@ ROUTES = [
     _R("POST", r"/api/project/[^/]+/check", "project", own="new"),
     _R("GET", r"/api/hosts", "read"),                                  # 普通用户只列他能用的（Handler.do_GET）
     _R("GET", PROJECT_CONFIG_PATH.pattern, "read", own="path"),
+    _R("GET", PROJECT_READ_PATH.pattern, "read", own="path"),         # labmon status|disk|records（#52）：只读，普通用户只看自己的项目
     _R("PUT", PROJECT_CONFIG_PATH.pattern, "project", own="new"),     # 推项目配置（#161）：第一次推的人是主人（#167）
     _R("POST", r"/api/(password|tokens/add|revoke|push|push/test)", U.ACCOUNT, own="self"),   # 自己的口令、令牌、推送（#167）：只认浏览器会话
     _R("GET", r"/api/client/(install\.sh|wheel)", "read"),             # 由看板发客户端（#167，dist.py）：登录了就能取

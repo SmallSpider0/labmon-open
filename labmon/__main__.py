@@ -9,6 +9,9 @@
     labmon report "现象" --evidence "证据" [--project ID] [--host ID] [--at 时刻]  把 labmon 问题报给看板
     labmon update                                           换成看板在跑的同一版本（看板发的客户端装的才用；#167）
     labmon collect -c monitor.toml                          让看板立即采集这个项目一次，打出结果与链接
+    labmon status  [项目 id] [-c monitor.toml] [--json]     项目现状（各主机与卡、车道、运行中、排队的预计开始、失败、计划项、挪法建议、告警；只读）
+    labmon disk    [项目 id] [-c monitor.toml] [--json]     项目的磁盘：共享盘上本项目各目录与增量、整块盘几天满，各主机本地盘上本项目的缓存（只读）
+    labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   项目的记录（拉起、掉线、续租、失败、临时指令……；只读）
     labmon check   -c monitor.toml                          看板按它校验配置、打出各主机的探针规格；末尾列出与看板上那份的同步状态、wait 还没报过的看板页面上的改动
     labmon wait    -c monitor.toml                          等告警：每轮先与看板上的配置同步，再问看板（长轮询），出现新告警（含借到卡等全局消息）或采集停了即退出（退出码 1）
     labmon wait    -c monitor.toml --job 任务 [--job 项目/任务 …]   同时等这些任务跑完（问看板）：都有结果时退出，全成功 0、其余 4；告警照常退出 1；
@@ -55,7 +58,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 
 from . import backup as BK
 from . import client, dist
@@ -69,7 +72,7 @@ from . import projects as PJ
 from . import projsync as PS
 from . import service as S
 from . import users as U
-from .api import OVR, WORKER_ACTS
+from .api import OVR, WORKER_ACTS, borrow_text
 from .config import PORT, ConfigError, brief, check_future, fmt_time, parse_time, stale_limit
 from .platform import PlatformError
 from .serve import serve
@@ -84,13 +87,6 @@ def _summary(snap: dict, where: str) -> None:
     print(f"[labmon] {fmt_time(snap['generated'])} {hosts}；告警 {len(snap['alerts'])} 条；页面 {where}", flush=True)
     for a in snap["alerts"]:
         print("  告警：" + a["msg"], flush=True)
-
-
-def _borrow_text(b: dict | None) -> str:
-    if not b:
-        return ""
-    return ("换给自己借来的" if b.get("swap") else f"借 {b['holder']}（{fmt_time(b['since'])} 起）") + (f"，约定 {fmt_time(b['until'])} 还" if b.get("until") else "") \
-        + (f"，只给 {'、'.join(b['for'])} 用" if b.get("for") else "")
 
 
 def _call(method: str, path: str, body=None, **kw) -> dict | int:
@@ -117,7 +113,7 @@ def cmd_host(ap: argparse.ArgumentParser, a: argparse.Namespace) -> int:
             return 1
         for h in r["hosts"]:
             st = f"已归还 {h['returned']}" if h.get("returned") else "在用"
-            print(f"  {h['id']:<10} {st:<22} {h.get('ssh') or '本机'}:{h.get('port', 22)}  {h.get('label') or ''}  {_borrow_text(h.get('borrow'))}")
+            print(f"  {h['id']:<10} {st:<22} {h.get('ssh') or '本机'}:{h.get('port', 22)}  {h.get('label') or ''}  {borrow_text(h.get('borrow'))}")
         groups: dict = {}                   # 共用 worker 目录的在用主机按目录分组（#35 A；旧看板没有 home_with 时不打）
         for h in r["hosts"]:
             if h.get("home_with") and not h.get("returned"):
@@ -152,7 +148,7 @@ def cmd_borrow(argv: list[str]) -> int:
             return r
         rows = [h for h in r["hosts"] if h.get("borrow") and not h.get("returned")]
         for h in rows:
-            print(f"  {h['id']:<10} {h.get('ssh')}:{h.get('port')}  {_borrow_text(h['borrow'])}")
+            print(f"  {h['id']:<10} {h.get('ssh')}:{h.get('port')}  {borrow_text(h['borrow'])}")
         print(f"[labmon] 在借 {len(rows)} 台" if rows else "[labmon] 没有在借的主机")
         return 0
     until = None if (a.until or "").lower() == "none" else parse_until(a.until)
@@ -569,6 +565,37 @@ def cmd_report(argv: list[str]) -> int:
                                                "host": a.host, "occurred": occurred}, ap=ap, timeout=30)
 
 
+READS = {"status": "项目现状：各主机与卡、各车道、运行中（进度、预计结束、CPU、日志最后一行）、排队的预计开始、失败、计划项、挪法建议、告警",
+         "disk": "项目的磁盘：共享盘上本项目各目录的大小与近 24 小时、7 天的增量，整块盘剩多少、几天满；各主机本地盘上本项目的缓存与单格临时",
+         "records": "项目的记录（记录页里与本项目有关的：开始、失败、拉起、掉线、续租、临时指令……），新的在前"}
+
+
+def cmd_read(argv: list[str]) -> int:
+    """实验会话的只读命令（#52）：labmon status|disk|records [项目 id]，经 GET /api/project/<id>/<命令>（api.status、api.disk、api.records），
+    看板排好版、这里原样打出；--json 打原始数据。项目缺省取 -c 的 monitor.toml（缺省当前目录的）。"""
+    what = argv[0]
+    ap = argparse.ArgumentParser(prog=f"labmon {what}", description=READS[what])
+    ap.add_argument("project", nargs="?", help="项目 id（缺省取 -c 那份 monitor.toml 的 id）")
+    ap.add_argument("-c", "--config", default="monitor.toml", help="项目目录里的配置文件（缺省 monitor.toml）")
+    ap.add_argument("--json", action="store_true", help="打原始数据（JSON）：status 是项目快照（docs/schema.md），disk 是存储数据，records 是记录行")
+    if what == "records":
+        ap.add_argument("--host", help="只看这台主机的")
+        ap.add_argument("--cat", help="只看这一类：link 连接、op 平台操作、config 配置改动、lease 租期、borrow 借用、disk 共享盘、queue 队列……")
+        ap.add_argument("-q", help="按词搜（空格分开的几个词都要出现）")
+        ap.add_argument("-n", type=int, default=30, help="最多几条（缺省 30）")
+    a = ap.parse_args(argv[1:])
+    pid = a.project
+    if not pid:
+        try:
+            pid = brief(a.config)["id"]
+        except ConfigError as e:
+            print(f"[labmon] 配置错误：{e}（在项目目录里跑，或写项目 id）", file=sys.stderr)
+            return 3
+    q = urlencode({k: v for k, v in (("host", getattr(a, "host", None)), ("cat", getattr(a, "cat", None)), ("q", getattr(a, "q", None)),
+                                     ("limit", getattr(a, "n", None))) if v})
+    return client.run("GET", f"/api/project/{quote(pid, safe='')}/{what}" + (f"?{q}" if q else ""), ap=ap, timeout=60, as_json=a.json)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] and argv[0] in OVR:
@@ -591,6 +618,8 @@ def main(argv: list[str] | None = None) -> int:
         return client.login(la.name, la.admin)
     if argv[:1] == ["report"]:
         return cmd_report(argv[1:])
+    if argv[:1] and argv[0] in READS:
+        return cmd_read(argv)
     if argv[:1] == ["update"]:
         argparse.ArgumentParser(prog="labmon update", description="从看板下载新版并更新命令行").parse_args(argv[1:])
         return client.update()
@@ -606,10 +635,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     ap = argparse.ArgumentParser(prog="labmon", description="本机各项目在实验室 GPU 服务器上跑实验的统一工具（看板、worker、组内服务器）", epilog=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
-    # pause 等临时指令、borrow、user、server、secret、backup、login、url、update 有自己的参数解析（上面先截走），列在这里只为 --help 能看到
+    # pause 等临时指令、borrow、user、server、secret、backup、login、url、update、status、disk、records 有自己的参数解析（上面先截走），列在这里只为 --help 能看到
     ap.add_argument("cmd", choices=["collect", "render", "check", "serve", "wait", "service", "host", "worker", "project", "fleet", "notify", "hostcheck", *OVR, "borrow", "user",
-                                    "server", "secret", "backup", "login", "url", "update", "report"],
-                    help="见下面的用法；pause / resume / focus / unfocus / drain / undrain / borrow / user / server / secret / backup / login 各有自己的 --help")
+                                    "server", "secret", "backup", "login", "url", "update", "report", *READS],
+                    help="见下面的用法；pause / resume / focus / unfocus / drain / undrain / borrow / user / server / secret / backup / login / status / disk / records 各有自己的 --help")
     ap.add_argument("sub", nargs="?", choices=["install", "add", "status", "restart", "stop", "list", "return", "restore", "start", "rm", "init", "limit", "probe", "boot", "import", "fit",
                                                "archive", "push", "pull", "test"],
                     help="service 的动作（install/status/restart/stop），host 的动作（list/return/restore），"

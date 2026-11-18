@@ -199,12 +199,16 @@ def _files(pid: str) -> dict:
     return {str(f.relative_to(d)): ver_of(f.read_bytes()) for f in sorted(d.rglob("*")) if f.is_file()} if d.is_dir() else {}
 
 
+def require(pid: str) -> None:
+    """项目要登记过（含已归档的）：没登记、id 写法不对抛 Refused(404)。取配置、wait、只读命令（labmon status|disk|records）共用这一句。"""
+    if not ID_RE.fullmatch(pid or "") or not cfg_file(pid).is_file():
+        raise Refused(404, f"看板上没有项目 {pid}：在项目目录里 labmon project push 登记")
+
+
 def get_config(pid: str) -> dict:
     """看板上的配置：{id, ver, text, files {files/ 下的位置: 版本}, archived}。没登记抛 Refused(404)。"""
-    p = cfg_file(pid)
-    if not ID_RE.fullmatch(pid) or not p.is_file():
-        raise Refused(404, f"看板上没有项目 {pid}：在项目目录里 labmon project push 登记")
-    text = p.read_text()
+    require(pid)
+    text = cfg_file(pid).read_text()
     return {"id": pid, "ver": ver_of(text), "text": text, "files": _files(pid), "archived": pid in archived()}
 
 

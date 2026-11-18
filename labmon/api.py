@@ -2,6 +2,7 @@
 客户端把 out、err 原样打到标准输出、标准错误，按 rc 退出：输出与退出码与以前在本机做的一样。回 usage 的是参数错（客户端照旧 ap.error，退出码 2）。
 写主机清单（set_returned、set_sched_ovr、borrow.*）、ssh 到服务器（workerctl）从此只在看板服务这一个进程里做。
 时刻由客户端解析成 epoch 秒传过来（相对写法“明天 9:00”按命令行那台机器的现在算，与以前一样）。
+实验会话的只读命令（labmon status、disk、records，#52）也在这里排版：GET /api/project/<id>/…，回 {rc, out, err, data}，--json 打 data。
 """
 from __future__ import annotations
 
@@ -11,12 +12,14 @@ from contextlib import nullcontext
 
 from . import borrow as B
 from . import collect as C
+from . import disk as DK
 from . import fleet as F
 from . import pool as P
 from . import projects as PJ
 from . import workerctl as W
-from .config import HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
-from .state import snapshot
+from .config import GIB, HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
+from .records import EVENT_KINDS, project_rows
+from .state import load_json, snapshot
 
 OVR = {"pause": ("add", "pause"), "resume": ("rm", "pause"), "focus": ("add", "focus"), "unfocus": ("rm", "focus"),
        "drain": ("add", "drain"), "undrain": ("rm", "drain")}
@@ -42,6 +45,14 @@ class Out:
 def usage(msg: str) -> dict:
     """参数错：客户端照旧 ap.error（退出码 2）。"""
     return {"rc": 2, "out": "", "err": "", "usage": msg}
+
+
+def borrow_text(b: dict | None) -> str:
+    """借来的主机那一句（labmon host list、labmon borrow 列表、labmon status 的主机行共用）。"""
+    if not b:
+        return ""
+    return ("换给自己借来的" if b.get("swap") else f"借 {b['holder']}（{fmt_time(b['since'])} 起）") + (f"，约定 {fmt_time(b['until'])} 还" if b.get("until") else "") \
+        + (f"，只给 {'、'.join(b['for'])} 用" if b.get("for") else "")
 
 
 def unknown_project(pid: str, *, require: bool = False) -> str | None:
@@ -218,3 +229,190 @@ def check(pid: str, text: str, may=None) -> dict:
         after.append(f"[labmon] monitor.toml 里的 {'、'.join('[local]' if k == 'local' else k for k in ign)} 不再生效（{'，'.join(why)}），不用改")
     after += [f"[labmon] {m}" for m in told]
     return o.done(0, after=after)
+
+
+# ---------- 只读：项目现状、存储、记录（#52：实验会话不看页面，要读的都经命令行） ----------
+# GET /api/project/<id>/(status|disk|records)：回 {rc, out, err, data}，命令行原样打出 out；--json 打 data。
+def _gib(b: float | None) -> str:
+    return "—" if b is None else f"{b / GIB:.1f} GiB"
+
+
+def _delta(b: float | None) -> str:
+    return "" if not b else f"{'+' if b > 0 else '−'}{abs(b) / GIB:.1f} GiB"
+
+
+def _lane_name(ln: dict) -> str:
+    return f"{ln.get('label') or ln.get('id')}（{ln.get('host')}，{ln.get('queue') or ln.get('id')}）"
+
+
+def _lane_state(ln: dict) -> str:
+    """车道此刻为什么不跑或怎样跑：已归还、暂停中、被临时指令挡、依赖、推演排不上、在等，都没有为空。"""
+    if ln.get("returned"):
+        return f"主机已归还（{fmt_time(ln['returned'])}）" + (f"，经 {ln['read_via']} 代读" if ln.get("read_via") else "")
+    dep = {"failed": "队首等的任务跑失败了", "missing": "队首等的任务找不到", "cycle": "队首的依赖成环"}.get(ln.get("dep") or "")
+    parts = [f"暂停中：{ln['paused']}" if ln.get("paused") else "", f"被临时指令挡住（{ln['held']}）" if ln.get("held") and not ln.get("paused") else "",
+             dep or "", f"推演排不上：{ln['stuck']}" if ln.get("stuck") else "",
+             f"等待中：{ln['waiting']}" if ln.get("waiting") and not ln.get("paused") else "",
+             "队列进程不在" if ln.get("started") and not ln.get("alive") and not ln.get("managed") and not ln.get("paused") else ""]
+    return "；".join(p for p in parts if p)
+
+
+def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict:
+    """labmon status（#52）：项目快照（docs/schema.md）排成几段：各主机与卡、各车道、运行中（进度、预计结束、此刻 CPU、日志最后一行）、
+    排队的预计开始、最近失败、计划项、挪法建议、此刻的告警。glob：看的人能看的全局快照（users.view 过的），只取本项目在跑任务的 CPU。
+    快照还没有：rc 0、一句话；已归档的另写那句（projects.archived_msg）。data 是项目快照原样（没有为 None）。"""
+    now = time.time() if now is None else now
+    o = Out()
+    gone = PJ.archived_msg(pid)
+    if gone:
+        o.p(f"[labmon] {gone}")
+    snap = load_json(PJ.out_dir(pid) / "snapshot.json", None)
+    if not snap:
+        o.p(f"[labmon] 项目 {pid} 的第一次采集还没完成，过一两分钟再看")
+        return o.done(0, data=None)
+    age = now - (snap.get("generated") or now)
+    stale = (snap.get("thresholds") or {}).get("stale_s")
+    head = f"[labmon] {snap.get('title') or pid}（{pid}）快照 {fmt_time(snap.get('generated') or now)}（{fmt_dur(age)}前）"
+    if stale and age > stale:
+        head += "：看板没在采集，告诉用户（会话不重启看板）"
+    if snap.get("all_done_ts"):
+        head += f"；预计全部跑完 {fmt_time(snap['all_done_ts'])}"
+    if snap.get("no_work_since"):
+        head += f"；暂时没实验（{fmt_time(snap['no_work_since'])} 起）"
+    o.p(head)
+    if (snap.get("lan") or {}).get("ok") is False:
+        o.p("  看板那台此刻不在内网：数据是离开前的")
+    o.p("主机：")
+    for h in snap.get("hosts") or []:
+        name = h.get("label") or h["id"]
+        if h.get("returned"):
+            o.p(f"  {name}：已归还（{fmt_time(h['returned'])}）")
+            continue
+        st = "正常" if h.get("ok") else f"连不上：{h.get('error')}" + (f"（上次 {fmt_time(h['last_ok'])}）" if h.get("last_ok") else "")
+        cards = "，".join(f"卡 {g['index']} {g.get('util', 0)}% {g.get('mem_used', 0) / 1024:.1f}/{g.get('mem_total', 0) / 1024:.0f} GiB"
+                         for g in h.get("gpus") or [])
+        o.p(f"  {name}：{st}" + (f"；{cards}" if cards else "") + (f"；{borrow_text(h['borrow'])}" if h.get("borrow") else ""))
+    lanes = {ln["id"]: ln for ln in snap.get("lanes") or []}
+    o.p("车道：")
+    for ln in lanes.values():
+        cnt = f"{ln.get('done', 0)}/{ln.get('total', 0)} 跑完" + (f"，失败 {ln['failed']}" if ln.get("failed") else "")
+        end = f"；预计 {fmt_time(ln['eta_ts'])} 跑完" if ln.get("eta_ts") and ln.get("unfinished") else ""
+        why = _lane_state(ln)
+        o.p(f"  {_lane_name(ln)}：{cnt}{end}" + (f"；{why}" if why else ""))
+    jobs = snap.get("jobs") or []
+
+    def where(j):
+        ln = lanes.get(j.get("lane"))
+        return f"{ln.get('label') or j['lane']}（{ln.get('host')}）" if ln else str(j.get("lane"))
+    cores = {(e.get("id"), r.get("name")): (r.get("use") or {}).get("cores") for e in (glob or {}).get("hosts") or []
+             for r in (e.get("status") or {}).get("running") or [] if r.get("project") == pid}
+    run = [j for j in jobs if j.get("status") == "running"]
+    if run:
+        o.p("运行中：")
+    for j in run:
+        host = (lanes.get(j.get("lane")) or {}).get("host")
+        bits = [f"进度 {j['progress'][0]}/{j['progress'][1]}" if j.get("progress") else "没有进度行",
+                f"已跑 {fmt_dur(j['elapsed_min'] * 60)}" if j.get("elapsed_min") is not None else "",
+                f"预计 {fmt_time(j['eta_ts'])} 结束（{j.get('eta_source') or '—'}）" if j.get("eta_ts") else "",
+                f"超估时 {fmt_dur(j['overrun_min'] * 60)}" if j.get("overrun_min") else "",
+                "挂起中（SIGSTOP）" if j.get("suspended") else "",
+                f"CPU {cores[(host, j['id'])]:.1f} 核" if cores.get((host, j["id"])) is not None else ""]
+        o.p(f"  {j['id']}（{where(j)}）：" + "，".join(b for b in bits if b))
+        if j.get("last_line"):
+            o.p("      日志" + (f" {fmt_dur(now - j['log_mtime'])}前" if j.get("log_mtime") else "") + f"：{j['last_line']}")
+    queued = [j for j in jobs if j.get("status") == "queued"]
+    if queued:
+        queued.sort(key=lambda j: (j.get("plan_start_ts") is None, j.get("plan_start_ts") or 0))
+        o.p(f"排队（{len(queued)} 个" + ("，按预计开始列前 8 个" if len(queued) > 8 else "") + "）：")
+        for j in queued[:8]:
+            start = f"预计 {fmt_time(j['plan_start_ts'])} 开始" if j.get("plan_start_ts") else "推演不出何时开始"
+            o.p(f"  {j['id']}（{where(j)}）：{start}" + (f"，{fmt_time(j['eta_ts'])} 结束" if j.get("eta_ts") else ""))
+    failed = sorted((j for j in jobs if j.get("status") == "failed"), key=lambda j: -(j.get("end_ts") or 0))
+    if failed:
+        o.p(f"失败（{len(failed)} 个" + ("，列最近 5 个" if len(failed) > 5 else "") + "；修好后删状态目录里的 <名称>.failed 重跑）：")
+        for j in failed[:5]:
+            ln = lanes.get(j.get("lane")) or {}
+            log = f"{ln['logs_dir']}/{j['id']}.log" if ln.get("logs_dir") else ""
+            o.p(f"  {j['id']}（{where(j)}）" + (f" {fmt_time(j['end_ts'])}" if j.get("end_ts") else "") + (f"，退出码 {j['killed']}（被信号终止）" if j.get("killed") else "")
+                + (f"：{j['last_line']}" if j.get("last_line") else "") + (f"；日志 {log}" if log else ""))
+    groups = snap.get("groups") or []
+    if groups:
+        o.p("计划项：")
+    for g in groups:
+        ratio = "，".join(f"{r['cls']} 实际/估时 ×{r['k']:.2f}" for r in g.get("ratios") or [] if r.get("k") is not None)
+        o.p(f"  {g.get('label') or g['id']}：{g.get('status')}，{g.get('done', 0)}/{g.get('total', 0)} 跑完"
+            + (f"，{g['running']} 在跑" if g.get("running") else "") + (f"，{g['queued']} 排队" if g.get("queued") else "")
+            + (f"，失败 {g['failed']}" if g.get("failed") else "") + (f"；预计 {fmt_time(g['eta_ts'])}" if g.get("eta_ts") and g.get("status") != "完成" else "")
+            + (f"；{ratio}" if ratio else ""))
+    rb = snap.get("rebalance") or {}
+    if rb.get("text"):
+        o.p(f"挪法建议：{rb['text']}")
+    elif rb.get("why"):
+        o.p("别的主机接不了本项目的任务：" + "；".join(rb["why"]))
+    alerts = snap.get("alerts") or []
+    o.p(f"告警（{len(alerts)} 条）" + ("：" if alerts else ""))
+    for a in alerts:
+        o.p(f"  - [{a['key']}] {a['msg']}" + ("（用户也看得到）" if a.get("to") == "both" else "（要用户处理）" if a.get("to") == "user" else ""))
+    return o.done(0, data=snap)
+
+
+def disk(pid: str, psnap: dict | None = None) -> dict:
+    """labmon disk（#52）：本项目在共享盘上各目录的大小与增量、最大的几项，整块盘的剩余与几天满，各主机本地盘上本项目的缓存与单格临时、本地盘余量。
+    数据 disk.project_storage（与项目页「本项目占用」同一份；#53 起细到项目根下的一级目录、带 24 小时与 7 天增量）。psnap：项目快照（本地盘余量；缺省现读）。"""
+    o = Out()
+    s = DK.project_storage(pid)
+    psnap = psnap if psnap is not None else (load_json(PJ.out_dir(pid) / "snapshot.json", None) or {})
+    free, total = s.get("free"), s.get("total")
+    if total:
+        line = f"[labmon] 共享盘剩 {_gib(free)} / 共 {_gib(total)}（{free / total:.0%}）"
+        eta = "，".join(f"按近 {w}的速度约 {d:g} 天满" for w, d in (("24 小时", s.get("eta")), ("7 天", s.get("eta7"))) if d is not None)
+        o.p(line + (f"；{eta}" if eta else "；近来没在涨"))
+    else:
+        o.p("[labmon] 共享盘的总量与剩余还没读到")
+    dirs = s.get("dirs") or {}
+    d24, d7, at, top = (s.get(k) or {} for k in ("d24", "d7", "at", "top"))
+    if dirs:
+        o.p("本项目在共享盘上（扫描时刻各目录不同，见行尾）：")
+        for u, b in sorted(dirs.items(), key=lambda kv: -(kv[1] or 0)):
+            grow = "，".join(f"近 {w} {_delta(x.get(u))}" for w, x in (("24 小时", d24), ("7 天", d7)) if x.get(u))
+            o.p(f"  {u}  {_gib(b)}" + (f"（{grow}）" if grow else "") + (f"  扫描 {fmt_time(at[u])}" if at.get(u) else ""))
+            for p, pb in (top.get(u) or [])[:5]:
+                o.p(f"      {p}  {_gib(pb)}")
+        tot24 = sum(x for x in d24.values() if x)
+        o.p(f"  合计 {_gib(sum(b or 0 for b in dirs.values()))}" + (f"，近 24 小时 {_delta(tot24)}" if tot24 else ""))
+    else:
+        o.p("共享盘还没扫到本项目的目录（扫描轮流做，新目录要等一阵）")
+    local = s.get("local") or {}
+    hosts = {h["id"]: h for h in psnap.get("hosts") or []}
+    ids = list(dict.fromkeys([*hosts, *local]))
+    if ids:
+        o.p("各主机本地盘（续租、容器重启会清空；能重算的缓存放这里，用 needs= 声明）：")
+    for hid in ids:
+        loc, h = local.get(hid) or {}, hosts.get(hid) or {}
+        if h.get("returned"):
+            continue
+        mine = f"本项目缓存 {_gib(loc.get('cache') or 0)}，单格临时 {_gib(loc.get('scratch') or 0)}" if loc else "本项目没有缓存"
+        room = "，".join(f"{m.get('label') or m['path']} 剩 {m['avail_gb']:.1f} GiB" for m in h.get("mounts") or [] if m.get("avail_gb") is not None)
+        o.p(f"  {h.get('label') or hid}：{mine}" + (f"；{room}" if room else ""))
+    return o.done(0, data=s)
+
+
+def records(pid: str, host: str | None = None, cat: str | None = None, q: str | None = None, limit: int = 30, see=None) -> dict:
+    """labmon records（#52）：本项目所用主机上算它的记录（records.project_rows，与项目页时间线的事件同一规则），新的在前，最多 limit 条。
+    see：看的人能看哪些（users.visible）。data 是记录行。"""
+    o = Out()
+    psnap = load_json(PJ.out_dir(pid) / "snapshot.json", None) or {}
+    hosts = [h["id"] for h in psnap.get("hosts") or []]
+    if host and host not in hosts:
+        o.err(f"[labmon] 主机 {host} 不在项目 {pid} 用的主机里（{'、'.join(hosts) or '还没有'}）")
+        return o.done(3, data=[])
+    rows = project_rows(pid, hosts, host, cat, q, limit, see)
+    if not rows:
+        o.p("[labmon] 没有符合的记录")
+    for e in rows:
+        name = EVENT_KINDS.get(e.get("kind"), (e.get("kind") or "",))[0]
+        on = e.get("host") or "、".join(e.get("hosts") or []) or "全部主机"
+        o.p(f"{fmt_time(e['t'])} [{on}] {name}：{e.get('msg') or ''}")
+        if e.get("detail"):
+            o.p("      " + str(e["detail"]).replace("\n", "\n      "))
+    return o.done(0, data=rows)

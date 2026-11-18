@@ -211,9 +211,9 @@ def call(method: str, path: str, body=None, *, admin: bool = False, timeout: flo
         wait = min(wait * 2, BACKOFF_MAX)
 
 
-def run(method: str, path: str, body=None, *, admin: bool = False, ap=None, timeout: float = 600) -> int:
+def run(method: str, path: str, body=None, *, admin: bool = False, ap=None, timeout: float = 600, as_json: bool = False) -> int:
     """命令行一条命令走接口：回话 {rc, out, err} 原样打出、按 rc 退出；usage 是参数错（ap.error，退出码 2）。
-    看板回了错打它的原因、退出 3（要管理员的命令 403 时加一句该怎么办）；连不上退出 2。"""
+    as_json：标准输出改打回话的 data（只读命令的 --json，#52），err 照打。看板回了错打它的原因、退出 3（要管理员的命令 403 时加一句该怎么办）；连不上退出 2。"""
     try:
         r = call(method, path, body, admin=admin, timeout=timeout)
     except Failed as e:
@@ -224,7 +224,7 @@ def run(method: str, path: str, body=None, *, admin: bool = False, ap=None, time
         return 2
     if r.get("usage") and ap is not None:
         ap.error(r["usage"])
-    sys.stdout.write(r.get("out") or "")
+    sys.stdout.write(json.dumps(r.get("data"), ensure_ascii=False, indent=1) + "\n" if as_json else r.get("out") or "")
     sys.stdout.flush()
     sys.stderr.write(r.get("err") or "")
     return int(r.get("rc") or 0)
