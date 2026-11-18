@@ -403,6 +403,14 @@ def overview() -> dict:
     return {"generated": NOW, "hosts": [a, b], "colors": {"proj-a": "#7F77DD", "proj-b": "#D85A30"}, "notices": [],
             "lan": {"ok": True, "since": None, "checked": NOW}, "wake": [], "event_kinds": EVENT_KINDS, "event_cats": EVENT_CATS,
             "fleet": _fleet(a), "disk": _disk(), "occ": {"srv-a": occ_a, "srv-b": occ_b}, "regs": _regs(a, b),
+            # 算力池（pool.tick，#25）：各待放清单为什么还没放（键「目录|清单」）；在借着的主机上的 since 是这一轮的时刻，没有 why 的是这一轮正放出去
+            "pool": {"lists": {
+                "/data/me/proj-a/pq|jobs/p.txt": {"project": "proj-a", "root": "/data/me/proj-a/pq", "jobs": "jobs/p.txt", "host": "pool", "since": NOW - H,
+                                                  "why": "池里借着的服务器都放不下（srv-h：显存不够）；没有能借的入池服务器（srv-g 不在入池时段）"},
+                "/data/me/proj-b/pq2|jobs/p2.txt": {"project": "proj-b", "root": "/data/me/proj-b/pq2", "jobs": "jobs/p2.txt", "host": "srv-h", "since": NOW,
+                                                    "why": "池里借着的服务器都放不下（srv-h：内存不够）"},
+                "/data/me/proj-a/pq3|jobs/p3.txt": {"project": "proj-a", "root": "/data/me/proj-a/pq3", "jobs": "jobs/p3.txt", "host": "pool", "since": NOW - 5 * 60}},
+                "gone": []},
             "rebalance": {"proj-a": dict(REBAL), "proj-b": {"why": ["srv-a 上本项目 11-10 22:59 后没活，接不了：srv-b 上 jobs/b3.txt 的队尾 hold_b 是占位任务，不挪"], "from": NOW + 9 * H}},
             "sched": {"cap_min": 30.0, "hl_h": 24.0, "use_sum": 22.1, "projects": [
                 {"id": "proj-a", "person": "amy", "pk": "5a1c0e7d9b2f", "puse": 22.1, "w": 1, "use": 18.9, "cards": 1.0, "queued": 2, "waiting": 2, "wait_avg": 12.5, "wait_n": 3, "focus": {"until": NOW + 6 * H, "hosts": None}, "paused": None},
@@ -525,6 +533,8 @@ def overview_evil() -> dict:
     F["mine"][0]["sample"]["work"][0].update(label="任" + BAD, cwd="/d/" + BAD)
     F["mine"][0]["error"] = "错" + BAD
     F["servers"][2]["guard"]["fail"]["msg"] = "败" + BAD
+    F["servers"][-2]["lend"].update(say="池" + BAD, hours="22:00-" + BAD)     # 算力池（#76）：入池那一句与时段、池里等着的清单
+    d["pool"]["lists"]["坏|" + BAD] = {"project": "evil", "root": "/r/" + BAD, "jobs": "j/" + BAD, "host": "主" + BAD, "since": NOW - H, "why": "因" + BAD}
     F["unknown"][0]["label"] = "未知" + BAD
     me, owner = F["holders"][-2:]
     me["borrowed"][0]["from"] = "主" + BAD

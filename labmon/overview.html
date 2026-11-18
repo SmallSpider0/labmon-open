@@ -1519,7 +1519,7 @@ function reclaimPop(s) {
     <div class="sm mut">停下的那一格按清单的停法停，在别处重跑；之后 3 小时内算力池不再借这台。</div>${P.err ? `<div class="rn-err">${esc(P.err)}</div>` : ""}`;
   return popConfirm(btn, true, body, `<button class="btn pri dz" data-lend="rcgo" data-id="${esc(s.id)}" ${P.busy ? "disabled" : ""}>${P.busy ? "正在收回…" : "停下并收回"}</button>`);
 }
-const lendLent = s => !!s?.lend?.lent && LIVE && (lendMine(s.id) || canOps());    // 这台正借给算力池、看页面的人能收回
+const lendLent = s => !!s?.lend?.lent && lendCan(s.id);    // 这台正借给算力池、看页面的人能收回
 async function lendAct(act, d) {
   const s = lendSrv(d.id);
   if (!s) return;
