@@ -5504,12 +5504,14 @@ def fit_snapshot(st):
     jobs = [{"key": "run:%d" % i, "project": j.get("project"), "name": j["name"], "t0": j.get("t0"), "t1": None, "gpus": j.get("gpus") or [],
              "vram": {}, "ram": acct(j, "ram"), "cpu": acct(j, "cpu"), "excl": j.get("excl"), "tag": j.get("tag"), "hold": bool(j.get("hold")),
              "ngpu": len(j.get("gpus") or []), "use": j.get("use") or {}, "cards": 0.0} for i, j in enumerate(st.get("running") or [])]
+    by = {j["name"]: j for j in jobs}
+    gp = [dict(g, _j=by.get(g.get("job")) if g.get("owner") == "job" else None) for g in st.get("gpu_procs") or []]    # 独占的判断（intruders）要看卡上有谁
     cards = [{"i": g["i"], "uuid": g["uuid"], "total": g.get("total") or 0.0, "keep": 0.0, "other": 0.0, "ka": False,
               "free": (room.get("gpus") or {}).get(g["uuid"], g.get("free") or 0.0) + ka.get(g["uuid"], 0.0)} for g in info.get("gpus") or []]
     return {"cards": cards, "limit": (info.get("mem") or {}).get("limit"),
             "room": None if room.get("ram") is None else room["ram"] + sum(j["ram"] for j in jobs), "margin": room.get("margin") or 0,
             "cpu_cap": room.get("cpu_cap"), "cpu_room": None if room.get("cpu") is None else room["cpu"] + sum(j["cpu"] for j in jobs),
-            "jobs": jobs, "ext": st.get("external") or [], "gp": [], "cpu": None, "holds": {}, "tags": (st.get("limits") or {}).get("tags") or {},
+            "jobs": jobs, "ext": st.get("external") or [], "gp": gp, "cpu": None, "holds": {}, "tags": (st.get("limits") or {}).get("tags") or {},
             "owner": set(room.get("owner") or []), "who": "对方" if st.get("guest") else "labmon 之外的进程",
             "kept": bool((st.get("guest") or {}).get("keep")), "cut": None, "brief": False, "gholds": {}, "gangs": {}, "gfirst": {}}
 
@@ -5549,13 +5551,20 @@ class FitHost:
         if project:
             r["project"] = project
         e = estimate(self.hist, r)
-        d = duration(self.hist, r, self.model())
+        # 时长同真放行（queue_durs）：按此刻放一个新任务会遇到的同卡并行数（最空的那张卡，同 k_now；这次假设开的也算）与在跑同类的进度挑记录
+        kn = min((1 + sum(1 for j in self.S["jobs"] if not j["hold"] and c["uuid"] in j["gpus"]) for c in self.S["cards"]), default=1)
+        d = duration(self.hist, r, self.model(), kn, self.runs(r))
         x = dict(self.w.job_spec(n, r, e, d and d["min"]), key="fit:%s" % n, project=r["project"],
                  allowed=q["gpus"] if q.get("_host") == self.host else None)
         return r, e, x
 
     def model(self):
         return ((self.w.info.get("gpus") or [{}])[0]).get("name")
+
+    def runs(self, r):
+        """这台在跑的同类（项目 + 去掉种子编号的名字）按进度估的总长（模块级 run_tot，与 worker 同口径；看板写来的 eta.json），不含它自己。"""
+        return [m for y, m in run_tot(self.st.get("running") or [], self.eta.get("jobs") or {}, self.eta.get("t") or 0).get((r["project"], base_name(r["name"])), [])
+                if y != r["name"]]
 
     def blocked(self, project):
         """这台此刻不开新车道的整台原因：持久的临时指令挡住这个项目（drain、只给别的项目用、暂停，override_hit 的 lasting）、
@@ -5616,9 +5625,7 @@ class FitHost:
         if gpu:
             c = cs[0]
             k = sum(c["uuid"] in j["gpus"] for j in S["jobs"] if not j["hold"]) + 1     # 与 worker 同口径：这台的型号、在跑同类按进度估的（eta.json）
-            run = [m for y, m in run_tot(self.st.get("running") or [], self.eta.get("jobs") or {}, self.eta.get("t") or 0).get((r["project"], base_name(r["name"])), [])
-                   if y != r["name"]]
-            d = duration(self.hist, r, self.model(), k, run)
+            d = duration(self.hist, r, self.model(), k, self.runs(r))
             util = next(y["util"] for y in self.cards if y["uuid"] == c["uuid"])
             say = "卡 %s 可用 %.1f GiB，要 %.1f GiB（%s，含另留的 1 GiB）；近 10 分钟利用率 %s%s%s" % (
                 ",".join(str(y["i"]) for y in cs), free[c["uuid"]] / 1024, need_mb(x["vram"]) / 1024, x["src"], "%d%%" % util if util is not None else "—",

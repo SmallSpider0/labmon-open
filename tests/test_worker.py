@@ -887,6 +887,26 @@ class AdmissionUnitTest(UnitBase):
         self.fit_two_cards(gpu_procs=[{"uuid": "GPU-b", "owner": "keepalive", "mb": 2000, "hpid": 9}])
         self.assertIn("可以开车道并行：卡 1", self.fit_out(["v1"])["v1"])     # 保活不算：放任务前 worker 先停它
 
+    def test_fit_exclusive_and_concurrency_duration(self):
+        # Codex 审 #49 第二轮：独占的行看得到卡上 labmon 之外的进程（快照的 gp 不清空）；截止前跑不跑得完按此刻同卡并行数估时（同 k_now），
+        # 不按单跑：单跑 10 分钟、同卡 4 条 300 分钟，两张卡各 3 条在跑，60 分钟后续租：放不下
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("e_s0", "bp", now - 3600, now - 1800, ram_peak=1.0, vram_peak=1000.0, cores_peak=1.0)])
+        self.hosts.queues({"x": ["e_s1|true   # exclusive=gpu"]}, project="bp")
+        self.hosts.register("t", "x", "bp")
+        gs = {"gpus": [{"i": i, "uuid": u, "free": 45000.0, "total": 46000.0} for i, u in enumerate(("GPU-a", "GPU-b"))]}
+        self.fit_two_cards(running=[], info=gs)
+        self.assertIn("可以开车道并行", self.fit_out(["e_s1"])["e_s1"])
+        self.fit_two_cards(running=[], info=gs, gpu_procs=[{"uuid": u, "owner": "other", "mb": 2000, "hpid": 9, "job": None, "ka": False, "comm": "py"} for u in ("GPU-a", "GPU-b")])
+        self.assertIn("独占：labmon 之外的进程在用卡（PID 9（py））", self.fit_out(["e_s1"])["e_s1"])
+        self.hosts.usage("t", [usage_row("k_s0", "bp", now - 9000, now - 8400, conc=1.0, gpus=["GPU-a"], ram_peak=1.0, vram_peak=1000.0, cores_peak=1.0),
+                               usage_row("k_s1", "bp", now - 30000, now - 12000, conc=4.0, gpus=["GPU-a"], ram_peak=1.0, vram_peak=1000.0, cores_peak=1.0)])
+        self.hosts.queues({"k": ["k_s2|true"]}, project="bp")
+        self.hosts.register("t", "k", "bp")
+        run = [running_job("o%d" % i, "bq", gpus=[u]) for i, u in enumerate(["GPU-a"] * 3 + ["GPU-b"] * 3)]
+        self.fit_two_cards(running=run, overrides=[{"kind": "deadline", "at": now + 3600, "target": "renew"}])
+        self.assertIn("前跑不完", self.fit_out(["k_s2"])["k_s2"])
+
     def test_fit_list_skips_row_in_current(self):
         # Codex 审 #49：放行它的主机状态过期了，状态目录的 current 还写着它在跑：不再分给别的主机（旧代码只看新鲜主机状态里的 running）
         now = self.hosts.now()
