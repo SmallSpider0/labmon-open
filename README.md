@@ -146,7 +146,7 @@ labmon/fleetboot.py     开机参数：人员名单、资源池与模板作业�
 labmon/platform.py      SCM 平台的接口（登录、作业列表、克隆、停止、提交）
 labmon/disk.py          共享盘：取回 worker 的扫描索引，按人汇总用量、增量、冷数据，快满与暴涨告警；GPU 负载按归属表归人 whose
 labmon/fleet_probe.sh   组内服务器的只读探针（bash，经标准输入送去）
-labmon/fleet_guard.sh   在组内服务器上开、停 labmon 自己开的那一个保活
+labmon/fleet_guard.sh   在组内服务器上开、停、重开看板登记的保活；用户空转保活经配置脚本核实归属后换成看板保活
 tools/issue_watch.py    值守会话的常驻等待：本仓库出现新 Issue 才退出并打印（见 AGENTS.md「谁做什么、子 agent 怎么派」）
 tools/tx/               TX 上的看门狗 labmon-watch.py（探 /healthz，异常 15 分钟推到手机）与它的 systemd 单元、nginx、sshd、fail2ban 模板（装法见 docs/deploy.md）
 tools/wsl/              dashboard-host 的 WSL 里到 TX 的反向隧道单元 labmon-tunnel.service

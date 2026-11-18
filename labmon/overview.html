@@ -4546,28 +4546,37 @@ let GDERR = null, GDPEND = {};           // GDPEND：拨了还没存好的开关
 const gdVal = k => popIs("guard-edit", "") ? POP.draft[k] : fops().guard?.[k];
 // 与 fleet.set_guard 的范围一致；探测间隔不是整分钟时，服务端向下取整。
 const gdLimits = () => ({idle_min: [Math.floor(D.fleet.interval / 60), 1440], watch_min: [0, 60]});
-function gdPayload() {
-  if (!popIs("guard-edit", "") || POP.busy || !canOps()) return null;
-  const payload = {}, current = fops().guard;
+const GD_IN = {idle_min: ["gdidle", "空闲多久开"], watch_min: ["gdwatch", "开后盯多久"]};
+// 草稿的校验（保存按钮、回车与范围提示共用）：bad 是不合法的项，body 是合法且有改动时要提交的
+function gdCheck() {
+  const body = {}, bad = [], current = fops().guard;
   let changed = false;
   for (const [k, [lo, hi]] of Object.entries(gdLimits())) {
     const raw = gdVal(k), value = Number(raw);
-    if (raw == null || String(raw).trim() === "" || !Number.isInteger(value) || value < lo || value > hi) return null;
-    payload[k] = value;
+    if (raw == null || String(raw).trim() === "" || !Number.isInteger(value) || value < lo || value > hi) { bad.push(k); continue; }
+    body[k] = value;
     changed ||= value !== Number(current?.[k]);
   }
-  return changed ? payload : null;
+  return {bad, body: !bad.length && changed ? body : null};
 }
-const gdSyncSave = () => document.querySelector("[data-gdsave]")?.toggleAttribute("disabled", !gdPayload());
+const gdHint = bad => bad.map(k => `${GD_IN[k][1]}填 ${gdLimits()[k][0]} 到 ${gdLimits()[k][1]} 的整数分钟`).join("；");
+const gdPayload = () => popIs("guard-edit", "") && !POP.busy && canOps() ? gdCheck().body : null;
+function gdSyncSave() {     // 打字时就地更新保存按钮、范围提示与输入框的 aria-invalid，不整页重画（免得打断输入）
+  const {bad} = popIs("guard-edit", "") ? gdCheck() : {bad: []}, hint = document.querySelector("[data-gdhint]");
+  document.querySelector("[data-gdsave]")?.toggleAttribute("disabled", !gdPayload());
+  if (hint) { hint.textContent = gdHint(bad); hint.hidden = !bad.length; }
+  for (const [k, [id]] of Object.entries(GD_IN)) document.getElementById(id)?.setAttribute("aria-invalid", String(bad.includes(k)));
+}
 function guardDrawer() {
   const F = D.fleet, dis = canOps() ? "" : "disabled", iv = Math.round(F.interval / 60);
-  const open = popIs("guard-edit", ""), limits = gdLimits();
+  const open = popIs("guard-edit", ""), limits = gdLimits(), bad = open ? gdCheck().bad : [];
   const num = (id, name, k) => {
     const [lo, hi] = limits[k];
-    return `<label>${name}<input id="${id}" class="cap-in gd-in" type="number" inputmode="numeric" min="${lo}" max="${hi}" step="1" value="${esc(gdVal(k) ?? "")}"${POP.busy ? " disabled" : ""}></label>`;
+    return `<label>${name}<input id="${id}" class="cap-in gd-in" type="number" inputmode="numeric" min="${lo}" max="${hi}" step="1" value="${esc(gdVal(k) ?? "")}" aria-invalid="${bad.includes(k)}" aria-describedby="gdhint"${POP.busy ? " disabled" : ""}></label>`;
   };
   const edit = canOps() ? popConfirm(`<button class="btn" id="open-guard-edit" data-fop="guard-edit" aria-expanded="${open}" aria-haspopup="dialog">修改守护时间</button>`,
     open, open ? `<div class="aform">${num("gdidle", "空闲多久开（分钟）", "idle_min")}${num("gdwatch", "开后盯多久（分钟）", "watch_min")}</div>
+      <div class="rn-err" id="gdhint" data-gdhint role="status"${bad.length ? "" : " hidden"}>${esc(gdHint(bad))}</div>
       ${POP.err ? `<div class="rn-err">${esc(POP.err)}</div>` : ""}` : "",
     `<button class="btn pri" data-gdsave ${!gdPayload() ? "disabled" : ""}>保存</button>`, true) : opsNote();
   const flow = `<ol class="gd-flow">
@@ -4599,7 +4608,11 @@ async function gdSet(body) {
 }
 async function gdSave() {
   const pop = POP, body = gdPayload();
-  if (!body) return;
+  if (!body) {               // 不合法：提示照显示，焦点留在第一个不合法的框；没改动就什么也不做
+    const bad = popIs("guard-edit", "") && !pop.busy ? gdCheck().bad : [];
+    if (bad.length) { gdSyncSave(); document.getElementById(GD_IN[bad[0]][0])?.focus({preventScroll: true}); }
+    return;
+  }
   document.activeElement?.blur();
   pop.busy = true; pop.err = null; render(false);
   try {

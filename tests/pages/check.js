@@ -1068,13 +1068,14 @@ t("manage", "项目配置（#133）：当场校验改了的项（说法与范围
   has(fh, "在项目目录的 monitor.toml 里改，labmon wait 或 labmon project push 推上来后下一轮自动重读"); ok(!fh.includes("保存到 monitor.toml"));
   run(F, `cfgAct("set:interval:300", "proj-a"); cfgInput({dataset: {cf: "title", p: "proj-a"}, value: "x"}, "input")`); ok(!Object.keys(run(F, "CFE")).length, "离线页记了草稿");
 });
-ta("overview", "保活守护时间：草稿有效且有变化才可点保存或按回车", async () => {
+ta("overview", "保活守护时间：草稿有效且有变化才可点保存或按回车，不合法时当场写范围", async () => {
   const C = accCtx(OV, ADMIN_ME, "#/fleet/guard");
   run(C, `D.fleet.interval = 635; render(true); fopAct("guard-edit");
     POSTS = []; fleetPost = async (kind, body) => { POSTS.push([kind, body]); throw new Error("测试保存失败"); };
     SAVE = {disabled: true, toggleAttribute(k, on) { if (k === "disabled") this.disabled = on; }};
+    HINT = {hidden: true, textContent: ""};
     oldQuery = document.querySelector.bind(document);
-    document.querySelector = q => q === "[data-gdsave]" ? SAVE : oldQuery(q);`);
+    document.querySelector = q => q === "[data-gdsave]" ? SAVE : q === "[data-gdhint]" ? HINT : oldQuery(q);`);
   const enter = (isComposing = false) => fire(C, "keydown", {id: "gdidle"}, {key: "Enter", isComposing});
   const input = (id, value, disabled) => {
     fire(C, "input", {id, value});
@@ -1082,6 +1083,15 @@ ta("overview", "保活守护时间：草稿有效且有变化才可点保存或�
   };
   for (const v of ["", "3", "30.5", "1441", "060"]) { input("gdidle", v, true); enter(); }
   ok(run(C, "POSTS.length") === 0, "无效或等价草稿被回车提交");
+  ok(run(C, "HINT.hidden && document.getElementById('gdidle').attrs['aria-invalid'] === 'false'"), "等价草稿也出了范围提示");
+  // 不合法：范围提示当场出现（只列不合法的那项），回车把焦点留在那个框里（#26）
+  input("gdidle", "1441", true);
+  ok(run(C, "!HINT.hidden && HINT.textContent === '空闲多久开填 10 到 1440 的整数分钟'"), "不合法时没有范围提示：" + run(C, "HINT.textContent"));
+  ok(run(C, "document.getElementById('gdidle').attrs['aria-invalid'] === 'true'"), "不合法的框没标 aria-invalid");
+  run(C, `FOCUSED = null; document.getElementById("gdidle").focus = () => { FOCUSED = "gdidle"; }`);
+  enter();
+  ok(run(C, "FOCUSED === 'gdidle' && POSTS.length === 0"), "回车没把焦点留在不合法的框");
+  has(run(C, "guardDrawer()"), "空闲多久开填 10 到 1440 的整数分钟</div>", "重画后范围提示没了");
   has(run(C, "guardDrawer()"), 'min="10" max="1440"');
   input("gdidle", "30", false); input("gdwatch", "61", true); input("gdwatch", "5", false);
   focusText(C, 'id: "gdidle",');
