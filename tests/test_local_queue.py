@@ -252,6 +252,20 @@ class LocalQueueTest(unittest.TestCase):
         self.assertAlmostEqual(run["speed"][0][1], 0.45, delta=0.01)
 
 
+    def test_no_gpu_from_plan(self):
+        """车道的 no_gpu（#73）：worker 推演里写着不用卡（gpus 为 []）的未完成任务；推演里没有的（b_noest）照旧当要卡。"""
+        wh = self.d / "wh"
+        st = wh / "hosts" / "here" / "status.json"
+        st.parent.mkdir(parents=True)
+        now, root = time.time(), str(self.d / "proj")
+        st.write_text(json.dumps({"t": now, "waiting": [], "queues": [{"root": root, "jobs": "jobs/q.txt"}],
+            "plan": {"t": now, "lanes": [{"root": root, "queue": "jobs/q.txt", "project": "out", "kind": "queue", "stuck": None,
+                                          "jobs": [{"name": "a_run", "t0": now - 600, "t1": now + 600, "gpus": [], "run": True},
+                                                   {"name": "b_next", "t0": now + 600, "t1": now + 1800, "gpus": [0]}]}]}}))
+        snap, _ = self.run_collect(self.lock.pid, f'worker_home = "{wh}"')
+        lane = snap["lanes"][0]
+        self.assertEqual((lane["unfinished"], lane["no_gpu"]), (3, 1))
+
     def test_dead_lock_alerts(self):
         snap, _ = self.run_collect(dead_pid())
         self.assertFalse(snap["lanes"][0]["alive"])

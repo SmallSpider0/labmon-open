@@ -58,6 +58,7 @@
     "root": "/root/data1/alice/project-a/a1_r9", "queue": "jobs/r9_a6000w.txt",   // 队列目录与清单（配置写的或登记的；自动发现的取发现到的）：页面按它认 worker 的等待、队列结束事件
     "overrun": false,                            // 当前任务已超估时（eta_ts 因而偏早）
     "total": 22, "done": 8, "failed": 0, "unfinished": 14,
+    "no_gpu": 0,                                 // 未完成里不用卡的：worker 推演里这一条的 gpus 为 []（在跑的没分到卡、排队的推演里不给卡）；gpu_idle 告警不数它们
     "eta_ts": 1793970791.0
   }],
 
