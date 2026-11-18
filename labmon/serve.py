@@ -275,7 +275,7 @@ class Project(_Collector):
         first, seen = self.pushed is None, {k: v for k, v in (self.pushed or {}).items() if v > t - PUSH_AGAIN_S}
         new = [m for k, m in cur if k not in seen]
         self.pushed = seen | {k: t for k, _ in cur}
-        a = U.account(PJ.owner(self.id))
+        a = U.account(U.owner_of(self.id))
         if first or not new or not a or a["role"] == "admin":
             return []
         notify([f"{self.cfg.get('title') or self.id}：{m}" for m in new], to=[a["name"]])
@@ -300,7 +300,7 @@ class Overview(_Collector):
         for p in self.projects:
             s = p.snapshot() or {}
             out.append({"id": p.id, "title": s.get("title") or p.cfg.get("title") or p.id,
-                        "owner": PJ.owner(p.id),         # 项目主人（#167；为空的归管理员）：「管理」抽屉的「主人」一行
+                        "owner": U.owner_of(p.id),       # 项目主人（#167；为空、账号已删的归管理员）：「管理」抽屉的「主人」一行
                         # 给用户的告警（C.user_alerts：只给实验会话的不算，#142）；工作台总览列出、算进告警数，连不上工作台自己报，不重复
                         "alerts": len(C.user_alerts(s.get("alerts", []))),
                         "alert_msgs": C.user_alerts([x for x in s.get("alerts", []) if not x["key"].startswith("ssh_fail:")])[:8],
@@ -613,6 +613,7 @@ class Handler(BaseHTTPRequestHandler):
         只在内网入口的路由在公网入口上回 404（视同没注册）；没登录的页面 302 到登录页，别的回 401；没权限 403。"""
         m = "GET" if self.command == "HEAD" else self.command
         r = route_of(m, path)
+        self.guard = _NO_GUARD                           # 这个请求的对象检查（_own 定）；同一连接上的上一个请求留下的不算
         if r.lan and self.entry != "lan":
             self._json(404, {"error": "这项操作要在内网入口做"})
             return False
@@ -662,14 +663,22 @@ class Handler(BaseHTTPRequestHandler):
 
     def _own(self, r: Route, path: str, who: U.Ident) -> bool:
         """普通用户按对象核（#167，路由表的 own 列）：项目要是他的（users.need_project）、主机要开给他（need_host）、清单登记要是他项目的（need_reg、need_list）。
-        不行抛 users.Denied(403)；请求体不是 JSON 对象时已回 400、返回 False。管理员、读的路由（没写 own）不核；没写 own 的写路由普通用户一律 403。"""
+        不行抛 users.Denied(403)；请求体不是 JSON 对象时已回 400、返回 False。管理员、读的路由（没写 own）不核；没写 own 的写路由普通用户一律 403。
+        对象鉴权只在这里定（#19）：项目的主人、登记新项目的名额（need_room）、暂停是不是他下的（need_pause）当场核一次，同一份记成 self.guard(主机)，
+        要在锁里再核的业务函数（推配置、改配置、归档、恢复的 check_owner，调度卡与命令行的暂停）都调它，不各自另写。"""
         if who.role == "admin" or r.own == "self" or (r.own is None and r.method == "GET"):
             return True
         if r.own is None:
             raise U.Denied(403, "这件事只有管理员能做：普通用户只能动自己的项目、用开给自己的主机")
         if r.own in ("path", "new"):
             m = PATH_PID.fullmatch(path)
-            U.need_project(who, unquote(m[1]) if m else "", new_ok=r.own == "new")
+            pid, new = unquote(m[1]) if m else "", r.own == "new"
+
+            def guard(host=None):
+                U.need_project(who, pid, new_ok=new)
+                if new and r.method == "PUT":            # 第一次推就登记（#161）：名下项目的名额（#18）
+                    U.need_room(who, pid)
+            self._guard(guard)
             return True
         body = self._body()
         if body is None:
@@ -682,8 +691,14 @@ class Handler(BaseHTTPRequestHandler):
                 U.need_project(who, pid)
             if hid and hid not in U.access(who).hosts:
                 raise U.Denied(403, "只能报告你可见的主机")
-        elif r.own == "body":
-            U.need_project(who, s("project"))
+        elif r.own == "body":                          # 调度卡、项目「管理」：暂停与恢复另核是不是他下的（项目级的，#16）
+            pid, pause = s("project"), path in ("/sched/pause", "/sched/resume")
+
+            def guard(host=None):
+                U.need_project(who, pid)
+                if pause:
+                    U.need_pause(who, pid)
+            self._guard(guard)
         elif r.own == "holder":                        # 入池开关（#24）：这台组内服务器的持有人本人
             PO.need_holder(who, s("id"))
         elif r.own == "init":
@@ -692,11 +707,16 @@ class Handler(BaseHTTPRequestHandler):
             U.need_project(who, s("project"))
             for j in _strings(body, "jobs"):
                 U.need_project(who, WT.job_key(j, s("project"))[0])
-        elif r.own == "override":                      # 暂停：项目是他的，--host 只许他能用的（谁下的在写的时候核，users.need_pause，#16、#27）
-            U.need_project(who, s("target"))
-            hosts = _strings(body, "hosts")
+        elif r.own == "override":                      # 暂停：项目是他的，--host 只许他能用的，暂停与恢复要是他下的（项目级、逐台，users.need_pause，#16、#27）
+            pid, pause, hosts = s("target"), path.rsplit("/", 1)[-1] in ("pause", "resume"), _strings(body, "hosts")
             for h in hosts:
                 U.need_host(who, h)
+
+            def guard(host=None):
+                U.need_project(who, pid)
+                if pause:
+                    U.need_pause(who, pid, host)
+            self._guard(guard, hosts)
         elif r.own == "worker":
             sub = path.rsplit("/", 1)[-1]
             args = _worker_args(sub, body)
@@ -727,6 +747,12 @@ class Handler(BaseHTTPRequestHandler):
                     U.need_reg(who, s("host"), it["root"], it["jobs"], s("project"), snap)
                 body["home"] = None   # 代办目录由这台主机的现行清单决定
         return True
+
+    def _guard(self, fn, hosts=()) -> None:
+        """_own 定下的对象检查：当场核一次（给了 hosts 就逐台核，否则按项目级核），记成 self.guard 交给要在锁里再核的业务函数。"""
+        for h in hosts or (None,):
+            fn(h)
+        self.guard = fn
 
     def _cookie(self, raw: str | None) -> str:
         """会话 Cookie：HttpOnly、SameSite=Strict；经 HTTPS 的入口另加 Secure：公网入口（只经 HTTPS 反代用）、配了证书的内网入口（#165）。
@@ -779,13 +805,8 @@ class Handler(BaseHTTPRequestHandler):
     def _me(self, who: U.Ident) -> dict:
         """GET /api/me 与页面上的 ME：users.me 加上在跑的代码是哪个提交、何时启动（deploy.RUNNING；部署脚本等它换成新提交，#164）。"""
         out = U.me(who, self.entry) | {"commit": DP.RUNNING["commit"], "started": DP.RUNNING["started"]}
-        if out["admin"]:
-            try:
-                cfg = F.conf()
-            except ConfigError:
-                cfg = None
-            if cfg:
-                out["fleet_person"], out["fleet_person_error"] = F.account_person(cfg, who.name)
+        if out["admin"]:                               # 组内服务器页认“我”（#19：只认账号库的绑定）
+            out["fleet_person"], out["fleet_person_error"] = U.person_of(who.name)
         if out["account"]:                             # 浏览器会话（「我的账号」）：自己的推送（只有打码的目标，#167）
             self._client_tokens(out["tokens"])
             out["push"] = S.push_view(who.name)
@@ -1017,7 +1038,7 @@ class Handler(BaseHTTPRequestHandler):
         base = (self.headers.get("If-Match") or "").strip().strip('"') or None
         try:
             r = PJ.put_config(pid, body["text"], files, base, owner=who.name, by=f"经看板接口（{who.name}）",
-                              ops=U.can_ops(who, self.entry), check_owner=lambda: (U.need_project(who, pid, new_ok=True), U.need_room(who, pid)))
+                              ops=U.can_ops(who, self.entry), check_owner=self.guard)
         except U.Denied as x:
             return self._json(x.code, {"error": x.msg})
         except PJ.Refused as x:
@@ -1170,7 +1191,7 @@ class Handler(BaseHTTPRequestHandler):
                 for hid in allowed:
                     U.need_host(who, hid)
             r, what = A.override(verb, s("target"), hosts or None, num("until"), now, immediate_hosts=allowed,
-                                 by=who.name, check=lambda h: U.need_pause(who, s("target"), h), own=who.role != "admin"), f"{verb} {s('target')}"
+                                 by=who.name, check=self.guard, own=who.role != "admin"), f"{verb} {s('target')}"
         elif act == "project/init":
             name = body.get("name") or None
             if name is not None and (not isinstance(name, str) or "/" in name or name in (".", "..") or "\x00" in name):
@@ -1351,8 +1372,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif act in SCHED_ACTS:
                     kind, on = SCHED_ACTS[act]
                     until = _number(body, "until") if on else None
-                    if kind == "pause":
-                        U.need_pause(who, pid)
+                    self.guard()                       # 暂停是不是他下的：在写主机清单的同一把锁里再核（_own 定，#16）
                     msg = set_sched_ovr(kind, pid, on, until, by=who.name)
                     if kind == "pause" and "本来就没有" not in msg:   # 暂停、恢复会让会话以为卡住或要接着加任务：告诉它（权重、优先只改排序，不叫醒）
                         tell(pid, act, f"{sched_ovr_text(kind, pid, until)}（所有主机）：不再放行它的新任务，正在跑的跑完，排着的等恢复" if on
@@ -1384,14 +1404,14 @@ class Handler(BaseHTTPRequestHandler):
                 if p is None:
                     return self._json(404, {"error": f"看板服务里没有项目 {pid}"})
                 msg = PJ.archive(pid, p.snapshot(), snapshot(), p.interval, by="看板页面上" if who.via == "session" else f"经命令行（{who.name}）",
-                                 check_owner=lambda: U.need_project(who, pid), own=who.role != "admin", who=who)
+                                 check_owner=self.guard, own=who.role != "admin", who=who)
             elif act == "config":
                 p = self.board.projects.get(pid)
                 if p is None:
                     return self._json(404, {"error": f"看板服务里没有项目 {pid}"})
                 if not isinstance(body.get("set"), dict):
                     return self._json(400, {"error": "没说要改什么"})
-                said = PJ.set_config(pid, body["set"], check_owner=lambda: U.need_project(who, pid))
+                said = PJ.set_config(pid, body["set"], check_owner=self.guard)
                 if not said:
                     return self._json(200, {"msg": "没有改动"})
                 p._reload()
@@ -1413,7 +1433,7 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json(400, {"error": "请刷新归档列表并确认永久删除"})
                 msg = self.board.delete_project(pid, revision, who.name)
             elif act == "restore":
-                msg = PJ.restore(pid, check_owner=lambda: U.need_project(who, pid))
+                msg = PJ.restore(pid, check_owner=self.guard)
                 if who.via == "session":
                     tell(pid, "restore", f"恢复了项目 {pid}：看板接着采集它；登记没恢复，要跑先 labmon worker add <主机> ROOT JOBS --project {pid}")
             else:
@@ -1733,6 +1753,10 @@ def route_of(method: str, path: str) -> Route:
 PATH_PID = re.compile(r"/(?:p|api/project)/([^/]+)(?:/.*)?")      # own="path"、"new"：地址里的项目 id
 
 
+def _NO_GUARD(host=None) -> None:
+    """管理员、不用按对象核的请求：Handler.guard 什么都不核（#19）。"""
+
+
 def root_rel(path: str) -> str:
     """从 path 回看板根的相对地址（../ 几层，在根下是 ./）：服务端写的跳转与链接都用它，反代在前面加了路径前缀也不用改（#165）。"""
     return "../" * max(0, path.count("/") - 1) or "./"
@@ -1774,6 +1798,11 @@ def serve(port: int, interval: int | None = None, public_port: int | None = None
             log_events([{"kind": "project", "msg": note}])
         if note:
             log(note)
+    try:                                              # 可删（#19 迁移，users.migrate_people）：部署后主与备用各启动过一次就删这几行
+        for note in U.migrate_people():
+            log(note)
+    except Exception as e:  # noqa: BLE001 — 迁移出错只记下，服务照常起，下次启动再迁
+        log(f"账号的人员对应这次没迁（#19，下次启动再迁）：{e!r}")
     try:
         srv = Server((conf["lan_bind"], port), interval=interval, conf=conf)
         pub = Listener(("127.0.0.1", public_port), srv, conf["public_hosts"]) if public_port else None

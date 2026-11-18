@@ -26,6 +26,7 @@ from . import platform as P
 from .config import active_hosts, all_hosts, fmt_dur, parse_time
 from .records import log_events
 from .state import load_json, save_json
+from .users import person_of
 
 PORT_RANGE = (15151, 15199)
 
@@ -219,7 +220,7 @@ def set_person(name: str, image: str | None = None, run_cmd: str | None = None, 
         if sl:
             raise P.PlatformError(f"{name} 还占着 {'、'.join(sl)}，不能删：先把服务器分配给别人或关机")
         from . import users as U
-        with U.removing_person(name, cfg):
+        with U.removing_person(name):
             F.edit_state("people.json", lambda d: d.pop(name, None))
         log_events([{"kind": "config", "who": name, "msg": f"人员：删了 {name}"}], t)
         return people(cfg)
@@ -525,7 +526,7 @@ def preview(cfg: dict, kind: str, sid: str | None = None, person: str | None = N
     name = (person or ((old or {}).get("holder") if kind == "open" else "") or "").strip()     # 换人不默认原来的人
     ppl = people(cfg)
     pp = ppl.get(name) or {}
-    actor, error = F.account_person(cfg, account)
+    actor, error = person_of(account)
     if error:
         raise P.PlatformError(error)
     mine = bool(name and actor and name.casefold() == actor.casefold())

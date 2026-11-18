@@ -17,7 +17,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fixtures import fake_host, fake_status, running_job, worker_module  # noqa: E402
+from fixtures import fake_host, fake_status, make_token, running_job, worker_module  # noqa: E402
 from labmon import borrow as B  # noqa: E402
 from labmon import config as K  # noqa: E402
 from labmon import fleet as F  # noqa: E402
@@ -55,6 +55,8 @@ class Base(unittest.TestCase):
         self.env = mock.patch.dict(os.environ, {"LABMON_HOSTS": str(self.d / "hosts.toml"), "LABMON_STATE": str(self.d / "state")})
         self.env.start()
         (self.d / "hosts.toml").write_text(HOSTS)
+        for name in ("me", "second", "third"):                              # 借用人按登录账号绑着的组内人员认（#19：只认账号库的绑定）
+            make_token(name)
         self.calls, self.keeps = [], []
         B._REC.clear()                                                        # 推荐的预留按小时缓存，各测试的状态目录不同
 
@@ -71,7 +73,7 @@ class Base(unittest.TestCase):
     def server(self) -> dict:
         return next(s for s in tomllib.loads((self.d / "hosts.toml").read_text())["fleet"]["servers"] if s["id"] == SID)
 
-    def begin(self, work=(), until=None, projects=None, ssh_out="", light=False, away=False, account=None, ssh_err="", **a):
+    def begin(self, work=(), until=None, projects=None, ssh_out="", light=False, away=False, account="me", ssh_err="", **a):
         a, self.remote = {"work": list(work), **a}, []
         with mock.patch.object(F, "parse", lambda raw: raw), mock.patch.object(F, "analyze", lambda smp, cfg: a):
             return B.begin(SID, until, projects, fetch=lambda s: ("raw", None), ssh=lambda s, cmd, input=None: self.remote.append((cmd, input)) or (0, ssh_out, ssh_err),

@@ -228,6 +228,13 @@ class FleetOpsTest(unittest.TestCase):
         os.environ["LABMON_HOSTS"] = NO_HOSTS
         self.tmp.cleanup()
 
+    def me(self, account="alice", person="ALICE") -> str:
+        """看板上登录的管理员账号，绑着组内人员 person：平台操作认“我”只认账号库的绑定（#19）。"""
+        from fixtures import add_account
+        with unittest.mock.patch("labmon.users._log"):
+            add_account(account, "admin", person=person)
+        return account
+
     def sync(self, code="q7Wz"):
         c = cfg(self.plat.url)
         if code:
@@ -885,17 +892,17 @@ class FleetOpsTest(unittest.TestCase):
         FB.set_person("EE", REG + "ubuntu:aa", RUN, "新来的", cfg=c)
         ps = FB.people(c)
         self.assertEqual(set(ps), {"ALICE", "AA", "BB", "CC", "EE"})
-        self.assertEqual(F.account_person(c, "alice"), ("ALICE", None))
-        self.assertEqual(F.account_person(c, "ee"), ("EE", None))
-        self.assertEqual(F.account_person({**c, "account_people": {"admin.a": "ALICE"}}, "admin.a"), ("ALICE", None))
-        self.assertIsNotNone(F.account_person(c, "admin.a")[1])
+        from labmon import users as U
+        self.me()
+        self.assertEqual(U.person_of("alice"), ("ALICE", None))
+        self.assertEqual(U.person_of("ee"), (None, None))                    # 没开账号：不按同名去猜（#19）
         self.assertNotIn("me", ps["ALICE"])
         self.assertEqual((ps["ALICE"]["slots"], ps["ALICE"]["image"], ps["ALICE"]["src"]), (["29"], REG + "pt:1", "job"))
         self.assertEqual((ps["CC"]["image"], ps["CC"]["saved"]), (None, False))   # 占着服务器、还没读到作业：先列出来
         self.assertEqual(FB.job_name("ALICE", FB.taken_jobs(c)), "ALICE-2")
         self.assertEqual(FB.job_name("ALICE", FB.taken_jobs(c, "ALICE")), "ALICE")
         self.assertEqual(FB.job_name("EE", FB.taken_jobs(c)), "EE")
-        pv = FB.preview(c, "swap", "a", "ALICE", tcp=lambda n, p: True)
+        pv = FB.preview(c, "swap", "a", "ALICE", tcp=lambda n, p: True, account="alice")
         self.assertEqual((pv["job"], pv["name"], pv["mine"], pv["image"], pv["image_src"]), ("ALICE-2", "ALICE-2", True, REG + "pt:1", "这人的设置"))
         self.assertIn("自用", pv["after"])
         self.assertIn("加了后缀", pv["items"][0]["note"])
@@ -910,6 +917,7 @@ class FleetOpsTest(unittest.TestCase):
         self.sync()
         n = len(self.plat.calls)
         c = cfg(self.plat.url)
+        self.me()
         self.assertTrue(FB.preview(c, "swap", "a", "ALICE", account="alice")["mine"])
         self.assertFalse(FB.preview(c, "swap", "a", "ALICE", account="another")["mine"])
         op = self.renew(["a"], code=None, kind="swap", person="ALICE", account="alice")
@@ -958,7 +966,7 @@ class FleetOpsTest(unittest.TestCase):
         del c["platform"], c["platform_user"]
         self.assertEqual((FO.platform_conf(c), F.legacy_person(c)), ((self.plat.url, "u"), "ALICE"))
         self.assertNotIn("ALICE", FB.taken_jobs(c))
-        pv = FB.preview(c, "open", None, "ALICE", PRIV, tcp=lambda n, p: False)
+        pv = FB.preview(c, "open", None, "ALICE", PRIV, tcp=lambda n, p: False, account=self.me())
         self.assertEqual((pv["job"], pv["port"], pv["mine"]), ("ALICE", "15155", True))
         self.assertIn("沿用上次的端口", next(x for x in pv["items"] if x["item"] == "端口")["note"])
         self.assertIn("恢复已归还的自用主机 29", pv["after"])                  # #86：会恢复那一块，不是“加一台”
@@ -966,7 +974,7 @@ class FleetOpsTest(unittest.TestCase):
         n = len(self.plat.calls)
         self.hosts = []
         FO.start("open", c, None, ids=[], person="ALICE", pool=PRIV, probe=self.remote.probe, ssh_fn=self.remote.ssh, forget_fn=self.remote.forget,
-                 ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01, tcp=lambda nd, p: False, hosts=self.fake_hosts())
+                 ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01, tcp=lambda nd, p: False, hosts=self.fake_hosts(), account="alice")
         for t in threading.enumerate():
             if t.name == "fleet-open":
                 t.join(10)
@@ -1012,7 +1020,7 @@ class FleetOpsTest(unittest.TestCase):
         FO.SESS["captcha_at"] = 0
         FO.start("open", cfg(self.plat.url), None, ids=[], person="ALICE", pool=PRIV, probe=self.remote.probe, ssh_fn=ssh_fn,
                  forget_fn=lambda s: got.append(dict(s)), ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01,
-                 tcp=lambda nd, p: False)
+                 tcp=lambda nd, p: False, account=self.me())
         for t in threading.enumerate():
             if t.name == "fleet-open":
                 t.join(10)
@@ -1059,7 +1067,7 @@ class FleetOpsTest(unittest.TestCase):
         self.sync()
         c = cfg(self.plat.url)
         FB.set_person("EE", REG + "ubuntu:aa", RUN, cfg=c)
-        self.assertTrue(FB.preview(c, "swap", "a", "EE", account="ee")["mine"])
+        self.assertTrue(FB.preview(c, "swap", "a", "EE", account=self.me("ee", "EE"))["mine"])
         op = self.renew(["a"], code=None, kind="swap", person="EE", account="ee")
         self.assertIsNone(op["error"], op)
         self.assertTrue(op["conn"]["mine"])

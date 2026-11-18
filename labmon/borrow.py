@@ -40,6 +40,7 @@ from .records import log_events
 from .renew import eta_of
 from .service import log
 from .state import load_json, load_rows, save_json, state_dir
+from .users import person_of
 from .workerctl import worker_env, host_conf, override_each, run_out
 
 MARGIN_S = 3600                  # 对方租期到期前这么久截止：续租会重启容器，没跑完的白跑
@@ -135,8 +136,8 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
         msg = f"借用 {label(s)} 的约定改为{what}"
         log_events([{"kind": "borrow", "host": sid, "who": s["holder"], "msg": msg}])
         return msg
-    person, error = F.account_person(cfg, account)
-    if error or (account and not person):
+    person, error = person_of(account)
+    if error or not person:
         raise ConfigError(error or f"账号 {account} 尚未关联组内人员")
     if sid in F.off_servers():
         raise ConfigError(f"{label(s)} 已关机")

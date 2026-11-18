@@ -722,6 +722,24 @@ class AuthTest(unittest.TestCase):
             self.assertEqual(put("e2", amy, headers={"If-Match": hd["ETag"]})[0], 200)   # 已登记的照常推
             self.assertEqual(put("e4", admin)[0], 200)
 
+    def test_object_checks_live_in_own(self):
+        """对象鉴权只在 _own 定（#19）：登记新项目的名额、撤别人下的暂停不靠业务函数各自补；业务函数在锁里再核用的是 _own 给的同一份 guard。"""
+        amy = make_token("amy", role="user", scopes=("project",))
+        admin = make_token("boss", role="admin", scopes=("admin", "project"))
+        PJ.put_config("exp", 'id = "exp"\n', owner="amy")
+        put = lambda pid: self.call(self.lan + f"/api/project/{pid}/config", {"text": f'id = "{pid}"\n', "files": {}}, tok=amy, method="PUT")   # noqa: E731
+        with mock.patch.object(S.U, "USER_PROJECTS", 1), mock.patch.object(S.PJ, "put_config") as stub:
+            status, _, raw = put("e2")
+            self.assertEqual(status, 409, raw)
+            stub.assert_not_called()
+        self.assertEqual(self.call(self.lan + "/sched/pause", {"project": "exp"}, tok=admin)[0], 200)
+        with mock.patch.object(S.A, "override") as ov, mock.patch.object(S, "set_sched_ovr") as sso:
+            for path, data in (("/api/override/resume", {"target": "exp"}), ("/sched/resume", {"project": "exp"})):
+                self.assertEqual(self.call(self.lan + path, data, tok=amy)[0], 403, path)
+            ov.assert_not_called()
+            sso.assert_not_called()
+        self.assertEqual(self.call(self.lan + "/api/override/resume", {"target": "exp"}, tok=admin)[0], 200)
+
     def test_minimum_client_and_version_metadata(self):
         code = fixtures.add_account("boss", "admin", "本机命令行")
         _, headers, _ = self.call(self.lan + "/api/setup", {"name": "boss", "code": code, "password": "correct horse"})
@@ -850,16 +868,16 @@ class AuthTest(unittest.TestCase):
             self.assertEqual(borrow.call_args.kwargs["account"], "other")
 
     def test_account_people_conflicts_do_not_merge_or_change_access(self):
-        hosts = Path(os.environ["LABMON_HOSTS"])
-        hosts.write_text('[fleet]\n[fleet.account_people]\nother = "OWNER"\n')
-        boss, other = fixtures.make_legacy_account("boss", "admin"), fixtures.make_legacy_account("other", "admin")
+        """账号库里两个账号绑到同一人（手改出来的）：两边都不认这人，管理员照样能登录、管账号；再给这人开账号 409（#19：只认账号库的绑定）。"""
         from labmon import fleetboot as FB
+        boss, other = make_token("boss"), make_token("other")
         FB.set_person("OWNER", create=True, roster_only=True)
+        with S.U._edit() as d:
+            d["users"]["boss"]["fleet_person"] = "owner"
+            d["users"]["other"]["fleet_person"] = "OWNER"
         rc, _, body = self.call(self.lan + "/api/users/add", {"name": "owner", "person": "OWNER"}, tok=boss)
         self.assertEqual(rc, 409)
-        self.assertIn("对应多个账号", json.loads(body)["error"])
-        # 配置是手写的：已有冲突只禁用冲突映射，管理员仍能登录并管理账号。
-        hosts.write_text('[fleet]\n[fleet.account_people]\nother = "OWNER"\nboss = "owner"\n')
+        self.assertIn("已开通账号", json.loads(body)["error"])
         rc, _, body = self.call(self.lan + "/api/users", tok=boss)
         self.assertEqual(rc, 200)
         for account in json.loads(body)["users"]:
@@ -868,7 +886,7 @@ class AuthTest(unittest.TestCase):
         rc, _, body = self.call(self.lan + "/api/me", tok=other)
         self.assertEqual(rc, 200)
         self.assertIsNone(json.loads(body)["fleet_person"])
-        hosts.write_text('[fleet]\n[fleet.account_people]\nother = "OWNER"\n')
+        S.U.bind_person("boss", "boss", "本机命令行")                          # 冲突的一方改绑别人：另一方就认得出了
         self.assertEqual(json.loads(self.call(self.lan + "/api/me", tok=other)[2])["fleet_person"], "OWNER")
         read = S.U.token_add("boss", "读页面", ["read"])[0]
         self.assertEqual(self.call(self.lan + "/api/users", tok=read)[0], 403)
@@ -1196,8 +1214,8 @@ class AuthTest(unittest.TestCase):
     def test_account_onboarding_binding(self):
         from labmon import fleet as F
         from labmon.state import save_json
-        K.hosts_file().write_text('[fleet]\n[fleet.account_people]\nlegacy = "Reserved"\n')
-        save_json(F.state_file("people.json"), {"Amy": {}, "Bob": {}, "Reserved": {}})
+        K.hosts_file().write_text('[fleet]\ninterval = 600\n')
+        save_json(F.state_file("people.json"), {"Amy": {}, "Bob": {}})
         boss, ordinary = make_token(), make_token("reader", role="user", scopes=("project",))
         add = self.lan + "/api/users/add"
         listing = lambda: json.loads(self.call(self.lan + "/api/users", tok=boss)[2])  # noqa: E731
