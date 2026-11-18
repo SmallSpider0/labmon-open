@@ -726,6 +726,7 @@ def _groups(cfg: dict, snap: dict, state: dict, ratios: dict) -> None:
 def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict, t: float) -> None:
     """主机级告警：GPU 空转（还有任务未完成、利用率却一直低，写明各车道在做什么）、CPU 持续被限流且本项目有超核的任务、开跑核数给少给多（只给会话）、drain 挡住本项目的任务、空闲关机风险（when_idle 检查）。"""
     al_cfg, alerts, hstate = cfg["alerts"], snap["alerts"], state.setdefault("hosts", {})
+    fits = {}                                     # (how, 类) → [(运行中任务, cpu_fit, 在哪, 类按什么认)]：cpu_low:、cpu_high: 跨主机合并（_cpu_fit_alerts）
     for hd in snap["hosts"]:
         if not hd["ok"]:
             continue
@@ -773,23 +774,15 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                                 "（OMP_NUM_THREADS 等、torch.set_num_threads、DataLoader num_workers、进程池；按 nproc 取的是宿主机的核数），改成按 $LABMON_CPUS；"
                                 "确实要更多核就在清单那一行写 cpus=，下次放行按它记账", say))
         # 开跑给的核数给少了、给多了（#46）：worker 判的（运行中任务的 cpu_fit，门槛只在 worker 的 cpu_fit），本项目的清单任务才报、只给会话；
-        # key 按车道与任务；worker 同一次运行判出来就留到跑完（Worker.cpu_hints），所以只叫醒一次。给少的已给到配额（sug 为 None）写大也给不了，不报
-        # 车道按清单认（目录 + 清单，_qpath）：同一台上两条清单可以有同名任务
+        # 车道按清单认（目录 + 清单，_qpath）：同一台上两条清单可以有同名任务。给少的已给到配额（sug 为 None）写大也给不了，不报。
+        # 按类（cpu_fit 的 cls：tag，否则去种子号同名）跨主机合并、循环后一起报（#91）
         by_q = {_qpath(ln["root"], ln["queue"]): ln for ln in lanes if ln.get("root") and ln.get("queue")}
         for r in (st or {}).get("running") or []:
             f, lane = r.get("cpu_fit"), by_q.get(_qpath(r.get("root"), r.get("queue")))
             if not f or not f.get("sug") or r.get("kind") != "queue" or r.get("project") != cfg["id"] or lane is None:
                 continue
-            ln, where = lane["id"], f"{hd['label']} {lane['label']}"
-            if f["how"] == "low":
-                alerts.append(alert(f"cpu_low:{ln}/{r['name']}", "agent",
-                                    f"任务 {r['name']}（{where}）近 10 分钟平均用了 {f['avg']:.1f} 核，给它的 {f['give']} 核基本用满，所在的卡利用率不到 50%：可能给少了。"
-                                    f"没开跑的同类任务在清单那一行写 cpus={f['sug']} 试试（cpus= 优先于历史；跑过以后可以删掉，历史只会往实测靠），"
-                                    "线程数、DataLoader 进程数按 $LABMON_CPUS 取；在跑的不必停"))
-            else:
-                alerts.append(alert(f"cpu_high:{ln}/{r['name']}", "agent",
-                                    f"任务 {r['name']}（{where}）清单写了 cpus={r.get('cpus')}（给 {f['give']} 核），跑到现在 1 分钟峰值只有 {f['peak']:.1f} 核：可以写小。"
-                                    f"没开跑的同类任务改成 cpus={f['sug']}，或删掉 cpus= 改按历史估（这次跑完就有），好让别的任务早点开跑；在跑的不必停"))
+            # 还没升级的 worker 不给 cls：按任务名各报一条（部署拉起新 worker 后就没有了）
+            fits.setdefault((f["how"], f.get("cls") or r["name"]), []).append((r, f, f"{hd['label']} {lane['label']}", f.get("by")))
         # drain 是整台主机的（续租预备、跑完就还、别的会话手动下的）：挡住本项目的任务时报一次，免得会话一直睡着不知道
         dr = [ln for ln in lanes if ln.get("held") == "drain" and ln.get("unfinished")]
         if dr:
@@ -811,6 +804,39 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
             alerts.append(alert(f"idle:{hd['id']}:{c['id']}", "both",
                                 f"{idle_say}：先看本项目没跑的任务为什么没放（项目页车道状态、labmon worker status {hd['id']}），"
                                 f"worker 不在就 labmon worker start {hd['id']}；保活由 worker 管，不自己 ka.sh start", idle_say))
+
+    alerts.extend(_cpu_fit_alerts(fits))
+
+
+def _cpu_fit_alerts(fits: dict) -> list:
+    """开跑核数给少、给多的告警（只给会话，#46）：同一个项目同一类（tag，否则去种子号同名）的合成一条，跨主机（#91）。
+    key cpu_low:<类>、cpu_high:<类> 不带任务名：同类后面的任务接着被判出来时 key 不变，消失后 6 小时内再出现不再叫醒（waits._new_alerts，#88）。
+    fits 由 _host_alerts 收集：(how, 类) → [(运行中任务, cpu_fit, 在哪, 类按什么认)]。"""
+    out = []
+    for (how, cls), xs in fits.items():
+        if len(xs) == 1:
+            subj = f"任务 {xs[0][0]['name']}（{xs[0][2]}）"
+        else:                                     # 按主机车道列：本机 车道 1：a_s1、a_s2；别的主机 车道 2：a_s3
+            who = "；".join(f"{w}：{'、'.join(r['name'] for r, _, w2, _ in xs if w2 == w)}" for w in dict.fromkeys(w for _, _, w, _ in xs))
+            subj = f"{'同 tag' if xs[0][3] == 'tag' else '同类'} {cls} 的 {len(xs)} 个任务（{who}）"
+        sug = max(f["sug"] for _, f, _, _ in xs)
+
+        def rng(k):                               # 几个任务的平均核数、峰值：一样的写一个，否则写范围
+            a, b = min(f[k] for _, f, _, _ in xs), max(f[k] for _, f, _, _ in xs)
+            return f"{a:.1f}" if round(a, 1) == round(b, 1) else f"{a:.1f}–{b:.1f}"
+        give = "、".join(f"{g:g}" for g in sorted({f["give"] for _, f, _, _ in xs}))
+        if how == "low":
+            out.append(alert(f"cpu_low:{cls}", "agent",
+                             f"{subj}近 10 分钟平均用了 {rng('avg')} 核，给的 {give} 核基本用满，所在的卡利用率不到 50%：可能给少了。"
+                             f"没开跑的同类任务在清单那一行写 cpus={sug} 试试（cpus= 优先于历史；跑过以后可以删掉，历史只会往实测靠），"
+                             "线程数、DataLoader 进程数按 $LABMON_CPUS 取；在跑的不必停"))
+        else:
+            hint = "、".join(f"{c:g}" for c in sorted({r["cpus"] for r, _, _, _ in xs if r.get("cpus") is not None})) or "?"
+            out.append(alert(f"cpu_high:{cls}", "agent",
+                             f"{subj}清单写了 cpus={hint}（给 {give} 核），跑到现在 1 分钟峰值只有 {rng('peak')} 核：写多了。"
+                             "同类跑完几次、峰值都不到一半后，没开跑的自动按实测记账（开跑仍按 cpus= 给核），不必改清单；"
+                             f"想马上让出核，没开跑的改成 cpus={sug}，或删掉 cpus= 改按历史估；在跑的不必停"))
+    return out
 
 
 NO_WORK_WAKE_S = 86400   # 项目跑空后这么久内给实验会话那条 no_work:（只给会话，#43）

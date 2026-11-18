@@ -353,7 +353,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <tr><td><code>dep:</code></td><td>会话</td><td>队首的依赖等不来：等的失败了、找不到、成环</td><td>重跑被等的、改对名字、改清单顺序或删 <code>after=</code></td></tr>
         <tr><td><code>cpu:</code></td><td>会话</td><td>队首因 CPU 被挡满 10 分钟</td><td>按原因：别的任务占着就等；<code>cpus=</code> 写多了就改小</td></tr>
         <tr><td><code>throttle:</code></td><td>两边</td><td>容器 CPU 被配额限流 ≥ 25% 持续 10 分钟，本项目有任务实测核数远超给的核数</td><td>查写死的线程数、进程数（没设的 OMP 等已缺省成 <code>$LABMON_CPUS</code>），改成按它；确实要更多核就写 <code>cpus=</code></td></tr>
-        <tr><td><code>cpu_low:</code> <code>cpu_high:</code></td><td>会话</td><td>开跑满 10 分钟：用满了给的核、卡又吃不满（给少了）；或写了 <code>cpus=</code> 峰值却不到一半（给多了）</td><td>没开跑的同类改清单行的 <code>cpus=</code>：写大一点，或写小、删掉改按历史估</td></tr>
+        <tr><td><code>cpu_low:</code> <code>cpu_high:</code></td><td>会话</td><td>开跑满 10 分钟：用满了给的核、卡又吃不满（给少了）；或写了 <code>cpus=</code> 峰值却不到一半（给多了）</td><td>同类一条、不重复叫醒。给少了：没开跑的同类把 <code>cpus=</code> 写大一点；给多了：同类跑完几次都这样后自动按实测记账（开跑仍给 <code>cpus=</code> 的核），不必改，急着让出再写小</td></tr>
         <tr><td><code>noprogress:</code></td><td>会话</td><td>在跑的任务超了预计、已跑满 30 分钟，这一次的日志里一直没有进度行</td><td>看它还在不在干活；在跑的不用停，给还没开跑的同类任务补上 <code>PROGRESS k/N</code></td></tr>
         <tr><td><code>drain:</code></td><td>会话</td><td>主机 drain 中，挡着本项目的任务</td><td>续租预备或要还了；需要就换主机</td></tr>
         <tr><td><code>borrow_cut:</code></td><td>两边</td><td>借来的主机上约定前跑不完，这台不会再放它</td><td>把清单行换到别的在用主机（别处接得了时句末写好挪法）；截止是约定时也可请你延长</td></tr>
@@ -706,6 +706,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <li><b>OOM 之后</b>（#62）：清单任务失败时 worker 认一下是不是 OOM（日志末尾是 CUDA OOM，或容器内存撞上限被杀），记进用量行。OOM 那次的峰值是被当时可用的量截住的，不当历史；同 tag、同名里最近一次跑成功之后的 OOM 给那一项下限 max(那次放行时的估计 ×2, OOM 时峰值 ×1.1)，几条取大，提示值写小了的同样抬高。峰值 10 秒一采，几十秒就 OOM 的常常采不全，所以两头都取。例：同队列估 7.1 GiB 的 ViT 一 OOM，下一次按 14.2 GiB 估，再 OOM 按 28.4，再往上按整卡；有一次跑成功（实测 15.9 GiB）就按 17.5 估，一张 47.5 GiB 的卡放两条。借来的主机上被对方挤掉的不算我们的 OOM。不自动重排：OOM 也可能是程序错误，照旧留 <code>.failed</code> 给实验会话看日志。</li>
         <li><b>CPU 封顶</b>：核数四舍五入、至少 1。清单写的 <code>cpus=</code> 不封顶，超过配额的写“放不下”，要改小；封顶只针对按历史估的（见下一条）与开跑导出的 <code>LABMON_CPUS</code>（封顶到配额向下取整）。</li>
         <li><b>CPU</b>：开跑时没设的 <code>OMP_NUM_THREADS</code>、<code>MKL_NUM_THREADS</code>、<code>OPENBLAS_NUM_THREADS</code> 缺省同 <code>LABMON_CPUS</code>（清单行或 <code>.env</code> 里写了的不盖），不再按宿主机核数起线程。按 <code>LABMON_CPUS</code> 设并行数的任务（含靠这个缺省的），历史峰值只会照着给它的核数长（给 1 核就只开 1 个），所以第一次要写 <code>cpus=</code>。按历史估的超过全停时能给的，按那整份算，原因里写估计与封顶后的核数。</li>
+        <li><b><code>cpus=</code> 写多了</b>（#91）：同 tag 或同名近 5 次里至少 3 次、每次开跑给的核都不少于现在写的、1 分钟峰值都不到一半且少至少 1 核，没开跑的按峰值 ×1.1 取整记账（例：写 4、峰值 1.0–1.2 → 记 1 核），开跑仍按 4 给 <code>LABMON_CPUS</code>，线程数不变；有一次峰值过了一半就回到按 4，改大了旧记录不算数。</li>
         <li><b>时长的同类</b>：同项目、去掉种子编号的名字，跑成功过的。两边都有估时就按 实际/估时 的中位数折算，否则取同类实际用时的中位数。</li>
         <li>只认跑完的、同型号 GPU 的记录。每条记录记着运行期间同卡平均几条 labmon 任务（<code>conc</code>）：取与这个任务预计会遇到的条数最接近的那几条（推演按开跑时卡上的条数）。并行的拖慢因类而异：27 上的小任务并行 4 条与 6 条都是约 20 分钟，有的类挤着跑要慢好几倍，单跑的记录估不了。占位任务只按 <code>est_min</code>，也不进项目比值。</li>
         <li>同类还没有跑完的、有在跑的：排队的按在跑同类的日志进度估的总时长，不按清单估时。</li>
