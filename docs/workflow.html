@@ -256,7 +256,7 @@ html { scroll-behavior: smooth; }
     <div class="who" aria-label="颜色表示谁在做">
       <span class="w-main">总控会话</span><span class="w-agent">子 agent</span><span class="w-human">维护者</span><span class="w-ci">CI、Codex 与机器</span>
     </div>
-    <figcaption>虚线：CI 失败或审查有意见，回到第 4 步。每条意见先写一个在旧代码上会失败的测试再改。Codex 的意见由还在前台等审查的实现者当场修，推上去再请审；已经停下来的，一两处的小阻塞按<a href="#roles">角色表</a>派新的小修 agent。</figcaption>
+    <figcaption>虚线：CI 失败或审查有意见，回到第 4 步。每条意见先写一个在旧代码上会失败的测试再改。Codex 的意见由还在前台等审查的实现者当场修，推上去再请审（只做无冲突变基、<code>git range-diff</code> 显示改动不变的不再请审，CI 绿即可合并，并在 PR 上写明；手工解过冲突或改动变了的照旧请审）；已经停下来的，一两处的小阻塞按<a href="#roles">角色表</a>派新的小修 agent。</figcaption>
   </figure>
 
   <p class="prose"><b>主动推进与清晰沟通。</b>先核根因、现有实现与 skill 分工，沿使用流程检查连带影响；有依据就继续做到验收。回复直接说行动、结果与实际影响。实验准备仍由实验会话沿 SSH 与共享盘流程负责；跨职责扩展先说明必要性并取得维护者确认；brief 与审查共同核对是否重复平台化会话职责。效率优先，先评估步骤与重复 I/O 成本，不新增源码快照、源码哈希或服务器代码版本管理。主会话、子 agent 和续接会话共同读取 <a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#沟通与主动推进">同一规则</a>，交接保留目标、决定、证据与剩余工作。</p>
