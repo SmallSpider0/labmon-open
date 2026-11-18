@@ -1921,6 +1921,11 @@ t("auth", "算力池入口已删除：侧栏、路由与项目管理抽屉都不
 t("auth", "普通用户：侧栏没有组内服务器与「管理」，有「我」；没有立即采集、调度按钮与平台操作；组内页只说要管理员；记录没有平台操作这类", () => {
   ok(OVU.fleet === null && !OVU.notices.length, "users.view 没去掉组内");
   ok(OV.hostcheck && OVU.hostcheck === null, "users.view 没去掉看板服务所在机的体检（#166）");
+  // #17：普通用户的快照按白名单取：别的项目的配色、正在扫的路径、别人的目录、主备细节都不给，页面照常画
+  ok(Object.keys(OVU.colors).every(k => OVU.access.own.includes(k)), "配色里还有别人的项目：" + Object.keys(OVU.colors));
+  ok(!("now" in (OVU.disk || {})) && !("colors" in (OVU.disk || {})) && (OVU.disk?.ours?.dirs || []).every(d => OVU.access.own.includes(d.p)), "共享盘给多了");
+  ok(!OVU.server || Object.keys(OVU.server).every(k => ["role", "say"].includes(k)), "主备给多了");
+  ok(!("pool_observed" in OVU) && !("host_notices" in OVU), "派单库存或主机提醒给了普通用户");
   ok(!page(accCtx(OVU, USER_ME), "#/").includes("svc-t"), "普通用户的总览不该有「看板服务」小卡");
   const U = accCtx(OVU, USER_ME);
   for (const r of ["#/", "#/host/srv-a", "#/host/srv-b", "#/p/proj-a/manage", "#/fleet", "#/fleet/srv/srv-a", "#/log", "#/me", "#/admin/users"]) {
@@ -2076,6 +2081,7 @@ t("auth", "管理员从公网入口来：账号管理只在内网入口，人员
       ok(h.includes("账号管理只在内网入口") === !lan, me.entry + "：提示不对");
       ok(lan || !h.includes('data-acc="reload"'), "公网入口还给了重试");
     }
+    ok(lan || !people.includes("未开通账号"), "没取账号列表却说未开通");
   }
 });
 

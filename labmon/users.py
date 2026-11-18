@@ -799,34 +799,50 @@ def visible(who: Ident, acc: Access | None = None):
                           or e.get("kind") in ("account", "hostcheck", "maint", "server", "report") or e.get("who")) and _related(e, acc)
 
 
+# 普通用户的全局快照只取这些（#17）：VIEW_KEYS 原样给，下面 view 里再按 access 过滤几项（sched 去掉别人项目暂停的 by，#16）；不在白名单里的（以后新加的字段也一样）不给。
+VIEW_KEYS = ("generated", "lan", "event_kinds")
+# 共享盘只给主机页那条共享盘条要的：总量、剩余、历史、提醒线与扫描进度（ours 另按项目过滤，scanner 只在可见主机时给）
+VIEW_DISK = ("root", "df", "eta", "hist", "warn_gb", "at", "units", "pending", "yield")
+VIEW_DISK_ALERTS = ("low", "soon")                     # 整块盘的告警（快满）；按人的 burst:、over: 不给
+STANDBY_SAY = "这台看板服务是备用：页面上的数据可能不是最新的，要动东西到主看板做"
+
+
 def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
-    """看的人能看到的全局快照：普通用户去掉组内服务器（fleet）、共享盘的按人明细与按人告警、给系统通知的提醒（notices）、
-    给实验会话的消息（wake）与看板服务所在机的体检（hostcheck，#166），记录的分类也去掉组内的那几类；
-    主机只留给他看的（他能用的、他的项目有车道的），项目、已归档的、挪法建议只留他的，登记只留那些主机上他项目的清单（#167）。
-    调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上），别人项目的暂停去掉谁下的（by）。管理员原样。"""
+    """看的人能看到的全局快照。管理员原样。普通用户按白名单取（#17）：VIEW_KEYS 原样；主机只留给他看的（他能用的、他的项目有车道的），
+    整项照给（同一台上别人任务的命令行与日志末尾也在里面：一台主机开给谁，谁就看得到这台上的所有任务，docs/api.md「普通用户看到的」）；
+    项目、已归档的、挪法建议、配色只留他的，登记只留那些主机上他项目的清单（#167）；共享盘取 VIEW_DISK；主备只给 role 与一句通用的话。
+    组内服务器（fleet）、提醒（notices）、给实验会话的消息（wake）、看板服务所在机的体检（hostcheck，#166）给空值，记录的分类去掉组内的那几类。
+    调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上），别人项目的暂停去掉谁下的（by）。"""
     if who.role == "admin" or not snap:
         return snap
     acc = acc or access(who, snap)
-    out = dict(snap, fleet=None, notices=[], wake=[], hostcheck=None, host_notices=None,
+    out = {k: snap[k] for k in VIEW_KEYS if k in snap}
+    out.update(fleet=None, notices=[], wake=[], hostcheck=None,
                event_cats=[c for c in snap.get("event_cats") or EVENT_CATS if c[0] not in FLEET_CATS and c[0] != "report"],
                access={"own": sorted(acc.projects), "hosts": sorted(acc.allowed)})
-    # 可删（#12）：删池之前写的 snapshot.json 带着 pool_observed（各项目的节点观测与尝试回执），备用机不采集、照读旧快照。
-    # 主看板与备用机都在 #12 之后重写过 snapshot.json、也不再恢复这之前的备份时删。
-    out.pop("pool_observed", None)
     out["hosts"] = [h for h in snap.get("hosts") or [] if h.get("id") in acc.hosts]
     out["projects"] = [p for p in snap.get("projects") or [] if p.get("id") in acc.projects]
     out["archived"] = [a for a in snap.get("archived") or [] if a.get("id") in acc.projects]
     out["rebalance"] = {k: v for k, v in (snap.get("rebalance") or {}).items() if k in acc.projects}
+    out["colors"] = {k: v for k, v in (snap.get("colors") or {}).items() if k in acc.projects}
     out["regs"] = [{**x, "queues": None if x.get("queues") is None else [q for q in x["queues"] if q.get("project") in acc.projects]}
                    for x in snap.get("regs") or [] if x.get("host") in acc.hosts or any(q.get("project") in acc.projects for q in x.get("queues") or [])]
-    if isinstance(snap.get("occ"), dict):
-        out["occ"] = {k: v for k, v in snap["occ"].items() if k in acc.hosts}
+    occ = snap.get("occ")
+    out["occ"] = {k: v for k, v in occ.items() if k in acc.hosts} if isinstance(occ, dict) else {}
+    sv = snap.get("server")
+    out["server"] = {"role": sv.get("role"), "say": STANDBY_SAY if sv.get("role") == "standby" else ""} if isinstance(sv, dict) else None
     sc = snap.get("sched")
     if isinstance(sc, dict):                          # 调度卡各项目的行照留；别人项目的暂停不给看是谁下的（#16）
         out["sched"] = {**sc, "projects": [p if p.get("id") in acc.projects or "by" not in (p.get("paused") or {})
                                            else {**p, "paused": {k: v for k, v in p["paused"].items() if k != "by"}} for p in sc.get("projects") or []]}
     dk = snap.get("disk")
+    out["disk"] = None
     if isinstance(dk, dict):
-        out["disk"] = {k: v for k, v in dk.items() if k not in ("owners", "names", "owners_set", "colors")}
-        out["disk"]["alerts"] = [a for a in dk.get("alerts") or [] if not str(a.get("key") or "").startswith(("burst:", "over:"))]
+        d = {k: dk[k] for k in VIEW_DISK if k in dk}
+        if dk.get("scanner") in acc.hosts:
+            d["scanner"] = dk["scanner"]
+        if isinstance(dk.get("ours"), dict):
+            d["ours"] = {"dirs": [x for x in dk["ours"].get("dirs") or [] if x.get("p") in acc.projects]}
+        d["alerts"] = [a for a in dk.get("alerts") or [] if a.get("key") in VIEW_DISK_ALERTS]
+        out["disk"] = d
     return out
