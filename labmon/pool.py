@@ -293,7 +293,8 @@ def _returns(lent: list[dict], srv: dict, fst: dict, bst: dict, t: float, ret, f
 def want_borrow(need: dict, cfg: dict, fst: dict, bst: dict, t: float, busy=(), regs: dict | None = None) -> tuple[str | None, float | None, str]:
     """挑一台入池的服务器来借（D）：入池、在时段内、没借着、没关机、没在做平台操作、不在休息期与退避里；最近一次探测新鲜，
     GPU 上除保活外没有进程、can_borrow（VS Code、终端这类轻用借来后给主人留预留）；主人最近一次有实验已过 guard_idle_min；
-    截止（时段结束与租期前 MARGIN_S 取早）离现在至少 POOL_MIN_LEFT_S；卡数与单卡显存装得下 need；没在 nofit 里；
+    截止（时段结束与租期前 MARGIN_S 取早）离现在至少 POOL_MIN_LEFT_S；卡数够、单卡显存装得下 need（清单写的提示值才比；按历史估的超过整卡
+    时 worker 按整卡算，同 card_need）；没在 nofit 里；
     这台目录里没有留着别的清单登记（regs：全局快照的 regs 按主机；以前手动借时留下的，池借来一拉起 worker 就会接着跑它们）。
     多台时卡数差最小的、单卡显存差最小的、空闲最久的。返回 (服务器 id, 时段结束（全天为 None）, 没挑到时各台为什么不行)。"""
     off, out, miss = F.off_servers(), [], {}
@@ -316,7 +317,7 @@ def want_borrow(need: dict, cfg: dict, fst: dict, bst: dict, t: float, busy=(), 
               else "GPU 上有主人的进程" if F._brief_work(a) or not B.can_borrow(a)
               else "主人刚用过" if st.get("last_job") and t - st["last_job"] < cfg["guard_idle_min"] * 60
               else "离截止不到 %d 小时" % (POOL_MIN_LEFT_S // 3600) if cut and cut - t < POOL_MIN_LEFT_S
-              else "卡不够" if len(gs) < ng or (ng and card < vr + 1)
+              else "卡不够" if len(gs) < ng or (ng and need.get("src") == "提示值" and card < vr + 1)   # 按历史估的超过整卡按整卡算（worker 的 card_need），空卡就放
               else "借过放不下" if any(x[2] > t and x[0] <= ng and x[1] <= vr + 0.5 for x in m.get("nofit") or [])
               else None)
         if no:

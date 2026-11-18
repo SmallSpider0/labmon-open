@@ -1040,7 +1040,7 @@ class AdmissionUnitTest(UnitBase):
             return json.loads(out.getvalue().strip().splitlines()[-1])
         r = ask(("t", "old"))
         self.assertEqual(r["head"], "j_s2")
-        self.assertEqual((r["need"]["ngpu"], round(r["need"]["vram"]), r["need"]["cpus"]), (1, 21, 1))
+        self.assertEqual((r["need"]["ngpu"], round(r["need"]["vram"]), r["need"]["cpus"], r["need"]["src"]), (1, 21, 1, "同名 近 1 次峰值 ×1.1"))
         self.assertTrue(r["hosts"]["t"]["ok"], r)
         self.assertIn("可用", r["hosts"]["t"]["why"])
         self.assertEqual(r["hosts"]["old"], {"ok": False, "why": "old 的 worker 没在跑（状态 15 分钟没更新）"})

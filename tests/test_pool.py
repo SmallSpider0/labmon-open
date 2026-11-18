@@ -423,6 +423,14 @@ class PoolBorrowTest(TickBase):
             self.tick(self.snap([], [self.pool_list()]), t=NOW + P.POOL_RETRY_S + 1)
         self.assertEqual(len(self.starts), 1)
 
+    def test_history_estimate_capped_to_whole_card(self):
+        # 按历史估的显存超过整卡时 worker 按整卡算（card_need）：48.4 GiB 的历史估计照样借 46 GiB 的空卡；清单写的提示值照旧要装得下（Codex 审查 #75）
+        self.need = {"ngpu": 1, "vram": 48.4, "src": "同名近 5 次峰值"}
+        self.assertEqual(self.pick()[0], "a")
+        self.need = {"ngpu": 1, "vram": 48.4, "src": "提示值"}
+        self.assertIsNone(self.pick()[0])
+        self.assertIn("卡不够", self.pick()[2])
+
     def test_skip_server_with_leftover_lists(self):
         # 以前手动借过、目录里还留着别的清单登记的：池借来一拉起 worker 就会接着跑它们，不借（Codex 审查 #75）
         left = {"host": "a", "state": "returned", "queues": [{"root": "/r/old", "jobs": "jobs/old.txt", "project": "px", "stop": "boundary"}]}
@@ -453,7 +461,7 @@ class PoolBorrowTest(TickBase):
             B._update(lambda st: st.pop("a", None))
             CF.set_fleet_keys({"borrow_since": None}, "测试", sid="a")
         self.assertEqual(self.pick(busy={"a": "renew"})[2], "在做平台操作 1 台")
-        self.need = {"ngpu": 1, "vram": 46.0}                          # 单卡 46 GiB：要 46 + 1 放不下
+        self.need = {"ngpu": 1, "vram": 46.0, "src": "提示值"}         # 单卡 46 GiB：清单写的 46 + 1 放不下
         self.assertIn("卡不够", self.pick()[2])
         self.need = {"ngpu": 1, "vram": 20.0}
         self.hours(NOW - 600, NOW + 3600)                                 # 时段一小时后结束：离截止不到 2 小时

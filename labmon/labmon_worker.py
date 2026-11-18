@@ -6027,7 +6027,7 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
     状态过期的写明没算。按清单顺序逐行，每行先在这次分到车道最少的那台上试（一样少的按 hosts 的顺序），判断同单行的 fit（FitHost.open）；
     哪台都放不下的到此为止，其余排在后面。只回答此刻放得下多少：怎么拆清单、开不开由实验会话定。
     as_json（--json，算力池往哪台放，pool.fit_head，#25）：只看队首（还会跑、没在跑的第一行；依赖由 worker 状态的 pool_heads 管，这里不判），
-    打一行 JSON {head, need {ngpu, vram 每卡 GiB, ram GiB, cpus}, dur 分钟（不知道为 null）, hosts {主机: {ok, why}}}；
+    打一行 JSON {head, need {ngpu, vram 每卡 GiB, src 显存估计的来源（提示值的才要装得下，按历史估的超过整卡按整卡算：card_need）, ram GiB, cpus}, dur 分钟（不知道为 null）, hosts {主机: {ok, why}}}；
     各台的判断同上（FitHost.open），没有能算的主机也给 need；没有还要跑的行 head 为 null。"""
     now = time.time()
     root = os.path.abspath(root)
@@ -6136,7 +6136,7 @@ def fit_head(q, head, fhs, skip, hist, now):
         return {"head": None, "need": None, "dur": None, "hosts": {h: {"ok": False, "why": "清单里没有还要跑的行"} for h in [f.host for f in fhs] + list(skip)}}
     n, c = head
     r, e, x = FitHost(q.get("_host") or "", {}, hist, {}).req(q, n, c, None)
-    out = {"head": n, "need": {"ngpu": x["ngpu"], "vram": round(x["vram"] or 0.0, 2), "ram": round(x["ram"] or 0.0, 2), "cpus": x["cpus"]},
+    out = {"head": n, "need": {"ngpu": x["ngpu"], "vram": round(x["vram"] or 0.0, 2), "src": x["src"], "ram": round(x["ram"] or 0.0, 2), "cpus": x["cpus"]},
            "dur": x["dur"] and round(x["dur"]), "hosts": {h: {"ok": False, "why": why} for h, why in skip.items()}}
     for fh in fhs:
         r, e, x = fh.req(q, n, c, None)
