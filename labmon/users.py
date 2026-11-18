@@ -908,11 +908,16 @@ def _nrm(root: str) -> str:
     return posixpath.normpath(str(root or ""))
 
 
+def same_list(q: dict, root: str, jobs: str) -> bool:
+    """全局快照 regs 里的一条登记 q 是不是这条清单（ROOT、JOBS）：拼起来规整后是同一个清单文件就算（./q.txt、a/../q.txt 与 q.txt 是同一条，#18；
+    ROOT/JOBS 从哪里断开都一样，#77：worker status 列的是拼起来的路径，worker rm 同样按文件认，labmon_worker.matching_regs 的 by_file）。"""
+    return bool(q.get("root") and q.get("jobs")) and _nrm(posixpath.join(q["root"], q["jobs"])) == _nrm(posixpath.join(root, jobs))
+
+
 def reg_projects(snap: dict, root: str, jobs: str, host: str | None = None) -> set:
-    """全局快照的 regs 里这条清单（ROOT、JOBS）登记在哪些项目名下；host 给了只看那一台。ROOT 与 JOBS 两边都归一化后比
-    （./q.txt、a/../q.txt 与 q.txt 是同一条，#18：不然换个写法就绕过 need_list）。"""
+    """全局快照的 regs 里这条清单（ROOT、JOBS，按 same_list 认）登记在哪些项目名下；host 给了只看那一台（不然换个写法就绕过 need_list）。"""
     return {q.get("project") for x in snap.get("regs") or [] if host is None or x.get("host") == host
-            for q in x.get("queues") or [] if _nrm(q.get("root")) == _nrm(root) and _nrm(q.get("jobs")) == _nrm(jobs)}
+            for q in x.get("queues") or [] if same_list(q, root, jobs)}
 
 
 def need_list(who: Ident, root: str, jobs: str, pid: str, snap: dict | None = None) -> None:

@@ -343,11 +343,15 @@ def registry(qdir):
     return qs, bad
 
 
-def matching_regs(qdir, root, jobs, *, aliases=False):
-    """一台主机的登记目录 qdir 里登记过这条队列（同一目录、同一清单）的文件：按内容认，11-06 前不带哈希的旧文件名也认得；缺 project 的旧登记也认（rm 删得掉）。"""
+def matching_regs(qdir, root, jobs, *, aliases=False, by_file=False):
+    """一台主机的登记目录 qdir 里登记过这条队列（同一目录、同一清单）的文件：按内容认，11-06 前不带哈希的旧文件名也认得；缺 project 的旧登记也认（rm 删得掉）。
+    by_file（rm 用，#77）：ROOT 与 JOBS 拼起来规整后是同一个清单文件就算，不管从哪里断开（status 列的是拼起来的 ROOT/JOBS，看不出登记时在哪断开），
+    只比文字、不碰文件，目录已经删了的也认得。aliases：另认经符号链接是同一个文件的（文件要还在）。"""
     def same(reg):
         r, j = reg.get("root"), reg.get("jobs")
         if os.path.normpath(r or "") == os.path.normpath(root) and j == jobs:
+            return True
+        if by_file and r and j and os.path.normpath(os.path.join(r, j)) == os.path.normpath(os.path.join(root, jobs)):
             return True
         if aliases and r and j:
             try:
@@ -6334,7 +6338,7 @@ def main(argv=None):
         # 核对项目、查状态目录、登记与搬走，整段经同一把登记锁。
         with reg_lock(required=bool(a.expect_project or a.expect_from)):
             dirs = reg_dirs()
-            old_regs = matching_regs(p.queues, root, a.args[1])
+            old_regs = matching_regs(p.queues, root, a.args[1], by_file=a.cmd == "rm")
             if a.cmd == "add" and a.expect_from and not (dirs.get(a.expect_from) and reg_files(dirs[a.expect_from], root, a.args[1])):
                 print("这条清单已不在 %s 上（撤回或搬走了）：不搬" % a.expect_from, file=sys.stderr)
                 return 2
@@ -6351,9 +6355,11 @@ def main(argv=None):
                 if a.expect_project and not old:
                     print("这条登记已不存在：请刷新后重试", file=sys.stderr)
                     return 2
-                for f in old:
+                for f, reg in old_regs:
                     os.remove(f)
-                print("已移除 %s/%s" % (root, a.args[1]) if old else "没登记过 %s/%s" % (root, a.args[1]))
+                    print("已移除 %s %s" % (reg.get("root"), reg.get("jobs")))
+                if not old:
+                    print("没登记过 %s/%s" % (root, a.args[1]))
                 return 0
             if not a.project:
                 print("add 必须写 --project <看板项目 id>（monitor.toml 的 id）", file=sys.stderr)

@@ -20,7 +20,7 @@ labmon worker limit 29 heavy=2                           # 同 tag 同时运行�
 labmon worker status 29                                  # 登记的队列（清单跑空的标“空着”）、运行中与等待中的任务（等待行带排第几、是不是屏障、预计开始）；末尾一句与哪几台共用 worker 目录（看板按主机清单补）
 labmon worker fit 29 x4_s110_seed2 [--project a1]        # 开并行车道前：与真放行同一份准入放不放得下，同卡并行时同类约要多久、卡吃不满是不是 CPU 受限（见“资源估计”）
 labmon worker fit 29 ROOT JOBS --list --project a1      # 这条清单还会跑的行此刻能在共用 worker 目录的几台上再开几条车道
-labmon worker rm 29 /root/data1/alice/proj jobs/a6000.txt  # 按目录与清单认登记，只删这一条；已归还的主机经与它共用 worker_home 的在用主机代办（不连已归还的那台）
+labmon worker rm 29 /root/data1/alice/proj jobs/a6000.txt  # 按清单文件认登记：ROOT 与 JOBS 拼起来是同一个文件就算（status 列的 ROOT/JOBS 从哪里断开都行，目录已删也撤得掉），只删这一条；已归还的主机经与它共用 worker_home 的在用主机代办（不连已归还的那台）
 labmon worker stop 29                                    # 停 worker；运行中的任务继续跑，下次启动时接管
 ```
 

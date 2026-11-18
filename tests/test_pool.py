@@ -229,6 +229,7 @@ class PoolRegTest(Base):
         self.assertEqual(P.locate("/r/x", "jobs/x.txt", snap), "pool")
         self.assertEqual(P.locate("/r/y", "jobs/y.txt", snap), "a")         # 已放到借给池的主机上：在那台撤
         self.assertEqual(P.locate("/r/z", "jobs/z.txt", snap), "pool")      # 自用主机上同一条清单不算池里的
+        self.assertEqual(P.locate("/r/y/jobs", "y.txt", snap), "a")         # 同一个清单文件、从别处断开（#77）照样认得
         with mock.patch.object(A.P, "locate", return_value="a") as loc, mock.patch.object(A.W, "run_out", return_value=(0, "")) as ro:
             A.worker("rm", CF.POOL, ["/r/y", "jobs/y.txt"])
         loc.assert_called_once_with("/r/y", "jobs/y.txt")
