@@ -633,7 +633,8 @@ def project() -> dict:
              lane(lb, "车道 2", "srv-a", "/data/me/proj-a/q2", "jobs/q2.txt", paused="临时指令 pause", held="pause", holding=True, has_hold=True, total=2, unfinished=2),
              lane(lc, "车道 1", "srv-b", "/data/me/proj-a/b2", "jobs/b2.txt", waiting="等 beta_eval_s7 跑完", stuck="推演到 7 天后还没轮到", total=2, done=1, unfinished=1),
              # 交给算力池、还没放到哪台的（#24，collect._lane 的 pool）：没有 worker 管，等着放到某台
-             lane("pq/jobs/p.txt", "车道 1", "pool", "/data/me/proj-a/pq", "jobs/p.txt", pool=True, waiting="在算力池里等着放到某台", fs_skew=None, total=1, unfinished=1),
+             lane("pq/jobs/p.txt", "车道 1", "pool", "/data/me/proj-a/pq", "jobs/p.txt", pool=True, waiting="在算力池里等着放到某台：池里借着的服务器都放不下（srv-h：显存不够）", pool_since=NOW - H,
+                  fs_skew=None, total=1, unfinished=1),
              lane("ph/jobs/h.txt", "车道 1", "srv-h", "/data/me/proj-a/ph", "jobs/h.txt", alive=True, total=2, done=1, unfinished=1, eta_ts=NOW + 25 * 60)]
     gpu = lambda i, used, util: {"index": i, "name": "NVIDIA RTX A6000", "util": util, "mem_used": used, "mem_total": 46068.0, "temp": 51.0, "power": 87.5, "power_limit": 300.0}  # noqa: E731
     hosts = [{"id": "srv-a", "label": "srv-a（A6000）", "ok": True, "error": None, "borrow": None, "gpus": [gpu(0, 21000.0, 95.0), gpu(1, 900.0, 3.0)],

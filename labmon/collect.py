@@ -522,7 +522,8 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     lane.update(info)
     if hcfg[q["host"]].get("pool"):                  # 算力池里待放的（#24）：没有 worker 管，等看板放到某台；不报队列进程不在
         pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {}     # 为什么还没放（pool.tick，#25）
-        lane.update(pool=True, managed=True, alive=False, waiting=None if lane.get("paused") else POOL_WAIT + (f"：{pv['why']}" if pv.get("why") else ""))
+        lane.update(pool=True, managed=True, alive=False, waiting=None if lane.get("paused") else POOL_WAIT + (f"：{pv['why']}" if pv.get("why") else ""),
+                    pool_since=pv.get("since"))     # 从何时起在池里等（页面上写已等多久，#89）
     if lane.get("held") and not lane.get("paused") and not any(j["status"] == "running" for j in jobs):
         lane["paused"] = lane["waiting"]          # 被临时指令挡住（drain、本项目暂停、续租截止、约定归还）：按暂停算，不报空转（约定归还挡住的另报 borrow_cut）
     if lane.get("dep") not in (None, "wait"):    # 队首等的依赖跑失败了、找不到、成环：不改就一直不放行（labmon wait 与实验会话据此处理）

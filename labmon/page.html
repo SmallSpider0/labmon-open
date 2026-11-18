@@ -143,7 +143,10 @@ const ST = {done: ["完成", "b-ok"], failed: ["失败", "b-bad"], running: ["�
 // 任务的显示状态：暂停任务（清单里等条件放行的占位任务）与被信号终止的失败单独标出
 const stOf = j => j.suspended && j.status === "running" ? ["已挂起", "b-warn"] : j.hold ? ({running: ["暂停中", "b-warn"], queued: ["暂停（排队）", "b-mute"], done: ["已放行", "b-mute"], failed: ["暂停出错", "b-bad"]})[j.status]
   : j.status === "failed" && j.killed ? ["被终止", "b-warn"] : ST[j.status];
-const retShown = h => D.lanes.some(l => l.host === h.id && l.unfinished);     // 已归还的主机还单列：它上面还有任务没跑完
+const retShown = h => D.lanes.some(l => l.host === h.id && l.unfinished);
+// 交给算力池、还没放到哪台的车道（#89）：池不是主机，没有卡、没有推演，这些车道与任务不进时间线，在时间线下面与「运行中」里写原因
+const poolLanes = () => D.lanes.filter(l => l.pool);
+const inPool = j => !!D.lanes.find(l => l.id === j.lane)?.pool;     // 已归还的主机还单列：它上面还有任务没跑完
 // 车道此刻的状态类别：判断顺序只在这一处，laneState 的整句与紧凑视图“没在跑”那一行的计数都按它（#86）
 const laneKind = l => l.returned ? "returned" : l.paused ? "paused" : l.holding ? "holding" : l.alive ? "alive" : l.waiting ? "waiting"
   : l.started === false ? "unstarted" : l.unfinished ? (l.managed ? "managed" : "gone") : "done";
@@ -152,7 +155,7 @@ const laneState = l => ({
   paused: () => "已暂停：" + l.paused,
   holding: () => D.jobs.some(j => j.lane === l.id && j.suspended) ? "任务被挂起（SIGSTOP，kill -CONT 恢复）" : "暂停中（等条件放行）",
   alive: () => "队列在跑（PID " + l.pid + "）",
-  waiting: () => "等待中：" + l.waiting + (l.stuck ? "；推演不出何时轮到：" + l.stuck : ""),
+  waiting: () => "等待中：" + l.waiting + (l.pool && l.pool_since ? `（已等 ${dur(NOW - l.pool_since)}）` : "") + (l.stuck ? "；推演不出何时轮到：" + l.stuck : ""),
   unstarted: () => "未启动",
   managed: () => "排队中（worker 在管）" + (l.stuck ? "；推演不出何时跑完：" + l.stuck : ""),
   gone: () => "队列进程不在，排队任务没有预计时间",
@@ -228,7 +231,8 @@ function topline() {
   const al = forUser(D.alerts);
   const age = Date.now() / 1000 - NOW, stale = age > (D.thresholds?.stale_s ?? 420);   // 与 labmon wait 的 collector_stale 同一门槛（config.stale_limit，缺省配置是 7 分钟）
   const gone = D.hosts.filter(h => h.returned && !retShown(h));
-  const hosts = D.hosts.filter(h => !gone.includes(h)).map(h => h.pool ? `<span class="nw" ${tip("交给算力池、还没放到哪台的清单在这里等着；看板挑一台入池的组内服务器放过去" + (h.ok ? "" : "\n" + (h.error || "这一轮没读到池里的清单")))}><span class="cdot" style="background:${h.ok ? "var(--accent)" : "var(--bad)"}"></span> ${esc(h.label)}</span>`
+  const pl = poolLanes().filter(l => l.unfinished);
+  const hosts = D.hosts.filter(h => !gone.includes(h) && (!h.pool || pl.length || !h.ok)).map(h => h.pool ? `<span class="nw ${h.ok ? "mut" : ""}" style="${h.ok ? "" : "color:var(--bad)"}" ${tip("交给算力池、还没放到哪台的清单：看板挑一台入池的服务器放过去\n" + (pl.map(l => `${laneName(l, D.hosts)}：${laneState(l)}`).join("\n") || "") + (h.ok ? "" : "\n" + (h.error || "这一轮没读到池里的清单")))}>算力池里待放 ${pl.length} 条清单</span>`
     : h.returned ? `<span class="nw mut" ${tip(`已归还（${ts(h.returned)}），不再连接；还有任务没跑完`)}><span class="cdot" style="background:var(--faint)"></span> ${esc(h.label)} · 已归还</span>`
     : `<span class="nw" ${tip(h.ok ? "探针正常" : h.error || "失败")}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}"></span> ${esc(h.label)}</span>${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}`).join(" ")
     + (gone.length ? ` <span class="nw mut" ${tip(gone.map(h => `${h.label}：${ts(h.returned)} 归还`).join("\n") + "\n它们的车道照常显示结果")}>已还 ${gone.length} 台</span>` : "");
@@ -321,7 +325,7 @@ function kpis() {
     out.push(`<div class="kpi" ${tip(ms.map(x => `${x.host ? x.host.label + " " : ""}${x.label}：剩 ${f1(x.avail)} / ${f1(x.total, 0)} GiB`).join("\n"))}>
       <div class="k">磁盘余量</div><div class="v" style="${low ? "color:var(--bad)" : ""}">${f1(m.avail)}<small> GiB</small></div>
       <div class="meter"><i style="width:${m.used_pct}%;background:${low ? "var(--bad)" : "var(--muted)"}"></i>${m.min != null ? `<b style="left:${(1 - m.min / m.total) * 100}%"></b>` : ""}</div>
-      <div class="s">${D.hosts.length > 1 && m.host ? esc(hostShort(m.host)) + " " : ""}${esc(m.label)}${m.min != null ? ` · 线 ${f1(m.min, 0)} GiB` : ""}</div></div>`);
+      <div class="s">${D.hosts.filter(h => !h.pool).length > 1 && m.host ? esc(hostShort(m.host)) + " " : ""}${esc(m.label)}${m.min != null ? ` · 线 ${f1(m.min, 0)} GiB` : ""}</div></div>`);
   }
   return `<div class="kpis">${out.join("")}</div>`;
 }
@@ -331,8 +335,8 @@ const GAP_S = 600;
 let EV = {events: {}, occ: {}, colors: {}};   // 经 serve 打开时取 events.json：主机 30 天事件、同机别的项目的占用与配色（本项目的存储在快照的 storage）
 const evs = h => EV.events?.[h] || [];
 tlInit({get: (k, d) => LS.get(k, d), set: (k, v) => LS.set(k, v), now: () => NOW, draw: () => drawTimeline(),
-  all: () => tlSpan([...D.jobs.map(jobT0).filter(Boolean), ...(D.attempts || []).map(x => x.t0)], D.jobs.map(jobT1).filter(Boolean)),
-  near: () => D.jobs.map(j => [jobT0(j), jobT1(j), j.status === "running" || j.status === "queued"])});
+  all: () => { const js = D.jobs.filter(j => !inPool(j)); return tlSpan([...js.map(jobT0).filter(Boolean), ...(D.attempts || []).map(x => x.t0)], js.map(jobT1).filter(Boolean)); },
+  near: () => D.jobs.filter(j => !inPool(j)).map(j => [jobT0(j), jobT1(j), j.status === "running" || j.status === "queued"])});
 
 // 临时指令事件 → {act, okind, target, until, at, glob}：worker 记事件时就带这些字段；glob 是项目级的（所有主机，serve.proj_events 标的），
 // 与这台单独下的同种指令各自配对增撤
@@ -460,7 +464,7 @@ function drawTimeline() {
   const {t0, t1} = tlRange(), win = (a, b) => a != null && b != null && b > t0 && a < t1;
   const showAll = LS.get("tlall", false), rows = [], used = new Set();
   let hidden = 0;
-  const shown = D.hosts.map(h => {
+  const shown = D.hosts.filter(h => !h.pool).map(h => {
     const lanes = D.lanes.filter(l => l.host === h.id && !l.missing);
     const vis = lanes.filter(l => showAll || l.unfinished || jobsOf(l.id).some(j => win(jobT0(j), jobT1(j)))
       || (D.attempts || []).some(x => x.lane === l.id && win(x.t0, x.t1)));
@@ -478,7 +482,9 @@ function drawTimeline() {
     if (oc.length) rows.push({h: Math.min(44, 8 + 10 * tlPack(oc)), draw: (y, hh, c) => othersRow(h, oc, y, hh, c)});
     vis.forEach(l => rows.push({h: 24, draw: (y, hh, c) => laneRow(l, hb, multi ? gsOf(l) : [], y, hh, c, used)}));
   }
-  const more = hidden || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? "收起这段时间没有任务的车道" : `另有 ${hidden} 条车道这段时间没有任务，显示`}</span></div>` : "";
+  // 池里待放的（#89）：一条清单一行，写原因与已等多久
+  const pool = poolLanes().filter(l => l.unfinished).map(l => `<div class="sm mut" style="margin-top:2px" ${tip("交给算力池、还没放到哪台：放到某台后这条车道跟到那台画；已经跑过的按实际跑的主机画")}>${esc(laneName(l, D.hosts))}（${l.unfinished} 个任务）不在图上：${esc(laneState(l))}</div>`).join("");
+  const more = pool + (hidden || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? "收起这段时间没有任务的车道" : `另有 ${hidden} 条车道这段时间没有任务，显示`}</span></div>` : "");
   tlShow(box, rows, {markers: D.markers, more, over: depLines, items: () => tlItems(gcolor([...used][0]))});
   const lg = document.getElementById("tllegend");
   if (lg) lg.innerHTML = D.groups.filter(g => used.has(g.id)).map(g => `<span class="nw"><span class="dot" style="background:${g.color}"></span> ${esc(g.label)}</span>`).join(" &nbsp;");   // 只列这段时间图上有的

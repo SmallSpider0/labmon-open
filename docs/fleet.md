@@ -507,7 +507,8 @@ labmon 之外的按目录一段段斜纹，过门槛变紫），下面「本地�
   经与它共用 worker 目录的在用主机代办（`workerctl.via`）。池里的清单要停得下来、换得了台：不许 `--stop boundary`、`--gpus`、成组（`gang=`）与占位任务，停法缺省 `term`（`labmon_worker.pool_refuse`）。
   一条清单只归一台照旧：之后 `worker add <自用主机> …` 把它从池里搬回来。撤回 `labmon worker rm pool ROOT JOBS`（在清单此刻登记的地方撤，`pool.locate`）；`worker status|start|stop pool` 都不认。
 - **看得到**：全局快照的 `regs` 里 `host` 为 `pool`、`state` 为 `pool` 的一项（在用主机之后、已归还的之前；`added_t` 是登记文件的修改时刻）；
-  项目页多一张「算力池」小卡与池车道（`collect._lane` 标 `pool`，没有 worker 管：不报队列进程不在，等待原因“在算力池里等着放到某台”），车道经同一 worker 目录的在用主机代读，代读的那台不是本项目的主机时不进项目快照。
+  项目页有池车道（`collect._lane` 标 `pool`，没有 worker 管：不报队列进程不在，等待原因“在算力池里等着放到某台”接上 `pool.lists` 的 `why`，`pool_since` 是开始等的时刻），车道经同一 worker 目录的在用主机代读，代读的那台不是本项目的主机时不进项目快照。
+  算力池不是主机（#89）：时间线不画它一行，待放的清单在时间线下面一条一行写原因与已等多久，「运行中」与车道悬停里同一句；顶栏只在有待放的清单时写「算力池里待放 N 条清单」，资源小图不画它；车道名不把它算进几台主机，池车道前面总写「算力池」。
   刚从池借来的主机搬回池里、那台手上那一格还在跑的（状态目录 `current` 里放行的主机是那台）在池车道上照样算在跑（探针按 #95 的口径认，#78）。
   别处 `after=` 等池里的任务算还会跑（worker 的 `Worker.pool_todo` 随 `peers` 读进 `peer_todo`），不报找不到。
 

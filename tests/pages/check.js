@@ -1554,9 +1554,9 @@ t("project", "运行中的条上百分比是现在线在条上的位置，不是
 t("project", "时间线按主机分组：主机一行表头（利用率、事件都在里面），车道单行缩进，条上去掉自动分组的前缀", () => {
   const A = pjCtx(PJ, EVN); run(A, `TL.v = {a: ${-3 * H}, b: ${12 * H}}; drawTimeline()`);     // 固定 15 小时的视图：条宽与下面省略的写法对得上
   const tl = el(A, "tlbox").innerHTML, labs = [...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
-  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1 · q1", "车道 2 · q2", "借 OWNER", "车道 1 · b2", "池 PERSON7", "车道 1 · h", "算力池", "车道 1 · p"]), JSON.stringify(labs));   // 算力池（#24）同一台主机那样分组
+  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1 · q1", "车道 2 · q2", "借 OWNER", "车道 1 · b2", "池 PERSON7", "车道 1 · h"]), JSON.stringify(labs));   // 算力池不是主机，不画一行（#89）
   ok(!tl.includes("GPU 利用率") && !tl.includes(" 事件<") && !tl.includes("同机别的项目<"), "还有单独的利用率、事件行或主机前缀");
-  ok((tl.match(/stroke-opacity="\.4"/g) || []).length === 3, "四组之间该各有一条分隔线");
+  ok((tl.match(/stroke-opacity="\.4"/g) || []).length === 2, "三组之间该各有一条分隔线");
   has(tl, ">train_s1 · 44%<", "条上去掉 alpha_"); has(tl, ">⏸ unt…ata<", "占位任务"); has(tips(tl), "alpha_train_s1", "悬停是全名");
   ok(!tl.includes('r="2.5"'), "图上只有一个计划项时不该画计划项圆点");
   run(A, 'TL.v = null; LS.set("tl", "week"); drawTimeline()');
@@ -2721,7 +2721,14 @@ t("reg", "交给算力池的清单（#24）：项目抽屉里一行「算力池 
 t("project", "项目页的算力池（#24）：顶栏一个「算力池」，车道写在池里等着，资源小图不画它", () => {
   const C = pjCtx(PJ, EVN), h = app(C);
   has(h, "算力池"); has(tips(h), "交给算力池、还没放到哪台的清单");
-  ok(run(C, 'laneState(D.lanes.find(l => l.host === "pool"))') === "等待中：在算力池里等着放到某台", "池车道的状态");
+  ok(run(C, 'laneState(D.lanes.find(l => l.host === "pool"))') === "等待中：在算力池里等着放到某台：池里借着的服务器都放不下（srv-h：显存不够）（已等 60 分钟）", "池车道的状态：原因与已等多久（#89）");
+  ok(run(C, 'laneName(D.lanes.find(l => l.host === "pool"), D.hosts)') === "算力池 车道 1 · p", "池车道名前写算力池");
+  ok(run(C, 'laneName(D.lanes.find(l => l.host === "pool"), [{id: "srv-a"}, {id: "pool", pool: true, label: "算力池"}])') === "算力池 车道 1 · p", "只有一台真主机时池车道也写算力池");
+  ok(run(C, 'laneName(D.lanes.find(l => l.host === "srv-a"), [{id: "srv-a"}, {id: "pool", pool: true, label: "算力池"}])') === "车道 1 · q1", "算力池不算进几台主机");
+  has(h, "算力池里待放 1 条清单", "顶栏写池里待放几条，不当成一台主机");
+  run(C, "drawTimeline()"); const tl = el(C, "tlbox").innerHTML;
+  ok(![...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].some(m => m[1].includes("算力池") || m[1] === "车道 1 · p"), "时间线不该有算力池行（#89）");
+  has(tl, "算力池 车道 1 · p（1 个任务）不在图上：等待中：在算力池里等着放到某台：池里借着的服务器都放不下（srv-h：显存不够）（已等 60 分钟）", "时间线下写池里待放的原因与已等多久");
   const rc = run(C, "resourcesCard()");
   ok(!rc.includes("</span> 算力池</b>"), "资源小图不该画算力池"); has(rc, "srv-h（池 · PERSON7）", "池借来的主机照常画（#78）");
   ok(run(C, 'hostShort(D.hosts.find(h => h.pool))') === "算力池", "短名");
