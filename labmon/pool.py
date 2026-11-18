@@ -26,7 +26,7 @@ from . import fleet as F
 from . import fleetops as FO
 from . import lease as LS
 from . import users as U
-from .config import HOSTS_LOCK, POOL, ConfigError, fmt_dur, fmt_time, set_fleet_keys, user_hosts
+from .config import HOSTS_LOCK, POOL, ConfigError, fmt_dur, fmt_time, home_host, home_peers, pool_home, set_fleet_keys, user_hosts
 from .labmon_worker import fair_key, person_use
 from .records import log_events
 from .service import log, notify
@@ -188,20 +188,24 @@ def fit_head(item: dict, hosts: list[str]) -> dict | None:
         return None
 
 
+def _home_sts(snap: dict) -> list[dict]:
+    """池登记所在 worker_home（config.pool_home）下各台在写的 worker 状态：只有它们读得到池目录、用量记录也是这块盘上的；
+    别的 worker_home 的 worker 写的 pool_heads 是空的，不能拿来比新旧。"""
+    home = pool_home()
+    h = home and home_host(home)
+    ids = set(home_peers(h["id"])) if h else set()
+    return [e.get("status") or {} for e in snap.get("hosts") or [] if e.get("worker_up") and str(e.get("id")) in ids]
+
+
 def _heads(snap: dict) -> tuple[dict, bool]:
-    """池清单各自的队首（worker 状态的 pool_heads：同一 worker_home 下各台都算一份，取最新的那份）与有没有一份新鲜的状态。"""
-    best = None
-    for e in snap.get("hosts") or []:
-        st = e.get("status") or {}
-        if e.get("worker_up") and "pool_heads" in st and (best is None or (st.get("t") or 0) > (best.get("t") or 0)):
-            best = st
+    """池清单各自的队首（worker 状态的 pool_heads：池那个 worker_home 下各台都算一份，取最新的那份）与有没有一份新鲜的状态。"""
+    best = max((st for st in _home_sts(snap) if "pool_heads" in st), key=lambda x: x.get("t") or 0, default=None)
     return ((best or {}).get("pool_heads") or {}), best is not None
 
 
 def _share(snap: dict) -> dict:
-    """各项目的用量（衰减后的卡·时）：同一 worker_home 下各台状态里的 share.use 一样（都读全部用量记录），取最新的那份。"""
-    sts = [e.get("status") or {} for e in snap.get("hosts") or [] if e.get("worker_up")]
-    st = max(sts, key=lambda x: x.get("t") or 0, default={})
+    """各项目的用量（衰减后的卡·时）：池那个 worker_home 下各台状态里的 share.use 一样（都读全部用量记录），取最新的那份。"""
+    st = max(_home_sts(snap), key=lambda x: x.get("t") or 0, default={})
     return (st.get("share") or {}).get("use") or {}
 
 
@@ -286,10 +290,11 @@ def _returns(lent: list[dict], srv: dict, fst: dict, bst: dict, t: float, ret, f
     return going, gone
 
 
-def want_borrow(need: dict, cfg: dict, fst: dict, bst: dict, t: float, busy=()) -> tuple[str | None, float | None, str]:
+def want_borrow(need: dict, cfg: dict, fst: dict, bst: dict, t: float, busy=(), regs: dict | None = None) -> tuple[str | None, float | None, str]:
     """挑一台入池的服务器来借（D）：入池、在时段内、没借着、没关机、没在做平台操作、不在休息期与退避里；最近一次探测新鲜，
     GPU 上除保活外没有进程、can_borrow（VS Code、终端这类轻用借来后给主人留预留）；主人最近一次有实验已过 guard_idle_min；
-    截止（时段结束与租期前 MARGIN_S 取早）离现在至少 POOL_MIN_LEFT_S；卡数与单卡显存装得下 need；没在 nofit 里。
+    截止（时段结束与租期前 MARGIN_S 取早）离现在至少 POOL_MIN_LEFT_S；卡数与单卡显存装得下 need；没在 nofit 里；
+    这台目录里没有留着别的清单登记（regs：全局快照的 regs 按主机；以前手动借时留下的，池借来一拉起 worker 就会接着跑它们）。
     多台时卡数差最小的、单卡显存差最小的、空闲最久的。返回 (服务器 id, 时段结束（全天为 None）, 没挑到时各台为什么不行)。"""
     off, out, miss = F.off_servers(), [], {}
     ng, vr = need.get("ngpu") or 0, need.get("vram") or 0
@@ -305,6 +310,7 @@ def want_borrow(need: dict, cfg: dict, fst: dict, bst: dict, t: float, busy=()) 
         lease = F.lease_end(st, cfg)
         cut = min([x for x in (nxt, lease - B.MARGIN_S if lease else None) if x], default=None)
         no = ("不在入池时段" if not inside else "借着" if F.borrowed(s) else "关机了" if sid in off else "在做平台操作" if sid in busy
+              else "目录里还留着别的清单" if ((regs or {}).get(sid) or {}).get("queues")
               else "休息中" if (m.get("rest") or 0) > t else "刚借不成" if t - (m.get("fail") or 0) < POOL_FAIL_S
               else "没探到" if not a or st.get("down") or st.get("error") or t - (st.get("last") or 0) > 2 * cfg["interval"]
               else "GPU 上有主人的进程" if F._brief_work(a) or not B.can_borrow(a)
@@ -462,7 +468,7 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
         lv["why"] = it.get("why")
         if asked or busy or not it.get("need"):
             continue
-        sid, until, why = want_borrow(it["need"], cfg, fst, bst, t, busy)
+        sid, until, why = want_borrow(it["need"], cfg, fst, bst, t, busy, regs)
         if not sid:
             lv["why"] = f"{lv['why']}；没有能借的入池服务器（{why}）"
             continue

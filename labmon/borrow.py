@@ -182,6 +182,8 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
         _, current = _server(sid)
         if F.borrowed(current) or current["holder"] != s["holder"] or current["job"] != s["job"]:
             raise ConfigError(f"{label(s)} 的登记已变，请刷新后再试")
+        if pool and not (current.get("lend") and F.lend_open(current, time.time())[0]):   # 探测期间持有人关了入池、改了时段：按最新的配置不借
+            raise ConfigError(f"{label(s)} 刚关了入池或不在入池时段里了：算力池不借")
         set_fleet_keys({"borrow_since": fmt_time(time.time(), year=True), "borrow_returned": None, "borrow_by": person, "borrow_light": True if use else None,
                         "borrow_pool": True if pool else None, **keys},
                        f"{'算力池借来' if pool else '借用'} {label(s)}：{what}", sid=sid)
@@ -190,7 +192,7 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
     def fresh(st):                                   # 这一次借用重新记；算力池的记忆（休息期、退避、nofit）跨借用留着
         mem = dict((st.get(sid) or {}).get("pool") or {})
         if pool:
-            mem.update(started=a.get("started"), since=round(time.time()), idle=None)
+            mem.update(started=a.get("started"), since=round(time.time()), idle=None, busy=None)   # busy 只算这一次借用的
         st[sid] = {"warned": [], "ka": ka_on, **({"pool": mem} if mem else {})}
     _update(fresh)
     notes = []

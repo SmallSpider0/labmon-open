@@ -1758,6 +1758,21 @@ class GuestTest(UnitBase):
         self.assertIsNone(self.w.guest_block())
         self.assertEqual(len(self.w.owner), 1)
 
+    def test_pool_owner_new_gpu_proc_within_reserve(self):
+        # 算力池借来时主人在轻用（VS Code、终端：hold 为真、按预留留着），之后主人在卡上起了新的 GPU 进程、显存还在预留以内：
+        # 池借只许 GPU 空着时借，所以有了这样的进程就算主人回来（Codex 审查 #75）；手动借的照旧按预留判
+        t = time.time()
+        self.cards(40000, 40000)
+        self.guest(dict(self.KEEP, hold=True, pool=1))
+        self.w.other = {"vram": {"GPU-a": 1024.0}, "ram": 0.5, "cpu": 0.2, "ka": {}, "gid": {"GPU-a": {7100}}, "ka_cpu": 0.0}
+        self.w.guest_scan(t)
+        self.assertEqual(len(self.w.owner), 1)
+        self.assertIn("卡 0", self.w.owner[0])
+        self.assertIn("主人回来了", self.w.guest_block())
+        self.guest(dict(self.KEEP, hold=True))                                          # 手动借的：在预留以内不挡
+        self.w.guest_scan(t + 1)
+        self.assertIsNone(self.w.guest_block())
+
     def test_unstoppable_keepalive_card_in_plan(self):
         # #45：两卡借来的主机，卡 0 上的单元还要 30 分钟，卡 1 上有对方另起、ka.sh 停不了的保活（只占 6 GiB）：真放行不放卡 1，推演也不放，
         # 等着的单元排在 30 分钟后的卡 0（旧推演清空了 owner，排在马上、卡 1）。保活没了：推演当轮重推（不等 FORECAST_EVERY）、排到马上的卡 1；

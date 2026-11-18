@@ -539,12 +539,38 @@ class BorrowTest(Base):
         _, wake = B.check([], time.time(), ovr=self.ovr)
         self.assertEqual([w["key"] for w in wake], [f"borrow_done:{SID}"])
 
-    def pool_begin(self, work=(), **a):
-        """算力池自动借（#25）：不记借的人、写 borrow_pool；探到的容器启动时刻记进 borrow.json 的 pool 子项。"""
+    def pool_begin(self, work=(), fetch=None, **a):
+        """算力池自动借（#25）：不记借的人、写 borrow_pool；探到的容器启动时刻记进 borrow.json 的 pool 子项。持有人开着入池（全天）。"""
         a = {"work": list(work), "started": 1700000000, **a}
+        if not self.server().get("lend"):
+            K.set_fleet_keys({"lend": True}, "测试：入池", sid=SID)
         with mock.patch.object(F, "parse", lambda raw: raw), mock.patch.object(F, "analyze", lambda smp, cfg: a):
-            return B.begin(SID, None, None, fetch=lambda s: ("raw", None), ssh=lambda s, cmd, input=None: (0, "", ""),
+            return B.begin(SID, None, None, fetch=fetch or (lambda s: ("raw", None)), ssh=lambda s, cmd, input=None: (0, "", ""),
                            start=lambda hid: (0, "ok\n"), ovr=self.ovr, pool=True)
+
+    def test_pool_begin_rechecks_lend(self):
+        # 探测期间持有人关了入池：锁里按最新配置再核一次，不写 borrow_pool、不拉起（Codex 审查 #75）
+        def fetch(s):
+            K.set_fleet_keys({"lend": None}, "测试：关了入池", sid=SID)
+            return "raw", None
+        with self.assertRaises(ConfigError) as c:
+            self.pool_begin(fetch=fetch)
+        self.assertIn("入池", str(c.exception))
+        self.assertNotIn("borrow_since", self.server())
+        def fetch2(s):                                                       # 改了时段、此刻不在时段里：同样不借
+            h = time.localtime(time.time() + 3 * 3600)
+            K.set_fleet_keys({"lend": True, "lend_hours": "%02d:00-%02d:30" % (h.tm_hour, h.tm_hour)}, "测试：改时段", sid=SID)
+            return "raw", None
+        with self.assertRaises(ConfigError):
+            self.pool_begin(fetch=fetch2)
+        self.assertNotIn("borrow_since", self.server())
+
+    def test_pool_begin_resets_busy(self):
+        # 再借时清掉上一次借用的 busy（有池任务跑过的时刻），休息期、退避、nofit 留着：不然这次一个也没跑起来也记不下 nofit（Codex 审查 #75）
+        B._update(lambda st: st.__setitem__(SID, {"pool": {"busy": 5, "nofit": [[1, 2.0, 9e9]], "fail": 2}}))
+        self.pool_begin()
+        m = B.load_json(B.state_dir() / "borrow.json", {})[SID]["pool"]
+        self.assertEqual((m.get("busy"), m["nofit"], m["fail"]), (None, [[1, 2.0, 9e9]], 2))
 
     def test_pool_begin(self):
         # 写 borrow_pool、不写 borrow_by；guest 指令的 keep 带 pool；borrow.json 记容器启动时刻，休息期、退避跨借用留着（旧代码不认 pool）

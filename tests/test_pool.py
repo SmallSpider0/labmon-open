@@ -381,6 +381,22 @@ class PoolPlaceTest(TickBase):
         self.assertEqual(self.moves, [])
 
 
+class PoolHomeTest(TickBase):
+    def test_heads_only_from_pool_home(self):
+        # 主机清单里有两个 worker_home：池清单的队首只认池登记那个 HOME 下各台的状态（别的 HOME 的 worker 读不到池目录，写的是空的），
+        # 那边的状态更新得晚也不把池清单当成“没有还要跑的行”（Codex 审查 #75）
+        self.setup_tick()
+        (self.d / "hosts.toml").write_text(HOSTS.format(extra="lend = true\n").replace(
+            '[fleet]', '[[hosts]]\nid = "far"\ndata_root = "/data/far"\nworker_home = "/data/far/.labmon"\n\n[fleet]', 1))
+        sn = self.snap([], [self.pool_list()])
+        far = fake_host("far", {"pool_heads": {}, "share": {"use": {}}})
+        far["status"]["t"] = sn["hosts"][0]["status"]["t"] + 60
+        sn["hosts"].append(far)
+        out = self.tick(sn)
+        self.assertNotIn("清单里没有还要跑的行", out["lists"]["/r/x|jobs/x.txt"].get("why") or "")
+        self.assertEqual(len(self.starts), 1)
+
+
 class PoolBorrowTest(TickBase):
     def setUp(self):
         super().setUp()
@@ -405,6 +421,15 @@ class PoolBorrowTest(TickBase):
         self.assertEqual(m["want"], {"ngpu": 1, "vram": 20.0})
         with mock.patch.object(P.FO, "busy", return_value={"zz": "renew"}):     # 操作格忙：不借
             self.tick(self.snap([], [self.pool_list()]), t=NOW + P.POOL_RETRY_S + 1)
+        self.assertEqual(len(self.starts), 1)
+
+    def test_skip_server_with_leftover_lists(self):
+        # 以前手动借过、目录里还留着别的清单登记的：池借来一拉起 worker 就会接着跑它们，不借（Codex 审查 #75）
+        left = {"host": "a", "state": "returned", "queues": [{"root": "/r/old", "jobs": "jobs/old.txt", "project": "px", "stop": "boundary"}]}
+        out = self.tick(self.snap([], [self.pool_list()], regs=[left]))
+        self.assertEqual(self.starts, [])
+        self.assertIn("目录里还留着别的清单", out["lists"]["/r/x|jobs/x.txt"]["why"])
+        self.tick(self.snap([], [self.pool_list()], regs=[dict(left, queues=[])]), t=NOW + P.POOL_RETRY_S + 1)   # 登记都撤了：照借
         self.assertEqual(len(self.starts), 1)
 
     def test_each_condition(self):

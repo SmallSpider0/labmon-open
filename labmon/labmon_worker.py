@@ -2496,6 +2496,9 @@ class Worker:
         # 主人回来（#25）：超出的几项里去掉只因 ka.sh 停不了的保活超出的卡（那张卡上对方的进程都是它：保活只占位、不算主人干活，#37）
         gid = o.get("gid") or {}
         self.owner = [v for key, v in over.items() if key in ("ram", "cpu") or not (gid.get(key) and gid[key] <= set(o["ka"].get(key) or ()))]
+        if (k or {}).get("pool"):                      # 算力池只在 GPU 上除保活外没有进程时借：之后卡上有了对方的 GPU 进程（停不了的保活除外）就算回来，预留以内也算
+            self.owner += ["卡 %d：有了对方的 GPU 进程（PID %s）" % (g["i"], "、".join(map(str, sorted(gid[g["uuid"]] - set(o["ka"].get(g["uuid"]) or ())))))
+                           for g in self.info.get("gpus") or [] if g["uuid"] not in over and gid.get(g["uuid"], set()) - set(o["ka"].get(g["uuid"]) or ())]
         if bool(over) != bool(self.back):
             self.event("guest", "借来的主机上对方用得比预留多（%s）：这部分不再放新任务" % "；".join(over.values()) if over else
                        "对方说好 %s 前不用：不再按预留挡，照常放行" % now_str(away)[5:16] if away else
