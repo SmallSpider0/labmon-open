@@ -1755,7 +1755,7 @@ function home() {
   const allw = D.hosts.flatMap(h => (h.status?.waiting || []).map(w => ({...w, h})));
   const waits = allw.filter(w => w.name), blocked = allw.filter(w => !w.name);
   const gu = hs.flatMap(h => h.status.info.gpus || []), gUsed = gu.reduce((a, g) => a + g.used, 0), gTot = gu.reduce((a, g) => a + g.total, 0);
-  const ut = gu.filter(g => g.util != null), now = D.generated;
+  const U = utilText(utilAvg(hs.flatMap(h => h.busy || [])), null), now = D.generated;
   const lease = D.hosts.filter(h => h.lease_end).sort((a, b) => a.lease_end - b.lease_end)[0];
   // 全部跑完：worker 推演里最晚的结束（与任务卡标题、项目表同一来源）
   const fin = D.hosts.flatMap(h => planLanes(h).flatMap(l => l.jobs.map(j => ({p: l.project, t1: j.t1 || 0})))).sort((a, b) => b.t1 - a.t1)[0];
@@ -1764,17 +1764,17 @@ function home() {
   const na = al.length + fal.length + pal.length;
   let s = intro + `<div class="kpis k5">
     <div class="kpi"><div class="k">运行 / 等待</div><div class="v">${jobs.length}<small> / ${waits.length} 个任务</small></div><div class="s">${[esc([...new Set(jobs.map(j => j.project))].join("、")), waits.filter(w => w.excl).length ? waits.filter(w => w.excl).length + " 个独占在等" : "", blocked.length ? blocked.length + " 条队列受阻" : ""].filter(Boolean).join("，") || "—"}</div></div>
-    <div class="kpi"><div class="k">显存</div><div class="v">${pct(gUsed, gTot) ?? "—"}<small>%</small></div><div class="s">${mb2g(gUsed)} / ${mb2g(gTot)} GiB，${gu.length} 张卡${ut.length ? `，利用率 ${Math.round(ut.reduce((a, g) => a + g.util, 0) / ut.length)}%` : ""}</div></div>
+    <div class="kpi"><div class="k">显存</div><div class="v">${pct(gUsed, gTot) ?? "—"}<small>%</small></div><div class="s">${mb2g(gUsed)} / ${mb2g(gTot)} GiB，${gu.length} 张卡${U.v != null ? `，<span ${tip(U.tip)}>${U.span}利用率 ${U.big}</span>` : ""}</div></div>
     <div class="kpi"><div class="k">最早到期的租期</div><div class="v">${lease ? leaseHtml(lease.lease_end) : "—"}</div><div class="s">${lease ? `${esc(hostShort(lease))} · ${ts(lease.lease_end)} 到期` : "没有登记租期"}</div></div>
     <div class="kpi"><div class="k">预计全部跑完</div><div class="v" style="font-size:19px">${last ? ts(last.t1) : "—"}</div><div class="s" ${mk ? tip(`下一个里程碑：${projName(mk.p.id, {plain: true})}${mk.label} ${ts(mk.ts)}`) : ""}>${last ? `${projName(last.p)}剩 ${dur(last.t1 - now)}` : "没有排队的任务"}${mk ? `，离 ${mk.p.id === last?.p ? "" : projName(mk.p.id)}${esc(mk.label)} ${dur(mk.ts - now)}` : ""}</div></div>
     <div class="kpi"><div class="k">告警</div><div class="v" style="color:${na ? "var(--bad)" : "var(--ok)"}">${na}<small> 条</small></div><div class="s">${na ? (fal.length || pal.length ? "含" + [fal.length ? `组内 ${fal.length} 条` : "", pal.length ? `项目 ${pal.length} 条` : ""].filter(Boolean).join("、") + "，" : "") + "见下方" : `${D.hosts.filter(h => h.worker_up).length} / ${D.hosts.length} 台 worker 在跑`}</div></div></div>`;
   if (na) s += `<div class="alerts">${al.map(a => `<div>⚠ ${esc(a)}</div>`).join("")}${fal.map(a => `<div>⚠ <a href="#/fleet">组内</a>：${esc(a)}</div>`).join("")}`
     + `${pal.map(({ps, m}) => `<div>⚠ ${ps.map(p => `<a href="#/p/${encodeURIComponent(p.id)}">${esc(p.title || p.id)}</a>`).join("、")}：${esc(m)}</div>`).join("")}</div>`;
   s += `<div class="card"><div class="chd"><b>主机</b><span class="sm mut">点一行看详情</span></div><div class="scroll"><table>
-    <tr><th>主机</th><th>worker</th><th style="min-width:180px" ${tip("每张卡一行：条是显存，数字是显存占比 · GPU 利用率")}>显存 · 利用率</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("组里各服务器挂的同一块盘：我们各项目、公共目录、我们的其他目录、其他人；红线是告警线。按人看在组内服务器的「共享盘」")}>共享盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
+    <tr><th>主机</th><th>worker</th><th style="min-width:180px" ${tip("每张卡一行：条是显存，数字是显存占比 · GPU 近 1 小时平均利用率（保活按 0 算）")}>显存 · 利用率</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("组里各服务器挂的同一块盘：我们各项目、公共目录、我们的其他目录、其他人；红线是告警线。按人看在组内服务器的「共享盘」")}>共享盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
     (D.hosts.map(h => {
       const info = h.status?.info, gs = info?.gpus || [], m = info?.mem;
-      const gb = gs.map(g => `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB，利用率 ${g.util ?? "—"}%`)}><div class="bar thin" style="flex:1"><i style="width:${100 * g.used / g.total}%;background:var(--accent)"></i></div><span class="sm num nw">${pct(g.used, g.total)}%<span class="mut"> · ${g.util == null ? "—" : Math.round(g.util) + "%"}</span></span></div>`).join("");
+      const gb = gs.map(g => { const U = utilText(gpuBusy(h, g.i), g.util); return `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB\n${U.tip}`)}><div class="bar thin" style="flex:1"><i style="width:${100 * g.used / g.total}%;background:var(--accent)"></i></div><span class="sm num nw">${pct(g.used, g.total)}%<span class="mut"> · ${U.big}</span></span></div>`; }).join("");
       const sx = sharedParts();
       const sb = sx ? `<div class="row" style="flex-wrap:nowrap">${sharedBar(sx, true)}<span class="sm num nw" style="${sx.dk.free < sx.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(sx.dk.free)}${sx.dk.eta_days != null && sx.dk.eta_days < 7 ? ` · ${sx.dk.eta_days} 天满` : ""}</span></div>` : "—";
       const mb = m ? `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1"><i style="width:${100 * m.used / m.limit}%;background:${m.used / m.limit >= 0.9 ? "var(--bad)" : "var(--accent)"}"></i><b style="left:90%"></b></div><span class="sm num nw">${g1(m.used)} / ${g1(m.limit)}</span></div>` : "—";
@@ -2085,7 +2085,7 @@ function resCard(h) {
   const st = h.status, info = st.info, now = D.generated, t0 = now - RANGE * 3600;
   const rows = (h.series || []).filter(r => r.t >= t0), grp = "h:" + h.id, gs = info.gpus || [];
   SPKG[grp] = {t0, t1: now, at: t => { const r = nearest(rows, t); return r ? `${ts(r.t)}\n内存 ${g1(r.mem)} / ${g1(r.lim)} GiB${r.anon != null ? `（收不回的 ${g1(r.anon)}）` : ""}`
-    + (r.gpu || []).map((g, k) => `\nGPU ${gs[k]?.i ?? k} 显存 ${mb2g(g[0])} / ${mb2g(g[1])} GiB · 利用率 ${g[2] == null ? "—" : Math.round(g[2]) + "%"}`).join("")
+    + (r.gpu || []).map((g, k) => `\nGPU ${gs[k]?.i ?? k} 显存 ${mb2g(g[0])} / ${mb2g(g[1])} GiB · 近 10 分钟利用率 ${pctText(g[3])}`).join("")
     + (r.cpu != null ? `\nCPU ${g1(r.cpu)} 核${r.thr ? `，限流 ${g1(r.thr)}%` : ""}` : "")
     + (r.nfs != null ? `\n共享盘 ${g1(r.nfs)} ms/次` : "") + (r.busy != null ? `\n本地盘忙 ${Math.round(r.busy)}%` : "") : ""; }};
   const sp = (f, opt) => rows.length > 1 ? spark(grp, t0, now, rows.map(r => [r.t, f(r)]), opt) : `<span>数据还不够</span>`;
@@ -2096,7 +2096,9 @@ function resCard(h) {
     const room = st.room?.gpus?.[g.uuid], nm = gs.length > 1 ? `GPU ${g.i} ` : "GPU ";
     s += row(nm + "显存", big(gpuSegs(h, g)), `${mb2g(g.used)} / ${mb2g(g.total)} GiB${room != null ? `<span class="mut" ${tip("按记账还能放（空闲 − 运行中任务还没占上的预留）")}>可放 ${mb2g(room)}</span>` : ""}`,
       sp(r => r.gpu?.[k] ? 100 * r.gpu[k][0] / r.gpu[k][1] : null), `GPU ${g.i}：${g.name || ""}`);
-    s += row(nm + "利用率", big(`<i style="width:${g.util ?? 0}%;background:var(--accent);opacity:.6"></i>`), g.util == null ? "—" : Math.round(g.util) + "%", sp(r => r.gpu?.[k]?.[2]));
+    const U = utilText(gpuBusy(h, g.i), g.util);      // 吃满程度（只有保活时按 0，#51）：条与数是近 1 小时平均，小曲线是近 10 分钟平均（series 卡的第 4 项）
+    s += row(nm + "利用率", big(`<i style="width:${U.v ?? 0}%;background:var(--accent);opacity:.6"></i>`), `${U.big}${U.sub ? `<span class="mut">${esc(U.sub)}</span>` : ""}`,
+      sp(r => r.gpu?.[k]?.[3]), `${U.span}平均\n${U.tip}\n小曲线是近 10 分钟平均`);
   });
   const m = info.mem;
   if (m) {
@@ -2919,16 +2921,22 @@ const peopleOrder = () => { const ppl = fops().people || {}, none = n => !(ppl[n
   return Object.keys(ppl).sort((a, b) => none(a) - none(b) || byName(a, b)); };
 const myFleetHost = x => x.mine && ME?.fleet_person === x.holder;
 const holdCount = n => [...D.fleet.servers, ...D.fleet.mine].filter(x => x.holder === n && !x.off).length;
-// GPU 利用率去掉保活：只有保活时按 0 算，保活自己占的另写。按样本的状态（与探针同口径；自用主机的 x.state 是平台操作口径，只跑 CPU 任务也算 job）
+// GPU 利用率去掉保活（吃满程度：只有保活时按 0 算，#51），返回 utilText 的结果（v 是数）。自用主机的样本（fleet.from_worker）带各卡 worker 的平均值 busy；
+// 组内服务器只有探针此刻的样本（5 秒内每 0.5 秒采一次取平均），按样本的状态（与探针同口径；自用主机的 x.state 是平台操作口径，只跑 CPU 任务也算 job）
 function fUtil(x) {
-  const a = x.sample || {};
-  return a.util == null ? {u: null, ka: null} : a.state === "keepalive" ? {u: 0, ka: a.util} : {u: a.util_real ?? a.util, ka: null};
+  const a = x.sample || {}, b = utilAvg((a.gpus || []).map(g => g.busy));
+  if (b) return utilText(b);
+  return utilText(a.util == null ? null : a.state === "keepalive" ? {now: 0, ka: a.util, how: FLEET_HOW} : {now: a.util_real ?? a.util, how: FLEET_HOW});
 }
-// 每张卡一排小方块：一块一张 GPU，填充高度是利用率；只有保活时是灰的
+const FLEET_HOW = "探针此刻的样本：5 秒内每 0.5 秒采一次取平均；只有保活时按 0 算";
+// 组内页一张卡的利用率（小方块、抽屉悬停）：自用主机取 worker 的平均值，组内服务器取探针此刻的样本（按整台的状态认只有保活）
+const fCardU = (g, st) => utilText(g.busy || (g.util == null ? null : st === "keepalive" ? {now: 0, ka: g.util, how: FLEET_HOW} : {now: g.util, how: FLEET_HOW}));
+// 每张卡一排小方块：一块一张 GPU，填充高度是利用率（自用主机是 worker 的近 1 小时平均，组内服务器是探针此刻的样本）；只有保活时是灰的、高度是保活顶出来的
 function gpuTiles(gs, st) {
   if (!gs?.length) return "";
-  return `<div class="gt${gs.length < 3 ? " one" : ""}">${gs.map((g, k) => { const f = Math.min(1, (g.util || 0) / 100);
-    return `<i ${tip(`GPU ${g.i ?? g.index ?? k}${g.name ? "：" + g.name : ""}\n利用率 ${g.util ?? "—"}% · 显存 ${mb2g(g.used)} / ${mb2g(g.total)} GiB${st === "keepalive" ? "\n只有保活在跑" : ""}`)}><b style="height:${Math.round(100 * f)}%;background:${st === "keepalive" ? KA : FSC[st] || "var(--muted)"}"></b></i>`; }).join("")}</div>`;
+  return `<div class="gt${gs.length < 3 ? " one" : ""}">${gs.map((g, k) => { const U = fCardU(g, st), ka = g.busy ? g.busy.ka != null : st === "keepalive";
+    const f = Math.min(1, ((ka ? g.busy?.ka ?? g.util : U.v) || 0) / 100);
+    return `<i ${tip(`GPU ${g.i ?? g.index ?? k}${g.name ? "：" + g.name : ""}\n利用率 ${U.big}（${U.span}）· 显存 ${mb2g(g.used)} / ${mb2g(g.total)} GiB${ka ? "\n只有保活在跑" : ""}`)}><b style="height:${Math.round(100 * f)}%;background:${ka ? KA : FSC[st] || "var(--muted)"}"></b></i>`; }).join("")}</div>`;
 }
 // 服务器上的操作按钮：放在这台的抽屉里，这台能做什么就给什么（抽屉的节两边一样，差别只在这里）。
 // 组内服务器：立即探测、借来用、开保活、续租、换人、开机、关机；借用中只有立即探测（续租、换人、关机都会停掉自己的 worker，按钮在「借用」里）。
@@ -2999,9 +3007,9 @@ function fleetCard(x) {
   }
   if (!x.off && x.lw?.risk) tags.push(heatTag(lwHeat(x.lw)));
   const lease = x.off || !x.lease_end ? "" : `<span ${tip(`${ts(x.lease_end)} 到期`)}>${leaseHtml(x.lease_end, "租期")}</span>`;
-  const {u, ka} = fUtil(x), nh = holdCount(x.holder), h = DH.srv(x.id);
+  const U = fUtil(x), nh = holdCount(x.holder), h = DH.srv(x.id);
   const num = x.off ? "" : `<div class="fc-gpu">${gpuTiles(gs, x.state)}
-      <div class="fc-num" ${tip("GPU 利用率，去掉保活：只有保活时按 0 算")}><b>${u == null ? "—" : Math.round(u) + "%"}</b><span class="sm mut">GPU${ka != null ? ` · 保活 ${Math.round(ka)}%` : ""}</span></div>
+      <div class="fc-num" ${tip(U.tip)}><b>${U.big}</b><span class="sm mut">GPU${U.ka || U.span ? " · " + esc(U.ka || U.span) : ""}</span></div>
       <div class="fc-num"><b>${vr[1] ? `${mb2g(vr[0])}<small> / ${mb2g(vr[1])} GiB</small>` : "—"}</b><span class="sm mut">显存（去掉保活）</span></div></div>`;
   return `<div class="fc${d?.k === "srv" && d.id === x.id ? " sel" : ""}${x.off ? " off" : ""}" id="fc-${esc(x.id)}" data-drw="${esc(h)}" tabindex="0" role="button" aria-label="${esc(x.holder)}（${esc(x.id)}）的详情">
     <div class="fc-hd">${pfav(x.holder, `<span class="cdot" style="background:${fDot(x)}"></span>`)}
@@ -3355,11 +3363,12 @@ function srvDrawer(id) {
     const row = (l, bar, v, spk, lt = "") => `<span class="l" ${lt ? tip(lt) : ""}>${l}</span>${bar}<span class="v">${v}</span><div class="spk">${spk}</div>`;
     let r = "";
     if (a.vram_total) {
-      r += row("利用率", fbar([[a.state === "keepalive" ? 0 : a.util, "var(--accent)", "实际"], [a.state === "keepalive" ? a.util : 0, KA, "保活", "hatch"]], 100, "big"),
-        a.util == null ? "—" : `${Math.round(fUtil(x).u)}%${a.state === "keepalive" ? `<span class="mut">保活 ${Math.round(a.util)}%</span>` : ""}`, sp(r => r.ur, {ref: F.share.util}), "5 秒内每 0.5 秒采一次取平均；只有保活时实际按 0 算");
+      const U = fUtil(x), kaB = a.state === "keepalive" ? a.util : 0;
+      r += row("利用率", fbar([[U.v, "var(--accent)", "实际"], [kaB, KA, "保活", "hatch"]], 100, "big"),
+        `${U.big}${U.sub ? `<span class="mut">${esc(U.sub)}</span>` : ""}`, sp(r => r.ur, {ref: F.share.util}), U.tip + "\n小曲线是每次探测的实际利用率");
       r += row("显存", fbar([[a.vram_real, "var(--accent)", `实际 ${mb2g(a.vram_real)} GiB`], [a.vram_ka, KA, `保活 ${mb2g(a.vram_ka)} GiB`, "hatch"], [a.vram - a.vram_real - a.vram_ka, "var(--muted)", "其他（容器里找不到的进程）", "hatch"]], a.vram_total, "big"),
         `${mb2g(a.vram_real)} / ${mb2g(a.vram_total)} GiB<span class="mut">含保活 ${mb2g(a.vram)}</span>`, sp(r => r.vt ? 100 * r.vr / r.vt : null, {ref: 100 * F.share.vram}),
-        (a.gpus || []).map(g => `GPU ${g.i}：${g.name}，${mb2g(g.used)} / ${mb2g(g.total)} GiB，利用率 ${g.util ?? "—"}%`).join("\n") + `\n曲线是实际显存；红虚线是可共享阈值`);
+        (a.gpus || []).map(g => `GPU ${g.i}：${g.name}，${mb2g(g.used)} / ${mb2g(g.total)} GiB，利用率 ${fCardU(g, a.state).big}`).join("\n") + `\n曲线是实际显存；红虚线是可共享阈值`);
     }
     if (a.cpu_quota && a.cpu != null) r += row("CPU", fbar([[a.cpu_real, "var(--accent)", `实际 ${g1(a.cpu_real)} 核`], [a.cpu - a.cpu_real, KA, "保活", "hatch"]], a.cpu_quota, "big"),
       `${g1(a.cpu_real)} / ${g1(a.cpu_quota)} 核`, sp(r => r.cq ? 100 * r.cr / r.cq : null, {ref: 100 * F.share.cpu}), `容器配额 ${g1(a.cpu_quota)} 核（nproc 显示的 ${a.nproc} 是宿主机的）`);
@@ -3876,10 +3885,10 @@ function personSections(n, p, hasAccount) {
   let s = fErr();
   const rows = (p?.slots || []).map(id => { const x = srvById(id), hh = DH.srv(id);
     if (!x) return `<div class="drow"><b>${esc(id)}</b></div>`;
-    const {u} = fUtil(x), a = x.sample || {}, vr = [a.vram_real, a.vram_total];
+    const U = fUtil(x), a = x.sample || {}, vr = [a.vram_real, a.vram_total];
     return `<div class="drow" data-drw="${esc(hh)}" tabindex="0" role="button"><span class="cdot" style="background:${fDot(x)}"></span><b>${esc(x.id)}</b>
       <span class="sm mut">${fKind(x)}</span>${fBusy(x) || fBadge(x)}<span class="sp"></span>
-      <span class="sm num">${x.off ? "" : `GPU ${u == null ? "—" : Math.round(u) + "%"} · ${vr[1] ? `${mb2g(vr[0])} / ${mb2g(vr[1])} GiB` : "—"}`}</span>${icon("chev")}</div>`; });
+      <span class="sm num">${x.off ? "" : `GPU ${U.big} · ${vr[1] ? `${mb2g(vr[0])} / ${mb2g(vr[1])} GiB` : "—"}`}</span>${icon("chev")}</div>`; });
   const borrowed = borrowChips(n);
   const give = p && canOps() ? `<span class="sp"></span>${givePop(n, "drawer")}` : "";
   s += dSec("服务器", (rows.length ? `<div class="drows">${rows.join("")}</div>` : "")
@@ -4318,7 +4327,7 @@ function cfAlerts(X) {
   // 数据过期的实际门槛（config.stale_limit，与 labmon wait、项目页标红同一个）：没改草稿取后端算好的 s；改了采集间隔或这项时拿后端给的系数当场套（#141）
   const SL = X.c.stale, st = Math.max(0, ok("stale_min")), siv = X.c.interval_fixed ? +SL.iv || iv : iv, floor = SL.runs * siv;
   const lim = X.dirty.has("interval") || X.dirty.has("stale_min") ? Math.max(floor, st * 60) + SL.pad : +SL.s, span = lim * 1.3;
-  return row("al-gpu", ["gpu_idle_util", "gpu_idle_min"], "zap", `GPU 利用率低于 ${n("gpu_idle_util", 52)} % 持续 ${n("gpu_idle_min")} 分钟，算空闲、告警`,
+  return row("al-gpu", ["gpu_idle_util", "gpu_idle_min"], "zap", `GPU 利用率（近 10 分钟平均，保活按 0 算）低于 ${n("gpu_idle_util", 52)} % 持续 ${n("gpu_idle_min")} 分钟，算空闲、告警`,
       `<div class="bar thin"><i style="width:${u}%;background:color-mix(in srgb, var(--warn) 55%, transparent)"></i><b style="left:${u}%"></b></div><span>0 · 低于 ${+u.toFixed(1)}% 算空闲 · 100%</span>`)
     + row("al-stale", ["stale_min"], "clock", `数据 ${n("stale_min")} 分钟没更新，算过期`,
       `<div class="bar thin tks" style="--st:${(100 * siv / span).toFixed(3)}%"><b style="left:${(100 * lim / span).toFixed(2)}%"></b></div>`

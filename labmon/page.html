@@ -273,15 +273,20 @@ function kpis() {
     const multi = D.hosts.filter(h => (h.gpus || []).length).length > 1;
     const gname = g => multi ? hostShort(g.host) + ((g.host.gpus || []).length > 1 ? "·" + g.index : "") : "GPU" + g.index;
     const dot = (k, txt) => `<span class="nw"><span class="cdot" style="background:${CC[k % CC.length]}"></span> ${txt}</span>`;
+    // 利用率：近 1 小时的吃满程度（只有保活时按 0，worker 的 10 秒样本，#51），utilText 出字；曲线是各卡近 10 分钟平均
     const series = gl.map((g, k) => ({name: gl.length > 1 ? gname(g) : "", color: CC[k % CC.length],
-      pts: HIST(g.host.id).filter(r => r.util && r.util[g.index] != null).map(r => [r.t, r.util[g.index]])}));
+      pts: HIST(g.host.id).filter(r => r.busy && r.busy[g.index] != null).map(r => [r.t, r.busy[g.index]])}));
+    const ut = g => utilText(gpuBusy(g.host, g.index), g.util), U = utilText(utilAvg(gl.map(g => gpuBusy(g.host, g.index))), avg(gl.map(g => g.util)));
+    const mine = utilMine(D.gpu_mine);
     // 卡与显存是整台主机的（含同机别的项目与 labmon 之外的进程）：本项目没任务在跑时写明，免得看成自己的
     const whole = "整台主机的数字，含同机别的项目与 labmon 之外的进程；本项目在跑 " + D.jobs.filter(j => j.status === "running" && !j.hold).length + " 个任务\n";
-    const notMine = !D.jobs.some(j => j.status === "running" && !j.hold) && avg(gl.map(g => g.util)) > 5;
-    out.push(`<div class="kpi" ${tip(whole + gl.map(g => `${g.host.label} GPU${g.index} ${g.name}\n  利用率 ${f1(g.util, 0)}% · ${f1(g.temp, 0)}°C · ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n"))}>
-      <div class="k">GPU 利用率 · ${gl.length} 卡 · 整机</div><div class="v">${f1(avg(gl.map(g => g.util)), 0)}<small>%${gl.length > 1 ? " 平均" : ""}</small></div>
+    const notMine = !D.jobs.some(j => j.status === "running" && !j.hold) && (U.v || 0) > 5;
+    const sub = [gl.length > 1 ? gl.map((g, k) => dot(k, `${esc(gname(g))} ${ut(g).big}`)).join(" · ") : esc(U.sub), mine ? esc(mine.sub) : "",
+      notMine ? "本项目没有任务在跑：是别的项目或进程在用" : ""].filter(Boolean);
+    out.push(`<div class="kpi" ${tip(whole + U.tip + "\n\n" + gl.map(g => `${g.host.label} GPU${g.index} ${g.name}\n  利用率 ${ut(g).big}（${ut(g).span}）${ut(g).sub ? " · " + ut(g).sub : ""} · ${f1(g.temp, 0)}°C · ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n") + (mine ? "\n\n" + mine.tip : ""))}>
+      <div class="k">GPU 利用率 · ${gl.length} 卡 · 整机</div><div class="v">${U.big.replace("%", "")}<small>%${U.span && U.span !== "此刻" ? " " + U.span : ""}${gl.length > 1 ? " 平均" : ""}</small></div>
       ${chart({series, t0: since, t1: NOW, ymax: 100, H: 22, area: gl.length === 1, fmt: v => f1(v, 0) + "%"})}
-      ${gl.length > 1 ? `<div class="s">${gl.map((g, k) => dot(k, `${esc(gname(g))} ${f1(g.util, 0)}%`)).join(" · ")}</div>` : notMine ? `<div class="s">本项目没有任务在跑：是别的项目或进程在用</div>` : ""}</div>`);
+      ${sub.length ? `<div class="s">${sub.join("<br>")}</div>` : ""}</div>`);
     const used = sum(gl.map(g => g.mem_used)) / 1024, tot = sum(gl.map(g => g.mem_total)) / 1024;     // 显存探针给的是 MiB
     const procs = D.hosts.flatMap(h => (h.gpu_procs || []).map(p => ({...p, host: h})));
     // 每张卡一段，段宽按该卡总显存，段内填色为已用；一眼看出哪张卡还有余量
@@ -436,7 +441,7 @@ function tlItems(c) {
     ["dep", "依赖（after=）：从等的任务结束连到它开始", sw(`<path d="M1 3C9 3 13 9 20 9" fill="none" stroke="var(--fg)" stroke-opacity=".45"/><circle cx="20" cy="9" r="2" fill="var(--fg)" fill-opacity=".6"/>`)],
     ["gap", "空档（标原因；往后的写推演里在等谁）", sw(`<line x1="0" x2="22" y1="6" y2="6" stroke="var(--faint)" stroke-dasharray="2 3"/>`)],
     ...occItems("var(--faint)", "同机别的项目："),
-    ["util", "整机 GPU 利用率（主机行的浅底）", sw(`<path d="M0 11L5 4L10 6L15 2L22 7L22 12L0 12Z" fill="var(--accent)" fill-opacity=".13"/><path d="M0 11L5 4L10 6L15 2L22 7" fill="none" stroke="var(--accent)" stroke-opacity=".7"/>`)],
+    ["util", "整机 GPU 利用率（主机行的浅底：近 10 分钟平均，保活按 0 算）", sw(`<path d="M0 11L5 4L10 6L15 2L22 7L22 12L0 12Z" fill="var(--accent)" fill-opacity=".13"/><path d="M0 11L5 4L10 6L15 2L22 7" fill="none" stroke="var(--accent)" stroke-opacity=".7"/>`)],
     ["down", "连不上", sw(bandRect("down", 0, 2, 22, 8))],
     ["warn", "drain、暂停、续租截止", sw(bandRect("warn", 0, 2, 22, 8))],
     ["ret", "跑完就还（画到预计归还）", sw(bandRect("ret", 0, 2, 22, 8))],
@@ -496,9 +501,9 @@ function depLines(c) {
 // （连不上、drain、暂停、续租截止、没在采集），竖线是换容器、续租与作废重排
 function hostRow(host, hb, ev, y, h, c) {
   // 逐次采样只留 24 小时：更早的、或看的区间超过一天半时用每小时平均（保留 30 天）
-  const hs = HIST(host.id).filter(p => p.util), first = hs.length ? hs[0].t : Infinity, long = c.t1 - c.t0 > 36 * 3600;
+  const hs = HIST(host.id).filter(p => p.busy), first = hs.length ? hs[0].t : Infinity, long = c.t1 - c.t0 > 36 * 3600;
   const hr = (D.util_hourly?.[host.id] || []).filter(p => long || p[0] + 3600 <= first).map(p => [p[0] + 1800, p[1], 5400]);
-  const pts = [...hr, ...(long ? [] : hs.map(p => [p.t, avg(p.util), (D.interval || 120) * 3.5]))].filter(p => p[0] >= c.t0 - 3600 && p[0] <= c.t1 + 3600 && p[1] != null);
+  const pts = [...hr, ...(long ? [] : hs.map(p => [p.t, avg(p.busy), (D.interval || 120) * 3.5]))].filter(p => p[0] >= c.t0 - 3600 && p[0] <= c.t1 + 3600 && p[1] != null);
   const ub = y + (ev ? h - 11 : h - 2), Y = v => ub - (ub - y - 3) * v / 100;     // 利用率的底边与高度
   let s = `<text class="lab" x="0" y="${y + (ub - y) / 2 + 5}" style="font-weight:600" ${tip(`${host.label}\n浅蓝底：整机 GPU 平均利用率（含同机别的项目${long ? "，每小时平均" : ""}）`
     + (ev ? "\n底边色带：连不上、drain、暂停、续租截止、labmon 没在采集；竖线是换容器、续租与作废重排" : ""))}>${esc(fit(hostShort(host), c.L - 6))}</text>`;
@@ -748,9 +753,10 @@ function resourcesCard() {
     const H = HIST(h.id), cg = h.cgroup || {}, gp = h.gpus || [], tiles = [], chips = [];
     if (gp.length) {
       const cols = ["var(--accent)", "#1D9E75", "#D85A30", "#7F77DD", "#D4537E", "#BA7517", "#639922", "#888780"];
-      const series = gp.map((g, k) => ({name: gp.length > 1 ? "GPU" + g.index : "", color: cols[k % cols.length], pts: H.filter(r => r.util).map(r => [r.t, r.util[k]])}));
-      tiles.push(tile(`GPU 利用率${gp.length > 1 ? " · " + gp.length + " 卡" : ""}`, f1(avg(gp.map(g => g.util)), 0) + "%", chart({series, t0, t1: NOW, ymax: 100, fmt: v => f1(v, 0) + "%"}),
-        gp.map(g => `GPU${g.index} ${g.name}  ${f1(g.temp, 0)}°C  ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n")));
+      const series = gp.map((g, k) => ({name: gp.length > 1 ? "GPU" + g.index : "", color: cols[k % cols.length], pts: H.filter(r => r.busy && r.busy[k] != null).map(r => [r.t, r.busy[k]])}));
+      const U = utilText(utilAvg(gp.map(g => gpuBusy(h, g.index))), avg(gp.map(g => g.util)));
+      tiles.push(tile(`GPU 利用率${gp.length > 1 ? " · " + gp.length + " 卡" : ""}`, `${U.big}${U.span ? `<span class="mut" style="font-weight:400"> ${U.span}</span>` : ""}`, chart({series, t0, t1: NOW, ymax: 100, fmt: v => f1(v, 0) + "%"}),
+        U.tip + "\n曲线是各卡近 10 分钟平均\n\n" + gp.map(g => `GPU${g.index} ${g.name}  ${utilText(gpuBusy(h, g.index), g.util).big}  ${f1(g.temp, 0)}°C  ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n")));
       const tot = sum(gp.map(g => g.mem_total)) / 1024;     // 显存探针给的是 MiB
       tiles.push(tile(`显存 · ${f1(tot, 0)} GiB`, f1(sum(gp.map(g => g.mem_used)) / 1024, 1) + " GiB",
         line(H.filter(r => r.mem).map(r => [r.t, sum(r.mem) / 1024]), tot, v => f1(v) + " GiB"),

@@ -19,7 +19,7 @@ import time
 from labmon.config import STALE_PAD_S, STALE_RUNS, cfg_spec, stale_limit
 from labmon.fleet import local_writes
 from labmon import hostcheck as HC
-from labmon.overview import EVENT_CATS, EVENT_KINDS
+from labmon.overview import EVENT_CATS, EVENT_KINDS, gpu_busy
 from labmon.users import Access, Ident, view
 
 BAD = "<i id=x>&\"'<!--<script>alert(1)</script>"
@@ -30,10 +30,10 @@ UNTIL = time.mktime(time.localtime(NOW + 7 * 86400)[:3] + (18, 37, 0, 0, 0, -1))
 
 
 def _series(n: int, lim: float, gpus: int) -> list[dict]:
-    # 前一半是旧行（看板 11-08 前存的，没有 thr、nfs、busy），后一半带主机压力
+    # 前一半是旧行（看板 11-08 前存的，没有 thr、nfs、busy；11-17 前的卡没有第 4 项吃满程度，#51），后一半带主机压力与吃满程度
     return [{"t": NOW - (n - k) * 600, "mem": 2.0 + (k % 7) * 0.5, "anon": 1.0 + (k % 7) * 0.3, "lim": lim, "cpu": 1.0 + (k % 3),
              **({"thr": float(k % 4), "nfs": 0.5 + (k % 6) * 6, "busy": float(k % 10) * 3} if k >= n // 2 else {}),
-             "gpu": [[20000 + 100 * (k % 9), 46068, 90.0 - (k % 5)] for _ in range(gpus)]} for k in range(n)]
+             "gpu": [[20000 + 100 * (k % 9), 46068, 90.0 - (k % 5)] + ([0.0 if g else 70.0 + k % 9] if k >= n // 2 else []) for g in range(gpus)]} for k in range(n)]
 
 
 def _dur(name: str, mins: float, cls: str) -> dict:
@@ -131,7 +131,9 @@ def _host_a() -> dict:
         "kafight": None, "watchdogs": {"frozen": [], "seen": []},
         # CPU 持续被配额限流 25 分钟（Worker.throttle，#39）：alpha_train_s1 给 4 核、1 分钟窗口实测 9.2 核
         "throttle": {"since": NOW - 1504, "for": 1500, "thr": 38.5, "alert": True, "over": [{"project": "proj-a", "name": "alpha_train_s1", "cores": 9.2, "give": 4}], "other": 0.3},
-        "guest": None, "util10": {"GPU-aaaa-0": 95, "GPU-aaaa-1": 3}, "disk": {"root": "/data/share", "mine": True, "now": None, "since": NOW - 100,
+        "guest": None, "util10": {"GPU-aaaa-0": 95, "GPU-aaaa-1": 3},
+        # 吃满程度（#51）：卡 1 此刻只有保活（顶到 99%），按 0 算
+        "gpu_busy": {"GPU-aaaa-0": {"now": 95.0, "m10": 88.4, "h1": 72.3, "cov": 3600}, "GPU-aaaa-1": {"now": 0, "m10": 0.0, "h1": 4.2, "cov": 3600, "ka": 99.0}}, "disk": {"root": "/data/share", "mine": True, "now": None, "since": NOW - 100,
                                                                               "yield": "共享盘慢（此刻 31 ms/次，本机基线 20）"},
         "room": {"ram": 97.5, "margin": 8.0, "gpus": {"GPU-aaaa-0": 24000.0, "GPU-aaaa-1": 44000.0}, "cpu": 12.5, "cpu_cap": 17},
         "queues": [{"root": root_a, "jobs": q_a, "gpus": None, "project": "proj-a", "stop": "boundary", "empty": False,
@@ -186,7 +188,7 @@ def _host_b() -> dict:
         "kafight": {"t": NOW - 600, "n": 1, "who": "不是经 ka.sh 拉起的；暂停了看门狗 PID 4242（bash keepalive_final_check.sh：提到保活程序，在循环里），还卡时恢复"},
         "watchdogs": {"frozen": [{"pid": 4242, "start": 123, "cmd": "bash keepalive_final_check.sh", "cwd": "/root/demo_eval/exp", "why": "提到保活程序，在循环里", "t": NOW - 600}],
                       "seen": [{"pid": 4300, "start": 456, "cmd": "python3 check.py", "cwd": "/root", "why": "提到保活程序，没见循环"}]},
-        "util10": {"GPU-bbbb-0": 90}, "disk": None, "room": {"ram": 40.0, "margin": 8.0, "gpus": {"GPU-bbbb-0": 20000.0}, "cpu": 4.8, "cpu_cap": 7},
+        "util10": {"GPU-bbbb-0": 90}, "gpu_busy": {"GPU-bbbb-0": {"now": 90.0, "m10": 86.0, "h1": 85.5, "cov": 1200}}, "disk": None, "room": {"ram": 40.0, "margin": 8.0, "gpus": {"GPU-bbbb-0": 20000.0}, "cpu": 4.8, "cpu_cap": 7},
         "queues": [{"root": root, "jobs": q, "gpus": None, "project": "proj-b", "stop": "boundary", "empty": False, "dur": {}}],
         "plan": {"t": NOW - 50, "lanes": [{"root": root, "queue": q, "project": "proj-b", "kind": "queue", "stuck": None, "stuck_dep": None, "jobs": [
             {"name": "beta_eval_s7", "t0": NOW - H, "t1": NOW + 2 * H, "gpus": [0], "run": True},
@@ -276,7 +278,8 @@ def _fleet(mine_host: dict) -> dict:
              "last": mine_host["status"]["t"], "error": None, "down": None, "since": None, "started": info["started"], "guard": {"on": False, "status": "worker"},
              "sample": {"state": "job", "util": 49.0, "util_real": 49.0, "vram": 21900.0, "vram_total": 92136.0, "vram_real": 20650.0, "vram_ka": 700.0,
                         "cpu": 3.2, "cpu_real": 3.2, "cpu_quota": 17.0, "nproc": 144, "mem": info["mem"], "mem_real": 19.9, "mem_ka": None, "share": False,
-                        "gpus": [{k: g[k] for k in ("i", "uuid", "name", "used", "total", "util")} for g in info["gpus"]], "root": info["rootfs"],
+                        "gpus": [{**{k: g[k] for k in ("i", "uuid", "name", "used", "total", "util")}, "busy": mine_host["status"]["gpu_busy"].get(g["uuid"])} for g in info["gpus"]],
+                        "root": info["rootfs"],
                         "started": info["started"],
                         "work": [{"kind": "job", "label": "alpha_train_s1", "mb": 20500, "n": 1, "names": [], "etime": 7200, "cwd": "/data/me/proj-a/q1", "owner": "ME"},
                                  {"kind": "job", "label": "labmon 之外：jupyter", "mb": 150, "n": 1, "names": [], "etime": None, "cwd": None, "owner": "ME"},
@@ -383,6 +386,8 @@ GROUPS_A = [{"id": "E1", "label": "E1 主实验", "color": "#7F77DD", "auto": Fa
 
 def overview() -> dict:
     a, b = _host_a(), _host_b()
+    for h in (a, b):                                   # 主机项的吃满程度（#51）：worker 的 gpu_busy 加上曲线汇的 24 小时平均，与看板同一个函数
+        h["busy"] = gpu_busy(h["status"], h["series"])
     occ_a = [{"p": "proj-a", "n": "alpha_train_s0", "lane": "车道 1", "t0": NOW - 5 * H, "t1": NOW - 4.5 * H, "g": [0], "st": "done"},
              {"p": "proj-b", "n": "beta_eval_s0", "lane": None, "t0": NOW - 7 * H, "t1": NOW - 6 * H, "g": [0], "st": "failed"},
              {"p": "proj-b", "n": "beta_x", "lane": None, "t0": NOW - 9 * H, "t1": NOW - 8 * H, "g": [1], "st": "stop"},
@@ -609,7 +614,10 @@ def project() -> dict:
               "gpu_procs": [{"pid": 2001, "mem": 20500.0, "cmd": "python train.py"}], "cgroup": {"cpu_usage_ns": 1, "cpu_quota": 17.0, "mem_used": 2.8e10, "mem_limit": 1.3e11, "mem_rss": 1.1e9},
               "loadavg": [18.8, 15.8, 14.8], "cpu_pct": 6.0,
               "mounts": [{"path": "/tmp", "label": "容器 /tmp", "total_gb": 805.3, "avail_gb": 787.6, "used_pct": 2.2, "min_gb": 50}],
-              "checks": [{"id": "keepalive", "label": "GPU 保活在跑", "state": "fail", "out": "", "detail": ["STOPPED 进程组 55336"]}]},
+              "checks": [{"id": "keepalive", "label": "GPU 保活在跑", "state": "fail", "out": "", "detail": ["STOPPED 进程组 55336"]}],
+              # 吃满程度（工作台那一轮 overview.gpu_busy 算好的，#51）；srv-b 没有：退回探针此刻的值
+              "busy": [{"i": 0, "now": 95.0, "m10": 88.4, "h1": 72.3, "cov": 3600, "d1": 64.0, "d1cov": 86000},
+                       {"i": 1, "now": 0, "m10": 0.0, "h1": 4.2, "cov": 3600, "ka": 99.0, "d1": 1.5, "d1cov": 86000}]},
              {"id": "srv-b", "label": "srv-b", "ok": True, "error": None, "gpus": [gpu(0, 6754.0, 90.0)], "gpu_procs": [], "cgroup": {"cpu_quota": 7.0, "mem_used": 2e9, "mem_limit": 6.5e10, "mem_rss": 1e9},
               "loadavg": [1.0, 1.0, 1.0], "cpu_pct": 2.0, "mounts": [], "checks": [],
               "borrow": {"holder": "OWNER", "since": NOW - 16 * H, "until": None, "for": ["proj-a"], "light": True, "cutoff": NOW + 6 * 86400, "why": "OWNER 的租期到期，提前 1 小时",
@@ -618,7 +626,7 @@ def project() -> dict:
     hist = []
     for k in range(144):
         t = NOW - (144 - k) * 600
-        hist.append({"t": t, "host": "srv-a", "ok": True, "util": [90.0 - k % 7, 3.0], "mem": [20000.0 + k, 900.0], "cpu_pct": 5.0 + k % 4, "ram": 1.1e9, "disk": {"/tmp": 787.6 - k * 0.01}})
+        hist.append({"t": t, "host": "srv-a", "ok": True, "util": [90.0 - k % 7, 3.0], **({"busy": [80.0 - k % 9, 0.0]} if k >= 72 else {}), "mem": [20000.0 + k, 900.0], "cpu_pct": 5.0 + k % 4, "ram": 1.1e9, "disk": {"/tmp": 787.6 - k * 0.01}})
         hist.append({"t": t, "host": "srv-b", "ok": True, "util": [85.0], "mem": [6700.0], "cpu_pct": 2.0, "ram": 1e9})
     groups = [{"id": "alpha_", "label": "alpha_*", "color": "#7F77DD", "status": "运行中", "auto": True, "done_when": None, "total": 4, "done": 1, "failed": 0, "running": 1, "queued": 2,
                "ratios": [{"cls": "alpha_train", "k": 0.9, "src": "同类近 3 次 实际/估时 ×0.90", "open": True}], "eta_ts": NOW + 7 * H},
@@ -638,7 +646,7 @@ def project() -> dict:
                        {"key": REBAL["key"], "to": "agent", "msg": REBAL["text"]}],          # collect._rebalance 出的：整句只给实验会话（#40）
             "markers": [{"date": "2026-11-13 19:59", "label": "投稿截止", "ts": NOW + 3 * 86400}, {"date": "2026-11-01 10:00", "label": "开题", "ts": NOW - 6 * 86400}],
             "spans": [[NOW - 40 * H, NOW - 30 * H], [NOW - 29 * H, NOW]], "util_hourly": {"srv-a": [[NOW - k * 3600, 80.0 + k % 9] for k in range(30 * 24, 0, -1)], "srv-b": [[NOW - 3600, 85.0]]},
-            "history": hist, "all_done_ts": NOW + 7 * H,
+            "history": hist, "all_done_ts": NOW + 7 * H, "gpu_mine": {"util": 63.2, "card_s": 52200, "n": 4},
             "attempts": [{"name": "alpha_probe_s9", "lane": la, "t0": NOW - 6.1 * H, "t1": NOW - 6 * H}, {"name": "alpha_probe_s9", "lane": la, "t0": NOW - 6.3 * H, "t1": NOW - 6.2 * H}],
             "no_work_since": None, "thresholds": {"stale_s": stale_limit(120, 5)}, "rebalance": dict(REBAL),
             # 本项目的存储（disk.project_storage，#53）：项目根下的一级目录（「.」是根下的文件）、删掉的、近来写得多的任务

@@ -133,7 +133,8 @@ HIST_N = 5               # 估计值看同类任务最近几次
 RATIO_N = 20             # 项目的 实际/估时 比值看最近这么多个跑成功的任务
 DUR_MARGIN = 1.2         # 截止前（续租、约定归还）的准入：预计时长再乘这么多（估时偏一点是常事，跑不完这一格就白跑）
 OVER_FRAC, OVER_MIN_S = 0.2, 600   # 剩余时长说不准时（超了预计；看板那边还有进度刚开始、没估时或已超估时）按已跑的这么多比例估、至少这么多秒（overrun_left）
-UTIL_WIN_S = 600         # 各卡利用率取近这么久的平均（状态的 util10，fit 列出来看）
+UTIL_WIN_S = 600         # 各卡利用率取近这么久的平均（状态的 util10，fit 列出来看；吃满程度 gpu_busy 的 m10 同一个长度）
+BUSY_WIN_S = 3600        # 各卡「吃满程度」（只有保活时按 0）留近这么久的样本：状态 gpu_busy 的 h1（页面主数字，#51）
 UTIL_LOW = 50            # 卡近 UTIL_WIN_S 的利用率低于这个 %，且上面在跑的被 CPU 卡住时，先加核、不在这张卡上开新车道（gpu_slack，#35、#37）
 CPU_BOUND_FRAC = 0.9     # 在跑任务近 CPU_WARM_S 各 1 分钟窗口核数的平均不少于给它的核数的这么多，算被 CPU 卡住（cpu_bound）
 CONC_MAX = 12            # 按同卡并行数挑同类记录（duration 的 k）时封顶到这么多（推演里查表、缓存用）
@@ -1941,6 +1942,13 @@ def job_procs(procs, jobs):
     return mine
 
 
+def win_mean(w, t, span, n=3):
+    """利用率窗口 w [(时刻, 值)] 里近 span 秒的样本平均（一位小数）；不到 n 个样本为 None。
+    「在用时多高」（util10）与「吃满程度」（gpu_busy）两种口径共用（Worker.util_window 记样本，#51）。"""
+    v = [x[1] for x in w if t - x[0] <= span]
+    return round(sum(v) / len(v), 1) if len(v) >= n else None
+
+
 def gpu_owners(apps, procs, owner, ka_full=None):
     """GPU 进程的归属（gp）：nvidia-smi 给的宿主机 PID 经 /proc/<pid>/sched 对回容器 PID（scan_procs 的 hpid），再看它属于哪个任务
     （owner {pid: 任务}）、是不是保活（命令行里有 keep_alive），都不是的算 labmon 之外的。
@@ -1977,7 +1985,9 @@ class Worker:
         self.envc = {}                        # 队列 key → (.env 的 fsig, 变量)
         self.storage = None                   # 本地盘：各项目的缓存与单格临时、labmon 之外的新写入（LocalDisk.summary）；共享盘上各项目目录（看板按它把共享盘用量分到项目）
         self.gate, self.failcnt, self.ovr, self.seen = False, None, [], set()
-        self.uwin = {}                        # 卡 UUID → 近 UTIL_WIN_S 秒的 (时刻, 利用率)
+        self.uwin = {}                        # 卡 UUID → 近 UTIL_WIN_S 秒的 (时刻, 利用率)：「在用时多高」，保活在的那几轮不记（util10，fit 用）
+        self.bwin = {}                        # 卡 UUID → 近 BUSY_WIN_S 秒的 (时刻, 利用率)：「吃满程度」，只有保活的那几轮记 0（gpu_busy，页面用，#51）
+        self.bka = {}                         # 卡 UUID → 这一轮只有保活时保活顶出来的原值（gpu_busy 的 ka）
         self.own_cpu = None                   # worker 自己的 CPU 用时（算 labmon 之外的 CPU 占用）
         self.other = {"vram": {}, "ram": None, "cpu": None, "ka": {}, "gid": {}, "ka_cpu": 0.0}   # labmon 之外的用量：各卡显存 MB、内存 GiB（收不回的，不算页缓存）、CPU 核
         # （内存与 CPU 不含任何保活的进程树：借来的主机上就是对方干活的用量，与算预留的组内探针同口径，#37）、各卡上 ka.sh 停不了的保活（宿主机 PID，只在借来的主机上认）、
@@ -4108,13 +4118,35 @@ class Worker:
         return ext
 
     def util_window(self, gpus, gp, t):
-        """各卡近 UTIL_WIN_S 秒的利用率窗口（uwin；保活在的那几轮不算：它只是占着卡）。"""
+        """各卡利用率的两个窗口（#51），都按 win_mean 取平均：
+        uwin「在用时多高」近 UTIL_WIN_S 秒，卡上有保活的那几轮不记（它只是占着卡；util10，fit 列出来看）；
+        bwin「吃满程度」近 BUSY_WIN_S 秒，卡上只有保活（ka.sh 管的与停不了的）的那几轮记 0（gpu_busy，页面上的利用率）。"""
         ka_on = {g["uuid"] for g in gp if g["owner"] == "keepalive"}
+        work = {g["uuid"] for g in gp if g["owner"] != "keepalive" and not g.get("ka")}
+        only_ka = {g["uuid"] for g in gp if g["owner"] == "keepalive" or g.get("ka")} - work
+        self.bka = {}
         for g in gpus:
             w = self.uwin.setdefault(g["uuid"], [])
-            if g.get("util") is not None and g["uuid"] not in ka_on:
-                w.append((t, g["util"]))
+            b = self.bwin.setdefault(g["uuid"], [])
+            if g.get("util") is not None:
+                if g["uuid"] not in ka_on:
+                    w.append((t, g["util"]))
+                b.append((t, 0 if g["uuid"] in only_ka else g["util"]))
+                if g["uuid"] in only_ka:
+                    self.bka[g["uuid"]] = g["util"]
             w[:] = [x for x in w if t - x[0] <= UTIL_WIN_S]
+            b[:] = [x for x in b if t - x[0] <= BUSY_WIN_S]
+
+    def busy_view(self, t):
+        """状态的 gpu_busy：各卡「吃满程度」{now 此刻, m10 近 10 分钟, h1 近 1 小时, cov 1 小时窗口实际覆盖的秒数（worker 刚起时不满）,
+        ka 此刻只有保活时保活顶出来的原值}。样本不够 3 个的平均为 None。"""
+        out = {}
+        for k, b in self.bwin.items():
+            if not b:
+                continue
+            out[k] = {"now": b[-1][1], "m10": win_mean(b, t, UTIL_WIN_S), "h1": win_mean(b, t, BUSY_WIN_S), "cov": round(t - b[0][0]),
+                      **({"ka": self.bka[k]} if k in self.bka else {})}
+        return out
 
     def measure(self, j, pids, procs, gp, util, ovram, jobs, t):
         """量一个任务这一轮的用量（写进 j["use"]）：内存（PSS 之和）与峰值、核数与累计 CPU、读写（进程树 /proc/<pid>/io 之和：此刻 MiB/s、
@@ -4587,7 +4619,8 @@ class Worker:
                       "back": list(self.back.values()), "quiet": sorted(set(self.back_last) - set(self.back)), "tight": self.tight,
                       "hit": self.hit, "away": self.away_state(),
                       "block": self.guest_block()} if self.guest() else None,        # 整台不放新任务的原因（guest_block）：fit 照它挡整台
-            "util10": {k: round(sum(x[1] for x in w) / len(w)) for k, w in self.uwin.items() if len(w) >= 3},
+            "util10": {k: round(v) for k, w in self.uwin.items() for v in [win_mean(w, now, UTIL_WIN_S)] if v is not None},   # 「在用时多高」（fit 用）
+            "gpu_busy": self.busy_view(now),      # 「吃满程度」（只有保活时按 0；页面上的利用率，#51）
             "disk": self.disk.brief() if self.disk else None,
             # 按记账还能放多少：内存 GiB、各卡 MB（整卡任务记账超过卡时写 0）、CPU 核（cpu_cap 是记账上限：配额向下取整；读不到配额都为 None）
             "room": {"ram": ram_free(S), "margin": S["margin"], "gpus": {u: max(0.0, v) for u, v in card_free(S).items()},

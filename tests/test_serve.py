@@ -1660,11 +1660,13 @@ class RegsTest(unittest.TestCase):
 
 class LongTermTest(unittest.TestCase):
     def test_spans_and_hourly_util(self):
-        # 采集区间：隔得近的接上，断开超过 10 分钟另起一段；每小时 GPU 利用率按次平均
+        # 采集区间：隔得近的接上，断开超过 10 分钟另起一段；每小时 GPU 利用率按次平均，取各次的吃满程度 busy（#51），
+        # 只有探针瞬时值 util 的那次（worker 不在）不记
         t = 1_800_000_000.0 // 3600 * 3600 + 1800
         state, snap = {"spans": [[t - 4000, t - 3000]]}, {"hosts": [{"id": "h"}]}
-        C._long_term(state, snap, [{"t": t - 100, "host": "h", "util": [40, 60]}], {"interval": 120}, t - 100)
-        C._long_term(state, snap, [{"t": t, "host": "h", "util": [100, None]}], {"interval": 120}, t)
+        C._long_term(state, snap, [{"t": t - 100, "host": "h", "util": [99, 99], "busy": [40, 60]}], {"interval": 120}, t - 100)
+        C._long_term(state, snap, [{"t": t - 50, "host": "h", "util": [99, 99]}], {"interval": 120}, t - 50)
+        C._long_term(state, snap, [{"t": t, "host": "h", "util": [0, 0], "busy": [100, None]}], {"interval": 120}, t)
         self.assertEqual(snap["spans"], [[t - 4000, t - 3000], [t - 100, t]])
         self.assertEqual(snap["util_hourly"], {"h": [[t - 1800, 75.0]]})
 

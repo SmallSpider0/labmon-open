@@ -286,6 +286,36 @@ const rebalTip = r => r?.text ? "可以挪：" + r.text : r?.why?.length ? "别�
 const rebalMark = r => r?.text ? ` <span class="badge b-warn" ${tip(rebalTip(r))}>⇄<span class="hide-sm"> 可提前</span></span>`
   : r?.why?.length ? ` <span class="badge b-mute" ${tip(rebalTip(r))}>⇄</span>` : "";
 const noWorkBadge = since => since ? `<span class="badge b-mute" ${tip(noWorkTip(since))}>${NO_WORK}</span>` : "";
+// GPU 利用率（#51）：页面上的利用率文字只从 utilText 出（项目页、工作台、组内页共用）。b 是一张卡的「吃满程度」，或 utilAvg 合起来的几张卡：
+// worker 每 10 秒一个样本，只有保活时按 0 算（保活只是占着卡），{now 此刻, m10 近 10 分钟, h1 近 1 小时, cov 1 小时窗口实际覆盖的秒数（worker 刚起时不满）,
+// d1 近 24 小时（看板从主机曲线汇的，overview.gpu_busy）, d1cov, ka 此刻只有保活时保活顶出来的原值, how 换掉悬停里的口径说明（组内探针的样本）}。
+// 没有 worker 的数据时 b 为空，raw 是探针此刻的值（不到 1 秒的瞬时值，含保活）。返回 {v 大字的数, big 大字, span 大字是多久的平均, ka 只有保活的那句（地方小时只写它）, sub 小字, tip 悬停}
+const UTIL_HOW = "保活按 0 算：worker 每 10 秒采一次各卡的利用率，卡上只有保活时记 0（保活只是占着卡）。nvidia-smi 的利用率是有核函数在跑的时间占比";
+const pctText = v => v == null ? "—" : Math.round(v) + "%";
+function utilAvg(bs) {
+  bs = (bs || []).filter(b => b?.now != null);
+  if (!bs.length) return null;
+  const m = k => { const v = bs.map(b => b[k]).filter(x => x != null); return v.length ? v.reduce((a, x) => a + x, 0) / v.length : null; };
+  const nka = bs.filter(b => b.ka != null).length;
+  return {now: m("now"), m10: m("m10"), h1: m("h1"), d1: m("d1"), cov: Math.min(...bs.map(b => b.cov || 0)), d1cov: Math.min(...bs.map(b => b.d1cov || 0)),
+          ka: nka === bs.length ? m("ka") : null, nka: nka < bs.length ? nka : 0, how: bs[0].how};
+}
+function utilText(b, raw = null) {
+  if (b?.now == null) return raw == null ? {v: null, big: "—", span: "", ka: "", sub: "", tip: "没有利用率数据"}
+    : {v: raw, big: pctText(raw), span: "此刻", ka: "", sub: "", tip: `探针此刻的值 ${pctText(raw)}：不到 1 秒的瞬时值，含保活（worker 没在写状态，没有平均值）`};
+  const v = b.h1 ?? b.m10 ?? b.now;
+  const span = b.h1 != null ? (b.cov >= 3300 ? "近 1 小时" : `近 ${dur(b.cov)}`) : b.m10 != null ? "近 10 分钟" : "此刻";
+  const ka = b.ka != null ? `只有保活（顶到 ${pctText(b.ka)}）` : b.nka ? `${b.nka} 张卡只有保活` : "";
+  const d1 = b.d1 != null ? `${b.d1cov >= 82800 ? "24 小时" : dur(b.d1cov)} ${pctText(b.d1)}` : "";
+  return {v, big: pctText(v), span, ka, sub: [span !== "此刻" ? `此刻 ${pctText(b.now)}` : "", d1, ka].filter(Boolean).join(" · "),
+          tip: [`${span === "此刻" ? "此刻" : span + "平均"} ${pctText(v)}`, span !== "此刻" ? `此刻 ${pctText(b.now)}` : "", b.m10 != null && span !== "近 10 分钟" ? `近 10 分钟 ${pctText(b.m10)}` : "",
+                d1 ? "近 " + d1 : "", ka, b.how || UTIL_HOW].filter(Boolean).join("\n")};
+}
+// 项目自己的平均利用率（collect.gpu_mine）：近 24 小时本项目的任务平均把所用的卡用到多少，按 卡数 × 时长 加权
+const utilMine = m => m ? {big: pctText(m.util), sub: `本项目近 24 小时 ${pctText(m.util)}`,
+  tip: `本项目近 24 小时 ${m.n} 个任务、${(m.card_s / 3600).toFixed(1)} 卡·时，平均把所用的卡用到 ${pctText(m.util)}（各任务运行期间所用卡的平均利用率，按卡数 × 时长加权；同卡有别的任务时是整卡合计）`} : null;
+// 一台主机第 i 张卡的吃满程度（主机项的 busy：工作台 overview.gpu_busy 算好，项目快照照搬）
+const gpuBusy = (h, i) => (h?.busy || []).find(b => b.i === i) || null;
 // 告警给谁看（#142）：每条带 to（项目告警由 collect.alert 定，工作台主机告警由 alertsOf 定）：user 要用户处理、agent 只给实验会话、both 两边都要。
 // forUser 给用户的文字（显眼列、算告警数；page 是 both 给用户的那份，没有就是 msg），与 collect.user_alerts 同一口径；forAgent 只给实验会话的
 const forUser = al => al.filter(a => a.to !== "agent").map(a => a.page ?? a.msg);
