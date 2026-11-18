@@ -4,6 +4,8 @@
 这里按项目挑整批完工最早的一种挪法：哪台、挪前几行（同一台上多开一条车道也算一种，offer 带 local，#43），整批从何时提前到何时。
 整批至少提前 max(GAIN_MIN_S, min(GAIN_S, 剩余时间 × GAIN_SHORT_FRAC), 剩余时间 × GAIN_FRAC) 才建议（_need；维护者 2026-11-08 定 1 小时与 10%，
 #43 按推荐放宽短批：剩 2 小时的批早 36 分钟就报）；报过建议的项目降到阈值一半以下才收、目标主机沿用上一轮的（滞回，免得在阈值附近或几台之间来回叫醒）。挪不了的写原因（只在页面上，不叫醒）。
+整批没有够门槛的挪法（整批被挪不动的行撑着，或何时跑完推不出），而接收方此刻没有 labmon 任务在跑（offer 的 idle）时，改按行比：
+挪来的每一行都比在原处早 GAIN_MIN_S 以上跑完就建议（_idle_gain，#62）。
 labmon 不改任何清单、不改放行规则：建议由实验会话照做（剪行、追加到目标主机的清单，见 SKILL「跑和盯」的 rebalance:）。
 
 看板这头每轮再核对一遍（#25）：offers 里的行这一轮已在原处开跑、已不在原处的 todo（剪过、跑完了）就截掉（各 worker 读别的主机的状态最多晚几分钟）；
@@ -44,6 +46,14 @@ def _finish(o: dict, k: int) -> float | None:
     return _top(list(ends.values()) + [js[-1]["end"], js[-1]["own"]])
 
 
+def _idle_gain(js: list, gap: float):
+    """接收方空着时按行比（#62）：挪来的这几行在这台都跑完的时刻（最后一项的 end）比它们在原处最早的预计结束（there 里最小的；
+    原处说不出的当很晚）早至少 gap 秒就成立。成立时返回原处最早的那个结束（都说不出为 None），不成立为 False。"""
+    known = [j["there"] for j in js if j.get("there") is not None]
+    there = min(known) if known else None
+    return there if there is None or there - js[-1]["end"] >= gap else False
+
+
 def _need(f: float, t: float) -> float:
     """整批从 f 跑完（现在 t）至少要提前多久才建议：剩余 2 小时要早 36 分钟，剩余 10 小时以上仍按 1 小时与 10%。"""
     left = f - t
@@ -58,9 +68,15 @@ def _text(p: dict, proj: str, label: dict, t: float) -> str:
         src.setdefault((j["host"], j["root"], j["queue"]), []).append(j["name"])
     what = "，".join(f"{label.get(h, h)} 上 {r.rstrip('/')}/{q} 的 {'、'.join(ns)}" for (h, r, q), ns in src.items())
     tid = p["target"]
-    to = fmt_time(p["to"])
-    when = (f"整批预计从 {fmt_time(p['from'])} 提前到 {to}（早 {fmt_dur(p['from'] - p['to'])}）" if p["from"] is not None
-            else f"整批预计 {to} 跑完（现在有任务在原处跑不了，整批何时跑完推不出）")
+    if p.get("idle"):                  # 接收方空着、按行比的（#62）：整批推得出、也提前了的另写一句
+        there = f"最早 {fmt_time(p['there'])} 才跑完" if p["there"] else "说不出何时跑完"
+        batch = (f"；整批预计从 {fmt_time(p['from'])} 提前到 {fmt_time(p['to'])}" if p["from"] is not None and p["to"] is not None and p["to"] < p["from"]
+                 else "")
+        when = f"{label.get(tid, tid)} 上现在没有 labmon 任务在跑，这几行在原处{there}，挪过来 {fmt_time(p['done'])} 前都跑完{batch}"
+    elif p["from"] is not None:
+        when = f"整批预计从 {fmt_time(p['from'])} 提前到 {fmt_time(p['to'])}（早 {fmt_dur(p['from'] - p['to'])}）"
+    else:
+        when = f"整批预计 {fmt_time(p['to'])} 跑完（现在有任务在原处跑不了，整批何时跑完推不出）"
     dep = [j["name"] for j in p["jobs"] if j.get("dep")]
     tail = f"；写了 after= 的 {'、'.join(dep)} 排在挪来的几行最后（等别的任务的行在前会堵住后面的）" if dep and len(dep) < len(p["jobs"]) else ""
     if p.get("local"):                 # 同机多开一条车道（#43）：剪到新的长期清单，与原清单同目录、同环境
@@ -137,7 +153,9 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
     报过建议的项目门槛减半（滞回）；上一轮的目标主机仍够门槛、跑完的时刻比最优的晚不到 STICK_S 时沿用它，免得几台一样空时每轮换一句。
     建议 {key 告警 key, target 挪到哪台, lane 接在它哪条清单后面, before 插在那条清单里哪一行前面（它写了依赖；None 接在末尾）,
     jobs [{host, root, queue, name, there, rest, end, own, dep 这一行写了 after=}], from 原来整批何时跑完
-    （推不出为 None）, to 挪后, cut 其中被借用约定挡住的清单 ["主机|目录|清单"], local 是不是同机多开一条车道, text}；挪不了的 {why [每台一句], from}；
+    （推不出为 None）, to 挪后（推不出为 None）, cut 其中被借用约定挡住的清单 ["主机|目录|清单"], local 是不是同机多开一条车道, text}；
+    整批没有够门槛的挪法、而有一台空着（offer 的 idle）时按行比（_idle_gain，#62）：建议另带 idle: True、there 这几行在原处最早何时跑完（说不出为 None）、
+    done 挪过去后何时都跑完；挪不了的 {why [每台一句], from}；
     没有可挪的、却有一台有空（这个项目早就没活，或同机能多开车道）只因挪来的那一行没有估时推演算不出（offer 的 nodur）时，
     {key "rebalance:<项目>:est", est: True, text 让会话写 est_min= 或 fit --list, why, from}（#43；同样只给会话、只叫醒一次）；都没有的项目不列。"""
     prev = prev or {}
@@ -156,24 +174,37 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
     out = {}
     for proj, xs in sorted(offs.items()):
         was = prev.get(proj) or {}
-        opts, why, est = [], [], []
+        opts, why, est, idles = [], [], [], []
+        half = 0.5 if was.get("key") else 1
         for hid, o in xs:
             f = _top(list(o["ends"].values()) + [o["free"]])
+            most = None                    # 这台空着时按行比成立的最多几行（#62）
             for k in range(1, len(o["jobs"]) + 1):
                 new = _finish(o, k)
-                if new is None or (f is not None and f - new < _need(f, t) * (0.5 if was.get("key") else 1)):
+                opt = {"target": hid, "lane": o["lane"], "before": o.get("before"), "jobs": o["jobs"][:k], "from": f, "to": new,
+                       "local": bool(o.get("local")), "gpus": o.get("gpus")}
+                there = _idle_gain(o["jobs"][:k], GAIN_MIN_S * half) if o.get("idle") and not o.get("local") else False
+                if there is not False:
+                    most = dict(opt, idle=True, there=there, done=o["jobs"][k - 1]["end"])
+                if new is None or (f is not None and f - new < _need(f, t) * half):
                     continue
-                opts.append({"target": hid, "lane": o["lane"], "before": o.get("before"), "jobs": o["jobs"][:k], "from": f, "to": new, "local": bool(o.get("local")), "gpus": o.get("gpus")})
+                opts.append(opt)
+            if most:
+                idles.append(most)
             # 挪不了：这台这个项目早就没活（离整批跑完还够阈值），却一行也接不了，写明为什么
             idle = f is None or (o["free"] is not None and f - max(o["free"], t) >= _need(f, t))
             if not o["jobs"] and o.get("why") and idle and not o.get("local"):     # 同机多开不成的不写：fit 会说
                 why.append(_why(hid, o, f, label, t))
             if not o["jobs"] and o.get("nodur") and (idle or o.get("local")):
                 est.append((hid, o))
-        if opts:
-            rank = lambda x: (x["to"], len(x["jobs"]))
-            best = min(opts, key=rank)
-            same = [x for x in opts if x["target"] == was.get("target") and x["local"] == bool(was.get("local")) and x["to"] <= best["to"] + STICK_S]
+        if opts or idles:
+            if opts:
+                rank = lambda x: (x["to"], len(x["jobs"]))
+                best = min(opts, key=rank)
+                same = [x for x in opts if x["target"] == was.get("target") and x["local"] == bool(was.get("local")) and x["to"] <= best["to"] + STICK_S]
+            else:                      # 没有整批的建议、有一台空着：按行比的（#62），挪得多的在前、再看跑完早的；上一轮的目标还成立就沿用
+                rank = lambda x: (-len(x["jobs"]), x["done"])
+                best, same = min(idles, key=rank), [x for x in idles if x["target"] == was.get("target") and not was.get("local")]
             best = dict(min(same or [best], key=rank), key=f"rebalance:{proj}")
             best["cut"] = sorted({_lane(j) for j in best["jobs"]} & late)
             best["text"] = _text(best, proj, label, t)
