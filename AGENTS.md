@@ -71,6 +71,7 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 本机在不在内网；按主机并行探测（一键一台，各走自己的长连接；有远程连不上时再查一次是不是刚离开内网） | `lan.check`、`lan.gather` |
 | 整文件覆盖写（写临时文件再改名；要 600 的传 `mode`，临时文件一建出来就是这个权限） | `state.write_atomic`；`save_json`、`collect.write_page`、`users.json` 都经它 |
 | 本机状态根目录（`LABMON_STATE`，缺省 `~/.local/state/labmon`；`tools/issue_watch.py` 的已见列表也放这里）与其下的状态目录 `overview/` | `state.state_root`、`state.state_dir` |
+| 按文件缓存读出的内容时判文件变没变（(inode, 修改时刻纳秒, 大小)；只比 `st_mtime` 时同一时间戳粒度里连写两次会漏读第二次，#31） | `state.file_sig`（`disk._rows`、`fleetview._hours`、`users._read`、`waits._sig`、`serve.Project._mtimes` 等）；worker 不 import 本包，另有一份 `fsig`（`load_hist`、`queue_durs`、`load_eta`、`list_of`、`list_env`、`qenv`），口径相同 |
 | JSON 状态文件；工作台的全局快照（上一轮 `overview.collect` 写的） | `state.load_json`、`state.save_json`；`state.snapshot()` |
 | JSONL（逐行记录、按保留期修剪；续写的互斥） | `state.parse_rows`、`state.load_rows`、`state.append_row`（内有按文件的 `_lock`）；worker 在服务器上跑、不 import 本包，另有一份 `load_jsonl`、`append_jsonl`（用量记录、事件、主机压力历史共用；互斥由调用方加 `flock`） |
 | 组内服务器状态目录里一个 JSON 的读改写（`op.json`、`boot.json`、`people.json`；平台操作线程、HTTP 线程与本机命令行都能改，读改写跨进程互斥） | `fleet.edit_state` |

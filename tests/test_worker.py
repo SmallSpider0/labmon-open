@@ -363,8 +363,8 @@ class AdmissionTest(WorkerBase):
 
     def test_cuda_oom_raises_next_estimate(self):
         # #62：清单任务打印 CUDA OOM 退出 1：用量行记 oom、放行时的估计；删 .failed 重排后按估计 ×2 = 24 GiB 等着，不再放进 hog 旁边原来的空位
-        # （40000 MB 的卡，hog 记 15 GiB，剩 24.1 GiB < 24+1）；hog 跑完后放行，再 OOM 一次，记的估计是 24
-        qa = self.queue("a", ["hog|sleep 8   # vram=15"])
+        # （40000 MB 的卡，hog 记 15 GiB，剩 24.1 GiB < 24+1）；hog 跑完后放行，再 OOM 一次，记的估计是 24。hog 停在闸门上，看完等着的再放行
+        qa = self.queue("a", [f"hog|{self.gate()}   # vram=15"])
         self.start()
         self.until(lambda: self.status().get("running"))
         qb = self.queue("b", ["x_s0|echo 'torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2 GiB'; exit 1   # vram=12 tag=t"])
@@ -380,6 +380,7 @@ class AdmissionTest(WorkerBase):
         w = next(w for w in self.status()["waiting"] if w["name"] == "x_s0")
         self.assertIn("没有可用显存够 24 GiB 的卡（同 tag 上次 OOM：放行时估 12.0 GiB ×2", w["why"])
         self.assertTrue(any(j["name"] == "hog" for j in self.status()["running"]))
+        self.release()
         self.until(lambda: len(x_rows()) == 2 and (qa / "state" / "hog.done").exists(), timeout=30)
         self.assertEqual([r["est"]["vram"] for r in x_rows()], [12.0, 24.0])
 
@@ -3755,6 +3756,29 @@ class DurationTest(unittest.TestCase):
         self.assertEqual(w.durs["k"], {"x_s3": {"min": 60.0, "src": "同类近 2 次 实际/估时 ×0.60", "k": 0.6, "cls": "x", "same": True}})
         self.assertFalse(self.m.fits_before(0, w.req_dur({"key": "k", "kind": "queue", "name": "x_s3"}), 71 * 60))   # 准入看的：清单算好的 × DUR_MARGIN = 72 分钟
         self.assertTrue(self.m.fits_before(0, w.req_dur({"key": "k", "kind": "queue", "name": "x_s3"}), 72 * 60))
+
+    def test_cache_sees_second_write_within_same_mtime(self):
+        # #31：同一个时间戳粒度里连写两次（os.utime 把修改时刻钉回去）第二次也要读到：用量记录（load_hist）与清单（queue_durs）都按 (inode, 纳秒, 大小) 认
+        f = self.d / "home" / "hosts" / "29" / "usage.jsonl"
+        f.parent.mkdir(parents=True)
+        f.write_text(json.dumps(self.rec("x_s1", 60.0, 100)) + "\n")
+        w = self.m.Worker("t")
+        ns = f.stat().st_mtime_ns
+        with open(f, "a") as fh:
+            fh.write(json.dumps(self.rec("x_s2", 60.0, 100)) + "\n")
+        os.utime(f, ns=(ns, ns))
+        self.assertEqual([h["name"] for h in self.m.load_hist(w.hist_cache)], ["x_s1", "x_s2"])
+        root = self.d / "bp"
+        (root / "jobs").mkdir(parents=True)
+        jf = root / "jobs" / "q.txt"
+        jf.write_text("a|true\n")
+        q = self.m.load_queue({"_slug": "k", "root": str(root), "jobs": "jobs/q.txt", "project": "bp"})
+        w.queue_durs([q])
+        ns = jf.stat().st_mtime_ns
+        jf.write_text("a|true\nb|true\n")
+        os.utime(jf, ns=(ns, ns))
+        w.queue_durs([q])
+        self.assertEqual([n for n, _ in w.qlists["k"][1]], ["a", "b"])
 
     def test_hist_order_and_share(self):
         # 排序与份额都按 t1；没记 project 的旧行（按目录名猜的）只供估时，不进份额；30 天前的也不进

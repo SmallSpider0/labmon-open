@@ -1363,6 +1363,13 @@ class LocalDisk(Disk):
         return {"t": ix.get("t"), "local": local, "own": own if units else None, "wrote": wrote}
 
 
+def fsig(path):
+    """文件变没变的签名 (inode, 修改时刻纳秒, 大小)，按文件缓存读出内容的都拿它比；读不到抛 OSError。只比 st_mtime 时同一个时间戳粒度里
+    连写两次第二次就漏读（共享盘上别的主机刚续写的用量记录要等下次再写才补上，#31）。看板那边是 state.file_sig，口径相同。"""
+    st = os.stat(path)
+    return st.st_ino, st.st_mtime_ns, st.st_size
+
+
 def load_jsonl(path):
     """JSONL 的全部行（用量记录、事件、主机压力历史共用；写坏的行跳过）。"""
     out = []
@@ -1392,12 +1399,12 @@ def append_jsonl(path, row, keep_s=None):
 
 def load_hist(cache):
     """各主机的 usage.jsonl（共享盘上同一个 HOME）：资源与时长都看所有主机的同类记录，借来的主机一上来就有历史。
-    cache 为 {文件: (修改时间, 记录)}，文件没变不重读；有变化返回按结束时刻排好的全部记录（记上主机），没变返回 None。
+    cache 为 {文件: (fsig, 记录)}，文件没变不重读；有变化返回按结束时刻排好的全部记录（记上主机），没变返回 None。
     几秒内就结束、没量到用量的（ram_peak 为空）也留着：依赖要看到这次的结果（别的主机上起不来就失败的），资源估计（estimate）自己跳过它们。"""
     changed = False
     for f in glob.glob(os.path.join(HOME, "hosts", "*", "usage.jsonl")):
         try:
-            m = os.stat(f).st_mtime
+            m = fsig(f)
         except OSError:
             continue
         if cache.get(f, (None,))[0] != m:
@@ -1877,7 +1884,7 @@ class Worker:
         self.info, self.gprocs, self.gp, self.cpu_prev = {}, [], [], None   # gp：这一轮 sample 认过归属的 GPU 进程（带任务引用）
         self.cpu_n = 0                        # labmon 之外的进程连着几轮占 VOID_CPU 核以上（整机独占放行前看，一轮的尖峰不算）
         self.local, self.local_t = None, 0   # 待跑任务声明的本地依赖（续租前看会不会丢）
-        self.envc = {}                        # 队列 key → (.env 修改时间, 变量)
+        self.envc = {}                        # 队列 key → (.env 的 fsig, 变量)
         self.storage = None                   # 本地盘：各项目的缓存与单格临时、labmon 之外的新写入（LocalDisk.summary）；共享盘上各项目目录（看板按它把共享盘用量分到项目）
         self.gate, self.failcnt, self.ovr, self.seen = False, None, [], set()
         self.uwin = {}                        # 卡 UUID → 近 UTIL_WIN_S 秒的 (时刻, 利用率)
@@ -1896,7 +1903,7 @@ class Worker:
         self.squeezed = {}                    # 任务名 → 借来的主机上被对方挤掉、重新排队的次数
         self.hist_cache, self.hist, self.hist_v = {}, [], 0   # 各主机的用量记录（load_hist），hist_v 每次有变化加一
         self.reload_hist()
-        self.qlists, self.durs, self.durs_key = {}, {}, None   # 各清单的 (修改时间, [(名称, 资源提示)])、预计时长（queue_durs）
+        self.qlists, self.durs, self.durs_key = {}, {}, None   # 各清单的 (fsig, [(名称, 资源提示)])、预计时长（queue_durs）
         self.durk = {}                                        # (项目, 任务, 清单估时, 同卡任务数 k) → duration 的结果（dur_k；queue_durs 重算时清掉）
         self.qest = {}                        # 队列 key → {任务: 资源估计（estimate）}（queue_durs 与预计时长一起算）
         self.plan, self.plan_key = {"t": 0, "lanes": []}, None   # 推演结果（forecast）与算它时的输入
@@ -1914,7 +1921,7 @@ class Worker:
         self.elsewhere = {}                   # 别的主机放行、这台不动的清单任务 {队列: (主机, 任务)}（run_elsewhere）：变了才记事件
         self.gone = set()                     # 看板说已归还的主机（returned.json，peers 一起读）：worker 不在时 offers 不把它的清单当说不准
         self.peer_st = {}                     # 别的在用主机的状态 {主机: status.json}（没过期、没 worker stop 过的；peers 一起读，offers 用）
-        self.olists = {}                      # 别的主机上清单与 .env 的 {路径: (修改时间, [(任务, 资源提示)] 或 .env 内容)}（list_of、list_env 缓存）
+        self.olists = {}                      # 别的主机上清单与 .env 的 {路径: (fsig, [(任务, 资源提示)] 或 .env 内容)}（list_of、list_env 缓存）
         self.offer, self.offer_t = [], 0.0    # 能接别处的任务（offers，写进状态给看板汇总挪法建议）与算出它的时刻
         self.bad_reg = set()                  # 坏了的登记文件（registry 跳过，只记一次事件）
         self.peer_regs = {}                   # 别的在用主机（peer_st）登记的清单 {(目录, 清单): [(登记文件修改时间, 主机)]}（peers 一起读，registry 认同一条清单归谁，#95）
@@ -2918,7 +2925,7 @@ class Worker:
         lists = {}
         for q in queues:
             try:
-                m = os.stat(q["jobs_path"]).st_mtime
+                m = fsig(q["jobs_path"])
             except OSError:
                 continue
             c = self.qlists.get(q["key"])
@@ -2982,7 +2989,7 @@ class Worker:
     def load_eta(self):
         """看板写来的运行中任务预计结束 {"t": 写的时刻, "jobs": {"项目|任务": 时刻}}（项目看板按日志进度算的，比时长估计准）；文件变了才重读。"""
         try:
-            m = os.stat(self.p.eta).st_mtime
+            m = fsig(self.p.eta)
         except OSError:
             self.eta, self.eta_t, self.eta_m = {}, 0, None
             return
@@ -3227,7 +3234,7 @@ class Worker:
     def list_of(self, path):
         """一条清单的 [(任务, 资源提示)]，按修改时间缓存（offers 取各行的资源提示；还会跑哪几行看 todo）；读不到为 None。"""
         try:
-            m = os.stat(path).st_mtime
+            m = fsig(path)
         except OSError:
             return None
         c = self.olists.get(path)
@@ -3241,7 +3248,7 @@ class Worker:
         给这条队列记账的位置，同目录的几条清单按规矩各写各的（两条队列不许共用状态目录），不算任务的环境。"""
         path = env_path(root, queue)
         try:
-            m = os.stat(path).st_mtime
+            m = fsig(path)
         except OSError:
             return os.path.normpath(root), None
         c = self.olists.get(path)
@@ -4450,7 +4457,10 @@ class Worker:
 
     def qenv(self, q):
         """队列的变量（读 .env 要起 bash，按修改时间缓存）。"""
-        mt = os.path.getmtime(q["env"]) if q["env"] and os.path.exists(q["env"]) else None
+        try:
+            mt = fsig(q["env"]) if q["env"] else None
+        except OSError:
+            mt = None
         c = self.envc.get(q["key"])
         if not c or c[0] != mt:
             c = self.envc[q["key"]] = (mt, env_of(q))

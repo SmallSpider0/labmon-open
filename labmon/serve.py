@@ -126,7 +126,7 @@ from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, cfg_spec,
     stale_limit, user_hosts, STALE_PAD_S, STALE_RUNS
 from .records import cat_of, log_events, records, report, report_headers, schedule_project, tell
 from .service import log, notify, rotate_log
-from .state import load_json, snapshot, state_dir
+from .state import file_sig, load_json, snapshot, state_dir
 
 OFFLINE = "本机不在内网：平台与各服务器都连不上，回到内网再操作"
 MIN_GAP = 10                   # 两次“立即采集”至少相隔这么多秒，更频繁的请求直接返回现有快照（页面改了配置后的那次除外）
@@ -230,7 +230,7 @@ class Project(_Collector):
 
     def _mtimes(self) -> tuple:
         # 项目配置与用户级主机清单任一改动都重读；主机清单是后来才建的也算
-        return tuple(os.stat(p).st_mtime for p in sources(self.cfg)) + (hosts_file().exists(),)
+        return tuple(file_sig(p) for p in sources(self.cfg)) + (hosts_file().exists(),)
 
     def _reload(self) -> None:
         try:
@@ -467,7 +467,7 @@ class Server(ThreadingHTTPServer):
                     self.projects = {**self.projects, pid: old}
                     msgs.append(f"{pid}：已恢复，接着采集")
                     continue
-                m = PJ.cfg_file(pid).stat().st_mtime
+                m = file_sig(PJ.cfg_file(pid))
                 if self.bad.get(pid) == m:
                     continue
                 try:

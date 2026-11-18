@@ -127,7 +127,7 @@ class ClientDistTest(unittest.TestCase):
                 pass
 
         with ThreadingHTTPServer(("127.0.0.1", 0), Board) as server:
-            thread = threading.Thread(target=server.serve_forever)
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
             thread.start()
             try:
                 local_config = config / "test.toml"
@@ -205,7 +205,7 @@ class ClientDistTest(unittest.TestCase):
         ctx.load_cert_chain(self.root / "board.crt", self.root / "board.key")
         with ThreadingHTTPServer(("127.0.0.1", 0), Board) as server:
             server.socket = ctx.wrap_socket(server.socket, server_side=True)
-            thread = threading.Thread(target=server.serve_forever)
+            thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05})
             thread.start()
             try:
                 url = f"https://127.0.0.1:{server.server_port}/"

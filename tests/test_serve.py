@@ -1629,6 +1629,23 @@ class DiskTest(unittest.TestCase):
                 for k, v in old.items():
                     os.environ.pop(k) if v is None else os.environ.__setitem__(k, v)
 
+    def test_rows_cache_sees_second_write_within_same_mtime(self):
+        # #31：scans.jsonl 同一个修改时刻里续写一行也要读到（以前只比 st_mtime，漏读到下次写）；换了状态目录不拿另一个目录的缓存
+        from labmon import disk as DK
+        with tempfile.TemporaryDirectory() as td, mock.patch.dict(os.environ, {"LABMON_STATE": td}):
+            f = DK._f("scans.jsonl")
+            f.parent.mkdir(parents=True)
+            f.write_text(json.dumps({"u": "a"}) + "\n")
+            self.assertEqual([r["u"] for r in DK._rows("scans.jsonl")], ["a"])
+            ns = f.stat().st_mtime_ns
+            with open(f, "a") as fh:
+                fh.write(json.dumps({"u": "b"}) + "\n")
+            os.utime(f, ns=(ns, ns))
+            self.assertEqual([r["u"] for r in DK._rows("scans.jsonl")], ["a", "b"])
+            with tempfile.TemporaryDirectory() as td2, mock.patch.dict(os.environ, {"LABMON_STATE": td2}):
+                self.assertEqual(DK._rows("scans.jsonl"), [])
+
+
 class LinkStepTest(unittest.TestCase):
     """掉线判定的边界：连不上要连续至少 2 次、且从第一次起持续 DOWN_S 秒才算；判过一次不再判；连上了才算恢复、清计数。"""
 
