@@ -2710,6 +2710,19 @@ class RegDupTest(UnitBase):
         self.assertEqual(self.w.running, {})
         self.assertEqual(self.events("interrupt"), [])
 
+    def test_add_expect_from_requires_source(self):
+        # 算力池搬清单（#25）带 --expect-from 原来那台：在登记锁里核对那台还登记着它；会话已撤回、已搬走的不再重新登记（Codex 审查 #75）
+        self.ft.unlink()
+        self.fo.unlink()
+        rc, out = self.add("t", "--expect-from", "o")
+        self.assertEqual(rc, 2, out)
+        self.assertIn("已不在 o 上", out)
+        self.assertEqual(list((self.hosts.home / "hosts" / "t" / "queues").glob("*.json")), [])
+        self.fo = self.hosts.register("o", "s", "pa")
+        rc, out = self.add("t", "--expect-from", "o")
+        self.assertEqual(rc, 0, out)
+        self.assertFalse(self.fo.exists())
+
     def test_guarded_add_and_rm_reject_stale_project(self):
         # 看板采到的主人已过期时，worker 在登记锁内按当前文件核对。
         reg = json.loads(self.fo.read_text())

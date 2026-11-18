@@ -224,7 +224,9 @@ def _box(st: dict, m: dict) -> str | None:
     同 health.container_step 认新容器的口径）；有一边不知道为 None。"""
     if not (m.get("started") and st.get("started")):
         return None
-    return "new" if abs(st["started"] - m["started"]) > 60 else "same"
+    if (st.get("last") or 0) <= (m.get("since") or 0):         # 这次借用之前的探测：记的可能是上一个容器（借来时 begin 现场探到的才算数），说不准
+        return None
+    return "new" if st["started"] - m["started"] > 60 else "same" if abs(st["started"] - m["started"]) <= 60 else None
 
 
 def relaunch_ok(e: dict, t: float | None = None) -> bool:
@@ -360,13 +362,15 @@ def _place(items: list[dict], cands: list[dict], regs: dict, t: float, move, fit
     """把放不下的清单放到候选的池主机上（fit 判；每台每轮一条，免得读到旧的 room 放多了）；要还的主机上放不下的回池里（back）。
     budget[0]：这一轮还能问几次 fit。返回仍放不下的（带 need 与原因 why）。"""
     left, used = [], set()
+    new = {it["key"] for it in items if not any(k[0] == it["key"] for k in _FIT)}   # 还没问过的清单：先给它们留预算，免得前面放不下的每轮重问把预算吃光
     for it in items:
         hs = [e["id"] for e in cands if e["id"] != it["host"] and e["id"] not in used]
         ck = (it["key"], tuple(hs))
         hit, asked = _FIT.get(ck), True
+        new.discard(it["key"])
         if hit and t - hit[0] < POOL_RETRY_S:
             res = hit[1]
-        elif budget[0] > 0:
+        elif budget[0] > 0 and (it["key"] not in {k[0] for k in _FIT} or budget[0] > len(new)):
             budget[0] -= 1
             try:
                 res = fit(it, hs)

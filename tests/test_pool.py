@@ -316,6 +316,18 @@ class PoolPlaceTest(TickBase):
         self.assertEqual(out["lists"]["/r/x|jobs/x.txt"]["since"], NOW - 600)
         self.assertEqual(self.starts, [])
 
+    def test_fit_budget_reaches_unasked_lists(self):
+        # 前面的清单一直放不下、缓存过期后每轮都要重问：没问过的清单先拿预算，后面的不会永远轮不到（Codex 审查 #75）
+        e = self.lent("a")
+        lists = [self.pool_list("/r/%d" % i, project="p%d" % i, added=NOW - 600 + i) for i in range(P.POOL_FIT_MAX + 2)]
+        self.fit_res = lambda it, hs: {"need": {"ngpu": 1, "vram": 20.0}, "hosts": {h: {"ok": False, "why": "满"} for h in hs}}
+        with mock.patch.object(P.FO, "busy", return_value={"zz": "renew"}):
+            self.tick(self.snap([e], lists))
+            asked = {k for k, _ in self.fits}
+            self.assertEqual(len(asked), P.POOL_FIT_MAX)
+            self.tick(self.snap([e], lists), t=NOW + P.POOL_RETRY_S + 1)
+        self.assertEqual({k for k, _ in self.fits}, {P.key(q["root"], q["jobs"]) for q in lists})
+
     def test_order_throttle_and_retry(self):
         # 先后照 fair_key（这人的用量少的先）；每台每轮只放一条；fit 每轮最多 POOL_FIT_MAX 次、同一（清单, 候选）POOL_RETRY_S 内不重判
         e = self.lent("a")
@@ -334,7 +346,7 @@ class PoolPlaceTest(TickBase):
             out = self.tick(self.snap([e], lists[:5], use=use), t=NOW + 1)
         self.assertEqual(len(self.fits), P.POOL_FIT_MAX)
         self.assertEqual(self.moves, [])
-        self.assertIn("这一轮问得够多了", out["lists"]["/r/0|jobs/x.txt"]["why"])
+        self.assertIn("这一轮问得够多了", out["lists"]["/r/2|jobs/x.txt"]["why"])    # 没问过的 p1、p0 先拿预算，问过的 p2 排到下一轮
         self.assertIn("池里借着的服务器都放不下（a：卡不够）", out["lists"]["/r/4|jobs/x.txt"]["why"])
         n = len(self.fits)
         with mock.patch.object(P.FO, "busy", return_value={"zz": "renew"}):
@@ -409,6 +421,17 @@ class PoolBorrowTest(TickBase):
     def hours(self, a, b):
         hm = lambda x: time.strftime("%H:%M", time.localtime(x))        # noqa: E731
         self.write('lend = true\nlend_hours = "%s-%s"\n' % (hm(a), hm(b)))
+
+    def test_probe_before_borrow_is_not_new_box(self):
+        # 组内探测早于这次借用、记的是上一个容器：不算换了容器（借来时 begin 现场探到的才是这次的），不还（Codex 审查 #75）
+        self.probe("a", started=NOW - 86400, last=NOW - 540)
+        self.mem("a", started=NOW - 600, since=NOW - 60)
+        e = self.lent("a", {"running": [{"name": "j", "hold": False}]})
+        out = self.tick(self.snap([e], []))
+        self.assertEqual((self.fins, out["gone"]), ([], []))
+        self.probe("a", started=NOW - 30, last=NOW)                      # 借来之后探到的新容器：换了，直接还
+        out = self.tick(self.snap([e], []), t=NOW + 1)
+        self.assertEqual(out["gone"], ["a"])
 
     def test_borrows_when_nothing_fits(self):
         # 池里有清单、没有借着的主机：按 fit 给的 need 挑一台入池的（a），fleetops.start("borrow", pool=True)；一轮最多借一台

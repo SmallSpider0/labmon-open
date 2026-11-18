@@ -6294,6 +6294,7 @@ def main(argv=None):
     ap.add_argument("--gpus", help="add：只用这些卡（nvidia-smi 序号，逗号分隔）")
     ap.add_argument("--project", help="add：看板的项目 id（必写）；fit：按这个项目的历史估（缺省取同名任务最近一次的项目）")
     ap.add_argument("--expect-project", help="add / rm：在登记锁内核对这条清单所属的项目")
+    ap.add_argument("--expect-from", help="add：在登记锁内核对这条清单此刻还登记在这台（算力池搬清单用，#25：会话已撤回、已搬走的不再重新登记）")
     ap.add_argument("--stop", help="add：暂停时怎么停：boundary（缺省，等当前任务跑完）/ term / file:<相对 ROOT 的路径>")
     ap.add_argument("--until", type=float, help="override add：到期时刻（epoch 秒）")
     ap.add_argument("--now", action="store_true", help="override add pause：立即按停法停下正在跑的")
@@ -6331,9 +6332,12 @@ def main(argv=None):
                 print(str(e), file=sys.stderr)
                 return 2
         # 核对项目、查状态目录、登记与搬走，整段经同一把登记锁。
-        with reg_lock(required=bool(a.expect_project)):
+        with reg_lock(required=bool(a.expect_project or a.expect_from)):
             dirs = reg_dirs()
             old_regs = matching_regs(p.queues, root, a.args[1])
+            if a.cmd == "add" and a.expect_from and not (dirs.get(a.expect_from) and reg_files(dirs[a.expect_from], root, a.args[1])):
+                print("这条清单已不在 %s 上（撤回或搬走了）：不搬" % a.expect_from, file=sys.stderr)
+                return 2
             if a.expect_project:
                 matches = list(old_regs)
                 if a.cmd == "add":

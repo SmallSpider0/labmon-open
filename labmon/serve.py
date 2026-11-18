@@ -1588,7 +1588,8 @@ def reg_move(to: str, items: list, own: bool = False, pool: str | None = None) -
             with PJ._reg_locked():
                 if reason := A.unknown_project(pid, require=True):
                     raise ConfigError(reason)
-                rc, out = W.run_out("add", to, [root, jobs], project=pid, stop=it.get("stop") or None, **({"expect_project": pid} if own else {}))
+                rc, out = W.run_out("add", to, [root, jobs], project=pid, stop=it.get("stop") or None, **({"expect_project": pid} if own else {}),
+                                    **({"expect_from": frm} if pool is not None and frm and frm != to else {}))   # 算力池按上一轮快照搬：worker 在锁里核对原来那台还登记着（#25）
             text = " ".join(out.strip().splitlines()[-2:])
             if rc != 0:
                 raise ConfigError(f"{_qname(root, jobs)} 没搬到 {to}：{text}" + (f"（已搬 {len(done)} 条）" if done else ""))
