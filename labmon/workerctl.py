@@ -100,9 +100,11 @@ def project_init(hid: str, name: str | None) -> tuple[int, str]:
 
 
 def override_each(action: str, kind: str, target: str | None, hosts: list[str], until: float | None = None, now: bool = False,
-                  at: float | None = None, keep: dict | None = None, once: bool = False) -> list[dict]:
+                  at: float | None = None, keep: dict | None = None, once: bool = False, by: str | None = None, expect_by: str | None = None) -> list[dict]:
     """在各主机的 worker 目录写只给这几台的临时指令（overrides.json），worker 下一轮生效。项目级的暂停、优先（所有主机）不经这里，
     记在主机清单（config.set_sched_ovr）。keep：guest 指令给对方留的量（borrow.reserve_for）；once：pause --now 停完就删（暂停由全局的那条挡）。
+    by：谁下的（看板账号名，记进那条的 by，#27）；expect_by：worker 在锁里核对那台已有的同目标指令是这个账号下的（或没有），不是就不改、退出码 2
+    （普通用户经看板写按主机的暂停时传，判断在 users.need_pause，这里只核快照之后有没有变）。
     返回每台的结果 [{"host", "rc", "out"}]（out 是 worker 打印的“生效中：…”，或 ssh 连不上的原因）。备用的看板服务上不写（#163）。"""
     LS.need("临时指令")
     out = []
@@ -111,7 +113,8 @@ def override_each(action: str, kind: str, target: str | None, hosts: list[str], 
         w = f"env {worker_env(h)} {shlex.quote(h['python'])} {shlex.quote(h['worker_home'] + '/labmon_worker.py')}"
         args = ["override", action, kind] + ([target] if target else [])
         extra = (f" --until {until}" if until else "") + (" --now" if now else "") + (f" --at {at}" if at else "") \
-            + (f" --keep {shlex.quote(json.dumps(keep))}" if keep else "") + (" --once" if once else "")
+            + (f" --keep {shlex.quote(json.dumps(keep))}" if keep else "") + (" --once" if once else "") \
+            + (f" --by {shlex.quote(by)}" if by else "") + (f" --expect-by {shlex.quote(expect_by)}" if expect_by is not None else "")
         rc, text = ssh(h, f"{w} {' '.join(shlex.quote(x) for x in args)}{extra} --host {shlex.quote(hid)}")
         out.append({"host": hid, "rc": rc, "out": text})
     return out

@@ -505,7 +505,7 @@ def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | Non
     近 1 天平均等多久（放行时记的 wait，按开始时刻取窗口：跑完的取本机存的用量记录 _keep_usage，在跑的取状态）、
     优先、暂停：null 或 {until（None 为无期限）, hosts}：项目级的（sw，主机清单 [sched.focus]、[sched.pause]，缺省现读）hosts 为 None，
     项目级的暂停另带 by（谁下的，config.pause_by；没记的为 None，当管理员下的，#16）；
-    没有项目级的、只在几台单独下的（worker 状态 overrides 里不带 global 的）hosts 列出这几台，until 取最晚的。
+    没有项目级的、只在几台单独下的（worker 状态 overrides 里不带 global 的）hosts 列出这几台，until 取最晚的；暂停另带 by：{主机: 谁下的}（不算 once，没记的为 None，#27）。
     项目取看板上的，另加此刻在跑、在等的别的项目名；没有 worker 状态带 share 时为 None。"""
     sts = [h["status"] for h in hosts if (h.get("status") or {}).get("share")]
     if not sts:
@@ -525,9 +525,12 @@ def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | Non
     def flag(kind, pid):
         if pid in (sw.get(kind) or {}):
             return {"until": sw[kind][pid], "hosts": None, **({"by": by.get(pid)} if kind == "pause" else {})}
-        on = [(h["id"], o.get("until")) for h in hosts for o in (h.get("status") or {}).get("overrides") or []
+        on = [(h["id"], o) for h in hosts for o in (h.get("status") or {}).get("overrides") or []
               if o["kind"] == kind and o.get("target") == pid and not o.get("global")]
-        return {"until": max((u for _, u in on), key=lambda u: u or float("inf")), "hosts": sorted({h for h, _ in on})} if on else None
+        if not on:
+            return None
+        return {"until": max((o.get("until") for _, o in on), key=lambda u: u or float("inf")), "hosts": sorted({h for h, _ in on}),
+                **({"by": {h: o.get("by") for h, o in on if not o.get("once")}} if kind == "pause" else {})}
     keys = {p: F.share_key(n) for p, n in people.items() if n}
     puse = {}
     for q, v in sh["use"].items():

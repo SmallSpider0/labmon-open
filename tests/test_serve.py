@@ -543,7 +543,7 @@ class ServeTest(unittest.TestCase):
         # 优先、暂停：项目级的（主机清单，hosts 为 None）取 sw；只在几台单独下的列出主机、到期取最晚（None 为无期限）；状态里的 global 项不重复算
         self.assertEqual((a["w"], a["use"], a["cards"], a["wait_avg"], a["wait_n"], a["focus"], a["paused"]),
                          (2.0, 3.0, 1.5, 15.0, 2, {"until": None, "hosts": ["x", "y"]}, {"until": now + 60, "hosts": None, "by": None}))
-        self.assertEqual((b["w"], b["queued"], b["waiting"], b["paused"], b["focus"]), (1, 2, 1, {"until": None, "hosts": ["x"]}, None))
+        self.assertEqual((b["w"], b["queued"], b["waiting"], b["paused"], b["focus"]), (1, 2, 1, {"until": None, "hosts": ["x"], "by": {"x": None}}, None))
         self.assertEqual((b["wait_avg"], b["wait_n"]), (1.0, 70))
 
     def test_events_only_this_project(self):
@@ -1024,6 +1024,34 @@ class AuthTest(unittest.TestCase):
         seen = U.view(U.Ident("amy", "user", frozenset({"project"}), "token", "k"), {"sched": snap, "projects": [], "hosts": []})
         self.assertNotIn("by", seen["sched"]["projects"][1]["paused"])        # 别人项目的暂停：普通用户看不到是谁下的
         self.assertIn("by", seen["sched"]["projects"][0]["paused"])
+
+    def test_host_pause_records_who_and_user_cannot_undo_admin_pause(self):
+        """只给某几台的暂停（--host）也记谁下的（#27）：两台各按那台 worker 状态里的 by 判断，同 users.need_pause；
+        普通用户在管理员下过的那台上撤不掉、也重下不了，另一台照常下，写的时候带 --by 与 --expect-by；管理员只带 --by。
+        普通用户看得到的主机状态里，别人项目的指令去掉 by。"""
+        amy = make_token("amy", role="user", scopes=("project",))
+        admin = make_token("boss", role="admin", scopes=("admin", "project"))
+        PJ.put_config("exp", 'id = "exp"\n', owner="amy")
+        K.hosts_file().write_text('[[hosts]]\nid = "a"\nssh = "remote-a"\nusers = ["amy"]\n[[hosts]]\nid = "b"\nssh = "remote-b"\nusers = ["amy"]\n')
+        ov = {"a": [{"kind": "pause", "target": "exp", "by": "boss"}, {"kind": "pause", "target": "other", "by": "bob"}],
+              "b": [{"kind": "pause", "target": "exp", "once": True}]}
+        save_json(state_dir() / "snapshot.json", {"hosts": [{"id": h, "status": {"t": time.time(), "overrides": o}} for h, o in ov.items()]})
+        with mock.patch.object(S.W, "override_each", return_value=[{"host": "b", "rc": 0, "out": "ok"}]) as each:
+            for path, data in (("/api/override/resume", {"target": "exp", "hosts": ["a"]}),
+                               ("/api/override/pause", {"target": "exp", "hosts": ["b", "a"]}),
+                               ("/api/override/pause", {"target": "exp", "hosts": ["a"], "now": True})):
+                self.assertEqual(self.call(self.lan + path, data, tok=amy)[0], 403, path)
+            each.assert_not_called()
+            self.assertEqual(self.call(self.lan + "/api/override/pause", {"target": "exp", "hosts": ["b"]}, tok=amy)[0], 200)   # once 不算
+            self.assertEqual(each.call_args.args[:4], ("add", "pause", "exp", ["b"]))
+            self.assertEqual((each.call_args.kwargs["by"], each.call_args.kwargs["expect_by"]), ("amy", "amy"))
+            self.assertEqual(self.call(self.lan + "/api/override/resume", {"target": "exp", "hosts": ["a"]}, tok=admin)[0], 200)
+            self.assertEqual((each.call_args.kwargs["by"], each.call_args.kwargs["expect_by"]), ("boss", None))
+        self.assertEqual(O.sched_view([{"id": h, "status": {"t": 1, "overrides": o, "share": {"weight": {}, "use": {}, "wait_cap_min": 30, "half_life_h": 24}}}
+                                       for h, o in ov.items()], [{"id": "exp"}], time.time())["projects"][0]["paused"],
+                         {"until": None, "hosts": ["a", "b"], "by": {"a": "boss"}})
+        seen = U.view(U.Ident("amy", "user", frozenset({"project"}), "token", "k"), {"hosts": [{"id": h, "status": {"overrides": o}} for h, o in ov.items()]})
+        self.assertEqual([o.get("by") for o in seen["hosts"][0]["status"]["overrides"]], ["boss", None])   # 自己项目的照给，别人项目的去掉
 
     def test_check_hides_hosts_not_opened_to_user(self):
         """普通用户的 labmon check（#16）：引用了没开给他的主机，照常校验，但不打那台的连接信息与探针规格；管理员照旧全打。"""

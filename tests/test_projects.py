@@ -90,20 +90,51 @@ class ArchiveTest(unittest.TestCase):
 
     def test_user_archive_keeps_admin_schedule(self):
         """普通用户归档自己的项目（#16）：只撤自己下的暂停；管理员定的权重、优先与别人下的暂停留着，恢复后照旧生效，归档绕不过去。管理员归档照旧全撤。"""
+        from labmon import users as U
+        amy = U.Ident("amy", "user", frozenset({"project"}), "token", "k")
         K.set_sched_ovr("focus", "p1", True)
         K.set_sched_ovr("pause", "p1", True, by="boss")
-        PJ.archive("p1", self.psnap(), self.glob(), user="amy")
+        PJ.archive("p1", self.psnap(), self.glob(), who=amy)
         sw = K.sched()
         self.assertEqual((sw["weight"]["p1"], sw["pause"], sw["focus"]), (2, {"p1": None}, {"p1": None}))
         self.assertEqual(K.pause_by(), {"p1": "boss"})
         PJ.restore("p1")
         K.set_sched_ovr("pause", "p1", True, by="amy")
-        PJ.archive("p1", self.psnap(), self.glob(), user="amy")
+        PJ.archive("p1", self.psnap(), self.glob(), who=amy)
         sw = K.sched()
         self.assertEqual((sw["weight"].get("p1"), "pause" in sw, K.pause_by()), (2, False, {}))   # 自己下的暂停撤了，权重与优先留着
         PJ.restore("p1")
         PJ.archive("p1", self.psnap(), self.glob())
         self.assertEqual(K.sched(), {"weight": {"p2": 3}})
+
+    def test_user_archive_keeps_admin_host_overrides(self):
+        """普通用户归档（#27）：只给某几台下的暂停也只撤他自己下的（各台按那台的 by 分开判断）；管理员在 b 上下的暂停、a 上的优先留着。
+        快照晚了、那台上其实已换成管理员的：worker 在锁里核（--expect-by），不撤、归档报没做完。管理员归档全撤。"""
+        from labmon import users as U
+        amy = U.Ident("amy", "user", frozenset({"project"}), "token", "k")
+        ova, ovb = (self.wh / "hosts" / h / "overrides.json" for h in "ab")
+        for f in (ova, ovb):
+            f.parent.mkdir(parents=True, exist_ok=True)
+        ova.write_text(json.dumps([{"kind": "pause", "target": "p1", "by": "Amy"}, {"kind": "focus", "target": "p1", "by": "boss"}]))
+        ovb.write_text(json.dumps([{"kind": "pause", "target": "p1", "by": "boss"}]))
+        hosts = [{"id": "a", "status": fake_status(overrides=json.loads(ova.read_text()))},
+                 {"id": "b", "status": fake_status(overrides=json.loads(ovb.read_text()))}]
+        g = self.glob(hosts=hosts)
+        msg = PJ.archive("p1", self.psnap(), g, who=amy)
+        self.assertEqual([(o["kind"], o.get("by")) for o in json.loads(ova.read_text())], [("focus", "boss")])
+        self.assertEqual(json.loads(ovb.read_text()), [{"kind": "pause", "target": "p1", "by": "boss"}])
+        self.assertIn("a 上的优先", msg)
+        self.assertIn("b 上的暂停", msg)
+        PJ.restore("p1")
+        ova.write_text(json.dumps([{"kind": "pause", "target": "p1", "by": "boss"}]))      # 快照里还是 amy 的，那台已换成管理员的
+        g = self.glob(hosts=[{"id": "a", "status": fake_status(overrides=[{"kind": "pause", "target": "p1", "by": "amy"}])}])
+        with self.assertRaises(ConfigError) as x:
+            PJ.archive("p1", self.psnap(), g, who=amy)
+        self.assertIn("没做完", str(x.exception))
+        self.assertEqual(len(json.loads(ova.read_text())), 1)
+        self.assertNotIn("p1", PJ.archived())
+        PJ.archive("p1", self.psnap(), self.glob(hosts=hosts))                                 # 管理员：全撤
+        self.assertEqual((json.loads(ova.read_text()), json.loads(ovb.read_text())), ([], []))
 
     def test_archive_multi_host(self):
         # 两台在用 + 一台已归还共用 worker_home：三处 p1 的登记都移除（已归还的 c 经 a 代办，不连 c）；p2 的不动；

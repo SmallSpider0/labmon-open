@@ -402,7 +402,7 @@ def overview() -> dict:
             "rebalance": {"proj-a": dict(REBAL), "proj-b": {"why": ["srv-a 上本项目 11-10 22:59 后没活，接不了：srv-b 上 jobs/b3.txt 的队尾 hold_b 是占位任务，不挪"], "from": NOW + 9 * H}},
             "sched": {"cap_min": 30.0, "hl_h": 24.0, "use_sum": 22.1, "projects": [
                 {"id": "proj-a", "person": "amy", "pk": "5a1c0e7d9b2f", "puse": 22.1, "w": 1, "use": 18.9, "cards": 1.0, "queued": 2, "waiting": 2, "wait_avg": 12.5, "wait_n": 3, "focus": {"until": NOW + 6 * H, "hosts": None}, "paused": None},
-                {"id": "proj-b", "person": "amy", "pk": "5a1c0e7d9b2f", "puse": 22.1, "w": 2, "use": 3.2, "cards": 1.0, "queued": 1, "waiting": 1, "wait_avg": None, "wait_n": 0, "focus": None, "paused": {"until": None, "hosts": ["srv-a"]}}]},
+                {"id": "proj-b", "person": "amy", "pk": "5a1c0e7d9b2f", "puse": 22.1, "w": 2, "use": 3.2, "cards": 1.0, "queued": 1, "waiting": 1, "wait_avg": None, "wait_n": 0, "focus": None, "paused": {"until": None, "hosts": ["srv-a"], "by": {"srv-a": "amy"}}}]},
             "projects": [
                 {"id": "proj-a", "title": "Alpha 实验", "owner": "amy", "alerts": 1, "alert_msgs": ["srv-a 数据盘 只剩 12.5 GiB"],
                  "generated": NOW - 120, "no_work_since": None,

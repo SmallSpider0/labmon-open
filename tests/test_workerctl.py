@@ -126,7 +126,7 @@ class OverrideCliTest(unittest.TestCase):
                 self.assertNotIn("pause", K.sched())
                 self.assertEqual(len(calls), 1)
                 self.assertEqual(M.main(["focus", "a1", "--host", "b"]), 0)
-                self.assertEqual(calls[-1], (("add", "focus", "a1", ["b"], None, False), {}))
+                self.assertEqual(calls[-1], (("add", "focus", "a1", ["b"], None, False), {"by": "boss", "expect_by": None}))   # #27：带 --host 的记谁下的
                 self.assertNotIn("focus", K.sched())
                 self.assertIn("[a] 生效中：…\n[b] 生效中：…\n", out.getvalue())
                 with contextlib.redirect_stderr(io.StringIO()) as err:              # drain 要 admin 令牌：实验会话的 project 令牌做不了

@@ -2479,6 +2479,35 @@ class CrossHostTest(UnitBase):
         w2.tick([qb], False)
         self.assertEqual(json.loads(Path(w2.p.status).read_text())["dep_miss"], [])
 
+    def test_host_pause_records_who_and_expect_by(self):
+        # #27：只给某几台的暂停记谁下的（--by），各台各记各的；--expect-by 在 overrides.json 的锁里核：
+        # 这台已有同目标的暂停是别人下的或没记是谁的不改、退出码 2；once 不算、也不被替掉。挡不挡照旧，状态带出 by
+        self.hosts.worker("o")
+
+        def ovr(*args):
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return self.m.main(["override", *args])
+
+        def on(host):
+            return [(o["kind"], o["target"], o.get("by"), bool(o.get("once"))) for o in json.loads((self.hosts.home / "hosts" / host / "overrides.json").read_text())]
+        self.assertEqual(ovr("add", "pause", "pa", "--host", "o", "--by", "boss"), 0)                        # 管理员在 o 上下的
+        self.assertEqual(ovr("add", "pause", "pa", "--host", "t", "--by", "amy", "--expect-by", "amy"), 0)  # t 上没有：普通用户能下
+        self.assertEqual(ovr("add", "pause", "pa", "--host", "o", "--by", "amy", "--expect-by", "amy"), 2)  # 不能重下成自己的
+        self.assertEqual(ovr("rm", "pause", "pa", "--host", "o", "--expect-by", "AMY"), 2)                  # 也撤不掉
+        self.assertEqual((on("o"), on("t")), ([("pause", "pa", "boss", False)], [("pause", "pa", "amy", False)]))
+        self.assertEqual(ovr("add", "pause", "pa", "--host", "o", "--now", "--once"), 0)                    # 只停一次不替掉、不核
+        self.assertEqual(ovr("add", "pause", "pa", "--host", "t", "--until", str(self.hosts.now() + 600), "--by", "amy", "--expect-by", "Amy"), 0)  # 自己的能改（不分大小写）
+        self.assertEqual(ovr("rm", "pause", "pa", "--host", "t", "--expect-by", "amy"), 0)
+        self.assertEqual((on("o"), on("t")), ([("pause", "pa", "boss", False), ("pause", "pa", None, True)], []))
+        (self.hosts.home / "hosts" / "o" / "overrides.json").write_text(json.dumps([{"kind": "pause", "target": "pa", "until": None, "t": 1}]))
+        self.assertEqual(ovr("rm", "pause", "pa", "--host", "o", "--expect-by", "amy"), 2)                  # 没记是谁的：当管理员下的
+        self.assertEqual(ovr("rm", "pause", "pa", "--host", "o"), 0)                                        # 不核（管理员）照撤
+        self.assertEqual(ovr("add", "pause", "pa", "--host", "o", "--by", "boss"), 0)
+        w = self.hosts.ws["o"]
+        w.ovr = w.load_overrides()
+        self.assertEqual([(o["target"], o.get("by")) for o in w.ovr], [("pa", "boss")])
+        self.assertEqual(w.override_hit({"project": "pa", "name": "a"})[0], "pause")                        # by 不影响挡不挡
+
 
 class PoolListTest(UnitBase):
     """交给算力池的清单（#24）：worker add --host pool 登记在共享盘 HOME/hosts/pool/queues/（池没有 worker、没有状态）；

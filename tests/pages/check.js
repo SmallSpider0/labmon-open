@@ -2114,6 +2114,14 @@ t("auth", "普通用户只改自己的项目，调度保留其他项目行和份
   ok(!theirs.includes('data-sch="ur"'), "没记是谁（当管理员）下的暂停，普通用户有恢复按钮"); has(tips(theirs), "不是你下的，恢复找管理员");
   ok(!paused("boss").includes('data-sch="ur"'), "管理员下的暂停，普通用户有恢复按钮"); has(tips(paused("boss")), "boss 下的");
   has(mine, 'data-sch="ur" data-p="proj-a"', "自己下的暂停该能恢复"); ok(!tips(mine).includes("找管理员"), "自己下的暂停不该叫找管理员");
+  // #27：只在几台单独下的暂停，不是他下的那几台不给撤销命令、写找管理员；自己下的照给命令
+  const hostTip = (who, by) => run(who, `(() => { const x = D.sched.projects[0], p0 = x.paused; x.paused = {until: null, hosts: ["srv-a", "srv-b"], by: ${JSON.stringify(by)}};
+    const r = flagTip("paused", x); x.paused = p0; return r; })()`);
+  const ht = hostTip(U, {"srv-a": "boss", "srv-b": "amy"});
+  ok(!ht.includes("--host srv-a") && ht.includes("--host srv-b"), "普通用户看到别人在那台下的暂停的撤销命令：" + ht);
+  has(ht, "上的不是你下的，撤销找管理员");
+  ok(!hostTip(U, {"srv-a": "AMY", "srv-b": "amy"}).includes("找管理员"), "自己在几台下的暂停不该叫找管理员");
+  has(hostTip(accCtx(OV, ADMIN_ME), {"srv-a": "boss", "srv-b": null}), "--host srv-a", "管理员该有每台的撤销命令");
   const p = page(U, "#/p/proj-a/manage");
   has(p, "改了就写回看板上的 monitor.toml"); has(p, "归档这个项目");
   has(p, "<b>项目归属</b>"); ok(!p.includes('data-pj="owner"'), "普通用户可以换项目主人");
