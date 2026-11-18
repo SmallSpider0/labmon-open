@@ -3664,7 +3664,7 @@ function personCard(n, p, h, u) {
   const isMe = u ? u.name === ME?.name : n === ME?.fleet_person;
   const href = DH.person(n);
   const selected = d?.k === "person" && d.id === n;
-  const account = accountCardStatus(u, ACC.users?.roles);
+  const account = ACC.users ? accountCardStatus(u, ACC.users.roles) : "";     // 账号列表没取到（公网入口、只读令牌、读不了）：不说“未开通”
   const slots = n ? [...(p?.slots || []).map(slotChip), ...borrowChips(n)] : [];
   const servers = '<span class="pk sm">服务器</span>' + (slots[0] || '<span class="sm mut">暂无</span>');
   const more = slots.length > 1 ? `<span class="sm mut nw">+${slots.length - 1} 台</span>` : "";
