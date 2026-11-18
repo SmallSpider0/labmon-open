@@ -121,7 +121,7 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 平台操作（核对、续租、开保活、关机、开机、换人、借来用；自用主机与组内服务器同一套） | `fleetops.run_*`（中文名 `fleetops.OP_NAMES`）；核对的比对 `fleetops.reconcile`（纯函数）；停平台作业、提交克隆并等运行 `fleetops.stop_job`、`fleetops.submit_job`（续租、换人、开关机共用，进度记进 `op.json`）；出错时这一台的状态一句话 `fleetops._note` |
 | 这一台此刻能不能动（在跑实验、未识别的 GPU 进程、没探到的、本地盘 labmon 之外写得多（`lw.risk`）的要勾「已说好」；自用主机 worker 在跑只许续租勾「可以中断」） | `fleetops._risk`、`fleetops._need_ack`（这一台的 `lw`：`fleetops._lw`）；页面上 `FBUSY`、`FRISKY`，勾选框的文字 `ackText`（overview.html；续租一台、批量续租、关机、换人共用） |
 | 换人、开机的作业名（同名已在用就加后缀；真操作只认刚读的平台列表，预览用上次核对存的）与端口（接替的那台的、这人在这个池里上次关掉那台的优先，被占了往后挑；向导预览与真操作同一处取，连同“为什么选它”那句）；续租、开机换了容器清旧主机密钥（状态目录的与自用主机自己那份）；连一台时新主机密钥记在哪份（服务器项带 `known_hosts` 的自用主机记在它那份、与实验会话裸 ssh 同一份，其余记在状态目录，#109） | `fleetboot.taken_jobs`、`fleetboot.job_name`；`fleetboot.back_port`、`fleetboot.pick_port`（已占的 `fleetboot.used_ports`）；`fleet.forget`（自用主机的那份取 `fleetboot.mine` 的 `known_hosts`）；`fleet._ssh_cmd` |
-| worker 停启保活（要卡时停、空闲时开、有了别的 GPU 进程让路；借来的主机上 `ka.sh` 停不了的保活：那张卡不放（推演同样不放），用量不算对方的） | worker 的 `keepalive`、`ka`；`gpu_owners`（`ka_full`）、`guest_scan`；推演经快照卡的 `ka` 由 `sim_snapshot` 挡（#45） |
+| worker 停启保活（要卡时停、空闲时开、有了别的 GPU 进程让路；借来的主机上 `ka.sh` 停不了的保活：那张卡不放（推演同样不放），用量不算对方的） | worker 的 `keepalive`、`ka`；`gpu_owners`（`ka_full`，认不认 `ka_owned`）、`guest_scan`；推演经快照卡的 `ka` 由 `sim_snapshot` 挡（#45） |
 | 要卡时停了的保活又被拉起（找调用者与看门狗、记事件与状态的 `kafight`；旧 `gpu_queue.sh` 拉的不算）；ka.sh 日志里哪条 `RESTORED` 是这台的（共享盘上各容器共用：按此刻保活的进程组与它的启动时刻认，#123）；进程启动时刻（epoch 秒，容器启动时刻也用它） | worker 的 `ka_restarted`、`ka_caller`、`ka_others`；记一次 `Worker.ka_fought`（推迟中保活自己没了 `Worker.ka_gone`）；`Worker.ka_groups`（`KA_LOG_LAG`，日志时刻 `ka_log_time`）；`started_at`（`host_info` 也调）；重启后找回近 1 小时的次数与“停着保活”（状态的 `kafight.hits`、`ka_stop`）`Worker.load_prev`（#124） |
 | 保活看门狗（认定：确定的、可能的，下面在跑程序的不算确定；借来的主机上平时只列出来，保活真被拉起才暂停、还卡时恢复；它正持着平时不持的文件锁时这一轮不暂停、不停保活） | worker 的 `watchdogs`（`script_of`、`refs`、`ours`）、`freeze`（`ka_restarted` 调）、`thaw`、`Worker.watch`；进程持着的文件锁 `held_locks`，平时持的锁 `Worker.note_seen`（`frozen.json` 的 `seen[].locks`、`locks_t`，读 `lock_base`），要不要推迟 `Worker.lock_busy`（推迟中 `Worker.ka_wait`）；`borrow.finish` 调 `thaw`；页面上借用抽屉 `borrowSec` 的看门狗一行 |
 | 平台操作在不在做；哪些服务器正在做（探测、保活守护、借用、掉线判定、自动预备续租都问它） | `fleetops._live`；`fleetops.busy()` |
@@ -209,6 +209,7 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 保活守护判定（这一台现在怎样、要不要开、重开或让出；自用主机是 `worker`、借用中是 `borrowed`：保活由 worker 停启；页面文字取它） | `fleet.guard_state`、`fleet.guard_act`；页面上 `guardText`、`gdSit`、`probeAt`、`gdIcon`（overview.html） |
 | 在组内服务器上开、停保活（开前看 GPU、确认进程组已占 GPU 才报成功、开后盯着让路、复查空转后恢复）；这一台开、停保活的命令（服务器自己写的优先，否则 `[fleet]` 段的） | `fleet.ka_start`、`fleet.ka_stop`（`fleet_guard.sh`）；`fleet.ka_cmd` |
 | 组内服务器 GPU 负载归类（只认保活，其余算实验）与按路径归人 | `fleet.classify`、`fleet.mark_keepalive`、`disk.whose`（归属表同 `disk.owner_of`） |
+| 进程跑的是哪个脚本、相对路径按工作目录还原（#29：认保活时相对路径起的同一脚本与写完整路径起的一样）；ka.sh 管的保活（python 跑 `AGRI_KA_DIR/AGRI_KA_SCRIPT`：命令行写完整路径，或相对路径还原、解开符号链接后是它）；借用前逐个核对 | worker 的 `script_arg`（看门狗 `script_of` 与 `ka_owned` 共用）、`ka_owned`；共享盘上 ka.sh 的 `pgids()`（不在本仓库，规则与 `ka_owned` 同一条）；组内字样与规则比的命令行接上还原路径 `fleet._abs_script`，探针 `fleet_probe.sh` 的 `script_abs`（只规整路径；探针在未必有 Python 的镜像里跑、worker 不 import 本包，所以三份）；借用核对 `fleet_guard.sh` 的 `kacheck`（读 `ka.sh running` 只经 `running_groups strict`），结果的话 `borrow._ka_miss` |
 | 固定配色（项目、计划项、共享盘上的人） | `config.pick_color` |
 | 页面渲染（模板 + common.js + 数据；写盘的原子写入）；往页面里填一块数据（`/*__DATA__*/null`、`/*__ME__*/null`，`<` 写成 `\u003c`） | `collect.render_page`、`collect.write_page`；`collect.fill` |
 | 页面上的租期文字（都按页面上的“现在”算：剩余秒数、一天内到期或已过、纯文字「剩 X」/「已过」、主机的「租期剩 X」、带配色的唯一出口） | `leaseLeft`、`leaseSoon`、`leaseRem`、`leaseText`、`leaseHtml`（overview.html） |
@@ -239,7 +240,8 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
   例外是保活守护：有实验时只让出看板自己开的保活。维护者 2026-11-17 确认（#10）：开启守护且未借用、没有平台操作时，
   若至少两轮有效探测相隔 10 分钟、各 GPU 利用率持续为零，只有在 `fleet_guard.sh` 现场复核容器、进程出生时钟、唯一保活进程组及 GPU 无其他负载后，
   才可经该主机配置的保活脚本停掉用户自行开启的空转保活，改由看板开启保活。无法核实归属时告警，其他进程保持只读。
-  另一个例外是借用（borrow.py）：用户勾“已和这人说好”后才拉起 worker，只许 GPU 空着或只有 ka.sh 的保活时借；还时只停自己的 worker、
+  另一个例外是借用（borrow.py）：用户勾“已和这人说好”后才拉起 worker，只许 GPU 空着、只有 ka.sh 管的保活，或对方轻用（除保活外各项用量都低于 `[fleet] share`，用户另勾“也借”，11-06 定）时借。
+  ka.sh 管的保活指 python 跑它的保活脚本，命令行写完整路径，或相对路径按进程工作目录还原后是它（维护者 2026-11-17 定，#29）；借前逐个保活进程核对在 `ka.sh running` 列出的进程组里（`fleet_guard.sh` 的只读 `kacheck`）。还时只停自己的 worker、
   占位任务与 ka.sh 保活，只删 `/tmp/labmon` 与这台的临时指令，`/tmp` 下别的文件不动。只限用户自己的项目，实验会话不自己去借。
   借用中 worker 可以暂停（SIGSTOP）确定的保活看门狗（`watchdogs` 认定），还时恢复（`thaw`，核对 PID 与启动时刻）；可能的只列出来，别的进程一概不动。
   它正持着平时不持的文件锁时（读 `/proc/locks`）这一轮不暂停：暂停在锁里，对方的锁会一直占到还卡（#38）。

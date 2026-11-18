@@ -552,6 +552,22 @@ def _script(args: str) -> tuple[str | None, list[str]]:
     return (t[0], rest) if t else (None, [])
 
 
+def _abs_script(args: str, cwd: str | None) -> str | None:
+    """python 跑的脚本写的是相对路径时，按进程工作目录还原的完整路径（只做 normpath：看板这边解不开对方的符号链接）；
+    不是 python、-m 或 -c、没有脚本、已是绝对路径、不知道工作目录的为 None。取第一个不以 - 开头的参数，同 ka.sh 认保活（#29）。
+    认保活与规则（classify 另拿它比一遍、mark_keepalive 写它）：相对路径起的与写完整路径起的同一脚本归类一样。
+    探针 fleet_probe.sh 的 script_abs 是同一条规则（探针在未必有 Python 的镜像里跑，各一份）。"""
+    t = args.split()
+    if not cwd or not t or not re.fullmatch(r"python[\d.]*", _exe(args)):
+        return None
+    i = 1
+    while i < len(t) and t[i].startswith("-"):
+        if t[i] == "-m" or re.fullmatch(r"-[^-]*c", t[i]):     # -m 模块、-c / -uc 代码：没有脚本
+            return None
+        i += 2 if t[i] in ("-W", "-X") else 1                 # 带一个参数的选项（同 worker 的 script_arg）
+    return os.path.normpath(os.path.join(cwd, t[i])) if i < len(t) and not t[i].startswith("/") else None
+
+
 def brief(args: str) -> str:
     """命令行的简称：python 取模块或脚本名，再带上 --config 的文件名。"""
     if not args.split():
@@ -586,15 +602,17 @@ def _desc(ps: dict, tops: set[int]) -> set[int]:
     return out
 
 
-def classify(own: str, text: str, cfg: dict) -> tuple[str, str | None, str | None]:
-    """(类别, 规则给的名字, 命中的规则)。own 是 GPU 进程自己的命令行，text 再加上父进程链与目录。
+def classify(own: str, text: str, cfg: dict, alt: str | None = None) -> tuple[str, str | None, str | None]:
+    """(类别, 规则给的名字, 命中的规则)。own 是 GPU 进程自己的命令行，text 再加上父进程链与目录。alt：相对路径的脚本按工作目录还原的完整路径
+    （_abs_script）：规则与保活字样另拿它比一遍（原命令行照旧比，带锚点的规则不受影响），相对路径起的与写完整路径起的同一脚本归类一样（#29）。
     顺序：规则命中自己的命令行 → 自己的命令行含保活字样 → 规则命中父进程链或目录 → 其余都算实验（有人在用）。
     保活字样排在“规则按父进程命中”之前：实验守护脚本（如 demo_eval 的 keepalive_guard.sh）拉起的保活，父进程带着项目路径，
     按父进程算会把纯保活误判成实验。"""
+    mine = [own] + ([alt] if alt else [])
     for r in cfg["rules"]:
-        if r["re"].search(own):
+        if any(r["re"].search(x) for x in mine):
             return r["kind"], r.get("label"), r["match"]
-    if any(k in own for k in cfg["keepalive"]):
+    if any(k in x for k in cfg["keepalive"] for x in mine):
         return "keepalive", None, None
     for r in cfg["rules"]:
         if r["re"].search(text):
@@ -603,12 +621,12 @@ def classify(own: str, text: str, cfg: dict) -> tuple[str, str | None, str | Non
 
 
 def mark_keepalive(sid: str, pid: int) -> str:
-    """页面上把这台的一组负载认作保活：它的 GPU 进程跑的脚本（照命令行里的写法）加进主机清单的 [fleet] keepalive，
-    再立刻探一次才生效。返回加进去的字样。"""
+    """页面上把这台的一组负载认作保活：它的 GPU 进程跑的脚本加进主机清单的 [fleet] keepalive，再立刻探一次才生效。返回加进去的字样。
+    照命令行里的写法；python 跑的相对路径按这组的工作目录写成完整路径（_abs_script）：以后写完整路径、相对路径起的同一脚本都认（#29）。"""
     w = next((w for w in ((_load_state().get(sid) or {}).get("sample") or {}).get("work", []) if w.get("pid") == pid), None)
     if not w or not w.get("chain"):
         raise ConfigError(f"{sid} 上已经没有这组负载，刷新再看")
-    word = _script(w["chain"][-1])[0]
+    word = _abs_script(w["chain"][-1], w.get("cwd")) or _script(w["chain"][-1])[0]
     if not word:
         raise ConfigError("认不出它跑的脚本，请在主机清单里加一条 [[fleet.rules]]（match 写正则，kind = \"keepalive\"）")
     cfg = conf()
@@ -628,20 +646,22 @@ def analyze(smp: dict, cfg: dict) -> dict:
         ch = _chain(ps, pid)
         if not ch:
             g = groups.setdefault(("h", a["hpid"]), {"kind": "unknown", "label": f"宿主机 PID {a['hpid']}（容器里找不到）",
-                                                     "rule": None, "top": None, "mb": 0, "n": 0, "names": [], "cwd": None, "chain": []})
+                                                     "rule": None, "top": None, "mb": 0, "n": 0, "names": [], "cwd": None, "chain": [], "gpids": []})
             g["mb"] += a["mb"]
             g["n"] += 1
             continue
         top = next((p for p in reversed(ch) if not _shell(ps[p]["args"])), ch[0])
         name = next((p for p in ch if not _spawn(ps[p]["args"])), ch[0])
-        kind, label, rule = classify(ps[pid]["args"], "\n".join(ps[p]["args"] for p in ch) + "\n" + (cwd or ""), cfg)
+        kind, label, rule = classify(ps[pid]["args"], "\n".join(ps[p]["args"] for p in ch) + "\n" + (cwd or ""), cfg, _abs_script(ps[pid]["args"], cwd))
         if kind == "keepalive":
             ka_gpu.add(pid)
         g = groups.setdefault(top, {"kind": kind, "label": label, "rule": rule, "top": top, "mb": 0, "n": 0, "names": [], "cwd": cwd,
-                                    "chain": [ps[p]["args"][:300] for p in reversed(ch)]})
+                                    "chain": [ps[p]["args"][:300] for p in reversed(ch)], "gpids": []})
         g["kind"] = min(g["kind"], kind, key=STATES.index)       # 一组里有实验就算实验
         g["mb"] += a["mb"]
         g["n"] += 1
+        if pid not in g["gpids"]:                                # 这组的 GPU 进程（容器 PID）：借用前逐个核对保活是不是 ka.sh 管的（borrow.begin）
+            g["gpids"].append(pid)
         nm = brief(ps[name]["args"])
         if nm not in g["names"]:
             g["names"].append(nm)

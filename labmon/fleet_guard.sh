@@ -9,8 +9,12 @@
 #       在同一次锁定内核对状态、全部 GPU 均未活动且没有别的 GPU 进程，再重开本工具登记的保活，或停掉配置脚本能确认的用户保活并开启看板保活。
 #   stop <ka 命令> <为什么>
 #       只停 labmon 开的那一个保活（进程组对得上才停）；别人开的、已经不在的不动。
+#   kacheck <ka 命令> <GPU 进程…>
+#       只读（不拿锁、不写文件，借用前 borrow.begin 用）：逐个看这些认作保活的 GPU 进程（容器 PID）所在的进程组在不在 ka.sh running 列出的里面。
+#       ok：都在（已经没了的不算）；noka PID…：不在的（ka.sh 停不了它们）；fail …：ka.sh 本身出错（退出码；原因在标准错误）。
 #
-# ka 命令是主机清单 [fleet] 的 keepalive_cmd（ka.sh：容器内加锁，按脚本的完整路径认保活，不会起两个）。
+# ka 命令是主机清单 [fleet] 的 keepalive_cmd（ka.sh：容器内加锁，不会起两个；python 跑它的保活脚本才算，命令行写完整路径，
+# 或相对路径按进程工作目录还原后是它，#29）。
 # 最后一行是结果：ok … / busy … / fail … / unmanaged …；探针（fleet_probe.sh）读 /tmp/labmon-guard.state 看保活是不是 labmon 开的。
 ST=${GUARD_STATE:-/tmp/labmon-guard.state}
 PROC=${GUARD_PROC:-/proc}
@@ -73,11 +77,15 @@ watch() {   # $1 盯到几点（epoch）$2 保活进程组 $3 ka 命令 $4 登�
   done
 }
 
-running_groups() {   # ka.sh 每行一个进程组号，空输出或命令失败都不是已运行的证据
-  local ids
-  ids=$(bash -c "$1 running" 9>&- 2>/dev/null) || return 1
+running_groups() {   # ka.sh 每行一个进程组号，空输出或命令失败都不是已运行的证据。
+  # 返回 0 有；1 没有在跑的（ka.sh running 退出 1，或什么都没打印）；200 输出认不出（strict）；其余是 ka.sh 自己的退出码。
+  # ka.sh 的标准错误照传，认不出的那一行也写到标准错误（kacheck 带回原因，同一次调用，#29）
+  local ids rc
+  ids=$(bash -c "$1 running" 9>&-); rc=$?
+  [ "$rc" = 0 ] || { [ "$rc" = 1 ] && return 1; return "$rc"; }
   if [ "${2:-}" = strict ]; then
-    printf '%s\n' "$ids" | awk 'NF && $0 !~ /^[1-9][0-9]*$/ {bad=1} /^[1-9][0-9]*$/ {print; seen=1} END {exit (bad || !seen)}'
+    printf '%s\n' "$ids" | awk 'NF && $0 !~ /^[1-9][0-9]*$/ {if (!bad) print "认不出的一行：" substr($0, 1, 200) > "/dev/stderr"; bad=1}
+      /^[1-9][0-9]*$/ {print; seen=1} END {exit (bad ? 2 : !seen)}' || return $(( $? == 2 ? 200 : 1 ))
   else
     printf '%s\n' "$ids" | grep -E '^[1-9][0-9]*$'
   fi
@@ -188,6 +196,24 @@ repair() {  # ka 命令、盯几秒、谁开的、容器出生时钟、登记时
   fi
 }
 
+kacheck() {  # ka 命令、认作保活的 GPU 进程（容器 PID）…
+  local groups rc pid row g bad=""
+  groups=$(running_groups "$1" strict); rc=$?
+  case "$rc" in               # 没有在跑的保活（返回 1）不是出错；出错的原因 ka.sh 已写到标准错误，借用的提示带上它
+    0|1) ;;
+    200) echo "fail ka.sh running 的输出认不出"; return ;;
+    *) echo "fail ka.sh running 出错（退出码 $rc）"; return ;;
+  esac
+  for pid in "${@:2}"; do
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || continue
+    { read -r row < "$PROC/$pid/stat"; } 2>/dev/null || continue     # 已经没了
+    row=${row##*) }; read -ra row <<< "$row"
+    g=${row[2]:-}
+    { [ -n "$g" ] && printf '%s\n' "$groups" | grep -qx -- "$g"; } || bad="$bad $pid"
+  done
+  if [ -n "$bad" ]; then echo "noka$bad"; else echo ok; fi
+}
+
 control() {
   if ! flock -w 15 9; then
     if [ "$1" = repair ]; then echo "busy 保活正在执行另一项操作"; else echo "fail 保活正在执行另一项操作"; fi
@@ -200,4 +226,4 @@ control() {
     *) echo "fail 不认识的动作 $1" ;;
   esac
 }
-control "$@" 9>>"$ST.lock"
+if [ "${1:-}" = kacheck ]; then kacheck "${@:2}"; else control "$@" 9>>"$ST.lock"; fi

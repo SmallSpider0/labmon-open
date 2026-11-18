@@ -43,10 +43,23 @@ HP=" $(echo "$APPS" | cut -d, -f1 | tr -d ' ' | tr '\n' ' ') "
 echo "@@ map"
 KA=""                            # 命令行里有保活字样的 GPU 进程（容器 PID）
 MAPPED=" "
-ka_pid() {
+# python 跑的脚本写的是相对路径时，按工作目录还原的完整路径（同 fleet._abs_script：取第一个不以 - 开头的参数，-m、-c 没有脚本；只做 normpath，#29）
+script_abs() {
+  local d=$1 a exe="" tok="" cwd skip=""
+  while IFS= read -r -d '' a; do
+    if [ -z "$exe" ]; then exe=${a##*/}; exe=${exe#-}; [[ "$exe" =~ ^python[0-9.]*$ ]] || return; continue; fi
+    if [ -n "$skip" ]; then skip=""; continue; fi
+    case "$a" in -m|-c|-[!-]*c) return ;; -W|-X) skip=1 ;; -*) ;; *) tok=$a; break ;; esac
+  done 2>/dev/null < "$d/cmdline"
+  [ -n "$tok" ] && [ "${tok#/}" = "$tok" ] || return
+  cwd=$(readlink "$d/cwd" 2>/dev/null) || return
+  realpath -m -s -- "$cwd/$tok" 2>/dev/null || printf '%s\n' "$cwd/$tok"
+}
+ka_pid() {                       # 命令行（后面接上还原的脚本路径，与 fleet.analyze 认保活同一口径）里有保活字样就记下
   local d=$1 c k
   shift
   c=$(tr '\0' ' ' 2>/dev/null < "$d/cmdline") || return
+  c="$c $(script_abs "$d")"
   for k in "$@"; do case "$c" in *"$k"*) KA="$KA ${d#/proc/}"; return ;; esac; done
 }
 for d in /proc/[0-9]*; do
@@ -60,7 +73,9 @@ for d in /proc/[0-9]*; do
 done
 for h in $HP; do
   [[ "$h" =~ ^[1-9][0-9]*$ ]] || continue
-  case "$MAPPED" in *" $h "*) ;; *) ka_pid "/proc/$h" "$@"; MAPPED="$MAPPED$h " ;; esac
+  case "$MAPPED" in *" $h "*) ;; *)     # 新内核在容器里直接给容器 PID：照样记工作目录
+    [ -d "/proc/$h" ] && echo "$h $h $(readlink "/proc/$h/cwd" 2>/dev/null)"
+    ka_pid "/proc/$h" "$@"; MAPPED="$MAPPED$h " ;; esac
 done
 echo "@@ ps"
 PS=$(ps -eo pid=,ppid=,etimes=,time=,pcpu=,rss=,args= 2>/dev/null | cut -c1-400)

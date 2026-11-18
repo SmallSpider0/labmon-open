@@ -780,31 +780,58 @@ def refs(text, *dirs):
     return "\n".join(out)
 
 
-def script_of(args, cwd, pid=None):
-    """shell 或 python 进程在跑什么：(脚本路径、-c、-s 或 -m 模块, 文字)。文字是命令行、脚本内容（前 64 KB）和它直接调到的脚本（refs）；
-    不是这两种解释器、交互 shell 与 REPL 为 None。脚本文件已被删掉的，bash 还开着它（fd 255），给了 pid 就从那里读。"""
+def script_arg(args, cwd):
+    """shell 或 python 进程跑的脚本：(脚本路径（相对路径按工作目录 cwd 还原、normpath）、"-c"、"-s" 或 "-m 模块", 下一个参数的位置)；
+    不是这两种解释器、交互 shell 与 REPL 为 None。看门狗（script_of）与 ka.sh 认保活（ka_owned）共用。"""
     if not args or not INTERP.match(os.path.basename(args[0])):
         return None
     py = os.path.basename(args[0]).startswith("python")
     takes = ("-W", "-X") if py else ("-o", "-O")       # 带一个参数的选项
-    line, i = " ".join(args), 1
+    i = 1
     while i < len(args) and args[i].startswith("-") and args[i] != "-":
         a = args[i]
         if a == "--":
             i += 1
             break
         if not a.startswith("--") and a.endswith("c"):     # -c、bash -lc、python -uc：代码在下一个参数
-            return "-c", line + "\n" + refs(args[i + 1] if i + 1 < len(args) else "", cwd)
+            return "-c", i + 1
         if py and a == "-m":
-            return "-m " + (args[i + 1] if i + 1 < len(args) else ""), line
+            return "-m " + (args[i + 1] if i + 1 < len(args) else ""), i + 2
         if not py and a == "-s":                           # bash -s：脚本从标准输入来，只看得到命令行
-            return "-s", line
+            return "-s", i + 1
         i += 2 if a in takes else 1
     if i >= len(args):
         return None
-    path = os.path.normpath(os.path.join(cwd, args[i]))
-    text = head(path) or (head(os.path.join(PROC, str(pid), "fd", "255")) if pid and not py else "")
-    return path, line + "\n" + text + "\n" + refs(text, os.path.dirname(path), cwd)
+    return os.path.normpath(os.path.join(cwd, args[i])), i + 1
+
+
+def script_of(args, cwd, pid=None):
+    """shell 或 python 进程在跑什么：(脚本路径、-c、-s 或 -m 模块, 文字)。文字是命令行、脚本内容（前 64 KB）和它直接调到的脚本（refs）；
+    不是这两种解释器、交互 shell 与 REPL 为 None。脚本文件已被删掉的，bash 还开着它（fd 255），给了 pid 就从那里读。"""
+    sa = script_arg(args, cwd)
+    if not sa:
+        return None
+    what, i = sa
+    line = " ".join(args)
+    if what == "-c":
+        return "-c", line + "\n" + refs(args[i] if i < len(args) else "", cwd)
+    if what == "-s" or what.startswith("-m "):
+        return what, line
+    py = os.path.basename(args[0]).startswith("python")
+    text = head(what) or (head(os.path.join(PROC, str(pid), "fd", "255")) if pid and not py else "")
+    return what, line + "\n" + text + "\n" + refs(text, os.path.dirname(what), cwd)
+
+
+def ka_owned(args, cwd, ka_full):
+    """ka.sh 认得、停得了的保活（与共享盘上 ka.sh 的 pgids() 同一条规则，#29）：python 跑的，命令行里写着 ka_full（AGRI_KA_DIR/AGRI_KA_SCRIPT）这个完整路径，
+    或跑的脚本（相对路径按进程工作目录还原）解开符号链接后就是它：先 cd 进保活目录、用 train_keep_alive.py、./train_keep_alive.py 起的也算。
+    cwd 读不到（进程没了）的相对路径认不出。"""
+    if not args or not re.match(r"python[\d.]*$", os.path.basename(args[0])):
+        return False
+    if ka_full in " ".join(args):
+        return True
+    sa = script_arg(args, cwd or "")
+    return bool(sa and sa[0].startswith("/") and os.path.realpath(sa[0]) == os.path.realpath(ka_full))
 
 
 def ours(pid):
@@ -1855,15 +1882,16 @@ def job_procs(procs, jobs):
 def gpu_owners(apps, procs, owner, ka_full=None):
     """GPU 进程的归属（gp）：nvidia-smi 给的宿主机 PID 经 /proc/<pid>/sched 对回容器 PID（scan_procs 的 hpid），再看它属于哪个任务
     （owner {pid: 任务}）、是不是保活（命令行里有 keep_alive），都不是的算 labmon 之外的。
-    ka_full（借来的主机上给）：ka.sh 认的保活脚本。命令行里没有它的保活 worker 停不了（other，ka 为真）：那张卡不放；它整棵进程树不算对方的用量（sample 里扣，#37）。"""
+    ka_full（借来的主机上给）：ka.sh 认的保活脚本。ka.sh 认不出（ka_owned：不是 python 跑它，相对路径按工作目录还原后也不是它）的保活
+    worker 停不了（other，ka 为真）：那张卡不放；它整棵进程树不算对方的用量（sample 里扣，#37）。"""
     by_hpid = {p["hpid"]: pid for pid, p in procs.items() if p["hpid"]}
     gp = []
     for hp, mb, uu in apps:
         cp = by_hpid.get(hp)
         j = owner.get(cp)
-        cmd = read(os.path.join(PROC, str(cp), "cmdline"), "") or "" if not j and cp is not None else ""
-        keep = "keep_alive" in cmd
-        ext = keep and ka_full is not None and ka_full not in cmd
+        args, cwd = proc_args(cp) if not j and cp is not None else ([], "")
+        keep = any("keep_alive" in a for a in args)
+        ext = keep and ka_full is not None and not ka_owned(args, cwd, ka_full)
         gp.append({"hpid": hp, "pid": cp, "mb": mb, "uuid": uu, "comm": procs[cp]["comm"] if cp in procs else None,
                    "owner": "job" if j else "keepalive" if keep and not ext else "other", "ka": ext, "job": j["name"] if j else None, "_j": j})
     return gp

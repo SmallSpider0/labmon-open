@@ -136,6 +136,32 @@ class ClassifyTest(unittest.TestCase):
         a = F.analyze(F.parse(raw), cfg(rules=[{"match": r"ka/train_keep_alive\.py", "kind": "job", "label": "伪装"}]))
         self.assertEqual(a["state"], "job")
 
+    def test_relative_keepalive(self):
+        """相对路径起的脚本按工作目录还原后再比字样与规则（#29）：写完整路径的字样（如页面上认作保活加的）也认得相对路径起的同一脚本，
+        别的目录里的同名脚本不认；每组负载带上它的 GPU 进程（gpids，借用前逐个核对）。"""
+        def run(args, cwd, words):
+            raw = probe_out(apps=[(500, 6748)], maps=[(9, 500, cwd)], ps=[(1, 0, "/bin/bash"), (9, 1, args, 100.0, 1024)])
+            return F.analyze(F.parse(raw), cfg(keepalive=words))
+        full = ["keep_alive", "/root/x/occupy_gpu.py"]
+        for args, cwd in (("/opt/py/bin/python /root/x/occupy_gpu.py", "/"), ("/opt/py/bin/python -u ./occupy_gpu.py --mb 6000", "/root/x"),
+                          ("python3 ../x/occupy_gpu.py", "/root/y")):
+            a = run(args, cwd, full)
+            self.assertEqual((a["state"], a["work"][0]["gpids"]), ("keepalive", [9]), args)
+        self.assertEqual(run("python occupy_gpu.py", "/root/y", full)["state"], "job")         # 别的目录里的同名脚本
+        self.assertEqual(run("python -c occupy_gpu.py", "/root/x", full)["state"], "job")
+        a = run("python ./occupy_gpu.py", "/root/x", ["keep_alive"])
+        self.assertEqual(a["state"], "job")
+        a = F.analyze(F.parse(probe_out(apps=[(500, 6748)], maps=[(9, 500, "/root/x")], ps=[(1, 0, "/bin/bash"), (9, 1, "python occupy_gpu.py", 100.0, 1024)])),
+                      cfg(rules=[{"match": r"/root/x/occupy_gpu\.py", "kind": "keepalive"}]))
+        self.assertEqual(a["state"], "keepalive")                                            # 规则同样比还原后的
+        a = F.analyze(F.parse(probe_out(apps=[(500, 6748)], maps=[(9, 500, "/root/x")], ps=[(1, 0, "/bin/bash"), (9, 1, "python train_keep_alive.py", 100.0, 1024)])),
+                      cfg(rules=[{"match": r"^python train_keep_alive\.py$", "kind": "job"}]))
+        self.assertEqual(a["state"], "job")                     # 原命令行上带锚点的规则照旧命中：还原路径只是另一个候选（PR #34 审查）
+        self.assertEqual([F._abs_script(x, "/w") for x in ("python a.py", "python -W ignore ./d/../a.py", "python /a.py", "python -m a", "python -uc a.py",
+                                                            "bash a.sh", "python")],
+                         ["/w/a.py", "/w/a.py", None, None, None, None, None])
+        self.assertIsNone(F._abs_script("python a.py", None))
+
     def test_rule_can_mark_keepalive(self):
         a = F.analyze(F.parse(GUARD), cfg(rules=[{"match": r"run_parallel\.py", "kind": "keepalive"}]))
         self.assertEqual(a["state"], "keepalive")
@@ -695,8 +721,9 @@ class LocalWritesTest(unittest.TestCase):
             self.assertEqual({x[0] for x in sc["top"][3:]}, {"/work/new/x.bin", "/root/.", "/tmp/."})
             self.assertTrue(all(x[2] >= boot for x in sc["top"]))
 
-    def probe_scan(self, apps, *ka, pids=()):
-        """真跑探针，扫一个空的假根盘：假 nvidia-smi 的 compute-apps 给 apps（宿主机 PID 一行一个），ka 是认作保活的字样。返回 (scan 段原文, parse 出的 scan)。"""
+    def probe_scan(self, apps, *ka, pids=(), full=False):
+        """真跑探针，扫一个空的假根盘：假 nvidia-smi 的 compute-apps 给 apps（宿主机 PID 一行一个），ka 是认作保活的字样。返回 (scan 段原文, parse 出的 scan)；
+        full 时返回 (探针整份输出, parse 出的 scan)。"""
         with tempfile.TemporaryDirectory() as td:
             b = Path(td) / "bin"
             b.mkdir()
@@ -708,7 +735,7 @@ class LocalWritesTest(unittest.TestCase):
             env = dict(os.environ, LABMON_SCAN=str(int(time.time()) - 60), LABMON_SCAN_ROOT=str(Path(td) / "root"), LABMON_SCAN_S="10",
                        NV_APPS=str(Path(td) / "apps"), PATH=f"{b}{os.pathsep}{os.environ['PATH']}")
             out = subprocess.run(["bash", "-s", "--", *ka], input=F.PROBE.read_text(), capture_output=True, text=True, timeout=60, env=env).stdout
-            return out.split("@@ scan\n", 1)[-1], F.parse(out)["scan"]
+            return out if full else out.split("@@ scan\n", 1)[-1], F.parse(out)["scan"]
 
     def test_probe_scan_while_job_runs(self):
         """GPU 上有不是保活的进程（对方在跑实验、容器里对不上的宿主机 PID）照样扫（维护者 11-10 定，#155；以前写 busy 不扫）。"""
@@ -716,6 +743,24 @@ class LocalWritesTest(unittest.TestCase):
             raw, sc = self.probe_scan(apps, "keep_alive.py")
             self.assertNotIn("busy", raw)
             self.assertIsNotNone(sc)                                                   # 扫了（macOS 的 BSD find 是 nofind，也算扫过）
+
+    @unittest.skipUnless(os.path.isdir("/proc/self") and shutil.which("realpath"), "要真的 /proc（Linux）")
+    def test_probe_relative_keepalive(self):
+        """探针按同一口径认保活（#29）：相对路径起的保活，字样写完整路径也读它的 PSS、报它的进程组（真跑 fleet_probe.sh 与一个真进程）。"""
+        with tempfile.TemporaryDirectory() as td:
+            ka = Path(td) / "ka"
+            ka.mkdir()
+            (ka / "occupy_gpu.py").write_text("import time\ntime.sleep(30)\n")
+            p = subprocess.Popen([sys.executable, "./occupy_gpu.py"], cwd=ka, start_new_session=True)
+            try:
+                time.sleep(0.3)
+                raw, _ = self.probe_scan([str(p.pid)], str(Path(os.path.realpath(ka)) / "occupy_gpu.py"), full=True)
+            finally:
+                p.kill()
+                p.wait()
+            smp = F.parse(raw)
+            self.assertIn(p.pid, smp["pss"])
+            self.assertEqual(smp["ka_groups"][p.pid][0], p.pid)
 
 
 class GuardTest(unittest.TestCase):
@@ -1037,6 +1082,38 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(start(), "fail 保活进程已启动，尚未看到它占用 GPU")
         self.assertIn(" 9 ", (d / "guard.state").read_text())
 
+    def test_kacheck(self):
+        """借用前的只读核对（#29）：逐个 GPU 进程看进程组在不在 ka.sh running 列出的里面；一个不在就 noka（原来只看退出码，一个认出就放行）；
+        没有在跑的保活不是出错（全部 noka）；ka.sh 跑不起来写明退出码与原因（原来吞掉）；不拿锁、不写文件。"""
+        d = Path(self.tmp.name)
+        for pid, pgid in ((11, 9), (12, 9), (13, 30)):
+            (d / "proc" / str(pid)).mkdir(parents=True)
+            (d / "proc" / str(pid) / "stat").write_text(f"{pid} (python (x)) S 1 {pgid} {pgid} 0\n")
+        (d / "ka.sh").write_text('echo x >> "$CALLS"\ncase "$1" in running) [ -s "$PID" ] || exit 1; cat "$PID" ;; esac\n')
+        env = {**self.shell_env(d), "PID": str(d / "pid"), "CALLS": str(d / "calls")}
+        self.err = ""
+
+        def run(ka, *pids):
+            r = subprocess.run(["bash", "-s", "--", "kacheck", ka, *map(str, pids)], input=F.GUARD.read_text(), env=env,
+                               capture_output=True, text=True, timeout=15)
+            self.err = r.stderr
+            return r.stdout.strip().splitlines()[-1]
+        ka = f"bash {d / 'ka.sh'}"
+        (d / "pid").write_text("9\n")
+        self.assertEqual(run(ka, 11, 12), "ok")
+        self.assertEqual(run(ka, 11, 13), "noka 13")                         # 同台另一个对方自己起的保活：不放过
+        self.assertEqual(run(ka, 11, 99), "ok")                              # 已经没了的不算
+        (d / "pid").write_text("")
+        self.assertEqual(run(ka, 11, 13), "noka 11 13")                      # 没有在跑的保活：都不是 ka.sh 的
+        self.assertEqual(run(f"bash {d / 'nope.sh'}", 11), "fail ka.sh running 出错（退出码 127）")
+        self.assertIn("nope.sh", self.err)                                    # ka.sh 的报错照传到标准错误，借用的提示带上它
+        (d / "pid").write_text("9\noops\n")
+        (d / "calls").write_text("")
+        self.assertEqual(run(ka, 11), "fail ka.sh running 的输出认不出")      # 输出认不出也不当成核对过
+        self.assertIn("oops", self.err)
+        self.assertEqual((d / "calls").read_text(), "x\n")                   # 只读一次（经 running_groups），不另跑一遍取原因（PR #34 审查）
+        self.assertFalse((d / "guard.state.lock").exists())                  # 只读：不拿锁、不建锁文件
+
     def test_script(self):
         """fleet_guard.sh 本身：用假的 nvidia-smi（给宿主机 PID）、/proc（sched 对回容器 PID、stat 带进程组）、ka.sh、setsid 跑。"""
         d = Path(self.tmp.name)
@@ -1239,6 +1316,10 @@ class OwnerTest(unittest.TestCase):
         self.assertEqual(len(cf), 1)
         self.assertEqual(cf[0]["msg"], "把 AA a 上的 /root/x/occupy_gpu.py 认作保活")
         self.assertTrue(cf[0]["detail"].startswith('[fleet] keepalive = ["keep_alive"]'), cf)
+        rel = probe_out(apps=[(501, 6748)], maps=[(19, 501, "/root/z")],                  # 相对路径起的：按工作目录写成完整路径（#29）
+                        ps=[(1, 0, "/bin/bash"), (19, 1, "/opt/py/bin/python ./hold_gpu.py", 100.0, 1024)])
+        F._save_state({"a": {"sample": F.analyze(F.parse(rel), F.conf())}})
+        self.assertEqual(F.mark_keepalive("a", 19), "/root/z/hold_gpu.py")
         g = F.analyze(F.parse(GUARD), F.conf())                          # GPU 进程是 python -c：认不出脚本
         F._save_state({"a": {"sample": g}})
         with self.assertRaises(ConfigError):
