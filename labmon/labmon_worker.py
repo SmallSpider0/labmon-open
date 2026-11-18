@@ -6063,8 +6063,14 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
             skip[h] = "%s：%s" % (h, hit[1] if hit else "看不到 GPU")
         else:
             fhs.append(fh)                        # 在限流的照样列出来（各行都写先减线程）
+    gone = set()                                  # 看板说已归还的主机（returned.json，各台一样）：容器没了，它放的任务也没了
+    for h in {p.host, *hosts}:
+        try:
+            gone |= set(json.loads(read(Paths(h).returned, "{}") or "{}").get("hosts") or [])
+        except (ValueError, AttributeError, TypeError):
+            pass
     cur = read_current(q["state"])                # 状态目录里在跑的：放它的主机状态过期了（worker 停了、崩了）任务照样可能在跑，不能再分
-    if cur:
+    if cur and not (cur[3] and cur[3] in gone):   # 放它的主机已归还的不算（算力池借的主机换了容器、清单回池里，#25；同 run_elsewhere）
         running.add(cur[0])
     _, pend = rows_left(q["state"], rows, None)
     pend = first_rows(pend)

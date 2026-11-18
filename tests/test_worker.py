@@ -1052,6 +1052,13 @@ class AdmissionUnitTest(UnitBase):
         self.assertFalse(r["hosts"]["t"]["ok"])
         Path(q["state"], "j_s3.done").write_text("")
         self.assertIsNone(ask(("t",))["head"])
+        # 池借的主机 gone 换了容器、清单回池里：current 里还记着它放的 j_s3（容器没了，任务也没了）。看板说 gone 已归还（returned.json）时
+        # 不算在跑，j_s3 重新当队首；没说的照旧当在跑、不再分（Codex 审查 #75）
+        os.remove(Path(q["state"], "j_s3.done"))
+        Path(q["state"], "current").write_text("j_s3 4242 %s gone\n" % time.strftime("%Y-%m-%d %H:%M:%S"))
+        self.assertIsNone(ask(("t",))["head"])
+        Path(self.m.Paths("t").returned).write_text(json.dumps({"hosts": ["gone"]}))
+        self.assertEqual(ask(("t",))["head"], "j_s3")
 
     def test_job_cmd_first_row(self):
         # 按名字找清单里的一行只有一处（job_cmd）：取第一条、跳过注释行，找不到为 None
