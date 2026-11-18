@@ -241,6 +241,14 @@ def _delta(b: float | None) -> str:
     return "" if not b else f"{'+' if b > 0 else '−'}{abs(b) / GIB:.1f} GiB"
 
 
+def _card(g: dict) -> str:
+    """一张卡的一句：利用率、显存（MiB 换 GiB）；探针读不到的（nvidia-smi 回 N/A，记 None）写“?”。"""
+    def v(x, f):
+        return "?" if x is None else format(x / 1024, f)
+    u = g.get("util")
+    return f"卡 {g['index']} {'?' if u is None else f'{u:g}'}% {v(g.get('mem_used'), '.1f')}/{v(g.get('mem_total'), '.0f')} GiB"
+
+
 def _lane_name(ln: dict) -> str:
     return f"{ln.get('label') or ln.get('id')}（{ln.get('host')}，{ln.get('queue') or ln.get('id')}）"
 
@@ -289,8 +297,7 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
             o.p(f"  {name}：已归还（{fmt_time(h['returned'])}）")
             continue
         st = "正常" if h.get("ok") else f"连不上：{h.get('error')}" + (f"（上次 {fmt_time(h['last_ok'])}）" if h.get("last_ok") else "")
-        cards = "，".join(f"卡 {g['index']} {g.get('util', 0)}% {g.get('mem_used', 0) / 1024:.1f}/{g.get('mem_total', 0) / 1024:.0f} GiB"
-                         for g in h.get("gpus") or [])
+        cards = "，".join(_card(g) for g in h.get("gpus") or [])
         o.p(f"  {name}：{st}" + (f"；{cards}" if cards else "") + (f"；{borrow_text(h['borrow'])}" if h.get("borrow") else ""))
     lanes = {ln["id"]: ln for ln in snap.get("lanes") or []}
     o.p("车道：")

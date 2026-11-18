@@ -113,6 +113,18 @@ class ReadsTest(unittest.TestCase):
         rc, out, _ = run(["status", "p1", "--json"])
         self.assertEqual(out.strip(), "null")
 
+    def test_status_unknown_gpu_fields(self):
+        # nvidia-smi 回 N/A 时探针记 None（probe.num）：照样出整份，未知的写“?”
+        board(self)
+        hosts = [{"id": "h1", "label": "h1", "ok": True, "gpus": [{"index": 0, "util": None, "mem_used": None, "mem_total": None},
+                                                                  {"index": 1, "util": 5, "mem_used": 1024, "mem_total": None}]}]
+        self.snap(hosts=hosts)
+        rc, out, err = run(["status", "p1"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("卡 0 ?% ?/? GiB", out)
+        self.assertIn("卡 1 5% 1.0/? GiB", out)
+        self.assertIn("告警（2 条）", out)
+
     def test_unregistered_and_not_owner(self):
         board(self)
         rc, _, err = run(["status", "nope"])
