@@ -7,12 +7,13 @@
 - 成员：管理员，或账号对应的人（users.person_of）有一台开了入池的组内服务器（member）。users.may_host 对 pool 问它。
 - 自动借还（tick，工作台每轮、只在持有服务租约时，overview.collect 里快照写盘前）：
   还（_returns）：池借着的主机（主机项 borrow.pool）主人回来（worker 状态的 guest.owner）、关了入池或出了时段、POOL_IDLE_S 没有池任务在跑
-  就 borrow.request_return（在跑的跑完就还；时段结束、租期截止由 borrow.check 的约定时间照旧管）；换了容器（组内探测的 started 与借来时记的不同）
+  （从借来、最近有池任务在跑、最近往上放清单里取晚的起算）就 borrow.request_return（在跑的跑完就还；时段结束、租期截止由 borrow.check 的约定时间照旧管）；换了容器（组内探测的 started 与借来时记的不同）
   直接 borrow.finish(gone=True)。放（_place）：池里待放的、要还的池主机上的、在池主机上队首因资源等满 POOL_WAIT_S 的清单，按 fair_key 排先后，
-  经 fit --list --json 判各台放不放得下，serve.reg_move 放过去（要还的主机上放不下的回池里待放）。借（want_borrow）：还有放不下的、
+  经 fit --list --json 判各台放不放得下，serve.reg_move 放过去（要还的主机上放不下的回池里待放）；
+  交给池之前在别的主机放行的那一格还没收尾的（worker 的 elsewhere）不放，已在池主机上的放回池里，等它跑完（#80）。借（want_borrow）：还有放不下的、
   平台操作格空着时，挑一台入池、在时段内、GPU 空着或只有保活、主人空闲够久的，fleetops.start("borrow", pool=True)。
 - 收回（reclaim）：持有人或能做平台操作的管理员点，request_return(now=True) 按停法停下池任务、清单回池里重排。
-持久的只有主机清单里的 lend、lend_hours、borrow_pool 与 borrow.json 各台的 pool 子项（started、since、busy、rest、fail、nofit、want）；
+持久的只有主机清单里的 lend、lend_hours、borrow_pool 与 borrow.json 各台的 pool 子项（started、since、busy、placed、rest、fail、nofit、want）；
 fit 的结果只缓存在内存里。
 """
 from __future__ import annotations
@@ -240,7 +241,7 @@ def relaunch_ok(e: dict, t: float | None = None) -> bool:
 
 
 def _returns(lent: list[dict], srv: dict, fst: dict, bst: dict, t: float, ret, fin) -> tuple[set, list[str]]:
-    """池借着的各台该不该还：R1 主人回来（guest.owner）、R3 关了入池或出了时段、R4 连着 POOL_IDLE_S 没有池任务在跑、R5 换了容器
+    """池借着的各台该不该还：R1 主人回来（guest.owner）、R3 关了入池或出了时段、R4 连着 POOL_IDLE_S 没有池任务在跑（从借来、最近一次有池任务在跑、最近一次往上放清单里取晚的起算）、R5 换了容器
     （R2 约定时间与租期截止由 borrow.check 照旧管）。R1–R4 走 request_return（在跑的跑完就还），R5 直接 finish(gone=True)。
     返回 (要还了的主机, 换了容器的主机)。"""
     going, gone = set(), []
@@ -264,7 +265,7 @@ def _returns(lent: list[dict], srv: dict, fst: dict, bst: dict, t: float, ret, f
             going.add(sid)
             continue
         owner = (ws.get("guest") or {}).get("owner")
-        last = t if run else max(m.get("busy") or 0, b.get("since") or 0, m.get("since") or 0)
+        last = t if run else max(m.get("busy") or 0, m.get("placed") or 0, b.get("since") or 0, m.get("since") or 0)   # 刚放上来的清单还没开跑也从放上来起算（#80）
         why, rest = None, None
         if owner:
             why, rest = f"{s['holder']} 回来了（{'；'.join(owner[:2])}）", "主人回来过"
@@ -296,7 +297,8 @@ def want_borrow(need: dict, cfg: dict, fst: dict, bst: dict, t: float, busy=(), 
     GPU 上除保活外没有进程、can_borrow（VS Code、终端这类轻用借来后给主人留预留）；主人最近一次有实验已过 guard_idle_min；
     截止（时段结束与租期前 MARGIN_S 取早）离现在至少 POOL_MIN_LEFT_S；卡数够、单卡显存装得下 need（清单写的提示值才比；按历史估的超过整卡
     时 worker 按整卡算，同 card_need）；没在 nofit 里；
-    这台目录里没有留着别的清单登记（regs：全局快照的 regs 按主机；以前手动借时留下的，池借来一拉起 worker 就会接着跑它们）。
+    这台目录里没有留着别的清单登记（regs：全局快照的 regs 按主机；以前手动借时留下的，池借来一拉起 worker 就会接着跑它们；
+    池自己放过去的（_ours，跑完的也算）不挡：还掉时 tick 把它们收回池里，没收成的借回来接着跑也是池的活，#80）。
     多台时卡数差最小的、单卡显存差最小的、空闲最久的。返回 (服务器 id, 时段结束（全天为 None）, 没挑到时各台为什么不行)。"""
     off, out, miss = F.off_servers(), [], {}
     ng, vr = need.get("ngpu") or 0, need.get("vram") or 0
@@ -312,7 +314,7 @@ def want_borrow(need: dict, cfg: dict, fst: dict, bst: dict, t: float, busy=(), 
         lease = F.lease_end(st, cfg)
         cut = min([x for x in (nxt, lease - B.MARGIN_S if lease else None) if x], default=None)
         no = ("不在入池时段" if not inside else "借着" if F.borrowed(s) else "关机了" if sid in off else "在做平台操作" if sid in busy
-              else "目录里还留着别的清单" if ((regs or {}).get(sid) or {}).get("queues")
+              else "目录里还留着别的清单" if any(not _ours(q) for q in ((regs or {}).get(sid) or {}).get("queues") or [])
               else "休息中" if (m.get("rest") or 0) > t else "刚借不成" if t - (m.get("fail") or 0) < POOL_FAIL_S
               else "没探到" if not a or st.get("down") or st.get("error") or t - (st.get("last") or 0) > 2 * cfg["interval"]
               else "GPU 上有主人的进程" if F._brief_work(a) or not B.can_borrow(a)
@@ -357,6 +359,8 @@ def _move(it: dict, to: str, move, t: float, snap: dict | None = None) -> bool:
     _event(it["host"] if to == POOL else to, None, f"算力池把 {it['project']} 的 {it['jobs']}" + (f" 从 {it['host']}" if it["host"] != POOL else "")
            + (" 放回池里待放" if to == POOL else f" 放到 {to}") + (f"（{it['reason']}）" if it.get("reason") else ""), t,
            act="place", project=it["project"])
+    if to != POOL:
+        _mem(to, placed=round(t))                         # R4 从放上来起算：队首还没开跑（等依赖、等资源）也不马上还（#80）
     return True
 
 
@@ -423,6 +427,16 @@ def _place(items: list[dict], cands: list[dict], regs: dict, t: float, move, fit
     return left
 
 
+def _ours(q: dict) -> bool:
+    """这条登记是不是池的：池里的清单都带停法（worker add pool 缺省 term，不许 boundary）；借给池之前就留下的多是 boundary 或没写，池不收、不搬。"""
+    return q.get("stop") not in (None, "boundary")
+
+
+def _elsewhere(x: list) -> str:
+    """worker 说这条清单在等别的主机放行的那一格收尾（pool_heads 与等待项的 elsewhere [主机, 任务]，run_elsewhere 认的）：那一句。"""
+    return f"{x[1]} 还在 {x[0]} 上跑（交给池之前在那台放行的），跑完再放"
+
+
 def _item(host: str, q: dict, t: float, **kw) -> dict:
     return {"host": host, "root": q["root"], "jobs": q["jobs"], "project": q.get("project"), "stop": q.get("stop"),
             "key": key(q["root"], q["jobs"]), "since": t, **kw}
@@ -447,11 +461,11 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
     lent = [e for e in snap.get("hosts") or [] if (e.get("borrow") or {}).get("pool") and e["id"] in srv]
     regs = {x["host"]: x for x in snap.get("regs") or []}
     going, gone = _returns(lent, srv, fst, bst, t, ret, fin)
-    for x in list(regs.values()):  # 还掉的池主机目录里还剩的登记（借着时没搬成的）与换了容器的：直接回池里待放
+    for x in list(regs.values()):  # 还掉的池主机目录里还剩的登记（借着时没搬成的、跑完了的）与换了容器的：直接回池里待放
         s = srv.get(x["host"])
-        if x["host"] in gone or (s and s.get("borrow_pool") and not F.borrowed(s) and x.get("state") == "returned"):
+        if x["host"] in gone or (s and s.get("borrow_pool") and not F.borrowed(s)):   # 刚还的那一轮 regs 还是还之前读的（active），照收（#80）
             for q in x.get("queues") or []:
-                if q.get("stop") not in (None, "boundary"):     # 池放过去的都带停法；别的（借给池之前就留下的）池不收，留给会话自己搬
+                if _ours(q):           # 别的（借给池之前就留下的）池不收，留给会话自己搬；收走的 _shift 当场从 regs 去掉，这一轮后面的放、借看收完的样子
                     _move(_item(x["host"], q, t, reason=f"{x['host']} 已还"), POOL, move, t, snap)
     heads, fresh = _heads(snap)
     paused = set((sw or {}).get("pause") or {})
@@ -460,6 +474,7 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
         it = _item(POOL, q, q.get("added_t") or t)
         pid, hd = it["project"], heads.get(it["key"])
         it["why"] = ("还没有在跑的 worker 读到池里的清单" if not fresh else "清单里没有还要跑的行" if not hd
+                     else _elsewhere(hd["elsewhere"]) if hd.get("elsewhere")
                      else f"队首在等依赖：{hd['dep'][1]}" if hd.get("dep") else "清单暂停中" if hd.get("held") else "项目暂停中" if pid in paused
                      else "项目主人不是算力池成员（没有开了入池的服务器）" if not _owner_ok(pid, cfg) else None)
         lists[it["key"]] = {k: it[k] for k in ("project", "root", "jobs", "host", "since")}
@@ -473,11 +488,14 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
         ws = (e.get("status") or {}) if e.get("worker_up") else {}
         for q in (regs.get(e["id"]) or {}).get("queues") or []:
             it = _item(e["id"], q, t)
+            w = next((w for w in ws.get("waiting") or [] if w.get("queue") and key(w.get("root"), w["queue"]) == it["key"]), None)
+            if w and w.get("elsewhere") and _ours(q):          # 放过来时别的主机放行的那一格还没收尾：这台一行也开不了，回池里等它跑完再放（#80）
+                _move(dict(it, reason=_elsewhere(w["elsewhere"])), POOL, move, t, snap)
+                continue
             if e["id"] in going:
                 if not ws or _todo(ws, q["root"], q["jobs"]):    # 只剩在跑的那一格（或都跑完了）的不用搬：跑完随主机一起还
                     pending.append(dict(it, back=True, reason=f"{e['id']} 要还了"))
                 continue
-            w = next((w for w in ws.get("waiting") or [] if w.get("queue") and key(w.get("root"), w["queue"]) == it["key"]), None)
             if w and not w.get("held") and not w.get("dep") and t - (w.get("since") or t) >= POOL_WAIT_S:
                 pending.append(dict(it, reason=f"在 {e['id']} 上等了 {fmt_dur(t - w['since'])}还没放行"))
     focus = set((sw or {}).get("focus") or {})

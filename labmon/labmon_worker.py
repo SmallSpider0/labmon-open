@@ -2696,10 +2696,11 @@ class Worker:
         self.dep_miss = {k: t for k, t in self.dep_miss.items() if k in want and k not in idx}
 
     def pool_view(self, now):
-        """算力池里待放的各清单还要跑的（#25）：{"目录|清单": {head 队首, n 还要跑几行, dep 队首的依赖没满足时 [状态, 原因]（dep_block），held 清单暂停}}；
+        """算力池里待放的各清单还要跑的（#25）：{"目录|清单": {head 队首, n 还要跑几行, dep 队首的依赖没满足时 [状态, 原因]（dep_block），held 清单暂停,
+        elsewhere 交给池之前在别的主机放行、还没收尾的那一格 [主机, 任务]（不算在 head、n 里，#80）}}；
         都跑完了的不列。池目录没有 worker：同一 worker_home 下各台的 worker 都按自己的 dep_state 算一份写进状态的 pool_heads，
-        看板（pool.tick）挑最新的那份：有行要跑、依赖满足、没暂停的才放、才为它借。"""
-        return {"%s|%s" % (os.path.normpath(r["root"]), r["queue"]): {"head": r["name"], "n": r["n"], "held": r["held"],
+        看板（pool.tick）挑最新的那份：有行要跑、依赖满足、没暂停、没有 elsewhere 的才放、才为它借。"""
+        return {"%s|%s" % (os.path.normpath(r["root"]), r["queue"]): {"head": r["name"], "n": r["n"], "held": r["held"], "elsewhere": r["elsewhere"],
                                                                       "dep": list(self.dep_block(r, now) or ()) or None} for r in self.pool_heads}
 
     def dep_block(self, r, now):
@@ -3285,18 +3286,23 @@ class Worker:
 
     def pool_todo(self, now):
         """算力池里待放的清单还会跑的行（#24）：peers 一起读，按别的主机的 todo 的样子 [("pool", 0, now, 清单项)] 记进 peer_todo，
-        别处 after= 等它时算还会跑（不报找不到，dep_note 写在池里等）。池目录没有 worker、没有状态，按登记与清单的状态目录现读（清单按修改时间缓存）。"""
+        别处 after= 等它时算还会跑（不报找不到，dep_note 写在池里等）。池目录没有 worker、没有状态，按登记与清单的状态目录现读（清单按修改时间缓存）。
+        交给池之前在别的主机上放行、还没收尾的那一格（状态目录的 current，run_elsewhere 认：放它的主机没归还）不算池里的：它在那台跑着
+        （那台状态 todo 里列着），这条清单在它跑完之前放到哪台都一行开不了，队首取它后面那行、记 elsewhere [主机, 任务]，看板等它跑完再放（#80）。"""
         out, self.pool_heads = [], []
         for q in registry(os.path.join(HOME, "hosts", POOL, "queues"))[0]:
             rows = self.list_of(q["jobs_path"])
             if rows is None:
                 continue
-            ms, left = rows_left(q["state"], rows, None)
+            cur = read_current(q["state"])
+            other = cur and run_elsewhere(POOL, q, cur, self.gone)
+            ms, left = rows_left(q["state"], rows, cur[0] if other else None)
             if not left:
                 continue
             n, h = left[0]                                  # 队首：看板放之前看它还有没有、依赖满足没有（pool_view）
             self.pool_heads.append({"project": q["project"], "root": q["root"], "queue": q["jobs"], "name": n, "n": len(left),
-                                    "deps": h.get("deps"), "deps_any": h.get("deps_any"), "held": "paused" if ms and "paused" in ms else None})
+                                    "deps": h.get("deps"), "deps_any": h.get("deps_any"), "held": "paused" if ms and "paused" in ms else None,
+                                    "elsewhere": [other, cur[0]] if other else None})
             ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [n for n, _ in left], "gang": {},
                   "deps": {n: [[p, x] for p, x, _ in d] for n, h in left for d in [dep_keys(dict(h, project=q["project"]))] if d},
                   "held": "paused" if ms and "paused" in ms else None}
@@ -4674,7 +4680,7 @@ class Worker:
                 if self.elsewhere.get(q["key"]) != (other, cur[0]):
                     self.event("worker", "清单 %s/%s 的 %s 是主机 %s 放行的，这台不接管、不重跑，等那台收尾" % (q["root"], q["jobs"], cur[0], other),
                                project=q["project"], root=q["root"], queue=q["jobs"], name=cur[0])
-                waiting.append({"key": q["key"], "q": q, "name": None,
+                waiting.append({"key": q["key"], "q": q, "name": None, "elsewhere": [other, cur[0]],
                                 "why": "主机 %s 放行的 %s 还没收尾（这条清单也登记在那台），等那台跑完；那台已不在、任务确定没了，删掉状态目录里的 current 这台就接着跑" % (other, cur[0])})
                 continue
             if cur:
@@ -4873,6 +4879,7 @@ class Worker:
                          "held": (w.get("held") or [None])[0],   # 挡住它的临时指令种类（drain、pause、deadline、guest）：看板据此标暂停
                          "dep": (w.get("dep") or [None])[0],     # 依赖没满足（dep_block）：wait 在等；failed 等的跑失败了、missing 找不到、cycle 成环，这三种看板出告警
                          "pos": w.get("pos"),                     # 排位（admit）：等待表的“排第几”与解释
+                         "elsewhere": w.get("elsewhere"),         # 整条清单在等别的主机放行的那一格收尾（run_elsewhere）：[主机, 任务]；算力池据此把它放回池里（#80）
                          "start": self.starts.get((w["key"], w["name"]))}   # 推演（plan）里它预计何时开始；推演里排不上的没有
                         for w in waiting]}, ensure_ascii=False, indent=1))
 

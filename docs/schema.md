@@ -166,7 +166,7 @@
   主机项另有看板算的 `busy`（`overview.gpu_busy`）：按 `info.gpus` 的顺序每卡一项 `{i, …gpu_busy 那几项, d1 近 24 小时平均, d1cov 它覆盖的秒数}`，`d1` 是 `series` 各行 `m10` 的平均；离线沿用旧状态、worker 不在（`worker_up` 为假）时没有，曲线那一行的 `m10` 也记 null。
   `room` 是按记账还能放多少：`{ram, margin, gpus {UUID: MB}, cpu 核, cpu_cap 记账上限（配额向下取整）, other_cpu, keep, owner}`，读不到配额时 `cpu`、`cpu_cap` 为 null；`other_cpu` 是认得准的 labmon 之外的核数（容器给 2 核以上时才有，否则 null），`keep` 是各卡给对方留着、对方还没用上的显存 `{UUID: MB}`（只列非 0 的），`owner` 是不放的卡（对方超出预留或刚回落、有停不了的保活），`worker fit` 按这几项判整机独占、整卡封顶与卡；借来的主机上 `guest.block` 是整台不放新任务的原因（对方内存或 CPU 超出预留、刚回落：`guest_block`，没有为 null）；
   `running[]` 的 `est` 是资源估计（`estimate`）：`vram`（每卡 GiB）与来源 `src`、`ram`（GiB）与来源 `ram_src`（#61 起 `src` 只指显存；之前放行、被接管的任务没有 `ram_src`，与 `src` 同一来源）、`util`，带 `cpus`（估计核数）、`cpu_src`（来源），`acct` 带 `cpu`（记账核数 = max(估计封顶到 `cpu_cap`, 实测)，开跑满 10 分钟后估计那份换成近 10 分钟窗口核数的最大值、不超过给的核数、不低于 1（#65），占位任务 0），`io_sus` 是记了“读写拥塞嫌疑”的时刻（没记为 null），`cpu_fit` 是开跑核数给少了、给多了（`{how: low|high, avg, peak, give, sug}`，没有或不满 10 分钟为 null，#46，[worker.md「CPU 与读写」](worker.md#cpu-与读写)）；
-  `waiting[]` 的 `est` 同样带 `ram_src`、`cpus`、`cpu_src`，`cpu_wait` 是一直因 CPU 被挡满 10 分钟后已挡的秒数（不到为 null）；`disk`（共享盘扫描，`mine` 为真的那台在扫）的 `yield` 是共享盘慢、推迟中的说明（没推迟为 null）；
+  `waiting[]` 的 `est` 同样带 `ram_src`、`cpus`、`cpu_src`，`cpu_wait` 是一直因 CPU 被挡满 10 分钟后已挡的秒数（不到为 null），`elsewhere` 是整条清单在等别的主机放行的那一格收尾时的 `[主机, 任务]`（`run_elsewhere`；没有为 null，算力池据此把它收回池里，#80）；`disk`（共享盘扫描，`mine` 为真的那台在扫）的 `yield` 是共享盘慢、推迟中的说明（没推迟为 null）；
   `running[].use` 另有 `rd`、`wr`（此刻 MiB/s）、`rd_b`、`wr_b`（累计字节）、`cores_peak`、`rd_peak`、`wr_peak`（1 分钟峰值），`conc`（运行期间同卡平均几条 labmon 任务，含自己；不用卡的没有），以及接管时续算用的内部键 `rchar`、`wchar`、`pw`、`conc_s`、`conc_w`、`pks`（近 10 分钟各 1 分钟窗口的 [结束时刻, 核数]，CPU 记账回收用）、`pk0`（从何时起量窗口核数）（看板不读），`running[]` 与 `waiting[]` 带清单的 `cpus`、`io`；
   `done[]` 的这几项同名（`cores_peak`、`rd_peak`、`wr_peak`、`rd_b`、`wr_b`、`cpus`、`io`；11-08 前的行没有，读的地方当没有）。
   `done[]` 的 `oom` 是失败是不是 OOM：`"vram"`（CUDA 显存）、`"ram"`（容器内存被杀）或 null（跑成功、别的失败、停下重排、借来的主机上被挤掉的；11-10 前的行没有，当作 null），
@@ -186,7 +186,7 @@
   `lan_off` 为本机不在内网（这时沿用上一轮的 `status`）；借来的主机带 `borrow`（同上）。
   算力池借来的（#25）：`borrow.pool` 为真（`holder` 照写持有人，`by` 是「算力池」）；换了容器的那一轮另带 `gone: true`（`pool._returns` 标，工作台不重新拉起 worker）。
   借来的主机的 `status.guest` 另有 `owner`（算力池用：对方超出预留的几项里去掉只因 `ka.sh` 停不了的保活超出的卡，算力池借的再加上有了对方 GPU 进程的卡；非空算主人回来了），各台状态另有 `pool_heads`：
-  `{"目录|清单": {head 队首, n 还要跑几行, held 清单暂停（"paused" 或 null）, dep 队首的依赖没满足时 [状态, 原因]（worker 的 dep_block）}}`，算力池里待放的各清单（看板取最新那份）。
+  `{"目录|清单": {head 队首, n 还要跑几行, held 清单暂停（"paused" 或 null）, dep 队首的依赖没满足时 [状态, 原因]（worker 的 dep_block）, elsewhere 交给池之前在别的主机放行、还没收尾的那一格 [主机, 任务]（不算在 head、n 里；没有为 null，#80）}}`，算力池里待放的各清单（看板取最新那份）。
   `offers_kept` 只在这一轮读这台失败（`error`、`status_error`，没 `worker stop`）、沿用它上一轮的 offers 时出现：`{t 那份状态写下的时刻（本机时钟 epoch 秒）, offers}`，按 `STALE_S` 过期（`rebalance.keep_offers`）。
 - 顶层 `rebalance` 是各项目的挪法建议 `{项目: …}`（`rebalance.suggest`，[workbench.md「挪法建议」](workbench.md#挪法建议)）：有建议的 `{key 告警 key（rebalance:<项目>）, target 挪到哪台, lane, before, local 是不是同机多开一条车道, gpus 同机时登记要限的卡（offer 的 gpus）, jobs（offers 的前几项）,
   from 原来整批何时跑完（推不出为 null）, to 挪后（推不出为 null）, idle 是不是接收方空着、按行比的（这时另带 there 这几行在原处最早何时跑完（说不出为 null）、done 挪过去后何时都跑完，#62）, cut 其中被借用约定挡住的清单 ["主机|目录|清单"]（这句写进 borrow_cut，不另报）, text 那一句（句尾“按 HH:MM 的推演”）}`；
