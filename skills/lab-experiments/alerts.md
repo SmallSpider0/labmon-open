@@ -43,6 +43,8 @@
   是本项目的，清本项目能重算的中间文件，删结果、旧 checkpoint 前先问用户；不是本项目的告诉用户，不动别人的文件。
 - `idle:<主机>:<检查>`：主机检查不通过（多是 GPU 保活没在跑），卡上又没有进程、没有任务在跑，机器可能因空闲被回收。保活由 worker 管，不自己 `ka.sh start`。
   先看本项目没跑的任务为什么没放（项目页车道状态、`labmon worker status`）；worker 不在就 `labmon worker start <主机>`。检查本身过时的（项目 monitor.toml 里重复或旧的保活检查、已归还主机的 `when_idle`），照 SKILL「已接入项目体检」删掉。
+- `throttle:<主机>:<起点>`：容器 CPU 持续被配额限流，消息里列出本项目实测核数远超给的核数（`$LABMON_CPUS`）的任务。这些任务在抢同机别的任务的核，自己也被限流变慢。
+  没设的 `OMP_NUM_THREADS` 等 worker 已缺省成 `$LABMON_CPUS`，仍超核的是别处写死了：查代码、`.env` 与清单行前缀里的线程数与进程数（`torch.set_num_threads`、DataLoader `num_workers`、进程池、按 `nproc` 取的值），改成按 `$LABMON_CPUS`，下次开跑生效，在跑的不必停；确实要更多核就在清单那一行写 `cpus=`（[lists.md](lists.md)）。同一段限流只报一次。
 - `returned_unfinished:<车道>`：自用主机已还回平台，它上面的车道还有任务没跑完：把清单 `worker add` 到别的主机（车道跟着登记走，项目配置不用改；用户也可以在看板主机页上整台搬、在新主机页上一次接上）。
 
 ## 借来的主机

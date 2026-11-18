@@ -1054,6 +1054,7 @@ function alertsOf(h) {
   for (const w of (h.status?.waiting || []).filter(w => w.dep && w.dep !== "wait")) add("agent", `${h.label}：${pname(w.project)} 的 ${w.name} ${w.why}`);
   for (const w of (h.status?.waiting || []).filter(w => w.cpu_wait)) add("agent", `${h.label}：${pname(w.project)} 的 ${w.name} 因 CPU 被挡 ${dur(w.cpu_wait)}：${w.why}`);
   for (const w of h.borrow?.late || []) add("both", `${h.label}：${pname(w.project)} 的 ${laneName(laneOf(h, w), [h])} 还有 ${w.n} 个任务不会在这台放行：${w.why}；${h.borrow.late_say}`);   // borrow.late_jobs、late_say
+  if (h.status?.throttle?.alert) add("both", thrText(h));   // CPU 持续被配额限流（worker 判的，#39）
   const kf = h.status?.kafight;            // worker 记的：要卡时停了的保活又被拉起来（近 1 小时）
   if (kf) add("user", `${h.label}：GPU 保活在任务运行中被拉起 ${kf.n} 次（1 小时内，最近 ${tsNear(kf.t)}），已停；${kf.who}`);
   if (h.renew?.state === "ready") add("user", `${h.label}：可以续租了（${h.renew.why}），${srvById(h.id) ? "到主机页点「续租」" : "去平台续租（主机清单没有 [fleet] 段，看板不能替你续）"}`);
@@ -1061,7 +1062,21 @@ function alertsOf(h) {
   if (h.auto && !h.error && h.status && !h.worker_up && !h.stopped) add("user", `${h.label}：worker 不在，看板会自动拉起（10 分钟内一次）`);
   return out;
 }
-const allAlerts = () => D.hosts.flatMap(h => forUser(alertsOf(h)));        // 给用户的（总览红框与告警数）
+const allAlerts = () => D.hosts.flatMap(h => forUser(alertsOf(h)));
+// CPU 被配额限流（worker 写的 throttle，#39；门槛只在 worker 的 thr_step、cpu_over，页面只读）：告警的那句、主机表与资源卡上限流比例的颜色与悬停
+const thrOver = th => th.over.map(o => `${pname(o.project)} 的 ${o.name} 实测 ${g1(o.cores)} 核（给 ${o.give} 核）`).join("、");
+function thrText(h) {
+  const th = h.status.throttle;
+  return `${h.label}：容器 CPU 被配额限流${th.thr != null ? ` ${g1(th.thr)}%` : ""}（已持续 ${dur(th.for)}），`
+    + (th.over.length ? `超核的任务：${thrOver(th)}，线程数、进程数按 $LABMON_CPUS 设就不再抢核` : th.other >= 1 ? `labmon 之外的进程占 ${g1(th.other)} 核` : "各任务都没超出给的核数，是配额本身不够");
+}
+// 限流比例的小字：限流中琥珀、持续满（告警）标红；悬停写口径与超核的任务
+function thrTag(h, cls = "sm") {
+  const thr = h.status?.info?.press?.thr, th = h.status?.throttle;
+  if (thr == null) return "";
+  const t = `近 1 分钟里 CPU 被配额限流的周期比例（cgroup cpu.stat）${th ? `\n${th.alert ? "持续" : "已"}限流 ${dur(th.for)}${th.over.length ? `\n超核：${thrOver(th)}` : ""}` : ""}\n只记录，准入不看`;
+  return `<span class="${cls}${th ? "" : " mut"}" style="${th ? `color:var(${th.alert ? "--bad" : "--warn"})` : ""}" ${tip(t)}>限流 ${g1(thr)}%</span>`;
+}        // 给用户的（总览红框与告警数）
 
 function workerBadge(h) {
   const st = h.status;
@@ -1699,15 +1714,15 @@ function home() {
   if (na) s += `<div class="alerts">${al.map(a => `<div>⚠ ${esc(a)}</div>`).join("")}${fal.map(a => `<div>⚠ <a href="#/fleet">组内</a>：${esc(a)}</div>`).join("")}`
     + `${pal.map(({ps, m}) => `<div>⚠ ${ps.map(p => `<a href="#/p/${encodeURIComponent(p.id)}">${esc(p.title || p.id)}</a>`).join("、")}：${esc(m)}</div>`).join("")}</div>`;
   s += `<div class="card"><div class="chd"><b>主机</b><span class="sm mut">点一行看详情</span></div><div class="scroll"><table>
-    <tr><th>主机</th><th>worker</th><th style="min-width:180px">显存</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("组里各服务器挂的同一块盘：我们各项目、公共目录、我们的其他目录、其他人；红线是告警线。按人看在组内服务器的「共享盘」")}>共享盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
+    <tr><th>主机</th><th>worker</th><th style="min-width:180px" ${tip("每张卡一行：条是显存，数字是显存占比 · GPU 利用率")}>显存 · 利用率</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("组里各服务器挂的同一块盘：我们各项目、公共目录、我们的其他目录、其他人；红线是告警线。按人看在组内服务器的「共享盘」")}>共享盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
     (D.hosts.map(h => {
       const info = h.status?.info, gs = info?.gpus || [], m = info?.mem;
-      const gb = gs.map(g => `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB，利用率 ${g.util ?? "—"}%`)}><div class="bar thin" style="flex:1"><i style="width:${100 * g.used / g.total}%;background:var(--accent)"></i></div><span class="sm num nw">${pct(g.used, g.total)}%</span></div>`).join("");
+      const gb = gs.map(g => `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB，利用率 ${g.util ?? "—"}%`)}><div class="bar thin" style="flex:1"><i style="width:${100 * g.used / g.total}%;background:var(--accent)"></i></div><span class="sm num nw">${pct(g.used, g.total)}%<span class="mut"> · ${g.util == null ? "—" : Math.round(g.util) + "%"}</span></span></div>`).join("");
       const sx = sharedParts();
       const sb = sx ? `<div class="row" style="flex-wrap:nowrap">${sharedBar(sx, true)}<span class="sm num nw" style="${sx.dk.free < sx.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(sx.dk.free)}${sx.dk.eta_days != null && sx.dk.eta_days < 7 ? ` · ${sx.dk.eta_days} 天满` : ""}</span></div>` : "—";
       const mb = m ? `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1"><i style="width:${100 * m.used / m.limit}%;background:${m.used / m.limit >= 0.9 ? "var(--bad)" : "var(--accent)"}"></i><b style="left:90%"></b></div><span class="sm num nw">${g1(m.used)} / ${g1(m.limit)}</span></div>` : "—";
       return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b></td><td>${workerBadge(h)}</td>
-        <td>${gb || "—"}</td><td>${mb}</td><td>${sb}</td><td class="r">${info?.cpu_used != null ? g1(info.cpu_used) : "—"} <span class="mut">/ ${info?.cpu_quota ? g1(info.cpu_quota) : info?.nproc ?? "—"}</span></td>
+        <td>${gb || "—"}</td><td>${mb}</td><td>${sb}</td><td class="r nw">${info?.cpu_used != null ? g1(info.cpu_used) : "—"} <span class="mut">/ ${info?.cpu_quota ? g1(info.cpu_quota) : info?.nproc ?? "—"}</span>${thrTag(h) ? `<div>${thrTag(h)}</div>` : ""}</td>
         <td class="r">${jobsOf(h).length}</td><td class="r">${(h.status?.waiting || []).length}</td>
         <td class="sm nw" ${info?.started ? tip(`容器 ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : ""}>${h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${renewChip(h)}</td></tr>`;
     }).join("") || `<tr><td colspan="9" class="empty">主机清单里没有在用的主机。</td></tr>`) + `</table></div></div>`;
@@ -2038,10 +2053,11 @@ function resCard(h) {
   const q = info.cpu_quota || info.nproc;
   if (info.cpu_used != null && q) {
     const js = jobsOf(h), acct = js.reduce((a, j) => a + (j.acct?.cpu || 0), 0), rc = st.room?.cpu;
-    const cs = js.map(j => (j.use?.cores ? seg(100 * j.use.cores / q, color(j.project), `${j.project} · ${j.name}：${g1(j.use.cores)} 核`, j.name) : "")
+    const ov = Object.fromEntries((st.throttle?.over || []).map(o => [o.project + "|" + o.name, o]));   // 限流中超核的任务（#39）
+    const cs = js.map(j => (j.use?.cores ? seg(100 * j.use.cores / q, color(j.project), `${j.project} · ${j.name}：${g1(j.use.cores)} 核${ov[j.project + "|" + j.name] ? `\n超核：给 ${ov[j.project + "|" + j.name].give} 核，1 分钟窗口实测 ${g1(ov[j.project + "|" + j.name].cores)} 核` : ""}`, j.name) : "")
       + (j.acct?.cpu - (j.use?.cores || 0) > 0.05 ? seg(100 * (j.acct.cpu - (j.use?.cores || 0)) / q, color(j.project), `${j.name}：记账还没占上的 ${g1(j.acct.cpu - (j.use?.cores || 0))} 核\n（开跑 10 分钟内按估计值预留：${j.est?.cpu_src || ""}；满 10 分钟后按近 10 分钟窗口核数）`, "", "resv") : "")).join("");
     s += row("CPU", big(cs + seg(Math.max(0, 100 * (info.cpu_used - js.reduce((a, j) => a + (j.use?.cores || 0), 0)) / q), "var(--muted)", "其他进程", "", "hatch")),
-      `${g1(info.cpu_used)} / ${g1(q)} 核${st.room?.cpu_cap != null ? `<span class="mut" ${tip("记账 = 各任务记的核数合计：开跑后 10 分钟内取 max(估计核数（封顶到上限）, 实测核数)，满 10 分钟后估计那份换成近 10 分钟窗口核数的最大值（不超过开跑时给的核数、不低于 1）再与实测取大；上限是配额向下取整")}>记账 ${g1(acct)} / ${st.room.cpu_cap}</span>` : ""}${rc != null ? `<span class="mut" ${tip("可放 = 配额 − labmon 之外的（含旧 gpu_queue.sh 的任务）− 任务记账")}>可放 ${g1(Math.max(0, rc))}</span>` : ""}${pr.thr != null ? `<span class="mut" ${tip("近 1 分钟里 CPU 被配额限流的周期比例（cgroup cpu.stat）；只记录，准入不看")}>限流 ${g1(pr.thr)}%</span>` : ""}`,
+      `${g1(info.cpu_used)} / ${g1(q)} 核${st.room?.cpu_cap != null ? `<span class="mut" ${tip("记账 = 各任务记的核数合计：开跑后 10 分钟内取 max(估计核数（封顶到上限）, 实测核数)，满 10 分钟后估计那份换成近 10 分钟窗口核数的最大值（不超过开跑时给的核数、不低于 1）再与实测取大；上限是配额向下取整")}>记账 ${g1(acct)} / ${st.room.cpu_cap}</span>` : ""}${rc != null ? `<span class="mut" ${tip("可放 = 配额 − labmon 之外的（含旧 gpu_queue.sh 的任务）− 任务记账")}>可放 ${g1(Math.max(0, rc))}</span>` : ""}${thrTag(h, "mut")}`,
       sp(r => r.cpu != null ? 100 * r.cpu / q : null),
       `容器里 nproc 显示 ${info.nproc ?? "—"} 个逻辑核，那是宿主机的；配额${info.cpu_quota ? " " + g1(info.cpu_quota) + " 核" : "读不到，不记 CPU 账"}\n放行按 CPU 记账：任务要的核数取清单的 cpus=，否则同类近 5 次峰值 ×1.1，都没有按 1 核；放不下的等着，原因写「CPU 不够」\n任务里的 $LABMON_CPUS 是开跑时给它记的核数（估计封顶到上限），不随之后的回收变；没设的 OMP/MKL/OPENBLAS 线程数缺省同它${psiT("cpu")}`);
   }

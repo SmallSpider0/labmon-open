@@ -301,6 +301,34 @@ class LocalQueueTest(unittest.TestCase):
         snap = status(None, "没有可用显存")
         self.assertIsNone(snap["lanes"][0].get("paused"))
 
+    def test_throttle_alert(self):
+        """容器 CPU 持续被配额限流（worker 写的 throttle，#39）：本项目有超核的任务才报 throttle:<主机>:<起点>，给两边看；
+        会话那份写按 $LABMON_CPUS 设线程数，页面上给用户的只说现象；只有别的项目超核、还没持续满、没在限流都不报。"""
+        root, out = self.d / "proj", PJ.out_dir("out")
+        make_queue(root, dead_pid(), self.cur.pid)
+        cfg = write_config(self.d, root, out)
+        cfg.write_text(cfg.read_text().replace('label = "本机"', f'label = "本机"\nworker_home = "{self.d}/wh"'))
+        sf = self.d / "wh" / "hosts" / "here" / "status.json"
+        sf.parent.mkdir(parents=True)
+        sf.write_text(json.dumps({"t": time.time(), "queues": [{"root": str(root), "jobs": "jobs/q.txt"}], "waiting": []}))
+        over = [{"project": "out", "name": "a_run", "cores": 6.0, "give": 2}, {"project": "other", "name": "x", "cores": 9.0, "give": 1}]
+
+        def alerts(th):
+            with mock.patch.object(C, "snapshot", lambda: {"hosts": [{"id": "here", "status": {"throttle": th}}]}):
+                return {a["key"]: a for a in C.collect(load(cfg))["alerts"] if a["key"].startswith("throttle:")}
+        th = {"since": 1000, "for": 900, "thr": 48.5, "alert": True, "over": over, "other": 0.3}
+        al = alerts(th)
+        self.assertEqual(list(al), ["throttle:here:1000"])
+        a = al["throttle:here:1000"]
+        self.assertEqual(a["to"], "both")
+        self.assertIn("本机：容器 CPU 被配额限流 48.5%（已持续 15 分钟），本项目超核的任务：a_run 实测 6 核（给 2 核）", a["msg"])
+        self.assertNotIn("x 实测", a["msg"])                                     # 别的项目的不写进来
+        self.assertIn("$LABMON_CPUS", a["msg"])
+        self.assertNotIn("LABMON_CPUS", a["page"])                               # 给用户的只说现象
+        self.assertEqual(alerts(dict(th, over=over[1:])), {})                    # 只有别的项目超核：不叫醒本项目
+        self.assertEqual(alerts(dict(th, alert=False)), {})                      # 还没持续满
+        self.assertEqual(alerts(None), {})
+
     def test_borrow_cut_alert(self):
         """借来的主机上队首被约定归还挡住（borrow.check 在全局快照里给的 late 非空）：报 borrow_cut:<车道>，写主机全名、车道名与还剩几个任务；
         自用主机被续租截止挡住的（没有 borrow）不报；约定延长、跑得完了（不再 held）就消失；归还后交给 returned_unfinished，不再报它。"""
