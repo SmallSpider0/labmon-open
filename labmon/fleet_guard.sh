@@ -10,13 +10,21 @@
 #       停下了、新的却没开成回 gap（GPU 上此刻没有保活，看板下次探测直接再开）；没停成仍是 fail。
 #   stop <ka 命令> <为什么>
 #       只停 labmon 开的那一个保活（进程组对得上才停）；别人开的、已经不在的不动。
+#   adopt <ka 命令> <盯几秒> <谁开的> <ka.env> <调用者> <借来时刻> <归还时刻> [<进程组> <出生时钟>]
+#       归还借来的服务器时（borrow.finish）与还掉以后补登记（保活守护的 adopt，#102）：此刻卡上的保活是借用期间 labmon 的 worker 开的，
+#       就不动进程、登记成看板的保活（同 start 的登记与盯着让路）。在锁里核对：ka.sh running 只列出一个进程组、组长出生时钟读得到、
+#       组长启动时刻在借用期间（前后各留 60 秒）、GPU 上除它以外没有进程，且认得出是 worker 开的——给了进程组与出生时钟（worker 状态的
+#       keepalive.mine）就要两样都相等；没给就看 ka.env 的 AGRI_ROOT/keepalive/events.log：这个进程组的 RESTORED、调用者是 <调用者>、
+#       时刻在组长启动后 −5～30 秒内（同 worker 的 KA_LOG_LAG），行里带出生时钟的还要相等。
+#       ok adopt 进程组：登记了；ok registered 进程组：本来就是看板登记的；no …：没有保活、有几个、不是借用期间起来的（对方的）；
+#       unsure …：借用期间起来的，却认不出是 worker 开的（不登记）；busy …：GPU 上有别的进程或查不到；fail …：ka.sh 出错。
 #   kacheck <ka 命令> <GPU 进程…>
 #       只读（不拿锁、不写文件，借用前 borrow.begin 用）：逐个看这些认作保活的 GPU 进程（容器 PID）所在的进程组在不在 ka.sh running 列出的里面。
 #       ok：都在（已经没了的不算）；noka PID…：不在的（ka.sh 停不了它们）；fail …：ka.sh 本身出错（退出码；原因在标准错误）。
 #
 # ka 命令是主机清单 [fleet] 的 keepalive_cmd（ka.sh：容器内加锁，不会起两个；python 跑它的保活脚本才算，命令行写完整路径，
 # 或相对路径按进程工作目录还原后是它，#29）。
-# 最后一行是结果：ok … / busy … / fail … / unmanaged … / gap …；探针（fleet_probe.sh）读 /tmp/labmon-guard.state 看保活是不是 labmon 开的。
+# 最后一行是结果：ok … / busy … / fail … / unmanaged … / gap … / no … / unsure …；探针（fleet_probe.sh）读 /tmp/labmon-guard.state 看保活是不是 labmon 开的。
 # 进程身份只比出生时钟（/proc/<pid>/stat 第 22 项，开机以来的时钟数，proc_birth），不换算成墙上时钟。
 ST=${GUARD_STATE:-/tmp/labmon-guard.state}
 PROC=${GUARD_PROC:-/proc}
@@ -94,6 +102,16 @@ running_groups() {   # ka.sh running 的读法（与 worker 的 Worker.ka_groups
   fi
 }
 
+register() {   # ka 命令、盯几秒、谁开的、进程组、出生时钟：写登记（看板开的保活），再在后台盯着让路（start 与 adopt 共用）
+  local now
+  now=$(date +%s)
+  echo "start $now $4 $(( now + $2 )) ${3//[[:space:]]/_} $5" > "$ST"
+  if [ "$2" -gt 0 ]; then       # 后台盯着：不继承本会话的输入输出，ssh 才能马上返回
+    ST="$ST" PROC="$PROC" setsid bash -c "$(declare -f gpu_procs running_groups guard_owner watch_yield watch); watch \"\$@\"" _ \
+      "$(( now + $2 ))" "$4" "$1" "$now" </dev/null >/dev/null 2>&1 9>&- &
+  fi
+}
+
 start() {
   local groups gpu g now until born rc
   groups=$(running_groups "$1"); rc=$?
@@ -114,13 +132,9 @@ start() {
   [ "$rc" = 0 ] || { echo "fail 保活没起来"; return; }
   if [[ "$groups" == *$'\n'* ]]; then echo "fail 开保活后找到多个进程组，无法确认归属"; return; fi
   g=$groups
-  now=$(date +%s)
   born=$(proc_birth "$g") || born=-          # 读不到出生时钟的登记认不出身份：照样让路、停，只是不自动重开
-  echo "start $now $g $(( now + $2 )) ${3//[[:space:]]/_} $born" > "$ST"
-  if [ "$2" -gt 0 ]; then       # 后台盯着：不继承本会话的输入输出，ssh 才能马上返回
-    ST="$ST" PROC="$PROC" setsid bash -c "$(declare -f gpu_procs running_groups guard_owner watch_yield watch); watch \"\$@\"" _ \
-      "$(( now + $2 ))" "$g" "$1" "$now" </dev/null >/dev/null 2>&1 9>&- &
-  fi
+  register "$1" "$2" "$3" "$g" "$born"
+  now=$(date +%s)
   until=$(( now + ${GUARD_READY_S:-10} ))
   while :; do
     gpu=$(gpu_procs "$g") || { echo "fail 查不到 GPU 进程"; return; }
@@ -201,6 +215,50 @@ repair() {  # ka 命令、盯几秒、谁开的、容器出生时钟、登记时
   esac
 }
 
+ka_logged() {  # events.log 进程组 出生时钟 启动时刻 调用者：这个进程组的 RESTORED 是不是这个调用者记的（时刻在启动后 −5～30 秒内；带出生时钟的要相等）
+  local ts rest t b
+  [ -r "$1" ] || return 1
+  while IFS= read -r ts && IFS= read -r rest; do
+    [[ "$rest" == *"调用者 $5" ]] || continue
+    b=$(printf '%s\n' "$rest" | sed -n 's/^RESTORED 进程组 [0-9]* 出生 \([0-9]*\)；.*/\1/p')
+    [ -z "$b" ] || [ "$b" = "$3" ] || continue
+    t=$(date -d "$ts" +%s 2>/dev/null) || continue
+    [ "$t" -ge $(( $4 - 5 )) ] && [ "$t" -le $(( $4 + 30 )) ] && return 0
+  done < <(tail -n 2000 "$1" | awk -v g="$2" '$2 == "RESTORED" && $3 == "进程组" && ($4 == g "；调用者" || $4 == g) {print $1; s = $0; sub(/^[^ ]+ /, "", s); print s}')
+  return 1
+}
+
+adopt() {  # ka 命令、盯几秒、谁开的、ka.env、调用者、借来时刻、归还时刻、[进程组、出生时钟]
+  local groups rc g born t0 bt tck gpu ev
+  [[ "$6" =~ ^[0-9]+$ && "$7" =~ ^[0-9]+$ ]] || { echo "fail 借用时段无效"; return; }
+  groups=$(running_groups "$1" strict); rc=$?
+  case "$rc" in
+    0) ;;
+    1) echo "no 没有保活在跑"; return ;;
+    *) echo "fail ka.sh running 出错或输出认不出（退出码 $rc）"; return ;;
+  esac
+  [[ "$groups" != *$'\n'* ]] || { echo "no 有几个保活进程组，认不准"; return; }
+  g=$groups
+  born=$(proc_birth "$g") || { echo "no 读不到保活的出生时钟"; return; }
+  if guard_owner "$1" "$g"; then echo "ok registered $g"; return; fi
+  bt=$(awk '$1 == "btime" {print $2}' "$PROC/stat" 2>/dev/null); tck=$(getconf CLK_TCK 2>/dev/null)
+  [[ "$bt" =~ ^[0-9]+$ && "$tck" =~ ^[1-9][0-9]*$ ]] || { echo "no 读不到开机时刻"; return; }
+  t0=$(( bt + born / tck ))
+  if [ "$t0" -lt $(( $6 - 60 )) ] || [ "$t0" -gt $(( $7 + 60 )) ]; then echo "no 保活不是借用期间起来的"; return; fi
+  if [ -n "${8:-}" ]; then
+    [ "$8" = "$g" ] && [ "${9:-}" = "$born" ] || { echo "unsure 卡上的保活不是 worker 记下的那个"; return; }
+  else
+    ev=$( . "$4" >/dev/null 2>&1; printf '%s' "${AGRI_ROOT:-}")
+    [ -n "$ev" ] || { echo "unsure 读不到 $4 的 AGRI_ROOT，查不了保活是谁开的"; return; }
+    ka_logged "$ev/keepalive/events.log" "$g" "$born" "$t0" "$5" || { echo "unsure ka.sh 的事件日志里没有 $5 拉起它的记录"; return; }
+  fi
+  gpu=$(gpu_procs "$g") || { echo "busy 查不到 GPU 进程"; return; }
+  [ "${gpu#* }" = 0 ] || { echo "busy GPU 上还有别的进程"; return; }
+  [ "${gpu% *}" -gt 0 ] || { echo "busy 保活还没占上 GPU"; return; }
+  register "$1" "$2" "$3" "$g" "$born"
+  echo "ok adopt $g"
+}
+
 kacheck() {  # ka 命令、认作保活的 GPU 进程（容器 PID）…
   local groups rc pid row g bad=""
   groups=$(running_groups "$1" strict); rc=$?
@@ -229,6 +287,7 @@ control() {
     start) start "$2" "${3:-0}" "${4:-看板}" ;;
     stop) stop "$2" "${3:-}" ;;
     repair) repair "${@:2}" ;;
+    adopt) adopt "${@:2}" ;;
     *) echo "fail 不认识的动作 $1" ;;
   esac
 }

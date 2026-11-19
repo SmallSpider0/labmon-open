@@ -523,11 +523,13 @@ class BorrowTest(Base):
         self.assertIn(("add", "pause", SID, "a1", None), self.calls)
         cmds = []
         probed = []
-        out = B.finish(SID, ssh=lambda s, cmd: cmds.append(cmd) or (0, "12\n", ""), ka=lambda s, cfg, by: ("ok", "start 1"),
+        out = B.finish(SID, ssh=lambda s, cmd: cmds.append(cmd) or (0, "12\n", ""), ka=lambda s, cfg, by: ("ok", "start 1"), adopt=lambda *a: ("no", "没有保活在跑"),
+                       
                        wrote={"since": 1, "b": 3 * 2 ** 30, "n": 2, "top": [["/root/res", 2 * 2 ** 30, 1], ["/work/out", 2 ** 30, 1]]}, kill=[42], probe=probed.append)
         self.assertEqual(probed, [SID])                                       # 开完保活随即探一次，页面马上看到
         self.assertIn("kill -TERM -- -42", cmds[0])
-        self.assertIn("(bash ka.sh stop)", cmds[0])                           # 借来时 GPU 空着：保活是 worker 开的，停掉
+        self.assertNotIn("ka.sh stop", cmds[0])
+        self.assertIn("(bash ka.sh stop)", cmds[1])                           # 借来时 GPU 空着、认不出是 worker 开的：停掉再按守护开（原来的做法）
         self.assertIn("rm -rf /tmp/labmon", cmds[0])
         self.assertIn("借用期间本地盘 labmon 目录之外新写了 3.0 GiB（多半是我们的任务写的：/root/res、/work/out），没动：留在 BOB 那边", out)   # 归还不删（#149）
         self.assertIn("可以告诉 BOB 了", out)
@@ -638,9 +640,10 @@ class BorrowTest(Base):
             cmds.append(cmd)
             order.append("thaw" if " thaw " in cmd else "stop")
             return (0, "看门狗：恢复了 PID 9（bash wd.sh：提到保活程序，在循环里）\n" if " thaw " in cmd else "", "")
-        out = B.finish(SID, ssh=ssh, ka=lambda s, cfg, by: order.append("ka") or ("ok", "start 1"), probe=lambda sid: None)
-        self.assertEqual(order, ["stop", "ka", "thaw"])
-        self.assertIn(f"thaw --host {SID}", cmds[1])
+        out = B.finish(SID, ssh=ssh, ka=lambda s, cfg, by: order.append("ka") or ("ok", "start 1"), probe=lambda sid: None,
+                       adopt=lambda *a: order.append("adopt") or ("no", "没有保活在跑"))
+        self.assertEqual(order, ["stop", "adopt", "stop", "ka", "thaw"])
+        self.assertIn(f"thaw --host {SID}", cmds[-1])
         self.assertIn("看门狗：恢复了 PID 9", out)
 
     def test_finish_keeps_owner_keepalive(self):
@@ -648,8 +651,9 @@ class BorrowTest(Base):
         self.begin(work=[{"kind": "keepalive", "label": "ka", "names": [], "mb": 500}])
         self.assertTrue(json.loads((self.d / "state" / "overview" / "borrow.json").read_text())[SID]["ka"])
         cmds = []
-        out = B.finish(SID, ssh=lambda s, cmd: cmds.append(cmd) or (0, "", ""), ka=lambda s, cfg, by: ("ok", "already 123"), probe=lambda sid: None)
-        self.assertNotIn("ka.sh stop", cmds[0])
+        out = B.finish(SID, ssh=lambda s, cmd: cmds.append(cmd) or (0, "", ""), ka=lambda s, cfg, by: ("ok", "already 123"), probe=lambda sid: None,
+                       adopt=lambda *a: ("no", "没有保活在跑"))
+        self.assertFalse(any("ka.sh stop" in c for c in cmds))
         self.assertIn("rm -rf /tmp/labmon", cmds[0])
         self.assertIn("保活还在（借来时就在、是 BOB 的，归还不停它）", out)
         self.assertNotIn("停不了", out)
@@ -665,7 +669,8 @@ class BorrowTest(Base):
         e["status"]["keepalive"] = {"ctl": True, "why": None, "stuck": stuck}
         B.check([e], time.time(), finish_fn=lambda hid, **k: got.append(k.get("stuck")) or "已还", ovr=self.ovr)
         self.assertEqual(got, [stuck])
-        out = B.finish(SID, ssh=lambda s, cmd: (0, "", ""), ka=lambda s, cfg, by: ("ok", "already 123"), probe=lambda sid: None, stuck=stuck)
+        out = B.finish(SID, ssh=lambda s, cmd: (0, "", ""), ka=lambda s, cfg, by: ("ok", "already 123"), probe=lambda sid: None, stuck=stuck,
+                       adopt=lambda *a: ("no", "没有保活在跑"))
         self.assertIn("保活还在（借来时就在、是 BOB 的，归还不停它）", out)
         self.assertIn("借用期间 worker 要卡时停不了它（ka.sh stop 退出码 1：别的调用者正持着锁", out)
 
@@ -674,8 +679,47 @@ class BorrowTest(Base):
         self.begin(work=[{"kind": "keepalive", "label": "ka", "names": [], "mb": 500, "ours": True}])
         self.assertFalse(json.loads((self.d / "state" / "overview" / "borrow.json").read_text())[SID]["ka"])
         cmds = []
-        B.finish(SID, ssh=lambda s, cmd: cmds.append(cmd) or (0, "", ""), ka=lambda s, cfg, by: ("ok", "start 1"), probe=lambda sid: None)
-        self.assertIn("ka.sh stop", cmds[0])
+        B.finish(SID, ssh=lambda s, cmd: cmds.append(cmd) or (0, "", ""), ka=lambda s, cfg, by: ("ok", "start 1"), probe=lambda sid: None,
+                 adopt=lambda *a: ("unsure", "ka.sh 的事件日志里没有拉起它的记录"))
+        self.assertTrue(any("ka.sh stop" in c for c in cmds))
+
+    def test_finish_adopts_worker_keepalive(self):
+        """#102：借来时卡上是对方的保活（borrow.json 的 ka 为真），借用期间 worker 要卡时停过、空闲时又经 ka.sh start 开了一个（状态的 keepalive.mine）。
+        归还时不再写“借来时就是对方的”，也不停再开：经 fleet_guard.sh 的 adopt 在现场核对身份后登记成看板的保活（不动进程、没有空档）。
+        以前照 borrow.json 写“保活还在（借来时就在、是 BOB 的）”，没人登记它，对方回来用卡时没人让路。"""
+        self.begin(work=[{"kind": "keepalive", "label": "ka", "names": [], "mb": 500}])
+        mine = {"g": 9100, "born": 4363366, "t": round(time.time()) - 600}
+        B.request_return(SID, ovr=self.ovr)
+        got = []
+        e = self.host_entry()
+        e["status"]["keepalive"] = {"ctl": True, "why": None, "stuck": None, "mine": mine}
+        B.check([e], time.time(), finish_fn=lambda hid, **k: got.append(k.get("mine")) or "已还", ovr=self.ovr)
+        self.assertEqual(got, [mine])                                         # borrow.check 把状态里的 mine 传给 finish
+        cmds, seen = [], []
+        out = B.finish(SID, ssh=lambda s, cmd: cmds.append(cmd) or (0, "", ""), ka=lambda *a: self.fail("登记上了就不该再开保活"),
+                       probe=lambda sid: None, mine=mine, adopt=lambda s, cfg, since, until, m: seen.append((since, until, m)) or ("ok", "adopt 9100"))
+        self.assertEqual(seen[0][2], mine)
+        self.assertEqual(round(seen[0][0]), round(K.parse_time(self.server()["borrow_since"])))   # 借用期间：借来时刻到归还时刻
+        self.assertFalse(any("ka.sh stop" in c for c in cmds))               # 不停、不重开
+        self.assertIn("保活是借用期间 worker 开的，已登记成看板的保活（盯着，对方的实验上来就让出）；借来时 BOB 的那个借用期间停过", out)
+        self.assertNotIn("借来时就在、是 BOB 的", out)
+
+    def test_finish_adopt_no_gap(self):
+        """#102：借来时 GPU 空着，卡上的保活是 worker 开的：登记上就不再 ka.sh stop 再开（原来会空十几秒没有保活）。"""
+        self.begin()
+        cmds = []
+        out = B.finish(SID, ssh=lambda s, cmd: cmds.append(cmd) or (0, "", ""), ka=lambda *a: self.fail("不该再开"), probe=lambda sid: None,
+                       adopt=lambda *a: ("ok", "adopt 9100"))
+        self.assertFalse(any("ka.sh stop" in c for c in cmds))
+        self.assertIn("保活是借用期间 worker 开的，已登记成看板的保活", out)
+        self.assertNotIn("借来时", out.split("：", 1)[1])
+
+    def test_finish_adopt_unsure_said(self):
+        """#102：借来时就有对方的保活，卡上这个是借用期间起来的、却认不出是 worker 开的：不登记、不停，结果里照实说一句。"""
+        self.begin(work=[{"kind": "keepalive", "label": "ka", "names": [], "mb": 500}])
+        out = B.finish(SID, ssh=lambda s, cmd: (0, "", ""), ka=lambda s, cfg, by: ("ok", "already 9100"), probe=lambda sid: None,
+                       adopt=lambda *a: ("unsure", "ka.sh 的事件日志里没有 labmon-worker:27-15152 拉起它的记录"))
+        self.assertIn("卡上的保活是借用期间起来的，ka.sh 的事件日志里没有 labmon-worker:27-15152 拉起它的记录，没登记成看板的保活", out)
 
     def test_finish_failure_said_once(self):
         """要还期间连不上：“没还成”只说一次，不是每轮都弹；连上还掉了再报结果。"""
@@ -683,7 +727,7 @@ class BorrowTest(Base):
         self.begin(until=t + 3600)
         B.request_return(SID, ovr=self.ovr)
         n = []
-        def fin(hid, wrote=None, kill=(), stuck=None):
+        def fin(hid, wrote=None, kill=(), **k):
             n.append(1)
             if len(n) < 3:
                 raise ConfigError("连不上 BOB（27-15152），还没还：timeout")

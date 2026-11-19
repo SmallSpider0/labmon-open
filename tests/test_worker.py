@@ -6235,6 +6235,44 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual((w2.ka_fail, w2.ka_off), (None, True))
         self.assertIn("GPU 保活停下了（之前从", Path(w.p.log).read_text())
 
+    def test_own_keepalive_marked(self):
+        """#102：worker 空闲时经 ka.sh start 拉起的保活，记下身份（进程组、组长出生时钟）写进状态的 keepalive.mine，归还时据此登记成看板的保活。
+        只认 events.log 里这台 worker 记的那条 RESTORED（ka.sh start 退出 0 也可能是别人刚开了一个）；重启接管找回；
+        保活没了（被 worker 停、被人 pkill -f train_keep_alive.py）就清掉，不当故障、不记事件。以前状态里没有它，还掉以后认不出是谁开的。"""
+        btime = int(time.time()) - 86400
+        (self.p / "stat").write_text(f"cpu 0\nbtime {btime}\n")
+        tck = os.sysconf("SC_CLK_TCK")
+        born = 3600 * tck
+        self.proc(4321, ["/usr/bin/python3", "/x/kad/train_keep_alive.py"], start=born)
+        demo = self.d / "keepalive_demo"
+        (demo / "keepalive").mkdir()
+        ev = demo / "keepalive" / "events.log"
+        when = lambda t: time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(t))
+        ka_on = demo / "ka_on"
+        ka_on.unlink()
+        w = self.m.Worker("t")
+        os.makedirs(w.p.dir)
+        w.ka_others = lambda: []
+        for _ in range(2):                                                   # 连着两次空着：拉起
+            w.ka_checked = 0
+            w.keepalive(False)
+        self.assertIn("start", (demo / "ka.log").read_text())
+        self.assertIsNone(w.ka_mine)                                          # running 没列出进程组：认不了，不记
+        ka_on.write_text("4321\n")
+        ev.write_text(f"{when(btime + 3600 + 8)} RESTORED 进程组 4321 出生 {born}；调用者 labmon-worker:u\n")
+        w.ka_mark()
+        self.assertIsNone(w.ka_mine)                                          # 别的主机的 worker 开的：不算自己的
+        ev.write_text(f"{when(btime + 3600 + 8)} RESTORED 进程组 4321 出生 {born}；调用者 labmon-worker:t\n")
+        w.ka_mark()
+        self.assertEqual(w.ka_mine, {"g": 4321, "born": born, "t": btime + 3600})
+        w2 = self.restart(w, age=self.m.STATUS_STALE_S + 600)                  # 停多久都找回：按出生时钟认，换了容器不会认错
+        self.assertEqual(json.loads(Path(w.p.status).read_text())["keepalive"]["mine"], w.ka_mine)
+        self.assertEqual(w2.ka_mine, w.ka_mine)
+        ka_on.unlink()                                                         # 被人 pkill 了：就是没了
+        self.assertIsNone(w2.ka_groups())
+        self.assertIsNone(w2.ka_mine)
+        self.assertFalse(Path(w.p.events).exists() and Path(w.p.events).read_text().strip())   # 不记事件、不告警
+
     def test_stuck_keepalive_cleared_when_gone_idle(self):
         """#102（Codex 审查）：停不了的保活在空闲时（没有任务要卡）被人停掉了：空闲那条路径也清掉 stuck，
         不让工作台一直误报、之后 worker 拉起的保活继承旧状态、下一段失败跳过门槛不记事件。"""
@@ -6320,7 +6358,7 @@ class WatchdogTest(unittest.TestCase):
                 os.environ.pop(k)
         st = json.loads(Path(w.p.status).read_text())
         self.assertEqual((st["gpu_procs"][0]["owner"], st["gpu_procs"][0]["t0"]), ("keepalive", 1005))
-        self.assertEqual(st["keepalive"], {"ctl": True, "why": None, "stuck": None})
+        self.assertEqual(st["keepalive"], {"ctl": True, "why": None, "stuck": None, "mine": None})
         out = subprocess.run([sys.executable, WORKER, "ls", "--host", "t"], capture_output=True, text=True,
                              env=dict(os.environ, LABMON_HOME=str(self.d / "home"))).stdout
         self.assertIn("  GPU 保活：在跑（%s 起）：PID 5300（容器内 300），卡 0 占 6.7 GiB；有任务要卡时 worker 自动停" % self.m.now_str(1005)[5:16], out)

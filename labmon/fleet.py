@@ -74,7 +74,7 @@ from pathlib import Path
 
 from . import lan as L
 from . import lease as LS
-from .config import GIB, POOL, POOL_LABEL, ConfigError, _read_toml, all_hosts, fmt_time, hosts_file, set_fleet_keys
+from .config import GIB, POOL, POOL_LABEL, ConfigError, _read_toml, all_hosts, fmt_time, guest_host, host_defaults, hosts_file, parse_time, set_fleet_keys
 from .health import container_step, lease_due, link_step
 from .health import lease_end as _lease_end
 from .records import log_events
@@ -343,6 +343,7 @@ def parse(raw: str) -> dict:
     smp = {"clock": _num(info.get("clock")), "nproc": _num(info.get("nproc"))}
     bt, tck, p1 = _num(info.get("btime")), _num(info.get("tck")), _num(info.get("p1"))
     smp["started"] = round(bt + p1 / tck) if bt and tck and p1 is not None else None
+    smp["btime"], smp["tck"] = bt, tck              # 进程出生时钟换成墙上时刻（analyze 的 ka_group）
     lim, use, ina, act = (_num(info.get(k)) for k in ("memlim", "memuse", "inact", "actf"))
     # 收不回的内存 = 用量 − 文件页：与 worker 的 mem_unevictable 同一口径（两份：探针在没有 Python 的镜像里跑，worker 不 import 本包）
     smp["mem"] = {"limit": lim / GIB, "used": (use - (ina or 0)) / GIB,
@@ -671,6 +672,13 @@ def analyze(smp: dict, cfg: dict) -> dict:
             target = [p1, "manual", *groups[0], zero_cards]
         signature = target or ["manual", p1, zero_cards, [[pid, by_pid.get(pid)] for pid in sorted(ka_gpu)]]
         manual_guard = {"identity": signature, "target": target}
+    # GPU 上只有保活、都在同一个进程组、不是看板登记的：那个组与组长启动时刻（还掉以后补登记 labmon 借用期间开的保活，guard_state 的 adopt，#102）
+    ka_group = None
+    if work and all(w["kind"] == "keepalive" and not w.get("ours") for w in work) and smp.get("btime") and smp.get("tck"):
+        grp = {tuple(smp.get("ka_groups", {}).get(pid) or ()) for pid in ka_gpu}
+        one = next(iter(grp)) if len(grp) == 1 else ()
+        if len(one) == 2:
+            ka_group = {"pgid": one[0], "birth": one[1], "t": round(smp["btime"] + one[1] / smp["tck"])}
     kinds = {w["kind"] for w in work}
     st = next((k for k in STATES if k in kinds), "idle")
     # 保活：GPU 上认作保活的进程整棵进程树（同 worker 的 proc_tree）。内存扣各进程 PSS（探针的 pss 段；按规则认作保活、探针没读的按 RSS），
@@ -694,7 +702,7 @@ def analyze(smp: dict, cfg: dict) -> dict:
             "vram_real": vr, "vram_ka": sum(w["mb"] for w in work if w["kind"] == "keepalive"), "cpu": smp["cpu"], "cpu_real": cr,
             "cpu_quota": smp["cpu_quota"], "nproc": smp["nproc"], "mem": m, "mem_real": mr, "mem_anon": ma, "share": bool(share),
             "gpus": [{k: g[k] for k in ("i", "uuid", "name", "used", "total", "util")} for g in smp["gpus"]],
-            "started": smp["started"], "root": smp["root"], "vscode": vscode, "terms": terms, "guard": g, "manual_guard": manual_guard, "mem_ka": ka_mem if m else None,
+            "started": smp["started"], "root": smp["root"], "vscode": vscode, "terms": terms, "guard": g, "manual_guard": manual_guard, "ka_group": ka_group, "mem_ka": ka_mem if m else None,
             "scan": smp.get("scan")}
 
 
@@ -963,6 +971,9 @@ def guard_state(s: dict, st: dict, cfg: dict, t: float, busy: bool = False) -> d
     ours = reg if any(w.get("ours") for w in work) else None          # 看板开的保活占着 GPU
     if reg and t >= g["until"] and not busy and any(not w.get("ours") for w in work):
         return {**(ours or {"on": on, "status": "busy"}), "act": "yield", "what": _brief_work(a, True)}
+    ad = None if busy else _adopt_due(s, st, a)
+    if ad:                                            # 关了守护也认：保活是 labmon 借用期间开的，登记了才有人替对方让路（#102）
+        return {"on": on, "status": "busy", **ad}
     if not on:
         return ours or {"on": on, "status": "off", "since": st.get("idle_since")}
     if busy:
@@ -987,6 +998,35 @@ def guard_state(s: dict, st: dict, cfg: dict, t: float, busy: bool = False) -> d
     return {**out, "status": "wait", **({"act": "start"} if t >= out["at"] else {})}
 
 
+def _adopt_due(s: dict, st: dict, a: dict) -> dict | None:
+    """还掉以后补登记（#102）：这台借过又还了（borrow_returned），GPU 上只有一个保活进程组、看板没登记、它的组长在上次借用期间
+    （前后各留 60 秒）起来，这个身份（进程组、出生时钟）还没试过（st 的 guard_adopt）。是就给 adopt 动作：fleet_guard.sh 在现场按 ka.sh 的
+    事件日志核对是不是这台的 worker 拉起的，认得出才登记成看板的保活。不是借用期间起来的（对方自己的）不动。"""
+    kg = a.get("ka_group")
+    since, back = parse_time(s.get("borrow_since")), parse_time(s.get("borrow_returned"))
+    if not (kg and since and back) or not since - 60 <= kg["t"] <= back + 60:
+        return None
+    key = [kg["pgid"], kg["birth"]]
+    if (st.get("guard_adopt") or {}).get("key") == key:
+        return None
+    return {"act": "adopt", "identity": key, "span": [round(since), round(back)]}
+
+
+def ka_env(s: dict) -> str:
+    """一台组内服务器上保活的配置 ka.env 在哪（借来时 worker 用的那份：主机模板的 ka_bin，没写是 worker_home/keepalive/bin，同 worker 的 KA_BIN）。"""
+    hf = hosts_file()
+    h = host_defaults(guest_host(s, _read_toml(hf).get("hosts", []) if hf.exists() else []))
+    return (h.get("ka_bin") or h["worker_home"].rstrip("/") + "/keepalive/bin").rstrip("/") + "/ka.env"
+
+
+def ka_adopt(s: dict, cfg: dict, since: float, until: float, mine: dict | None = None, ssh_fn=None) -> tuple[str, str]:
+    """把卡上借用期间这台 worker 开的保活登记成看板的保活（fleet_guard.sh 的 adopt：不动进程，现场核对身份；borrow.finish 与补登记共用，#102）。
+    mine：worker 状态的 keepalive.mine（{g, born}），有就按它认，没有就按 ka.sh 的事件日志认。返回 (ok | no | unsure | busy | fail | ssh, 说明)。"""
+    ident = [mine["g"], mine["born"]] if mine and mine.get("g") and mine.get("born") is not None else []
+    return _guard_run(s, cfg, ["adopt", int(cfg["guard_watch_min"] * 60), "借用归还", ka_env(s), "labmon-worker:" + str(s["id"]),
+                               round(since), round(until), *ident], ssh_fn)
+
+
 def ka_cmd(s: dict, cfg: dict) -> str | None:
     """这一台开、停保活的命令（唯一一处）：服务器自己写的优先，否则 [fleet] 段的；都没写是 None。"""
     return s.get("keepalive_cmd") or cfg.get("keepalive_cmd")
@@ -1000,7 +1040,7 @@ def _guard_run(s: dict, cfg: dict, args: list, ssh_fn=None) -> tuple[str, str]:
         return "fail", "[fleet] 没写 keepalive_cmd"
     rc, out, err = (ssh_fn or ssh)(s, "bash -s -- " + shlex.join([args[0], cmd, *map(str, args[1:])]), input=GUARD.read_text(), timeout=120)
     res, note = ((out.strip().splitlines() or [""])[-1].split(None, 1) + ["", ""])[:2]
-    if res in ("ok", "busy", "fail", "unmanaged", "gap"):
+    if res in ("ok", "busy", "fail", "unmanaged", "gap", "no", "unsure"):
         return res, note
     tail = (err or out).strip().splitlines()
     return ("ssh" if rc == 255 else "fail"), tail[-1] if tail else f"退出码 {rc}"
@@ -1034,6 +1074,21 @@ def guard_act(s: dict, st: dict, cfg: dict, t: float, busy: bool, ssh_fn=None) -
 
     if act == "warn":
         return warn(g["why"])
+    if act == "adopt":
+        res, note = ka_adopt(s, cfg, *g["span"], ssh_fn=ssh_fn)
+        if res in ("busy", "ssh"):                   # GPU 上有别的进程、查不到、连不上：下次探测再看
+            return None, []
+        st["guard_adopt"] = {"key": g["identity"], "t": round(t), "res": res}   # 同一个身份只试一次
+        if res == "ok":
+            if note.startswith("adopt"):
+                _event("guard_adopt", s["id"], f"{label} 卡上的保活是借用期间 labmon 的 worker 开的，已登记成看板的保活"
+                       f"（盯 {cfg['guard_watch_min']} 分钟，之后靠探测：有实验上来就让出）", t, s["holder"])
+            return "adopt", []
+        if res == "no":                              # 没有保活了、有几个、不是借用期间起来的：就是对方的，不动
+            return None, []
+        msg = f"{label} 卡上的保活是借用期间起来的，{note}：没登记成看板的保活，{s['holder']} 的实验上来时没人替这人停它，请核对"
+        _event("guard_fail", s["id"], msg, t, s["holder"])
+        return None, [msg]
     if act in ("start", "repair"):
         repair = act == "repair"
 
@@ -1203,7 +1258,7 @@ def _tick(t: float, fetch_fn, cfg: dict, force: str | None, probe: bool = True, 
             if ssh_fn and raw is not None:
                 act, more = guard_act(pick, st, cfg, t, pick["id"] in busy, ssh_fn)
                 out += more
-                if act in ("start", "already"):      # 已确认保活占 GPU：再探一次，页面马上看到
+                if act in ("start", "already", "adopt"):   # 已确认保活占 GPU、登记了：再探一次，页面马上看到
                     raw, err = fetch_fn(pick)
                     out += record(pick, raw, err, cfg, st, t + 1)
     out += lease_notices(cfg, sts, t, off)
