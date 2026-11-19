@@ -1066,6 +1066,8 @@ function alertsOf(h) {
   if (h.status?.throttle?.alert) add("both", thrText(h));   // CPU 持续被配额限流（worker 判的，#39）
   const kf = h.status?.kafight;            // worker 记的：要卡时停了的保活又被拉起来（近 1 小时）
   if (kf) add("user", `${h.label}：GPU 保活在任务运行中被拉起 ${kf.n} 次（1 小时内，最近 ${tsNear(kf.t)}），已停；${kf.who}`);
+  const ks = h.status?.keepalive?.stuck;   // worker 判的：要卡时停保活一直没停成（#102），任务和它同卡分算力
+  if (ks) add("user", `${h.label}：GPU 保活停不下来（${ks.why}，${tsNear(ks.t0)} 起 ${ks.n} 次），任务和它同卡分算力、少了它占的显存；${h.borrow ? `请 ${h.borrow.holder || "对方"} 停掉它或查 ka.sh` : "请查 ka.sh"}`);
   if (h.renew?.state === "ready") add("user", `${h.label}：可以续租了（${h.renew.why}），${srvById(h.id) ? "到主机页点「续租」" : "去平台续租（主机清单没有 [fleet] 段，看板不能替你续）"}`);
   else if (leaseSoon(h.lease_end)) add("user", `${h.label}：${leaseText(h)}（${ts(h.lease_end)} 到期）${h.renew ? "，已预备续租：" + h.renew.why : h.platform ? "，到主机页点「预备续租」" : "，找个任务间隙在平台续租"}`);
   if (h.auto && !h.error && h.status && !h.worker_up && !h.stopped) add("user", `${h.label}：worker 不在，看板会自动拉起（10 分钟内一次）`);

@@ -33,6 +33,7 @@ EVENT_KINDS = {
     "guard_restart": ("重开保活", "ok", "keepalive"), "guard_delay": ("延后保活", "mute", "keepalive"),
     "guard_start": ("开保活", "ok", "keepalive"), "guard_yield": ("让出", "mute", "keepalive"), "guard_fail": ("没开成", "bad", "keepalive"),
     "ka_fight": ("保活被拉起", "warn", "keepalive"), "watchdog": ("看门狗", "warn", "keepalive"),
+    "ka_stuck": ("保活停不下", "bad", "keepalive"),                       # worker 要卡时停保活一直没停成（#102）
     "start": ("开始", "mute", "queue"), "grant": ("放行", "mute", "queue"), "done": ("完成", "ok", "queue"), "end": ("结束", "mute", "queue"),
     "failed": ("失败", "bad", "queue"), "interrupt": ("中断", "warn", "queue"), "stop": ("暂停", "warn", "queue"), "gate": ("闸门", "bad", "queue"),
     "failcnt": ("撞上限", "bad", "queue"), "void": ("作废", "bad", "queue"), "squeeze": ("被挤掉", "warn", "queue"), "gang": ("成组", "warn", "queue"), "override": ("指令", "warn", "queue"), "worker": ("worker", "mute", "queue"),

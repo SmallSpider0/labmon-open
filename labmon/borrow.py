@@ -403,12 +403,13 @@ def wrote_note(w: dict | None, holder: str) -> str | None:
             + f"），没动：留在 {holder} 那边，我们拿不到，对方续租时会清掉")
 
 
-def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), probe=None, gone: bool = False) -> str:
+def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), probe=None, gone: bool = False, stuck: dict | None = None) -> str:
     """归还：一条 ssh 停 worker、停掉还挂着的占位任务（kill：它们的进程组）、清掉容器里 labmon 的本地目录与这台的临时指令；
     借来时 GPU 上没有保活的，顺手停掉 worker 开的保活（借来时就有对方的保活的不碰）。主机清单写 borrow_returned；
     再按保活守护开保活（已在跑不重开；开了就盯着，对方的实验上来就让出），然后恢复借来时暂停的保活看门狗（worker 的 thaw：
     保活已在，它醒来不会再多拉一个：出借方自己的保活管理器见到不是自己登记的同脚本保活会换成自己的，结果仍是一个），最后探一次这一台（同手动开保活，fleetops._probe）。
     wrote：借用期间本地盘 labmon 目录之外新写的（worker 的 storage.wrote：只列出来，不动，wrote_note）。
+    stuck：借用期间 worker 要卡时停不了卡上的保活（worker 状态的 keepalive.stuck，#102）：结果里照实写一句，不只说保活是谁的。
     gone：这台换了容器（算力池借着时主人续租或重启了，pool._returns 的 R5，#25）：旧容器里的 worker、任务、保活、/tmp/labmon 都已不在，
     只 worker stop（按命令行核对 PID，新容器里不会误停别的）、删这台的临时指令；不 kill 旧的进程组号、不停保活、不清 /tmp/labmon、
     不开保活、不恢复看门狗（新容器里的保活由主人与保活守护照现有规则管），只探一次。"""
@@ -441,9 +442,11 @@ def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), prob
     wd = (next((x for x in out.splitlines() if x.startswith("看门狗：")), None) if rc == 0
           else f"借来时暂停的看门狗没恢复成：{(err or out).strip()[-160:]}")
     (probe or FO._probe)(sid)
+    # 保活是谁的（借来时就在、不是 labmon 开的：borrow.json 的 ka）与 worker 停不停得了（worker 状态的 keepalive.stuck）是两回事，各说各的（#102）
     notes = [f"清掉了容器里 labmon 的本地目录（{mb} MB）" if mb else None,
-             ("保活还在" + ("（借来时就是 " + s["holder"] + " 的）" if theirs else "") if note.startswith("already") else "开了保活（盯着，对方的实验上来就让出）")
+             ("保活还在" + (f"（借来时就在、是 {s['holder']} 的，归还不停它）" if theirs else "") if note.startswith("already") else "开了保活（盯着，对方的实验上来就让出）")
              if res == "ok" else "GPU 上已有别的进程，没开保活" if res == "busy" else f"保活没开成：{note}",
+             f"借用期间 worker 要卡时停不了它（{stuck['why']}，{fmt_time(stuck['t0'])} 起），任务和它同卡分算力" if stuck else None,
              wd, wrote_note(wrote, s["holder"])]
     msg = (f"已把 {sid} 还给 {s['holder']}{took}：" + "；".join(x for x in notes if x)
            + ("。" if s.get("borrow_pool") else f"。可以告诉 {s['holder']} 了"))      # 算力池借的是持有人事先同意的，不用另行告诉
@@ -597,7 +600,7 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
             say(f"hit:{st['seen']}", "borrow_hit", f"{name} 上挤到了 {who}（{'；'.join(hits[:3])}）：这次借用给 {who} 的预留调到 ×{st['bump']:g}")
         if st.get("returning") and ws and not run and not swap:
             try:
-                done = finish_fn(hid, wrote=(ws.get("storage") or {}).get("wrote"),
+                done = finish_fn(hid, wrote=(ws.get("storage") or {}).get("wrote"), stuck=(ws.get("keepalive") or {}).get("stuck"),
                                  kill=[j["pid"] for j in ws.get("running", []) if j.get("hold") and j.get("pid")])
                 if not pool:                         # 算力池的归还只进记录（finish 记了 borrow_return）
                     msgs.append(done)
