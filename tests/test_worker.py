@@ -6235,6 +6235,28 @@ class WatchdogTest(unittest.TestCase):
         self.assertEqual((w2.ka_fail, w2.ka_off), (None, True))
         self.assertIn("GPU 保活停下了（之前从", Path(w.p.log).read_text())
 
+    def test_stuck_keepalive_cleared_when_gone_idle(self):
+        """#102（Codex 审查）：停不了的保活在空闲时（没有任务要卡）被人停掉了：空闲那条路径也清掉 stuck，
+        不让工作台一直误报、之后 worker 拉起的保活继承旧状态、下一段失败跳过门槛不记事件。"""
+        kad = self.d / "keepalive_demo"
+        (kad / "ka_stuck").write_text("另一个调用者正持着锁\n")
+        ka = {"hpid": 9300, "pid": 300, "mb": 6754.0, "uuid": "GPU-aaa", "comm": "python", "owner": "keepalive", "ka": False, "job": None, "_j": None}
+        w = self.m.Worker("t")
+        os.makedirs(w.p.dir)
+        w.running["k"] = {"name": "x1", "pid": 0, "gpus": []}
+        w.gp = [ka]
+        w.keepalive(True)
+        w.ka_fail["t0"] -= self.m.KA_STUCK_S + 1
+        w.keepalive(True)
+        self.assertIsNotNone(w.ka_stuck())
+        w.running = {}                                                         # 最后一个任务跑完
+        (kad / "ka_on").unlink()                                               # 有人把保活停了
+        w.gp = []
+        w.ka_others = lambda: []
+        w.ka_checked = 0
+        w.keepalive(False)
+        self.assertIsNone(w.ka_fail)
+
     def test_stuck_keepalive_not_listed(self):
         """#102：ka.sh running 说没在跑，GPU 上却有它认的保活（ka_owned）：worker 同样停不了它，照停失败算（门槛相同；刚停下的一分钟里不算）；保活没了就清掉。"""
         (self.d / "keepalive_demo" / "ka_on").unlink()

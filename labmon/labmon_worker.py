@@ -2217,6 +2217,8 @@ class Worker:
                 self.ka_note(why)
             self.ka_idle, self.ka_why = 0, None
             return
+        if self.ka_fail and not any(g["owner"] == "keepalive" for g in self.gp):
+            self.ka_note(None)                # 停不了的保活空闲时没了（有人停了）：清掉，免得一直误报、下一段失败沿用旧的起点（#102）
         others = self.ka_others()
         apps = gpu_apps()
         why = ("别的队列登记在跑（%s）" % ", ".join(others) if others else
