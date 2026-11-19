@@ -427,6 +427,7 @@ worker 把各清单每个任务的预计时长写进 `status.json`（队列的 `
 ## 保活
 
 有 GPU 任务在跑、或有会放行的 GPU 请求时停保活，并在 `$AGRI_ROOT/queues/labmon-<主机>/pid` 登记；被临时指令挡住的请求（暂停的项目、drain、续租截止、只给别人用）、依赖没满足的和等不来的请求（放不下、缺本地文件又补不了、tag 到上限）不算，卡空着时保活照开。
+`ka.sh` 是随 worker 发来的那份（`worker_home/ka.sh`，认法、退出码与日志见 [fleet.md「ka.sh」](fleet.md#kash)），配置读 `ka_bin` 里的 `ka.env`，两样缺一样 worker 就不管这台的保活。
 都没有时删除登记，每约 30 秒看一次：连续两次本机没有别的队列登记存活、GPU 上也没有任何进程，才 `ka.sh start`；
 保活在跑时 GPU 上有了别的进程（借来的主机上多半是对方回来用）就 `ka.sh stop` 让路，同保活守护。
 平台的保活按整台算（见 [fleet.md「保活守护」](fleet.md#保活守护)），多卡主机也只开停这一个。
@@ -495,7 +496,7 @@ BOB 的 watchdog 一生持着自己的单例锁，所以不能“持锁就不暂
 
 锁文件若在共享盘上，NFS 缺省把 `flock` 发给共享盘服务器，别的容器里用同一目录的也会被挡，这也是不能暂停在锁里的原因。
 
-借来的主机上，`ka.sh` 认不出的保活 worker 停不了（GPU 进程 `owner` 为 `other`、`ka` 为真）。ka.sh 认的（`ka_owned`，与共享盘上 ka.sh 的 `pgids()` 同一条，#29）：
+借来的主机上，`ka.sh` 认不出的保活 worker 停不了（GPU 进程 `owner` 为 `other`、`ka` 为真）。ka.sh 认的（`ka_owned`，与 ka.sh 的 `ka_procs` 同一条，#29、#105）：
 python 跑 `ka.env` 的 `AGRI_KA_DIR/AGRI_KA_SCRIPT`，命令行里写着这个完整路径，或跑的脚本相对路径按进程工作目录（`/proc/<pid>/cwd`）还原、解开符号链接后就是它
 （先 `cd` 进保活目录、用 `train_keep_alive.py`、`./train_keep_alive.py` 起的也算；别的目录里的同名脚本、`python -c`、工作目录读不到的不算）。停不了的保活：
 那张卡算超出预留、不放新任务（推演里同样不放：快照里这张卡的 `ka` 为真，`sim_snapshot` 照它挡；等待原因写“卡 N 上有对方另起、ka.sh 停不了的保活，不放（要停请对方停）”，推演排不上时写“显存不够（卡 N 有停不了的保活）”，#45），事件里写明要对方停；它整棵进程树的内存与核数不算对方的用量，核数另从可用核数里扣（见上文「借来的主机给对方留余量」）。借来时就有这种保活的本来就借不了（`borrow.begin` 逐个核对，要对方先停，见 [fleet.md「借用」](fleet.md#借用)）。

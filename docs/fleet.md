@@ -145,6 +145,22 @@ GPU 长时间没在用（没跑实验也没开保活）的服务器会被平台�
 
 平台的保活按整台算：多卡服务器上只要有一张卡开着保活（或有任务在用），整台就不会被当成闲置。所以 `ka.sh`、`fleet_guard.sh` 都按整台开停一个保活，多卡也不必每张卡都开（用户 11-06 确认）。
 
+### ka.sh
+
+保活只经 `ka.sh` 停启（不直接 kill）。labmon 自己的那份是 [`labmon/ka.sh`](../labmon/ka.sh)（#105）：`labmon worker start` 时与 `labmon_worker.py` 同一条连接写到 `worker_home/ka.sh`，
+只取 main 上已提交的版本（`workerctl.committed`）；配置读主机 `ka_bin` 目录里原来的 `ka.env`（`AGRI_ROOT`、`AGRI_KA_DIR`、`AGRI_KA_SCRIPT`、`AGRI_KA_PY`，经 `KA_ENV` 传）。
+共享盘上原来那份 `ka.sh` 不动；组内服务器的守护与借前核对用的是 `[fleet] keepalive_cmd` 写的命令，要它们也用 labmon 这份，把它写成
+`KA_CALLER=labmon-fleet KA_ENV=<ka_bin>/ka.env bash <worker_home>/ka.sh`。
+
+- **认哪些进程**：python 跑 `AGRI_KA_DIR/AGRI_KA_SCRIPT`，命令行里写着完整路径，或第一个脚本参数按进程工作目录还原、解开符号链接后是它（相对路径、`./`、`..`、经符号链接起的都算，#29）。
+  `running` 列的、`stop` 发信号的是同一份（`ka_procs`）：组里全是认出的保活进程才整组发，否则只发给认出的那些，同组别的程序不动。DataLoader 这类 fork 出来的子进程命令行、工作目录同父进程，一并停。
+  worker 的 `ka_owned` 与它同一条规则（两份：worker 不 import 本包；`tests/test_ka.py` 对同一组起法核对两边结论一致）。
+- **怎么起**：`cd AGRI_KA_DIR` 后 `setsid nohup <AGRI_KA_PY> <完整路径>`，命令行里带着脚本名：组里有人 `pkill -f train_keep_alive.py` 照样匹配，被这样停掉就是没了，worker 与守护按“没在跑”照常处理，不告警。
+- **退出码**（契约）：`running` 0 在跑（每行一个进程组号）、1 没有；`stop` 0 停了或本来就没有、1 发完 TERM（等 30 秒）与 KILL 还在、2 拿不到锁（60 秒）；
+  `start` 0 起来了或本来在跑、1 20 秒内没见到保活进程、2 拿不到锁；不认识的动作 2。失败时原因记进事件日志，同时写到标准错误（`ka.sh: STOP_FAILED 进程组 … 仍在` 这样一行）。
+- **锁与事件日志**：锁是 `/tmp/agri-ka-<AGRI_ROOT 的 cksum>.lock`，事件日志是 `AGRI_ROOT/keepalive/events.log`（时间 事件 详情；`RESTORED 进程组 G 出生 B；调用者 X`，`STOPPED`、`STOP_FAILED`、`RESTORE_FAILED`）。
+  位置与共享盘上原来那份相同：两份同时在用时彼此互斥、写同一份日志；ka.sh 不另记登记，每次按 `ps` 现找，谁起的保活两份都认得、停得掉，换用时不必停保活。
+
 ## 记录与通知
 
 状态目录 `~/.local/state/labmon/overview/fleet/`（`LABMON_STATE` 可改）：

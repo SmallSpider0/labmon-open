@@ -274,7 +274,7 @@ def fake_host(hid: str = "h", status: dict | None = None, **kw) -> dict:
 # ---------- 起真 worker ----------
 KA_SH = """#!/usr/bin/env bash
 # 假保活：状态记在 $AGRI_ROOT/ka_on（内容是 running 打印的进程组，可以空着），动作记在 $AGRI_ROOT/ka.log；有 $AGRI_ROOT/ka_stuck 时 stop 失败
-. "$(dirname "$0")/ka.env"
+. "${KA_ENV:-$(dirname "$0")/ka.env}"
 case "$1" in
   running) [ -f "$AGRI_ROOT/ka_on" ] && cat "$AGRI_ROOT/ka_on" ;;
   stop) echo stop >> "$AGRI_ROOT/ka.log"
@@ -316,7 +316,7 @@ def worker_env(d: Path, **extra: str) -> dict:
     (ka / "ka.env").write_text(f"AGRI_ROOT={d / 'keepalive_demo'}\n")
     (d / "keepalive_demo").mkdir()
     (d / "keepalive_demo" / "ka_on").touch()
-    return dict(os.environ, **dict(no_host(d), LABMON_HOME=str(d / "home"), LABMON_TICK="0.3", KA_BIN=str(ka), LABMON_GPUS="GPU-aaa:40000",
+    return dict(os.environ, **dict(no_host(d), LABMON_HOME=str(d / "home"), LABMON_TICK="0.3", KA_BIN=str(ka), KA_SH=str(ka / "ka.sh"), LABMON_GPUS="GPU-aaa:40000",
                                    LABMON_GPU_APPS="", LABMON_SLOTS=str(d / "slots"), LABMON_LOCAL=str(d / "local"), **extra))
 
 

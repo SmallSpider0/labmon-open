@@ -94,7 +94,9 @@ from pathlib import PurePosixPath
 HOME = os.environ.get("LABMON_HOME") or os.path.dirname(os.path.abspath(__file__))
 TICK = float(os.environ.get("LABMON_TICK", "10"))
 KA_CHECK_S = 3 * TICK    # 空闲时多久看一次要不要拉起保活
-KA_BIN = os.environ.get("KA_BIN", os.path.join(HOME, "keepalive", "bin"))
+KA_BIN = os.environ.get("KA_BIN", os.path.join(HOME, "keepalive", "bin"))   # 保活的配置 ka.env 所在目录（主机清单的 ka_bin）
+KA_ENV = os.path.join(KA_BIN, "ka.env")
+KA_SH = os.environ.get("KA_SH") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "ka.sh")   # 停启保活的脚本：与 worker 一起发来的那份（#105）
 PROC = os.environ.get("LABMON_PROC", "/proc")          # 只用于统计用量；测试时指向假目录
 CG = os.environ.get("LABMON_CGROUP", "/sys/fs/cgroup")
 NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -846,7 +848,7 @@ def script_of(args, cwd, pid=None):
 
 
 def ka_owned(args, cwd, ka_full):
-    """ka.sh 认得、停得了的保活（与共享盘上 ka.sh 的 pgids() 同一条规则，#29）：python 跑的，命令行里写着 ka_full（AGRI_KA_DIR/AGRI_KA_SCRIPT）这个完整路径，
+    """ka.sh 认得、停得了的保活（与 ka.sh 的 ka_procs 同一条规则，#29、#105；两份：worker 不 import 本包，tests/test_ka.py 核对结论一致）：python 跑的，命令行里写着 ka_full（AGRI_KA_DIR/AGRI_KA_SCRIPT）这个完整路径，
     或跑的脚本（相对路径按进程工作目录还原）解开符号链接后就是它：先 cd 进保活目录、用 train_keep_alive.py、./train_keep_alive.py 起的也算。
     cwd 读不到（进程没了）的相对路径认不出。"""
     if not args or not re.match(r"python[\d.]*$", os.path.basename(args[0])):
@@ -2104,8 +2106,9 @@ class Worker:
         self.ka_wait = None                   # 保活被拉起、看门狗正持着平时不持的锁：{t0: 开始等的时刻, said: 满 LOCK_WAIT_S 记过事件}（#38）
         self.procs, self.mine = {}, set()     # 这一轮的进程表（scan_procs）与 labmon 任务的进程：找看门狗用
         self.watch_t, self.watch_seen = 0.0, set()   # 借来的主机上次找看门狗的时刻、记过事件的可能的看门狗
-        env = subprocess.run(["bash", "-c", '. "$1/ka.env" 2>/dev/null; echo "${AGRI_ROOT:-}"; echo "${AGRI_KA_SCRIPT:+${AGRI_KA_DIR:-}/$AGRI_KA_SCRIPT}"', "_", KA_BIN],
-                             capture_output=True, text=True).stdout.split("\n") if os.path.exists(os.path.join(KA_BIN, "ka.sh")) else []
+        # 保活由 worker 管的前提：有 ka.env（这台的保活配置）与随 worker 发来的 ka.sh（#105）；缺一样就当这台没配保活（keepalive.ctl 为假）
+        env = subprocess.run(["bash", "-c", '. "$1" 2>/dev/null; echo "${AGRI_ROOT:-}"; echo "${AGRI_KA_SCRIPT:+${AGRI_KA_DIR:-}/$AGRI_KA_SCRIPT}"', "_", KA_ENV],
+                             capture_output=True, text=True).stdout.split("\n") if os.path.exists(KA_ENV) and os.path.exists(KA_SH) else []
         keepalive_demo = env[0].strip() if env else ""
         self.ka_full = (env[1].strip() if len(env) > 1 else "") or None   # ka.sh 认的保活：python 跑这个脚本（完整路径）；别的保活它停不了
         if keepalive_demo:
@@ -2133,7 +2136,8 @@ class Worker:
         写进原因，ka_note，#102）；别的动作不收：start 起的保活进程会继承管道，run 就等不到头。"""
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}   # 保活用 py38，不能继承项目的补装包
         env["KA_CALLER"] = "labmon-worker:" + self.host
-        return subprocess.run(["bash", os.path.join(KA_BIN, "ka.sh"), action], env=env,
+        env["KA_ENV"] = KA_ENV
+        return subprocess.run(["bash", KA_SH, action], env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE if action == "stop" else subprocess.DEVNULL, text=True)
 
     def ka_stop(self):
