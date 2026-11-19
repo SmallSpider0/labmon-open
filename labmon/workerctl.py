@@ -20,6 +20,7 @@ worker 装在 worker_home（缺省 <data_root>/labmon，共享盘上一份供各
 """
 from __future__ import annotations
 
+import base64
 import json
 import shlex
 import subprocess
@@ -140,18 +141,20 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
     if sub == "start":
         guest = h.get("borrow") and not h["borrow"].get("swap")                  # 直接借来的：不在对方的容器里扫共享盘
         sh = f" --shared {shlex.quote(h['shared'][0])}" if h["shared"] and not guest else ""      # 共享盘用量由这台的 worker 统计
-        # 一条连接：写入 main 上已提交的 worker，再后台拉起（--replace 让旧 worker 退出、由新进程接管任务）。
+        # 一条连接：写入 main 上已提交的 worker 与停启保活的 ka.sh（#105：ka.sh 经命令行里的 base64 带去，worker 经标准输入），再后台拉起（--replace 让旧 worker 退出、由新进程接管任务）。
         # 后台那句单独写、不接在 cd 或 && 后面，否则 ssh 会挂到进程结束。
         # START_CHECK_S 秒后看它还在不在：启动即崩的（输出接的是 /dev/null）带上 worker.log 末尾、退出码 3，调用方报“拉起失败”而不是“已拉起”
         log = shlex.quote(f"{home.rstrip('/')}/hosts/{hid}/worker.log")
+        ka = shlex.quote(home + "/ka.sh")
         remote = (f"mkdir -p {shlex.quote(home)} && cat > {shlex.quote(home + '/labmon_worker.py')}.new && "
+                  f"echo {base64.b64encode(committed('ka.sh').encode()).decode()} | base64 -d > {ka}.new && mv {ka}.new {ka} && "
                   f"mv {shlex.quote(home + '/labmon_worker.py')}.new {shlex.quote(home + '/labmon_worker.py')}\n"
                   f"setsid nohup {w} run --host {hq} --replace{sh} > /dev/null 2>&1 < /dev/null &\n"
                   f"sleep {START_CHECK_S}; o=$({w} ls --host {hq}); echo \"$o\"\n"
                   f"case \"$o\" in worker：运行中*) ;; *) echo '---- worker.log 末尾'; tail -n 12 {log}; exit 3;; esac")
         rc, out = ssh(h, remote, committed("labmon_worker.py"))
-        dirty = subprocess.run(["git", "-C", str(HERE), "diff", "--quiet", DEPLOY_REF, "--", "labmon_worker.py"]).returncode
-        return rc, (f"（工作区的 labmon_worker.py 与 {DEPLOY_REF} 上的不同，部署的是 {DEPLOY_REF} 上已提交的版本）\n" if dirty else "") + out
+        dirty = subprocess.run(["git", "-C", str(HERE), "diff", "--quiet", DEPLOY_REF, "--", "labmon_worker.py", "ka.sh"]).returncode
+        return rc, (f"（工作区的 labmon_worker.py 或 ka.sh 与 {DEPLOY_REF} 上的不同，部署的是 {DEPLOY_REF} 上已提交的版本）\n" if dirty else "") + out
     extra = " ".join(shlex.quote(a) for a in args) + (f" --gpus {shlex.quote(gpus)}" if gpus else "")
     extra += " --idle" if opts.pop("idle", False) else ""
     extra += " --list" if opts.pop("list", False) else ""    # fit --list（#35 B）：位置参数是 ROOT JOBS，hosts 是看哪几台

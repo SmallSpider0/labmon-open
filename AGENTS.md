@@ -68,7 +68,7 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 概念 | 唯一实现 |
 |---|---|
 | ssh 参数与执行（共用 ControlMaster 长连接） | `lan.ssh_argv`、`lan.ssh_run` |
-| 传到服务器上留着用的文件（worker、共享盘 README）只取 main 上已提交的版本（分支上没合并的、工作区没提交的都不带） | `workerctl.committed`（`DEPLOY_REF`） |
+| 传到服务器上留着用的文件（worker 与随它发的 `ka.sh`、共享盘 README）只取 main 上已提交的版本（分支上没合并的、工作区没提交的都不带） | `workerctl.committed`（`DEPLOY_REF`） |
 | 本机在不在内网；按主机并行探测（一键一台，各走自己的长连接；有远程连不上时再查一次是不是刚离开内网） | `lan.check`、`lan.gather` |
 | 整文件覆盖写（写临时文件再改名；要 600 的传 `mode`，临时文件一建出来就是这个权限） | `state.write_atomic`；`save_json`、`collect.write_page`、`users.json` 都经它 |
 | 本机状态根目录（`LABMON_STATE`，缺省 `~/.local/state/labmon`；`tools/issue_watch.py` 的已见列表也放这里）与其下的状态目录 `overview/` | `state.state_root`、`state.state_dir` |
@@ -220,11 +220,13 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 共享盘增长的关注档（照近 24 小时、近 7 天里快的速度多少天占满剩余，或这人的 `burst:` 告警；「⇈暴涨」「↑在涨」与紫色 `--heat`：按人列表、人员卡、人员抽屉的小结与各目录共用；本地盘的 `lwHeat` 也经 `heatTag` 出小标） | 页面上 `diskHeat`、`heatTag`、`heatNum`（`HEAT_HI`、`HEAT_MID`；暴涨告警在不在 `burstOf`，overview.html） |
 | 保活守护判定（这一台现在怎样、要不要开、重开或让出；自用主机是 `worker`、借用中是 `borrowed`：保活由 worker 停启；页面文字取它） | `fleet.guard_state`、`fleet.guard_act`；页面上 `guardText`、`gdSit`、`probeAt`、`gdIcon`（overview.html） |
 | 在组内服务器上开、停保活（开前看 GPU、确认进程组已占 GPU 才报成功、开后盯着让路、复查空转后恢复；重开时停了旧的、新的没开成回 `gap`，下次探测直接再开一次，#26）；这一台开、停保活的命令（服务器自己写的优先，否则 `[fleet]` 段的） | `fleet.ka_start`、`fleet.ka_stop`（`fleet_guard.sh`）；`fleet.ka_cmd`；重开 `fleet_guard.sh` 的 `repair`，缺口 `guard_gap`（`fleet.guard_act` 记、`fleet._guard_track` 清、`fleet.guard_state` 判） |
+| 停启保活的脚本（`labmon/ka.sh`，#105：随 worker 发到 `worker_home`，配置读 `ka_bin` 的 `ka.env`；退出码与失败原因写到标准错误是契约，锁与事件日志与共享盘上原来那份同一处） | `labmon/ka.sh`（`ka_procs`、`pgids`、`signal_ka`）；worker 经 `Worker.ka` 调（`KA_SH`、`KA_ENV`）；发出去在 `workerctl.run_out` 的 start |
+| 卡上的保活是借用期间 labmon 的 worker 开的：认出来、登记成看板的保活（不动进程；worker 记下自己开的身份，归还时与还掉以后补登记共用一处核对，#102） | worker 的 `Worker.ka_mark`（状态的 `keepalive.mine`）；`fleet.ka_adopt` → `fleet_guard.sh` 的 `adopt`（事件日志 `ka_logged`，登记与盯着 `register`，与 `start` 共用）；归还 `borrow.finish`，补登记 `fleet.guard_state` 的 `adopt`（`_adopt_due`，探测样本的 `ka_group`） |
 | `ka.sh running` 的读法：退出码 0 就是保活在跑，非 0 是没在跑；输出每行一个进程组号，要认归属时只认列出的进程组，在跑却没列出的算认不了（不当作没在跑再开一个）（#26） | `fleet_guard.sh` 的 `running_groups`（回 1 没在跑、201 认不了、200 另有不认识的行（`strict`，停用户自己的保活前与借用核对 `kacheck` 用它）、其余是 ka.sh 自己的退出码）；worker 的 `Worker.ka_groups`（None 没在跑、字典可为空）。worker 与探针、守护脚本各自在服务器上跑、不 import 本包，口径相同 |
 | 进程出生时钟（`/proc/<pid>/stat` 第 22 项，开机以来的时钟数；认同一个进程只比它，不换算成墙上时钟；看板登记的保活在登记行里记下它，#26） | `fleet_guard.sh` 的 `proc_birth`；探针 `fleet_probe.sh` 的 `birth`（`p1`、`ka_groups`、`guard` 段共用；两个脚本各自经标准输入送去，口径相同）；比对在 `fleet.parse`（`guard.identity`）；worker 要 epoch 秒时用 `started_at` |
 | 所有卡利用率为零（空转的证据：每张卡至少两条明确的零样本，读不到的、少一张的都不算） | `fleet.parse` 的每卡 `zero`、`fleet.analyze` 的 `zero_cards`（看板登记的 `guard.zero_cards`、自行开启的 `manual_guard`）；远端动手前复核 `fleet_guard.sh` 的 `gpu_zero`（探针在未必有 Python 的镜像里跑，与本机解析各一份） |
 | 组内服务器 GPU 负载归类（只认保活，其余算实验）与按路径归人 | `fleet.classify`、`fleet.mark_keepalive`、`disk.whose`（归属表同 `disk.owner_of`） |
-| 进程跑的是哪个脚本、相对路径按工作目录还原（#29：认保活时相对路径起的同一脚本与写完整路径起的一样）；ka.sh 管的保活（python 跑 `AGRI_KA_DIR/AGRI_KA_SCRIPT`：命令行写完整路径，或相对路径还原、解开符号链接后是它）；借用前逐个核对 | worker 的 `script_arg`（看门狗 `script_of` 与 `ka_owned` 共用）、`ka_owned`；共享盘上 ka.sh 的 `pgids()`（不在本仓库，规则与 `ka_owned` 同一条）；组内字样与规则比的命令行接上还原路径 `fleet._abs_script`，探针 `fleet_probe.sh` 的 `script_abs`（只规整路径；探针在未必有 Python 的镜像里跑、worker 不 import 本包，所以三份）；借用核对 `fleet_guard.sh` 的 `kacheck`（读 `ka.sh running` 只经 `running_groups strict`），结果的话 `borrow._ka_miss` |
+| 进程跑的是哪个脚本、相对路径按工作目录还原（#29：认保活时相对路径起的同一脚本与写完整路径起的一样）；ka.sh 管的保活（python 跑 `AGRI_KA_DIR/AGRI_KA_SCRIPT`：命令行写完整路径，或相对路径还原、解开符号链接后是它）；借用前逐个核对 | worker 的 `script_arg`（看门狗 `script_of` 与 `ka_owned` 共用）、`ka_owned`；`labmon/ka.sh` 的 `ka_procs`（running 与 stop 发信号共用，#105；规则与 `ka_owned` 同一条，`tests/test_ka.py` 对同一组起法核对两边一致）；组内字样与规则比的命令行接上还原路径 `fleet._abs_script`，探针 `fleet_probe.sh` 的 `script_abs`（只规整路径；探针在未必有 Python 的镜像里跑、worker 不 import 本包，所以三份）；借用核对 `fleet_guard.sh` 的 `kacheck`（读 `ka.sh running` 只经 `running_groups strict`），结果的话 `borrow._ka_miss` |
 | 固定配色（项目、计划项、共享盘上的人） | `config.pick_color` |
 | 页面渲染（模板 + common.js + 数据；写盘的原子写入）；往页面里填一块数据（`/*__DATA__*/null`、`/*__ME__*/null`，`<` 写成 `\u003c`） | `collect.render_page`、`collect.write_page`；`collect.fill` |
 | 页面上的租期文字（都按页面上的“现在”算：剩余秒数、一天内到期或已过、纯文字「剩 X」/「已过」、主机的「租期剩 X」、带配色的唯一出口） | `leaseLeft`、`leaseSoon`、`leaseRem`、`leaseText`、`leaseHtml`（overview.html） |

@@ -18,9 +18,10 @@
 借用中对方被挤到一次（我们的任务被 OOM 挤掉、或内核杀了对方的进程），这次借用的预留乘 BUMP_X。
 对方说好不用（页面上勾「某某说好约定时间前不用」，Issue #30）：主机清单记 borrow_away（取约定时间），随 guest 指令下发 keep.away；到那时以前 worker
 不预先留、不判对方的内存与 CPU 超出，对方有了新的 GPU 进程（连着两轮）或内核杀了 labmon 之外的进程（我们没有任务在跑时）就作废（worker 状态的 guest.away.end），check 清掉 borrow_away、提醒一次。独占任务等对方用完才放行（不留卡、不堵别的任务），被打扰就作废重排（所有主机一样）。
-归还（finish）：一条 ssh 停 worker、清容器里 labmon 的本地目录与这台的临时指令；借来时 GPU 上没有保活的（ka 为假），顺手 ka.sh stop
-停掉 worker 开的保活；借来时就有对方的保活的不碰它（worker 要卡时停过的话，worker 空闲时已按 ka.sh 开回来，同一个脚本）。
-再按保活守护开保活（fleet.ka_start：已在跑不重开），随即探一次这一台（页面不必等下一轮探测才看到保活），通知“可以告诉对方了”。
+归还（finish）：一条 ssh 停 worker、清容器里 labmon 的本地目录与这台的临时指令；卡上的保活是借用期间 worker 开的（worker 状态的 keepalive.mine，
+或 ka.sh 的事件日志），就不动进程、登记成看板的保活（fleet.ka_adopt，#102），照常盯着让路；认不出的：借来时 GPU 上没有保活的（ka 为假）
+照旧 ka.sh stop 再按保活守护开，借来时就有对方保活的不碰它、按保活守护开（fleet.ka_start：已在跑不重开）。
+随即探一次这一台（页面不必等下一轮探测才看到保活），通知“可以告诉对方了”。
 
 实验会话怎么知道：check 给全局快照写 wake（借到、到了约定时间、对方在用、已归还），labmon wait 把与本项目有关的当告警报出。
 提醒记在本机状态目录 overview/borrow.json：{服务器: {"warned": [...], "ka", "returning", "now", "kept", "back", "bump", "hit", "seen", "last"}}
@@ -403,10 +404,12 @@ def wrote_note(w: dict | None, holder: str) -> str | None:
             + f"），没动：留在 {holder} 那边，我们拿不到，对方续租时会清掉")
 
 
-def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), probe=None, gone: bool = False, stuck: dict | None = None) -> str:
-    """归还：一条 ssh 停 worker、停掉还挂着的占位任务（kill：它们的进程组）、清掉容器里 labmon 的本地目录与这台的临时指令；
-    借来时 GPU 上没有保活的，顺手停掉 worker 开的保活（借来时就有对方的保活的不碰）。主机清单写 borrow_returned；
-    再按保活守护开保活（已在跑不重开；开了就盯着，对方的实验上来就让出），然后恢复借来时暂停的保活看门狗（worker 的 thaw：
+def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), probe=None, gone: bool = False, stuck: dict | None = None,
+           mine: dict | None = None, adopt=None) -> str:
+    """归还：一条 ssh 停 worker、停掉还挂着的占位任务（kill：它们的进程组）、清掉容器里 labmon 的本地目录与这台的临时指令。主机清单写 borrow_returned。
+    卡上的保活是借用期间 worker 开的（mine：worker 状态的 keepalive.mine；没有就按 ka.sh 的事件日志认），不动进程、登记成看板的保活
+    （adopt 缺省 fleet.ka_adopt，在现场核对身份，#102）：不停再开，没有空档；认不出的照旧——借来时 GPU 上没有保活的停掉再按保活守护开，
+    借来时就有对方保活的不碰、按保活守护开（已在跑不重开；开了就盯着，对方的实验上来就让出）。然后恢复借来时暂停的保活看门狗（worker 的 thaw：
     保活已在，它醒来不会再多拉一个：出借方自己的保活管理器见到不是自己登记的同脚本保活会换成自己的，结果仍是一个），最后探一次这一台（同手动开保活，fleetops._probe）。
     wrote：借用期间本地盘 labmon 目录之外新写的（worker 的 storage.wrote：只列出来，不动，wrote_note）。
     stuck：借用期间 worker 要卡时停不了卡上的保活（worker 状态的 keepalive.stuck，#102）：结果里照实写一句，不只说保活是谁的。
@@ -422,7 +425,6 @@ def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), prob
     remote = (f"{w} stop --host {shlex.quote(sid)} >/dev/null 2>&1; {ovr_file}" if gone else
               f"{w} stop --host {shlex.quote(sid)} >/dev/null 2>&1; sleep 2; "
               + "".join(f"kill -TERM -- -{int(p)} 2>/dev/null; " for p in kill)
-              + (f"({ka_cmd} stop) >/dev/null 2>&1; " if ka_cmd and not theirs else "")
               + f"du -sm /tmp/labmon 2>/dev/null | cut -f1; rm -rf /tmp/labmon; {ovr_file}")
     rc, out, err = (ssh or F.ssh)(s, remote)
     if rc == 255:
@@ -437,15 +439,26 @@ def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), prob
         _update(lambda st: st.setdefault(sid, {}).update(returning=None, done=round(time.time())))
         log_events([{"kind": "borrow_return", "host": sid, "who": s["holder"], "msg": msg, **({"pool": True} if s.get("borrow_pool") else {})}])
         return msg
-    res, note = (ka or F.ka_start)(s, cfg, "借用归还")
+    # 卡上的保活是借用期间 worker 开的：登记成看板的保活，不停再开（#102）；认不出就照旧
+    ad, adn = (adopt or F.ka_adopt)(s, cfg, since, time.time(), mine) if ka_cmd and since else ("no", "")
+    if ad == "ok":
+        res, note = "ok", adn
+    else:
+        if ka_cmd and not theirs:                    # 借来时 GPU 上没有保活：卡上的多半是 worker 开的，认不出就停掉、按守护重开（原来的做法）
+            (ssh or F.ssh)(s, f"({ka_cmd} stop) >/dev/null 2>&1")
+        res, note = (ka or F.ka_start)(s, cfg, "借用归还")
     rc, out, err = (ssh or F.ssh)(s, f"{w} thaw --host {shlex.quote(sid)}")
     wd = (next((x for x in out.splitlines() if x.startswith("看门狗：")), None) if rc == 0
           else f"借来时暂停的看门狗没恢复成：{(err or out).strip()[-160:]}")
     (probe or FO._probe)(sid)
     # 保活是谁的（借来时就在、不是 labmon 开的：borrow.json 的 ka）与 worker 停不停得了（worker 状态的 keepalive.stuck）是两回事，各说各的（#102）
     notes = [f"清掉了容器里 labmon 的本地目录（{mb} MB）" if mb else None,
-             ("保活还在" + (f"（借来时就在、是 {s['holder']} 的，归还不停它）" if theirs else "") if note.startswith("already") else "开了保活（盯着，对方的实验上来就让出）")
+             ("保活是借用期间 worker 开的，已登记成看板的保活（盯着，对方的实验上来就让出）"
+              + (f"；借来时 {s['holder']} 的那个借用期间停过" if theirs else "") if ad == "ok" and adn.startswith("adopt") else
+              "保活是看板登记的那个，接着盯着让路" if ad == "ok" else
+              "保活还在" + (f"（借来时就在、是 {s['holder']} 的，归还不停它）" if theirs else "") if note.startswith("already") else "开了保活（盯着，对方的实验上来就让出）")
              if res == "ok" else "GPU 上已有别的进程，没开保活" if res == "busy" else f"保活没开成：{note}",
+             f"卡上的保活是借用期间起来的，{adn}，没登记成看板的保活" if ad == "unsure" and theirs else None,
              f"借用期间 worker 要卡时停不了它（{stuck['why']}，{fmt_time(stuck['t0'])} 起），任务和它同卡分算力" if stuck else None,
              wd, wrote_note(wrote, s["holder"])]
     msg = (f"已把 {sid} 还给 {s['holder']}{took}：" + "；".join(x for x in notes if x)
@@ -601,6 +614,7 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
         if st.get("returning") and ws and not run and not swap:
             try:
                 done = finish_fn(hid, wrote=(ws.get("storage") or {}).get("wrote"), stuck=(ws.get("keepalive") or {}).get("stuck"),
+                                 mine=(ws.get("keepalive") or {}).get("mine"),
                                  kill=[j["pid"] for j in ws.get("running", []) if j.get("hold") and j.get("pid")])
                 if not pool:                         # 算力池的归还只进记录（finish 记了 borrow_return）
                     msgs.append(done)

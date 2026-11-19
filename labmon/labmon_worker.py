@@ -94,7 +94,9 @@ from pathlib import PurePosixPath
 HOME = os.environ.get("LABMON_HOME") or os.path.dirname(os.path.abspath(__file__))
 TICK = float(os.environ.get("LABMON_TICK", "10"))
 KA_CHECK_S = 3 * TICK    # 空闲时多久看一次要不要拉起保活
-KA_BIN = os.environ.get("KA_BIN", os.path.join(HOME, "keepalive", "bin"))
+KA_BIN = os.environ.get("KA_BIN", os.path.join(HOME, "keepalive", "bin"))   # 保活的配置 ka.env 所在目录（主机清单的 ka_bin）
+KA_ENV = os.path.join(KA_BIN, "ka.env")
+KA_SH = os.environ.get("KA_SH") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "ka.sh")   # 停启保活的脚本：与 worker 一起发来的那份（#105）
 PROC = os.environ.get("LABMON_PROC", "/proc")          # 只用于统计用量；测试时指向假目录
 CG = os.environ.get("LABMON_CGROUP", "/sys/fs/cgroup")
 NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
@@ -846,7 +848,7 @@ def script_of(args, cwd, pid=None):
 
 
 def ka_owned(args, cwd, ka_full):
-    """ka.sh 认得、停得了的保活（与共享盘上 ka.sh 的 pgids() 同一条规则，#29）：python 跑的，命令行里写着 ka_full（AGRI_KA_DIR/AGRI_KA_SCRIPT）这个完整路径，
+    """ka.sh 认得、停得了的保活（与 ka.sh 的 ka_procs 同一条规则，#29、#105；两份：worker 不 import 本包，tests/test_ka.py 核对结论一致）：python 跑的，命令行里写着 ka_full（AGRI_KA_DIR/AGRI_KA_SCRIPT）这个完整路径，
     或跑的脚本（相对路径按进程工作目录还原）解开符号链接后就是它：先 cd 进保活目录、用 train_keep_alive.py、./train_keep_alive.py 起的也算。
     cwd 读不到（进程没了）的相对路径认不出。"""
     if not args or not re.match(r"python[\d.]*$", os.path.basename(args[0])):
@@ -2086,6 +2088,7 @@ class Worker:
         self.peer_box = []                    # 同一物理机（共享盘 clientaddr 相同）的别的主机在跑的任务 [(主机, 项目, 任务)]（peers 一起读）
         self.prows = [r for r in load_jsonl(self.p.press) if (r.get("t") or 0) >= time.time() - PRESS_KEEP_S]   # 本机近 14 天的压力历史（io_base）
         self.ka_off, self.ka_stop_t, self.ka_hits, self.fight = False, 0.0, [], None   # 要卡的这段里保活已停着、上次停的时刻、近 FIGHT_S 秒被重开的时刻、最近一次被重开（load_prev 找回，#124）
+        self.ka_mine = None                   # worker 自己用 ka.sh start 拉起、此刻还在的保活：{g 进程组, born 组长出生时钟, t 启动时刻}（ka_mark；状态的 keepalive.mine，归还时据此登记成看板保活，#102）
         self.ka_fail = None                   # 停保活没停成：{t0 起始, n 次数, why 原因, said 记过事件}，停下了或保活没了清掉（ka_note；load_prev 找回，#102）
         # 成组（gang=，#180）：
         self.gang_local = {}                  # 本机清单里还会跑的成员 {(项目, 任务): {key, gang, n, root, queue}}（list_state，含在跑的）
@@ -2104,8 +2107,9 @@ class Worker:
         self.ka_wait = None                   # 保活被拉起、看门狗正持着平时不持的锁：{t0: 开始等的时刻, said: 满 LOCK_WAIT_S 记过事件}（#38）
         self.procs, self.mine = {}, set()     # 这一轮的进程表（scan_procs）与 labmon 任务的进程：找看门狗用
         self.watch_t, self.watch_seen = 0.0, set()   # 借来的主机上次找看门狗的时刻、记过事件的可能的看门狗
-        env = subprocess.run(["bash", "-c", '. "$1/ka.env" 2>/dev/null; echo "${AGRI_ROOT:-}"; echo "${AGRI_KA_SCRIPT:+${AGRI_KA_DIR:-}/$AGRI_KA_SCRIPT}"', "_", KA_BIN],
-                             capture_output=True, text=True).stdout.split("\n") if os.path.exists(os.path.join(KA_BIN, "ka.sh")) else []
+        # 保活由 worker 管的前提：有 ka.env（这台的保活配置）与随 worker 发来的 ka.sh（#105）；缺一样就当这台没配保活（keepalive.ctl 为假）
+        env = subprocess.run(["bash", "-c", '. "$1" 2>/dev/null; echo "${AGRI_ROOT:-}"; echo "${AGRI_KA_SCRIPT:+${AGRI_KA_DIR:-}/$AGRI_KA_SCRIPT}"', "_", KA_ENV],
+                             capture_output=True, text=True).stdout.split("\n") if os.path.exists(KA_ENV) and os.path.exists(KA_SH) else []
         keepalive_demo = env[0].strip() if env else ""
         self.ka_full = (env[1].strip() if len(env) > 1 else "") or None   # ka.sh 认的保活：python 跑这个脚本（完整路径）；别的保活它停不了
         if keepalive_demo:
@@ -2133,7 +2137,8 @@ class Worker:
         写进原因，ka_note，#102）；别的动作不收：start 起的保活进程会继承管道，run 就等不到头。"""
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}   # 保活用 py38，不能继承项目的补装包
         env["KA_CALLER"] = "labmon-worker:" + self.host
-        return subprocess.run(["bash", os.path.join(KA_BIN, "ka.sh"), action], env=env,
+        env["KA_ENV"] = KA_ENV
+        return subprocess.run(["bash", KA_SH, action], env=env,
                               stdout=subprocess.PIPE, stderr=subprocess.PIPE if action == "stop" else subprocess.DEVNULL, text=True)
 
     def ka_stop(self):
@@ -2174,7 +2179,21 @@ class Worker:
         """保活在跑时为 {进程组: 组长的启动时刻（epoch 秒，读不到为 None）}（ka.sh running 一行一个进程组；ka.sh 用 setsid 起保活，
         组长就是保活进程），没在跑为 None。ka_caller 按它认 events.log 里哪条 RESTORED 是这台的。"""
         r = self.ka("running")
-        return {int(g): started_at(int(g)) for g in r.stdout.split() if g.isdigit()} if r.returncode == 0 else None
+        groups = {int(g): started_at(int(g)) for g in r.stdout.split() if g.isdigit()} if r.returncode == 0 else None
+        m = self.ka_mine
+        if m and not (groups and m["g"] in groups and pstart(m["g"]) == m["born"]):
+            self.ka_mine = None               # 自己开的那个没了（停了、被别人 pkill 了、换了容器）：不再记着
+        return groups
+
+    def ka_mark(self):
+        """ka.sh start 退出 0 之后：此刻只有一个保活进程组、events.log 里它的 RESTORED 是这台 worker 记的（ka_caller，调用者 labmon-worker:<主机>），
+        才记成自己开的（ka_mine：进程组与组长出生时钟）。退出 0 也可能是别人刚开了一个（start 见已在跑就不起），所以不凭退出码认。"""
+        groups = self.ka_groups()
+        if groups and len(groups) == 1 and self.ka_caller(groups) == "labmon-worker:" + self.host:
+            g = next(iter(groups))
+            born = pstart(g)
+            if born is not None:
+                self.ka_mine = {"g": g, "born": born, "t": round(groups[g] or time.time())}
 
     def keepalive(self, need_gpu):
         if not self.ka_reg:
@@ -2232,6 +2251,8 @@ class Worker:
         if self.ka_idle >= 2:
             rc = self.ka("start").returncode
             self.wlog("拉起 GPU 保活" + ("" if rc == 0 else "失败（退出码 %d）" % rc))
+            if rc == 0:
+                self.ka_mark()
             self.ka_idle, self.ka_why = 0, None
 
     def ka_others(self):
@@ -4083,6 +4104,8 @@ class Worker:
             self.ka_off, self.ka_stop_t = (True, old["ka_stop"]) if fresh and old.get("ka_stop") else (False, 0.0)
             ks = (old.get("keepalive") or {}).get("stuck") if fresh else None   # 停不了的保活：接着算，不重复记事件（#102）
             self.ka_fail = dict(ks, said=True) if ks else None
+            km = (old.get("keepalive") or {}).get("mine")   # 自己开的保活：停多久都沿用，按出生时钟认（ka_groups 对不上就清掉，换了容器不会认错）
+            self.ka_mine = km if isinstance(km, dict) and {"g", "born"} <= set(km) else None
             self.thr_since = (old.get("throttle") or {}).get("since") if fresh else None   # 限流的起算时刻：升级、重启不从头计时
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             self.prev, self.voided = {}, []
@@ -4898,7 +4921,8 @@ class Worker:
             "throttle": self.throttle(now),       # 这一段 CPU 限流与超核的任务（Worker.throttle）；没在限流为 None
             "ka_stop": self.ka_stop_t if self.ka_off else None,   # 要卡的这段里 worker 停着保活：停它的时刻（接管时找回，load_prev）
             "keepalive": {"ctl": bool(self.ka_reg), "why": self.ka_why,   # worker 管不管这台的保活（有 ka.sh）、没任务要卡却不拉起的原因（ka_lines 用，#61）
-                          "stuck": self.ka_stuck()},                          # 要卡时停不了它（#102）：ka_lines、看板告警、fit 照它说、照它占着算
+                          "stuck": self.ka_stuck(),                           # 要卡时停不了它（#102）：ka_lines、看板告警、fit 照它说、照它占着算
+                          "mine": self.ka_mine},                              # worker 自己开的、此刻还在的保活（#102）：归还时 borrow.finish 据此登记成看板保活
             "watchdogs": load_frozen(self.p),
             "guest": {"keep": self.keep(), "other": {"vram": self.other["vram"], "ram": self.other["ram"] and round(self.other["ram"], 2),
                                                      "cpu": self.other["cpu"] and round(self.other["cpu"], 2)},

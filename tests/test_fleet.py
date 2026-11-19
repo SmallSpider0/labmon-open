@@ -25,6 +25,7 @@ from fixtures import GB, GUARD_PROBE as GUARD, KA_PROBE as KA, NO_HOSTS, T0, fak
 os.environ["LABMON_LAN"] = "on"                       # 假服务器连不上：别判成本机不在内网
 os.environ["LABMON_HOSTS"] = NO_HOSTS
 
+from labmon import config as K  # noqa: E402
 from labmon import fleet as F  # noqa: E402
 from labmon import fleetboot as FB  # noqa: E402
 from labmon import fleetops as FO  # noqa: E402
@@ -1127,6 +1128,106 @@ class GuardTest(unittest.TestCase):
         self.assertEqual(len(evs), 1)
         self.assertIn("有了 train.py，守护开的保活已让出", evs[0]["msg"])
         self.assertEqual((self.remote, self.guard(T0 + 800)["status"]), ([], "busy"))
+
+    def returned(self, started, guard=None):
+        """b 借过、还掉了（借了 2 小时，10 分钟前还的）；探到的卡上只有一个保活，进程组 9 的组长在 started 起来（探针的 ka_groups 带出生时钟）。"""
+        s = self.c["servers"][0]
+        s.update(borrow_since=K.fmt_time(T0 - 7200, year=True), borrow_returned=K.fmt_time(T0 - 600, year=True))
+        if guard is not None:
+            s["guard"] = guard
+        btime = T0 - 86400 - 1000                    # 同 probe_out：btime = 容器启动 − 1000、tck 100
+        self.raw = KA + f"@@ ka_groups\n9 9 {(started - btime) * 100}\n"
+
+    def test_adopt_after_return(self):
+        """#102：还掉以后卡上留着借用期间 labmon 的 worker 开的保活（看板没登记，探针判 ours 为假）：守护的判定给 adopt，
+        经 fleet_guard.sh 在现场核对后登记成看板的保活，记一条 guard_adopt；同一个身份只试一次。关了守护的也认（登记了才有人替对方让路）。
+        以前这台的 state 是 keepalive 而不是 idle，守护只报 busy，手动开保活回 ok already，没有一条路能把它认回来。"""
+        self.returned(T0 - 3600, guard=False)
+        self.reply = "ok adopt 9"
+        self.tick(T0)
+        self.assertEqual(len(self.remote), 1)
+        self.assertTrue(self.remote[0].startswith("bash -s -- adopt 'bash /x/ka.sh' 300 '借用归还' /data/labmon/labmon/keepalive/bin/ka.env labmon-worker:b "
+                                                  f"{T0 - 7200} {T0 - 600}"), self.remote[0])
+        self.assertEqual(self.calls[-2:], ["b", "b"])                                         # 登记了再探一次
+        ev = records(cat="keepalive")[0]
+        self.assertEqual(ev["kind"], "guard_adopt")
+        self.assertIn("卡上的保活是借用期间 labmon 的 worker 开的，已登记成看板的保活", ev["msg"])
+        self.tick(T0 + 600)
+        self.assertEqual(len(self.remote), 1)                                                  # 同一个身份只试一次
+
+    def test_adopt_skips_owner_keepalive(self):
+        """还掉以后卡上的保活在借来之前就起来了（对方自己的）：不动、不连。"""
+        self.returned(T0 - 9000)
+        self.tick(T0)
+        self.assertEqual(self.remote, [])
+        self.assertEqual(records(cat="keepalive"), [])
+
+    def test_adopt_unsure_warns_once(self):
+        """借用期间起来的，现场认不出是 worker 开的：不登记，记 guard_fail、通知一次；连不上、GPU 上有别的进程（busy）下次再试。"""
+        self.returned(T0 - 3600)
+        self.reply = "busy GPU 上还有别的进程"
+        self.assertEqual(self.tick(T0), [])
+        self.reply = "unsure ka.sh 的事件日志里没有 labmon-worker:b 拉起它的记录"
+        out = self.tick(T0 + 600)
+        self.assertEqual(len(self.remote), 2)
+        self.assertTrue(any("没登记成看板的保活" in m and "BB 的实验上来时没人替这人停它" in m for m in out), out)
+        self.assertEqual([e["kind"] for e in records(cat="keepalive")], ["guard_fail"])
+        self.assertEqual(self.tick(T0 + 1200), [])
+        self.assertEqual(len(self.remote), 2)
+
+    def test_script_adopt(self):
+        """fleet_guard.sh 的 adopt（#102）：不动进程，只在核对过身份后写登记。没有保活、不是借用期间起来的回 no；
+        事件日志里没有这台 worker 拉起它的记录、worker 记下的身份对不上回 unsure；GPU 上有别的进程回 busy；本来就是看板登记的回 ok registered。"""
+        import datetime
+        d = Path(self.tmp.name)
+        g = os.getpid()                                     # 登记的进程组要活着（guard_owner 用 kill -0 核）
+        tck = int(subprocess.run(["getconf", "CLK_TCK"], capture_output=True, text=True).stdout)
+        btime, born = T0 - 86400, 3600 * tck                # 组长在开机后 1 小时起来：T0 − 82800
+        t0 = btime + born // tck
+        (d / "proc" / str(g)).mkdir(parents=True)
+        (d / "proc" / "stat").write_text(f"cpu 0\nbtime {btime}\n")
+        (d / "proc" / str(g) / "stat").write_text(f"{g} (python) S 1 {g} {g} 0 " + "0 " * 14 + f"{born} 0 0\n")
+        (d / "proc" / str(g) / "sched").write_text("python (x) (5000, #threads: 1)\n")
+        (d / "bin").mkdir()
+        for name, body in {"nvidia-smi": 'cat "$NV"', "timeout": 'shift 3; exec "$@"'}.items():
+            (d / "bin" / name).write_text("#!/bin/bash\n" + body + "\n")
+            (d / "bin" / name).chmod(0o755)
+        (d / "ka.sh").write_text('case "$1" in running) [ -s "$PID" ] || exit 1; cat "$PID" ;; esac\n')
+        (d / "root" / "keepalive").mkdir(parents=True)
+        (d / "ka.env").write_text(f'AGRI_ROOT="{d / "root"}"\n')
+        ev = d / "root" / "keepalive" / "events.log"
+        env = {**self.shell_env(d), "NV": str(d / "nv"), "PID": str(d / "pid")}
+        ka = f"bash {d / 'ka.sh'}"
+
+        def run(since=t0 - 3600, until=t0 + 3600, *ident):
+            r = subprocess.run(["bash", "-s", "--", "adopt", ka, "0", "借用归还", str(d / "ka.env"), "labmon-worker:b", str(since), str(until), *map(str, ident)],
+                               input=F.GUARD.read_text(), env=env, capture_output=True, text=True, timeout=30)
+            return r.stdout.strip().splitlines()[-1]
+
+        def ts(t):
+            return datetime.datetime.fromtimestamp(t, datetime.timezone.utc).astimezone().isoformat(timespec="seconds")
+        (d / "nv").write_text("5000\n")
+        self.assertEqual(run(), "no 没有保活在跑")
+        (d / "pid").write_text(f"{g}\n")
+        self.assertEqual(run(t0 + 600), "no 保活不是借用期间起来的")                          # 借来之前就在：对方的
+        self.assertEqual(run(), "unsure ka.sh 的事件日志里没有 labmon-worker:b 拉起它的记录")
+        ev.write_text(f"{ts(t0 + 12)} RESTORED 进程组 {g}；调用者 labmon-worker:bb\n"            # 别的主机的 worker：不算
+                      f"{ts(t0 + 300)} RESTORED 进程组 {g}；调用者 labmon-worker:b\n")           # 时刻对不上（同号的别的进程）：不算
+        self.assertTrue(run().startswith("unsure"))
+        self.assertFalse((d / "guard.state").exists())
+        ev.write_text(f"{ts(t0 + 12)} RESTORED 进程组 {g} 出生 {born + 1}；调用者 labmon-worker:b\n")   # 新版 ka.sh 带出生时钟：对不上
+        self.assertTrue(run().startswith("unsure"))
+        self.assertEqual(run(t0 - 3600, t0 + 3600, g, born + 1), "unsure 卡上的保活不是 worker 记下的那个")
+        ev.write_text(f"{ts(t0 + 12)} RESTORED 进程组 {g}；调用者 labmon-worker:b\n")              # 旧版 ka.sh 的行（补登记的那台）
+        (d / "nv").write_text("5000\n9999\n")
+        self.assertEqual(run(), "busy GPU 上还有别的进程")
+        (d / "nv").write_text("5000\n")
+        self.assertEqual(run(), f"ok adopt {g}")
+        self.assertEqual((d / "guard.state").read_text().split()[2:], [str(g), (d / "guard.state").read_text().split()[3], "借用归还", str(born)])
+        self.assertEqual(run(), f"ok registered {g}")
+        (d / "guard.state").unlink()
+        ev.write_text("")
+        self.assertEqual(run(t0 - 3600, t0 + 3600, g, born), f"ok adopt {g}")                 # worker 记下的身份（keepalive.mine）：对得上就认
 
     def test_script_checks_gpu_before_reporting_success(self):
         d = Path(self.tmp.name)

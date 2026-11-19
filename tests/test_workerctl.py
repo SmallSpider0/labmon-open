@@ -36,7 +36,9 @@ class StartTest(unittest.TestCase):
             sent = []
             real = workerctl.committed
             try:
-                with mock.patch.object(workerctl, "committed", lambda name: sent.append((name, real(name))) or sent[-1][1]), \
+                # ka.sh 同一条连接写进去（#105）：内容换成固定的一句，不依赖本地 main 上有没有它（PR 合并前 CI 的 main 还没有）
+                with mock.patch.object(workerctl, "committed", lambda name: sent.append((name, real(name) if name == "labmon_worker.py" else "#!/bin/sh\n# 假 ka.sh\n"))
+                                       or sent[-1][1]), \
                         mock.patch.object(workerctl, "START_CHECK_S", 0.3):      # 假 python 的 run 立刻退出，不用等 3 秒
                     rc, out = workerctl.run_out("start", "here", [])
             finally:
@@ -48,8 +50,10 @@ class StartTest(unittest.TestCase):
             self.assertIn("worker：未运行", out)
             self.assertIn("KeyError: 'stop'", out)
             # worker 照样写进去了，是 main 上已提交的版本（工作区里改了一半的不传）
-            self.assertEqual([n for n, _ in sent], ["labmon_worker.py"])
-            self.assertEqual((d / "alice" / "labmon" / "labmon_worker.py").read_text(), sent[0][1])
+            sent = dict(sent)
+            self.assertEqual(sorted(sent), ["ka.sh", "labmon_worker.py"])
+            self.assertEqual((d / "alice" / "labmon" / "labmon_worker.py").read_text(), sent["labmon_worker.py"])
+            self.assertEqual((d / "alice" / "labmon" / "ka.sh").read_text(), sent["ka.sh"])   # 停启保活的脚本与 worker 一起写到 worker_home
 
     def test_worker_environment_uses_explicit_host_paths(self):
         """路径可含空格或 shell 字符，按 shell 参数转义。"""

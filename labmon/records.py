@@ -31,7 +31,7 @@ EVENT_KINDS = {
     "owner_oom": ("挤到对方", "bad", "borrow"),
     "pool": ("算力池", "mute", "borrow"),            # 算力池的放、搬、回池、借、还、收回（pool.tick、pool.reclaim，#25）
     "guard_restart": ("重开保活", "ok", "keepalive"), "guard_delay": ("延后保活", "mute", "keepalive"),
-    "guard_start": ("开保活", "ok", "keepalive"), "guard_yield": ("让出", "mute", "keepalive"), "guard_fail": ("没开成", "bad", "keepalive"),
+    "guard_start": ("开保活", "ok", "keepalive"), "guard_adopt": ("登记保活", "ok", "keepalive"), "guard_yield": ("让出", "mute", "keepalive"), "guard_fail": ("没开成", "bad", "keepalive"),
     "ka_fight": ("保活被拉起", "warn", "keepalive"), "watchdog": ("看门狗", "warn", "keepalive"),
     "ka_stuck": ("保活停不下", "bad", "keepalive"),                       # worker 要卡时停保活一直没停成（#102）
     "start": ("开始", "mute", "queue"), "grant": ("放行", "mute", "queue"), "done": ("完成", "ok", "queue"), "end": ("结束", "mute", "queue"),
