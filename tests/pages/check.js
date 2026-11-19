@@ -653,6 +653,13 @@ t("overview", "保活看门狗：保活被拉起进主机告警，借用抽屉�
   has(bs, "暂停着（还卡时恢复）：PID 4242（bash keepalive_final_check.sh：提到保活程序，在循环里）"); has(bs, "找到、没动：PID 4300");
   clean(bs, "借用抽屉的看门狗");
 });
+
+t("overview", "保活停不下来（#102）：worker 要卡时停保活一直没停成，借来的主机给用户一条告警，写明原因与该找谁", () => {
+  const al = run(O, "alertsOf(D.hosts[1])").filter(a => a.msg.includes("GPU 保活停不下来"));
+  ok(al.length === 1 && al[0].to === "user", "停不了的保活该给用户一条告警");
+  has(al[0].msg, "（ka.sh stop 退出码 1：另一个调用者正持着锁，");
+  has(al[0].msg, "起 160 次），任务和它同卡分算力、少了它占的显存；请 OWNER 停掉它或查 ka.sh");
+});
 // #72：换人登记了新的一台、旧的从列表去掉后，开着旧那台的抽屉跟到新的那台（地址原地换掉），不停在“已经没有这一台”
 t("overview", "换人后抽屉跟到新的那台", () => {
   run(O, `SAVED = [D, OPS, history.replaceState]; history.replaceState = (s, t, h) => { location.hash = h; };

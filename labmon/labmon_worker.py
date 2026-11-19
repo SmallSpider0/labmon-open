@@ -758,6 +758,7 @@ WATCH_EVERY = 600        # 借来的主机多久找一遍看门狗
 SURE_WAIT = "；确定的：要卡时它把保活拉起来就暂停，还卡时恢复"   # 找到、还没暂停的确定的看门狗（frozen.json 的 seen）后面接的说明（#31）
 LOCK_WAIT_S = 60         # 看门狗一直持着平时不持的锁这么久：记一次事件（照样不暂停，#38）
 FIGHT_S = 3600           # 保活被重开的次数按这么久算（状态的 kafight、看板告警）
+KA_STUCK_S = 120         # 要卡时停保活连着失败这么久（且至少两次）算 worker 停不了它：ka_stuck 事件、状态的 keepalive.stuck（#102）
 KA_LOG_LAG = (-5, 30)    # ka.sh 记 RESTORED 的时刻比保活进程启动晚多少秒（它起来后最多等 20 秒才记；前后各留余量）：ka_caller 按它认这台的那条
 CRON = ("/etc/crontab", "/etc/cron.d", "/var/spool/cron")   # cron 在跑时看这些定时任务里有没有拉起保活的（暂停不了，只提醒）
 
@@ -868,7 +869,7 @@ def wd_text(ws):
 
 def ka_lines(st):
     """status.json 里这台的 GPU 保活说成几句（#61；`labmon worker status` 与看板的 `labmon status` 共用）：在跑的（几点起、
-    nvidia-smi 里的 PID 与卡、占多少显存）、停着的（worker 为要卡的任务停的）、没在跑又不拉起的原因、借来的主机上 ka.sh 停不了的、
+    nvidia-smi 里的 PID 与卡、占多少显存；要卡时 worker 停不了它的照实写，keepalive.stuck）、停着的（worker 为要卡的任务停的）、没在跑又不拉起的原因、借来的主机上 ka.sh 停不了的、
     近 1 小时被拉起几次。归属取状态里 gpu_procs 的 owner 与 ka（sample 经 gpu_owners、ka_owned 认的），这里不另判；PID 写宿主机的（nvidia-smi 列的那个）。"""
     idx = {g["uuid"]: g["i"] for g in (st.get("info") or {}).get("gpus") or [] if "uuid" in g}
     ka = st.get("keepalive") or {}
@@ -884,8 +885,10 @@ def ka_lines(st):
     mine = [g for g in st.get("gpu_procs") or [] if g.get("owner") == "keepalive"]
     if mine:
         t0 = min((g["t0"] for g in mine if g.get("t0")), default=None)
+        stuck = ka.get("stuck")              # worker 要卡时停不了它（Worker.ka_note，#102）：不说“自动停”
         out.append("GPU 保活：在跑%s：%s%s" % ("（%s 起）" % now_str(t0)[5:16] if t0 else "", procs(mine),
-                                         "；有任务要卡时 worker 自动停" if ka.get("ctl") else "；这台没配 ka.sh，worker 不停它" if ka.get("ctl") is False else ""))
+                                         "；worker 要卡时停它没停成（%s，%s 起 %d 次），和任务同卡分算力、占着显存" % (stuck["why"], now_str(stuck["t0"])[5:16], stuck["n"])
+                                         if stuck else "；有任务要卡时 worker 自动停" if ka.get("ctl") else "；这台没配 ka.sh，worker 不停它" if ka.get("ctl") is False else ""))
     elif st.get("ka_stop") is not None:
         out.append("GPU 保活：停着（%s有任务要卡；卡空下来后 worker 再拉起）" % ("worker %s 停的，" % now_str(st["ka_stop"])[5:16] if st["ka_stop"] else ""))
     elif ka.get("why"):
@@ -2083,6 +2086,7 @@ class Worker:
         self.peer_box = []                    # 同一物理机（共享盘 clientaddr 相同）的别的主机在跑的任务 [(主机, 项目, 任务)]（peers 一起读）
         self.prows = [r for r in load_jsonl(self.p.press) if (r.get("t") or 0) >= time.time() - PRESS_KEEP_S]   # 本机近 14 天的压力历史（io_base）
         self.ka_off, self.ka_stop_t, self.ka_hits, self.fight = False, 0.0, [], None   # 要卡的这段里保活已停着、上次停的时刻、近 FIGHT_S 秒被重开的时刻、最近一次被重开（load_prev 找回，#124）
+        self.ka_fail = None                   # 停保活没停成：{t0 起始, n 次数, why 原因, said 记过事件}，停下了或保活没了清掉（ka_note；load_prev 找回，#102）
         # 成组（gang=，#180）：
         self.gang_local = {}                  # 本机清单里还会跑的成员 {(项目, 任务): {key, gang, n, root, queue}}（list_state，含在跑的）
         self.gctx, self.gsim = {}, {}         # 本机有成员的组此刻怎样（gang_sync 每轮建）与给 place、推演的那份 {(项目, 组名): {at, local}}
@@ -2125,11 +2129,46 @@ class Worker:
 
     # ---- 保活 ----
     def ka(self, action):
-        """跑 ka.sh 的一个动作，返回 CompletedProcess（stdout 是文字：running 打印保活的进程组）。"""
+        """跑 ka.sh 的一个动作，返回 CompletedProcess（stdout 是文字：running 打印保活的进程组）。stop 另收下标准错误（停不下来时
+        写进原因，ka_note，#102）；别的动作不收：start 起的保活进程会继承管道，run 就等不到头。"""
         env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}   # 保活用 py38，不能继承项目的补装包
         env["KA_CALLER"] = "labmon-worker:" + self.host
         return subprocess.run(["bash", os.path.join(KA_BIN, "ka.sh"), action], env=env,
-                              stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                              stdout=subprocess.PIPE, stderr=subprocess.PIPE if action == "stop" else subprocess.DEVNULL, text=True)
+
+    def ka_stop(self):
+        """ka.sh stop：停了返回 None，没停成返回原因（退出码与它的报错末行）。"""
+        r = self.ka("stop")
+        tail = ((r.stderr or "").strip().splitlines() or [""])[-1][:200]
+        return None if r.returncode == 0 else "ka.sh stop 退出码 %d%s" % (r.returncode, "：" + tail if tail else "")
+
+    def ka_note(self, why):
+        """停保活的结果（keepalive 调，#102）：why 为 None 是停下了或保活已不在，否则是没停成的原因。连着没停成满 KA_STUCK_S、
+        至少两次算停不了：记一条 ka_stuck 事件（哪个保活、占多少、要谁处理），状态的 keepalive.stuck 给 ka_lines、看板告警、fit 与推演
+        照实说、照它一直占着算。worker 照旧每轮再停；任务之间的空档不清（同一段只记一次），停下了、保活没了才清，只写 worker.log。"""
+        f, now = self.ka_fail, time.time()
+        if why is None:
+            if f:
+                self.wlog("GPU 保活停下了（之前从 %s 起 %d 次没停成）" % (now_str(f["t0"])[5:16], f["n"]))
+            self.ka_fail = None
+            return
+        if not f or f["why"] != why:
+            self.wlog("停 GPU 保活没停成：%s" % why)
+        f = self.ka_fail = dict(f or {"t0": now, "n": 0, "said": False}, why=why)
+        f["n"] += 1
+        if not f["said"] and f["n"] >= 2 and now - f["t0"] >= KA_STUCK_S:
+            f["said"] = True
+            ka = [g for g in self.gp if g["owner"] == "keepalive"]
+            idx = {g["uuid"]: g["i"] for g in self.info.get("gpus") or [] if "uuid" in g}
+            which = "、".join("PID %d，卡 %s 占 %.1f GiB" % (g["hpid"], idx.get(g["uuid"], "?"), g["mb"] / 1024) for g in ka) or "保活"
+            self.event("ka_stuck", "要卡时停 GPU 保活没停成（%s，从 %s 起 %d 次）：保活（%s）和任务同卡分算力、占着显存，放卡与推演都照它一直占着算，"
+                       "worker 每轮再停；%s" % (why, now_str(f["t0"])[5:16], f["n"], which,
+                                             "请对方停掉它或查 ka.sh" if self.guest() else "请查 ka.sh"))
+
+    def ka_stuck(self):
+        """worker 要卡时停不了的保活（ka_note 判的，记过事件的那段）：{t0, n, why}，没有为 None。状态的 keepalive.stuck。"""
+        f = self.ka_fail
+        return {k: f[k] for k in ("t0", "n", "why")} if f and f["said"] else None
 
     def ka_groups(self):
         """保活在跑时为 {进程组: 组长的启动时刻（epoch 秒，读不到为 None）}（ka.sh running 一行一个进程组；ka.sh 用 setsid 起保活，
@@ -2150,13 +2189,18 @@ class Worker:
                 if self.ka_off and self.ka_restarted(groups):
                     self.ka_idle, self.ka_why = 0, None
                     return                   # 看门狗正持着平时不持的锁：这一轮不停保活（停了它会再拉一次、又持锁），下一轮再看
-                rc = self.ka("stop").returncode
-                self.wlog("停 GPU 保活" + ("" if rc == 0 else "失败（退出码 %d）" % rc))
-                self.ka_off, self.ka_stop_t = rc == 0, time.time()
+                why = self.ka_stop()
+                if why is None:
+                    self.wlog("停 GPU 保活")
+                self.ka_off, self.ka_stop_t = why is None, time.time()
+                self.ka_note(why)
             else:
                 if self.ka_off and self.ka_wait:
                     self.ka_gone()
                 self.ka_off = True
+                # ka.sh 说没在跑、GPU 上却有它管的保活（ka_owned）：同样停不了。刚停下的那一分钟里 nvidia-smi 可能还列着正在退出的，不算
+                mine = ["PID %d" % g["hpid"] for g in self.gp if g["owner"] == "keepalive"] if time.time() - self.ka_stop_t > 60 else []
+                self.ka_note("ka.sh running 说没在跑，GPU 上却有它管的保活（%s）" % "、".join(mine) if mine else None)
             self.ka_idle, self.ka_why = 0, None
             return
         self.ka_off, self.ka_wait = False, None
@@ -2168,10 +2212,13 @@ class Worker:
         if self.ka_groups() is not None:
             busy = [gp_label(g) for g in self.gp if g["owner"] != "keepalive"]
             if busy:                          # 有了别的 GPU 进程（借来的主机上多半是对方回来用）：保活让路，同保活守护；空下来再按下面的规则开
-                rc = self.ka("stop").returncode
-                self.wlog("GPU 上有了 %s，停保活让路" % "、".join(busy) + ("" if rc == 0 else "，没停成（退出码 %d）" % rc))
+                why = self.ka_stop()
+                self.wlog("GPU 上有了 %s，停保活让路" % "、".join(busy) + ("" if why is None else "，没停成（%s）" % why))
+                self.ka_note(why)
             self.ka_idle, self.ka_why = 0, None
             return
+        if self.ka_fail and not any(g["owner"] == "keepalive" for g in self.gp):
+            self.ka_note(None)                # 停不了的保活空闲时没了（有人停了）：清掉，免得一直误报、下一段失败沿用旧的起点（#102）
         others = self.ka_others()
         apps = gpu_apps()
         why = ("别的队列登记在跑（%s）" % ", ".join(others) if others else
@@ -2400,8 +2447,12 @@ class Worker:
             jobs.append({"key": j["key"], "project": j.get("project"), "name": j["name"], "t0": j["t0"], "t1": self.run_end(j, now),
                          "gpus": j["gpus"], "vram": a["vram"], "ram": a["ram"], "cpu": a["cpu"], "excl": j.get("excl"), "tag": j.get("tag"),
                          "hold": is_hold(j["name"]), "ngpu": j.get("ngpu", 1), "use": j.get("use") or {}, "cards": self.job_cards(j), "gang": j.get("gang")})
+        stuck = {}                            # worker 停不了的保活（ka_stuck，#102）：推演当它一直占着（卡的 other 只有推演用；真放行的空闲是 nvidia-smi 实测、已扣）
+        for g in self.gp if self.ka_stuck() else ():
+            if g["owner"] == "keepalive":
+                stuck[g["uuid"]] = stuck.get(g["uuid"], 0.0) + g["mb"]
         cards = [{"i": i, "uuid": u, "total": (info.get(u) or {}).get("total") or 0.0, "keep": self.keep_left(i, u),
-                  "other": self.other["vram"].get(u, 0.0), "free": f - self.keep_left(i, u) + seen.get(u, 0.0), "ka": bool(self.other["ka"].get(u))}
+                  "other": self.other["vram"].get(u, 0.0) + stuck.get(u, 0.0), "free": f - self.keep_left(i, u) + seen.get(u, 0.0), "ka": bool(self.other["ka"].get(u))}
                  for i, u, f in gpus]
         return {"cards": cards, "limit": m.get("limit"), "room": self.mem_room(), "margin": ram_margin(m["limit"]) if m.get("limit") else None,
                 "cpu_cap": cpu_cap(self.info.get("cpu_quota")), "cpu_room": self.cpu_room(),
@@ -4030,6 +4081,8 @@ class Worker:
                 self.dep_miss = {(p, n): t for p, n, t in old.get("dep_miss") or []}
             # 要卡时停着的保活：重启那段里被拉起，接管后第一轮照样记“保活被拉起”（#124）；停久了那段里怎样说不准，不沿用
             self.ka_off, self.ka_stop_t = (True, old["ka_stop"]) if fresh and old.get("ka_stop") else (False, 0.0)
+            ks = (old.get("keepalive") or {}).get("stuck") if fresh else None   # 停不了的保活：接着算，不重复记事件（#102）
+            self.ka_fail = dict(ks, said=True) if ks else None
             self.thr_since = (old.get("throttle") or {}).get("since") if fresh else None   # 限流的起算时刻：升级、重启不从头计时
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             self.prev, self.voided = {}, []
@@ -4844,7 +4897,8 @@ class Worker:
             "kafight": dict(self.fight, n=len(hits), hits=hits) if hits else None,
             "throttle": self.throttle(now),       # 这一段 CPU 限流与超核的任务（Worker.throttle）；没在限流为 None
             "ka_stop": self.ka_stop_t if self.ka_off else None,   # 要卡的这段里 worker 停着保活：停它的时刻（接管时找回，load_prev）
-            "keepalive": {"ctl": bool(self.ka_reg), "why": self.ka_why},   # worker 管不管这台的保活（有 ka.sh）、没任务要卡却不拉起的原因（ka_lines 用，#61）
+            "keepalive": {"ctl": bool(self.ka_reg), "why": self.ka_why,   # worker 管不管这台的保活（有 ka.sh）、没任务要卡却不拉起的原因（ka_lines 用，#61）
+                          "stuck": self.ka_stuck()},                          # 要卡时停不了它（#102）：ka_lines、看板告警、fit 照它说、照它占着算
             "watchdogs": load_frozen(self.p),
             "guest": {"keep": self.keep(), "other": {"vram": self.other["vram"], "ram": self.other["ram"] and round(self.other["ram"], 2),
                                                      "cpu": self.other["cpu"] and round(self.other["cpu"], 2)},
@@ -5869,12 +5923,12 @@ def gpu_slack(cards, jobs, th, cap):
 
 def fit_snapshot(st):
     """fit 用：一台主机的 status.json → 准入核心 place 认的资源快照（字段见 _place；与 Worker.snapshot 同形）。
-    卡的空闲取状态的 room.gpus（已扣在跑任务的记账与给对方留的），加回保活占的（放任务前 worker 先停保活），给对方留的照 room.keep（整卡封顶要扣）；在跑的只记内存与核（显存已扣在卡上），
+    卡的空闲取状态的 room.gpus（已扣在跑任务的记账与给对方留的），加回保活占的（放任务前 worker 先停保活；停不了的 keepalive.stuck 不加回，#102），给对方留的照 room.keep（整卡封顶要扣）；在跑的只记内存与核（显存已扣在卡上），
     room、cpu_room 是 labmon 全停时能给的（room 加回在跑的记账：ram_need、cpu_need 按它封顶）；tag 上限照 limits；对方超出预留与有停不了保活的卡
     照 room.owner 不放（旧 worker 没写为空）。独占留卡、成组留的资源不在状态里，不模拟。"""
     room, info = st.get("room") or {}, st.get("info") or {}
-    ka = {}
-    for g in st.get("gpu_procs") or []:
+    ka = {}                                   # worker 放任务前先停的保活占的（加回卡的空闲）；停不了的（keepalive.stuck，#102）不加回
+    for g in st.get("gpu_procs") or [] if not (st.get("keepalive") or {}).get("stuck") else ():
         if g.get("owner") == "keepalive":
             ka[g["uuid"]] = ka.get(g["uuid"], 0.0) + g["mb"]
     acct = lambda j, k: (j.get("acct") or {}).get(k) or 0.0

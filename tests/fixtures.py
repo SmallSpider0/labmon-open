@@ -273,11 +273,13 @@ def fake_host(hid: str = "h", status: dict | None = None, **kw) -> dict:
 
 # ---------- 起真 worker ----------
 KA_SH = """#!/usr/bin/env bash
-# 假保活：状态记在 $AGRI_ROOT/ka_on（内容是 running 打印的进程组，可以空着），动作记在 $AGRI_ROOT/ka.log
+# 假保活：状态记在 $AGRI_ROOT/ka_on（内容是 running 打印的进程组，可以空着），动作记在 $AGRI_ROOT/ka.log；有 $AGRI_ROOT/ka_stuck 时 stop 失败
 . "$(dirname "$0")/ka.env"
 case "$1" in
   running) [ -f "$AGRI_ROOT/ka_on" ] && cat "$AGRI_ROOT/ka_on" ;;
-  stop) rm -f "$AGRI_ROOT/ka_on"; echo stop >> "$AGRI_ROOT/ka.log" ;;
+  stop) echo stop >> "$AGRI_ROOT/ka.log"
+        if [ -f "$AGRI_ROOT/ka_stuck" ]; then cat "$AGRI_ROOT/ka_stuck" >&2; exit 1; fi   # 停不下来（#102）：内容当报错打到标准错误
+        rm -f "$AGRI_ROOT/ka_on" ;;
   start) echo start >> "$AGRI_ROOT/ka.log"; touch "$AGRI_ROOT/ka_on" ;;   # 先记日志再 touch：用例见 ka_on 出现就读日志
 esac
 """

@@ -188,6 +188,7 @@ def _host_b() -> dict:
         "voided": [], "guest": {"keep": keep, "other": {"vram": {}, "ram": 0.5, "cpu": 0.1}, "back": [], "quiet": [], "tight": None, "hit": 0,
                   "away": {"until": UNTIL, "end": None, "why": None}},
         "kafight": {"t": NOW - 600, "n": 1, "who": "不是经 ka.sh 拉起的；暂停了看门狗 PID 4242（bash keepalive_final_check.sh：提到保活程序，在循环里），还卡时恢复"},
+        "keepalive": {"ctl": True, "why": None, "stuck": {"t0": NOW - 2 * H, "n": 160, "why": "ka.sh stop 退出码 1：另一个调用者正持着锁"}},   # #102：要卡时停不了
         "watchdogs": {"frozen": [{"pid": 4242, "start": 123, "cmd": "bash keepalive_final_check.sh", "cwd": "/root/demo_eval/exp", "why": "提到保活程序，在循环里", "t": NOW - 600}],
                       "seen": [{"pid": 4300, "start": 456, "cmd": "python3 check.py", "cwd": "/root", "why": "提到保活程序，没见循环"}]},
         "util10": {"GPU-bbbb-0": 90}, "gpu_busy": {"GPU-bbbb-0": {"now": 90.0, "m10": 86.0, "h1": 85.5, "cov": 1200}}, "disk": None, "room": {"ram": 40.0, "margin": 8.0, "gpus": {"GPU-bbbb-0": 20000.0}, "cpu": 4.8, "cpu_cap": 7},
@@ -513,6 +514,7 @@ def overview_evil() -> dict:
     b["borrow"]["late_do"] = "换" + BAD
     b["borrow"]["late_say"] = "说" + BAD
     b["status"]["kafight"]["who"] = "谁" + BAD
+    b["status"]["keepalive"]["stuck"]["why"] = "ka.sh stop 退出码 1：" + BAD
     b["status"]["watchdogs"]["frozen"][0]["cmd"] = "bash " + BAD
     b["status"]["watchdogs"]["seen"][0]["why"] = "因" + BAD
     d["projects"].append({"id": "evil", "title": "邪恶" + BAD, "alerts": 1, "alert_msgs": ["告警" + BAD], "generated": NOW, "no_work_since": None,

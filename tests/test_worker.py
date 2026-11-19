@@ -6181,6 +6181,103 @@ class WatchdogTest(unittest.TestCase):
         w4 = self.restart(w3)
         self.assertEqual((json.loads(Path(w.p.status).read_text())["kafight"], w4.ka_hits, w4.fight), (None, [], None))
 
+    def test_stuck_keepalive_said(self):
+        """#102：借来的主机上 ka.sh 管的保活（owner keepalive），要卡时 ka.sh stop 一直失败：连着两次、满 KA_STUCK_S 才算停不了，
+        记一条 ka_stuck 事件（带 ka.sh 的报错）、状态的 keepalive.stuck，worker status 不再写“自动停”；推演（快照卡的 other）与 fit 当它一直占着；
+        重启接管不重复记；ka.sh 恢复后当轮停掉、清掉。以前只在 worker.log 每轮写一行“停 GPU 保活失败”，别处都照常说会自动停。"""
+        kad = self.d / "keepalive_demo"
+        (kad / "ka_stuck").write_text("另一个调用者正持着锁\n")
+        ka = {"hpid": 9300, "pid": 300, "mb": 6754.0, "uuid": "GPU-aaa", "comm": "python", "owner": "keepalive", "ka": False, "job": None, "_j": None}
+        w = self.m.Worker("t")
+        os.makedirs(w.p.dir)
+        w.ovr = [{"kind": "guest", "target": None}]
+        w.info = {"gpus": [{"i": 0, "uuid": "GPU-aaa", "total": 46068.0, "free": 20000.0}]}
+        w.running["k"] = {"name": "x1", "pid": 0, "gpus": []}
+        kinds = lambda: [e["kind"] for e in map(json.loads, Path(w.p.events).read_text().splitlines())] if Path(w.p.events).exists() else []
+        w.gp = [ka]
+        w.keepalive(True)                                                      # 第一次失败：还不算停不了
+        self.assertTrue((kad / "ka_on").exists())
+        self.assertEqual((w.ka_stuck(), kinds(), w.ka_off), (None, [], False))
+        w.keepalive(True)                                                      # 两次了，但不到 KA_STUCK_S
+        self.assertIsNone(w.ka_stuck())
+        w.ka_fail["t0"] -= self.m.KA_STUCK_S + 1
+        w.keepalive(True)
+        st = w.ka_stuck()
+        self.assertEqual((st["n"], st["why"]), (3, "ka.sh stop 退出码 1：另一个调用者正持着锁"))
+        self.assertEqual(kinds(), ["ka_stuck"])
+        ev = json.loads(Path(w.p.events).read_text().splitlines()[-1])["msg"]
+        self.assertIn("要卡时停 GPU 保活没停成（ka.sh stop 退出码 1：另一个调用者正持着锁", ev)
+        self.assertIn("PID 9300，卡 0 占 6.6 GiB", ev)
+        self.assertIn("请对方停掉它或查 ka.sh", ev)
+        w.keepalive(True)
+        self.assertEqual(kinds(), ["ka_stuck"])                               # 同一段只记一次
+        run, w.running = w.running, {}
+        S = w.snapshot({}, gpus=[(0, "GPU-aaa", 20000.0)])
+        self.assertEqual((S["cards"][0]["other"], S["cards"][0]["free"]), (6754.0, 20000.0))   # 推演按它一直占着；真放行照 nvidia-smi 的空闲（已扣）
+        sim = self.m.sim_snapshot(S, None)
+        self.assertEqual(sim["cards"][0]["total"], 46068.0 - 6754.0)
+        w.running = run
+        L = self.m.ka_lines({"keepalive": {"ctl": True, "why": None, "stuck": st}, "info": w.info, "gpu_procs": [dict(ka, t0=None)]})
+        self.assertEqual(len(L), 1)
+        self.assertNotIn("自动停", L[0])
+        self.assertIn("worker 要卡时停它没停成（ka.sh stop 退出码 1：另一个调用者正持着锁，%s 起 3 次），和任务同卡分算力、占着显存" % self.m.now_str(st["t0"])[5:16], L[0])
+        fs = lambda stuck: self.m.fit_snapshot({"room": {"gpus": {"GPU-aaa": 13000.0}}, "info": w.info, "gpu_procs": [ka],
+                                                "keepalive": {"ctl": True, "stuck": stuck}})["cards"][0]["free"]
+        self.assertEqual((fs(st), fs(None)), (13000.0, 13000.0 + 6754.0))    # fit：停不了的不加回
+        w2 = self.restart(w)                                                   # 重启接管：找回，不重记
+        self.assertEqual(json.loads(Path(w.p.status).read_text())["keepalive"]["stuck"]["n"], 4)
+        w2.running["k"], w2.ovr, w2.gp = {"name": "x1", "pid": 0, "gpus": []}, w.ovr, [ka]
+        w2.keepalive(True)
+        self.assertEqual((kinds(), w2.ka_stuck()["n"]), (["ka_stuck"], 5))
+        (kad / "ka_stuck").unlink()                                            # ka.sh 好了：当轮停掉、清掉
+        w2.keepalive(True)
+        self.assertFalse((kad / "ka_on").exists())
+        self.assertEqual((w2.ka_fail, w2.ka_off), (None, True))
+        self.assertIn("GPU 保活停下了（之前从", Path(w.p.log).read_text())
+
+    def test_stuck_keepalive_cleared_when_gone_idle(self):
+        """#102（Codex 审查）：停不了的保活在空闲时（没有任务要卡）被人停掉了：空闲那条路径也清掉 stuck，
+        不让工作台一直误报、之后 worker 拉起的保活继承旧状态、下一段失败跳过门槛不记事件。"""
+        kad = self.d / "keepalive_demo"
+        (kad / "ka_stuck").write_text("另一个调用者正持着锁\n")
+        ka = {"hpid": 9300, "pid": 300, "mb": 6754.0, "uuid": "GPU-aaa", "comm": "python", "owner": "keepalive", "ka": False, "job": None, "_j": None}
+        w = self.m.Worker("t")
+        os.makedirs(w.p.dir)
+        w.running["k"] = {"name": "x1", "pid": 0, "gpus": []}
+        w.gp = [ka]
+        w.keepalive(True)
+        w.ka_fail["t0"] -= self.m.KA_STUCK_S + 1
+        w.keepalive(True)
+        self.assertIsNotNone(w.ka_stuck())
+        w.running = {}                                                         # 最后一个任务跑完
+        (kad / "ka_on").unlink()                                               # 有人把保活停了
+        w.gp = []
+        w.ka_others = lambda: []
+        w.ka_checked = 0
+        w.keepalive(False)
+        self.assertIsNone(w.ka_fail)
+
+    def test_stuck_keepalive_not_listed(self):
+        """#102：ka.sh running 说没在跑，GPU 上却有它认的保活（ka_owned）：worker 同样停不了它，照停失败算（门槛相同；刚停下的一分钟里不算）；保活没了就清掉。"""
+        (self.d / "keepalive_demo" / "ka_on").unlink()
+        ka = {"hpid": 9300, "pid": 300, "mb": 6754.0, "uuid": "GPU-aaa", "comm": "python", "owner": "keepalive", "ka": False, "job": None, "_j": None}
+        w = self.m.Worker("t")
+        os.makedirs(w.p.dir)
+        w.running["k"] = {"name": "x1", "pid": 0, "gpus": []}
+        w.gp = [ka]
+        w.ka_stop_t = time.time()                                              # 刚停下：nvidia-smi 还列着正在退出的，不算没停成
+        w.keepalive(True)
+        self.assertIsNone(w.ka_fail)
+        w.ka_stop_t = 0.0
+        w.keepalive(True)
+        w.ka_fail["t0"] -= self.m.KA_STUCK_S + 1
+        w.keepalive(True)
+        self.assertIn("ka.sh running 说没在跑，GPU 上却有它管的保活", w.ka_stuck()["why"])
+        self.assertIn("请查 ka.sh", json.loads(Path(w.p.events).read_text().splitlines()[-1])["msg"])   # 自用主机：不写“请对方停”
+        w.gp = []
+        w.keepalive(True)
+        self.assertIsNone(w.ka_fail)
+
     def test_guest_watch_only_lists(self):
         """借来的主机：第一轮就找一遍，只列出来、不暂停（真把保活拉起来了才暂停，见上一条）；同一批不重复记事件。"""
         wd = self.live()
@@ -6223,7 +6320,7 @@ class WatchdogTest(unittest.TestCase):
                 os.environ.pop(k)
         st = json.loads(Path(w.p.status).read_text())
         self.assertEqual((st["gpu_procs"][0]["owner"], st["gpu_procs"][0]["t0"]), ("keepalive", 1005))
-        self.assertEqual(st["keepalive"], {"ctl": True, "why": None})
+        self.assertEqual(st["keepalive"], {"ctl": True, "why": None, "stuck": None})
         out = subprocess.run([sys.executable, WORKER, "ls", "--host", "t"], capture_output=True, text=True,
                              env=dict(os.environ, LABMON_HOME=str(self.d / "home"))).stdout
         self.assertIn("  GPU 保活：在跑（%s 起）：PID 5300（容器内 300），卡 0 占 6.7 GiB；有任务要卡时 worker 自动停" % self.m.now_str(1005)[5:16], out)

@@ -338,7 +338,7 @@ class BorrowTest(Base):
         t = time.time()
         self.begin(projects="a1")
         ov = [{"kind": "guest", "target": "a1", "keep": self.KEEP}]
-        fin = lambda hid, wrote=None, kill=(): "已还"
+        fin = lambda hid, **k: "已还"
         keys = lambda wake: [w["key"] for w in wake if w["key"].startswith("borrow_idle:")]
         _, wake = B.check([self.host_entry(overrides=ov)], t, finish_fn=fin, ovr=self.ovr)
         self.assertEqual(keys(wake), [])
@@ -357,7 +357,7 @@ class BorrowTest(Base):
         cut = K.parse_time(self.server()["borrow_until"])
         ov = [{"kind": "guest", "target": "a1", "keep": self.KEEP}, {"kind": "deadline", "target": "borrow", "at": cut}]
         done = []
-        fin = lambda hid, wrote=None, kill=(): done.append((hid, list(kill))) or "已还"
+        fin = lambda hid, wrote=None, kill=(), **k: done.append((hid, list(kill))) or "已还"
         e = self.host_entry(running=[("x1", 5)], overrides=ov)
         self.calls.clear()
         msgs, wake = B.check([e], t, finish_fn=fin, ovr=self.ovr)
@@ -604,7 +604,7 @@ class BorrowTest(Base):
         cut = time.time() + 600
         K.set_fleet_keys({"borrow_until": K.fmt_time(cut, year=True)}, "测试", sid=SID)
         ov = [{"kind": "guest", "target": None, "keep": dict(self.KEEP, pool=1)}, {"kind": "deadline", "target": "borrow", "at": K.parse_time(self.server()["borrow_until"])}]
-        fin = lambda hid, wrote=None, kill=(): "已还"
+        fin = lambda hid, **k: "已还"
         msgs, wake = B.check([self.host_entry(running=[("x1", 5)], back=["卡 0"], overrides=ov)], time.time(), finish_fn=fin, ovr=self.ovr)
         self.assertEqual((msgs, wake), ([], []))
         msgs, wake = B.check([self.host_entry(running=[("x1", 5)], overrides=ov)], cut + 61, finish_fn=fin, ovr=self.ovr)
@@ -651,7 +651,23 @@ class BorrowTest(Base):
         out = B.finish(SID, ssh=lambda s, cmd: cmds.append(cmd) or (0, "", ""), ka=lambda s, cfg, by: ("ok", "already 123"), probe=lambda sid: None)
         self.assertNotIn("ka.sh stop", cmds[0])
         self.assertIn("rm -rf /tmp/labmon", cmds[0])
-        self.assertIn("保活还在（借来时就是 BOB 的）", out)
+        self.assertIn("保活还在（借来时就在、是 BOB 的，归还不停它）", out)
+        self.assertNotIn("停不了", out)
+
+    def test_finish_says_stuck_keepalive(self):
+        """#102：借用期间 worker 要卡时停不了卡上的保活（状态的 keepalive.stuck）：归还的结果照实写，不只说“借来时就是对方的”；
+        borrow.check 把状态里的 stuck 传给 finish。"""
+        self.begin(work=[{"kind": "keepalive", "label": "ka", "names": [], "mb": 500}])
+        stuck = {"t0": time.time() - 3600, "n": 80, "why": "ka.sh stop 退出码 1：别的调用者正持着锁"}
+        B.request_return(SID, ovr=self.ovr)
+        got = []
+        e = self.host_entry()
+        e["status"]["keepalive"] = {"ctl": True, "why": None, "stuck": stuck}
+        B.check([e], time.time(), finish_fn=lambda hid, **k: got.append(k.get("stuck")) or "已还", ovr=self.ovr)
+        self.assertEqual(got, [stuck])
+        out = B.finish(SID, ssh=lambda s, cmd: (0, "", ""), ka=lambda s, cfg, by: ("ok", "already 123"), probe=lambda sid: None, stuck=stuck)
+        self.assertIn("保活还在（借来时就在、是 BOB 的，归还不停它）", out)
+        self.assertIn("借用期间 worker 要卡时停不了它（ka.sh stop 退出码 1：别的调用者正持着锁", out)
 
     def test_own_keepalive_is_not_owners(self):
         """借来时的保活是 labmon 自己开的（上次归还时守护式开的、盯着让路的那个）：不记成对方的，还的时候照常 ka.sh stop 再按守护开。"""
@@ -667,7 +683,7 @@ class BorrowTest(Base):
         self.begin(until=t + 3600)
         B.request_return(SID, ovr=self.ovr)
         n = []
-        def fin(hid, wrote=None, kill=()):
+        def fin(hid, wrote=None, kill=(), stuck=None):
             n.append(1)
             if len(n) < 3:
                 raise ConfigError("连不上 BOB（27-15152），还没还：timeout")
