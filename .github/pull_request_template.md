@@ -43,4 +43,4 @@ Closes #
 
 **文档**
 - [ ] 文档在本 PR 里一起改了（不另开 PR 补）；行为变了的地方已同步、旧说法已删：README.md / docs/workbench.md / docs/worker.md / docs/fleet.md / docs/schema.md / docs/scheduler.md（设计与依据）/ skills/lab-experiments/SKILL.md / AGENTS.md / docs/workflow.html（改了工作流时）
-- [ ] 改了用户看得到的功能或算法：已同步 docs/intro.html（说法、示意图、数字与页头的提交号；合并后由落到 main 的 agent 核对 HTML 文档，见 AGENTS.md「项目介绍页」）；没改的写“无关”
+- [ ] 改了用户看得到的功能或算法：已同步 docs/intro.html（说法、示意图、数字；合并后由落到 main 的 agent 核对 HTML 文档，见 AGENTS.md「项目介绍页」）；没改的写“无关”
