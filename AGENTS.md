@@ -184,6 +184,8 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 | 等待原因的结构化字段（缺本地文件又补不了；本地依赖怎么补） | worker 等待项的 `miss`（`place` 定）、`local[].how`（`copy`/`redo`/`mixed`）；看板按字段认，不按 `why` 文字 |
 | 容量单位（GiB = 2^30；挂载点、共享盘、内存） | `config.GIB`；页面上 `GIB`（common.js） |
 | 时间线（视图与拖动缩放、刻度、里程碑与现在线、按主机分组的分隔线（行的 `sep`）、任务条、占用条、图例、左栏按行名放宽（`lw`）；项目页与工作台共用） | common.js 的 `tlInit`、`tlRange`、`tlBind`、`tlSvg`、`tlShow`、`jobBar`、`tlPack`、`occBars`（状态名 `OCC_ST`、图例 `occItems`）；「全部」要包住的区间 `tlSpan`；近景按现在前后的任务定宽 `tlFit`（参数 `TL_FIT`，两页的 `near()` 给任务）；排在谁后面 `afterText` |
+| 项目页时间线的依赖连线（#111：边取本项目的 `deps`、两端都画在图上；平时只画关键的：同一车道的、能经别的依赖或车道顺序推出来的不画；悬停或触屏点一格高亮它的整条上下游（只沿依赖），链上不是传递边的线显出；线压在条下面（`tlSvg` 的 `o.under`），直角折线走行缝） | `depLines`（边 `depEdges`、走法 `depRoute`、传递判定 `depVia`）、`depChain`、`depOn`、悬停与点 `depHover`（状态 `DEPH`）；条的位置、行号由 `laneRow` 记进 `c.pos`（page.html） |
+| 触屏上点一格：第一次只看（悬停文字），3 秒内再点同一格才动作（收起行小方块定位、任务条跳到任务明细） | `tapTwice`（page.html；`gsqClick` 与任务条的点击共用） |
 | 自动归组（不属于任何 `[[groups]]` 的任务按名字前缀成组，id 即前缀：归组与页面上把自动组写成 `[[groups]]` 时认 id 同一条正则） | `config.AUTO_GROUP_RE`（`collect._group_of`、`config.set_project` 用）；worker 借同前缀的估时比值用自己的一份 `GROUP_RE`（不 import 本包，同一条正则，`test_group_regex_matches_board` 核对） |
 | 按估计字宽截断文字（缺省截尾；条上的任务名省略中间，可原样留一段前缀）与同一估计下的字宽；项目页时间线条上的任务名（去掉自动分组前缀与 `hold_`） | `fit`、`textW`（common.js）；`barName`（page.html） |
 | 正在操作（正拖着排顺序，焦点在可打字的输入框或下拉框里（勾选框、按钮类不算），或在正文、抽屉里选着文字且 1 分钟内动过选区；定时刷新先不重画，免得冲掉输入）；点了不能打字的地方（按钮、勾选框、文字）先让输入框失焦（Safari 点按钮不挪焦点，#131：按钮不再各自 blur） | common.js 的 `editing`（能打字的控件 `typingEl`）与它下面捕获阶段的 click 监听；工作台 `selecting`（overview.html），项目页 `redraw`（page.html） |

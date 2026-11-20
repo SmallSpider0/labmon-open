@@ -1,6 +1,6 @@
 """改页面时的离线预览：用页面测试的快照（snapshots.py）经 collect.write_page 渲染两页到临时目录（退出时删掉），起一个只读的静态服务看。
 
-    python3.11 tests/pages/preview.py [--port 8799] [--kind normal|evil|sparse|dense|many|overdue|longq|moved] [--as admin|public|user|empty] [--prefix /pfx]
+    python3.11 tests/pages/preview.py [--port 8799] [--kind normal|evil|sparse|dense|many|overdue|longq|moved|deps] [--as admin|public|user|empty] [--prefix /pfx]
 
 不 ssh、不连平台、不发通知，不碰 8765 上的看板与 ~/.local/state/labmon（状态目录指到临时目录）。
 目录布局照看板服务：/ 是工作台，/p/<项目>/ 是项目页，页面定时取的 /overview.json、/records.json、
@@ -39,7 +39,8 @@ KINDS = {"normal": ("overview", "project", "records", "project_events"),
          "many": ("overview_dense", "project_many", "records", "project_events"),
          "overdue": ("overview", "project_overdue", "records", "project_events_overdue"),
          "longq": ("overview", "project_longq", "records", "project_events"),
-         "moved": ("overview", "project_moved", "records", "project_events")}
+         "moved": ("overview", "project_moved", "records", "project_events"),
+         "deps": ("overview", "project_deps", "records", "project_events")}
 
 
 AS = {"admin": ("boss", "lan"), "public": ("boss", "public"), "user": ("amy", "lan"), "empty": ("carol", "lan")}     # --as：用哪个假账号、从哪个入口来
@@ -168,7 +169,7 @@ class Handler(SimpleHTTPRequestHandler):
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=8799)
-    ap.add_argument("--kind", choices=KINDS, default="normal", help="快照：正常、恶意字符串、字段大量缺省、高并行短任务、大量小规模并行（项目页的紧凑视图）、借来的主机过了约定时间、车道的清单名长、清单搬走后原主机在跑完一格")
+    ap.add_argument("--kind", choices=KINDS, default="normal", help="快照：正常、恶意字符串、字段大量缺省、高并行短任务、大量小规模并行（项目页的紧凑视图）、借来的主机过了约定时间、车道的清单名长、清单搬走后原主机在跑完一格、依赖多且跨两台主机")
     ap.add_argument("--as", dest="who", choices=AS, default="admin", help="我是谁：内网管理员、公网管理员、普通用户、刚加入的普通用户")
     ap.add_argument("--prefix", default="", help="照反代挂在这个路径前缀下（如 /pfx，#165）")
     a = ap.parse_args()

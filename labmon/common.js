@@ -509,7 +509,7 @@ const TL_DEFS = `<defs><pattern id="hatch" width="6" height="6" patternUnits="us
   <line x1="0" y1="0" x2="0" y2="6" stroke="var(--muted)" stroke-width="2.2" stroke-opacity=".55"/></pattern>
   <pattern id="hatchw" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="5" height="5" fill="var(--warn)" fill-opacity=".12"/><line x1="0" y1="0" x2="0" y2="5" stroke="var(--warn)" stroke-width="2" stroke-opacity=".6"/></pattern></defs>`;
 // 画一张时间线：rows [{h 行高, draw(y, h, c) → SVG, sep 一组的开头（上面画一条贯通的分隔线，第一行不画）}]，c 是坐标换算 {t0, t1, W, L, R, PW, narrow, X, cl, win, seen}；
-// o.markers [{label, ts}] 里程碑（视图之外的在右上角提示），o.seen 收集图上出现了哪些画法（图例只列这些）。TL.g 记下布局给拖动、缩放换算
+// o.markers [{label, ts}] 里程碑（视图之外的在右上角提示），o.seen 收集图上出现了哪些画法（图例只列这些），o.under(c) 画完各行后调、结果压在各行下面。TL.g 记下布局给拖动、缩放换算
 function tlSvg(box, rows, o = {}) {
   const {t0, t1} = tlRange(), now = TL.cfg.now(), seen = o.seen || new Set();
   // 左栏缺省宽屏 116、窄屏 82；o.lw 是行名要多宽（项目页按车道名算，#108），在缺省与上限（宽屏 200、不超过整宽的 30%；窄屏 128、不超过 34%）之间取
@@ -525,11 +525,12 @@ function tlSvg(box, rows, o = {}) {
     const lab = mid || tk.st >= 1440 ? tsMD(t) : tsHM(t);
     s += `<line x1="${X(t)}" x2="${X(t)}" y1="${top - 2}" y2="${H - 16}" stroke="var(--line)"/><text x="${X(t)}" y="${H - 3}" text-anchor="middle" style="${mid && tk.st < 1440 ? "fill:var(--fg)" : ""}">${lab}</text>`;
   }
+  let body = "";
   for (const r of rows) {
-    if (r.sep && y > top) s += `<line x1="0" x2="${W}" y1="${y - 1}" y2="${y - 1}" stroke="var(--muted)" stroke-opacity=".4"/>`;
-    s += r.draw(y, r.h, c); y += r.h + 2;
+    if (r.sep && y > top) body += `<line x1="0" x2="${W}" y1="${y - 1}" y2="${y - 1}" stroke="var(--muted)" stroke-opacity=".4"/>`;
+    body += r.draw(y, r.h, c); y += r.h + 2;
   }
-  if (o.over) s += o.over(c);      // 画在各行之上的（项目页的依赖连线：行里把条的位置记进 c，这里连）
+  s += (o.under ? o.under(c) : "") + body;     // 压在各行下面的（项目页的依赖连线：行里把条的位置记进 c，画完各行再连，插到各行前面，条盖住线）
   const ms = o.markers || [], off = ms.filter(m => m.ts > t1);
   if (ms.some(m => m.ts >= t0 && m.ts <= t1)) seen.add("marker");
   for (const m of ms) if (m.ts >= t0 && m.ts <= t1) s += `<line x1="${X(m.ts)}" x2="${X(m.ts)}" y1="2" y2="${H - 16}" stroke="var(--fg)" stroke-dasharray="4 3" stroke-opacity=".6"/>
@@ -543,7 +544,7 @@ function tlSvg(box, rows, o = {}) {
 // 只列图上出现了的（seen）；里程碑与现在线各页都有，接在最后
 function tlShow(box, rows, o = {}) {
   const seen = new Set();
-  box.innerHTML = tlSvg(box, rows, {markers: o.markers, seen, over: o.over, lw: o.lw}) + (o.more || "");
+  box.innerHTML = tlSvg(box, rows, {markers: o.markers, seen, under: o.under, lw: o.lw}) + (o.more || "");
   const items = [...(o.items ? o.items(seen) : []),
     ["marker", "里程碑", tlSw(`<line x1="6" x2="6" y1="0" y2="12" stroke="var(--fg)" stroke-dasharray="4 3" stroke-opacity=".6"/>`, 12)],
     ["now", "现在", tlSw(`<line x1="6" x2="6" y1="0" y2="12" stroke="var(--bad)" stroke-width="1.5"/>`, 12)]];

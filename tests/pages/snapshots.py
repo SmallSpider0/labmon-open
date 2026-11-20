@@ -869,6 +869,50 @@ def project_dense() -> dict:
     return d
 
 
+def project_deps() -> dict:
+    """依赖多、跨两台主机（#111）：srv-a、srv-b 各 4 条车道。车道 0（srv-a）上 dp_prep → dp_prep2（同车道相连）；其余 7 条车道各一个 dp_tr<i>
+    等 dp_prep2（又多写一个等 dp_prep：传递边），后面同车道的 dp_ev<i> 等 dp_tr<i>（同车道）与 dp_prep2（传递边）；车道 0 上的 dp_merge 等全部 dp_ev 与 dp_prep2，
+    srv-b 末条车道的 dp_report 等 dp_merge；另有一条与它们无关的 dp_side_a（srv-b）→ dp_side_b（srv-a）。共 39 条 after=，关键的是 prep2→tr 7 条、ev→merge 7 条、
+    merge→report、side_a→side_b。"""
+    d = project()
+    lane0 = d["lanes"][0]
+    lid = lambda i: f"auto:dp{i}/dp{i}"  # noqa: E731
+    host = lambda i: "srv-a" if i < 4 else "srv-b"  # noqa: E731
+    span: dict[str, tuple] = {}
+    jobs: list[dict] = []
+
+    def job(name: str, i: int, t0: float, mins: float, after: list[str], group: str) -> None:
+        t1 = t0 + mins * 60
+        span[name] = (t0, t1)
+        st = "done" if t1 <= NOW else "running" if t0 <= NOW else "queued"
+        j = {"id": name, "est_min": mins, "status": st, "lane": lid(i), "hold": False, "group": group, "dur_min": mins, "dur_src": "清单估时",
+             "deps": [["proj-a", a] for a in after]}
+        j.update({"done": {"start_ts": t0, "end_ts": t1, "actual_min": mins},
+                  "running": {"start_ts": t0, "eta_ts": t1, "elapsed_min": round((NOW - t0) / 60, 1), "remaining_min": round((t1 - NOW) / 60, 1),
+                              "eta_source": "估时", "speed": [], "last_line": "step"},
+                  "queued": {"plan_start_ts": t0, "eta_ts": t1}}[st])
+        jobs.append(j)
+
+    job("dp_side_a", 5, NOW - 9 * H, 60, [], "probe_")
+    job("dp_side_b", 2, NOW - 7.5 * H, 60, ["dp_side_a"], "probe_")
+    job("dp_prep", 0, NOW - 6 * H, 60, [], "eval_")
+    job("dp_prep2", 0, NOW - 5 * H, 30, ["dp_prep"], "eval_")
+    for i in range(1, 8):
+        job(f"dp_tr{i}", i, span["dp_prep2"][1] + i * 300, 90 + 20 * i, ["dp_prep2", "dp_prep"], "alpha_")
+        job(f"dp_ev{i}", i, span[f"dp_tr{i}"][1], 40, [f"dp_tr{i}", "dp_prep2"], "eval_")
+    t = max(span[f"dp_ev{i}"][1] for i in range(1, 8))
+    job("dp_merge", 0, t, 45, [f"dp_ev{i}" for i in range(1, 8)] + ["dp_prep2"], "alpha_")
+    job("dp_report", 7, span["dp_merge"][1], 20, ["dp_merge"], "eval_")
+    lanes = []
+    for i in range(8):
+        mine = [j for j in jobs if j["lane"] == lid(i)]
+        lanes.append({**copy.deepcopy(lane0), "id": lid(i), "label": f"车道 {i % 4 + 1}", "host": host(i), "root": f"/data/me/proj-a/dp{i}", "queue": f"jobs/dp{i}.txt",
+                      "total": len(mine), "done": sum(j["status"] == "done" for j in mine), "failed": 0, "unfinished": sum(j["status"] != "done" for j in mine),
+                      "eta_ts": max(span[j["id"]][1] for j in mine), "fs_skew": None})
+    d.update(lanes=lanes, jobs=jobs, attempts=[], all_done_ts=span["dp_report"][1], alerts=d["alerts"][:1], rebalance=None)
+    return d
+
+
 MANY_COLORS = ["#7F77DD", "#1D9E75", "#D85A30", "#D4537E", "#BA7517", "#639922", "#378ADD", "#888780"]
 
 
@@ -946,5 +990,6 @@ def overview_user() -> dict:
 
 EXTRA = {"overview_user": overview_user, "records": records, "records_evil": records_evil, "events": project_events, "events_evil": project_events_evil,
          "project_overdue": project_overdue, "project_longq": project_longq, "project_moved": project_moved, "events_overdue": project_events_overdue,
-         "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many}
+         "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many,
+         "project_deps": project_deps}
 
