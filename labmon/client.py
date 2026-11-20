@@ -75,6 +75,14 @@ class Failed(Exception):
         self.code, self.msg, self.data = code, msg, data or {}
 
 
+def ca_hint(reasons) -> str:
+    """连不上的原因里有证书校验没过（CERTIFICATE_VERIFY_FAILED）时接在后面的那句（#96）：向谁要哪张证书、写到哪。call、login、取更新包共用；别的原因回空串。"""
+    if not any("CERTIFICATE_VERIFY_FAILED" in str(r) for r in reasons):
+        return ""
+    return (f"。证书校验没过：内网入口用私有 CA 时，向看板管理员要签发内网入口证书的 CA 公钥（ca.crt，不是私钥），存到 {conf_file().parent / 'ca' / 'ca.crt'}，"
+            f"在 {conf_file()} 那个入口的 [[servers]] 里写 ca = \"~/.config/labmon/ca/ca.crt\"；已写了 ca 的，核对它是不是签发这个入口证书的那张")
+
+
 def conf_file() -> Path:
     return Path(os.environ.get("LABMON_CLIENT") or "~/.config/labmon/client.toml").expanduser()
 
@@ -206,7 +214,7 @@ def call(method: str, path: str, body=None, *, admin: bool = False, timeout: flo
         if standby and len(why) == len(srvs) and all(w.startswith("备用：") for w in why.values()):   # 都连上了、都是备用：再试也一样
             raise Failed(409, standby.get("error") or "看板服务是备用", standby)
         if time.time() - t0 + wait > patience:
-            raise Unreachable("连不上看板服务（试过 " + "；".join(f"{u}：{w}" for u, w in why.items()) + "）")
+            raise Unreachable("连不上看板服务（试过 " + "；".join(f"{u}：{w}" for u, w in why.items()) + "）" + ca_hint(why.values()))
         time.sleep(wait)
         wait = min(wait * 2, BACKOFF_MAX)
 
@@ -277,7 +285,7 @@ def login(name: str | None = None, admin: bool = False) -> int:
         if hint:
             print(f"[labmon] {hint}")
         return 0
-    print("[labmon] 连不上看板服务（试过 " + "；".join(why) + "）", file=sys.stderr)
+    print("[labmon] 连不上看板服务（试过 " + "；".join(why) + "）" + ca_hint(why), file=sys.stderr)
     return 2
 
 
@@ -321,7 +329,7 @@ def _download_wheel() -> tuple[str, bytes, str]:
             why.append(f"{srv['url']}：HTTP {e.code}")
         except (urllib.error.URLError, http.client.HTTPException, OSError) as e:
             why.append(f"{srv['url']}：{getattr(e, 'reason', e)}")
-    raise Unreachable("取不到客户端（试过 " + "；".join(why) + "）")
+    raise Unreachable("取不到客户端（试过 " + "；".join(why) + "）" + ca_hint(why))
 
 
 def install_update(expected: str | None = None, auto: bool = False) -> tuple[str, dist.Installed | None]:
