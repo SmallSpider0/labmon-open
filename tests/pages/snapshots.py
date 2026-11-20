@@ -607,7 +607,7 @@ def project() -> dict:
         {"id": "alpha_train_s0", "est_min": 40.0, "status": "done", "end_ts": NOW - 4.5 * H, "start_ts": NOW - 5 * H, "lane": la, "hold": False, "group": "alpha_",
          "dur_min": 28.5, "dur_src": "同类近 1 次 实际/估时 ×0.71", "actual_min": 28.5},
         {"id": "alpha_train_s1", "est_min": 300.0, "status": "running", "start_ts": NOW - 2 * H, "last_line": "step 40/100 loss 0.31", "log_mtime": NOW - 30, "lane": la, "hold": False,
-         "group": "alpha_", "dur_min": 270.0, "dur_src": "本项目近 11 个 实际/估时 ×0.90（按时长加权）", "elapsed_min": 120.0,
+         "group": "alpha_", "dur_min": 270.0, "dur_src": "同 tag alpha-train 近 11 个 实际/估时 ×0.90", "elapsed_min": 120.0,
          "progress": [40, 100], "speed": [[NOW - 50 * 60, 2.1], [NOW - 40 * 60, 2.4], [NOW - 30 * 60, 2.6], [NOW - 20 * 60, 2.5]], "rate_per_min": 2.5,
          "eta_source": "近期速度", "remaining_min": 150.0, "eta_ts": NOW + 2.5 * H},
         {"id": "alpha_train_s2", "est_min": 300.0, "status": "queued", "lane": la, "hold": False, "group": "alpha_", "dur_min": 120.0, "dur_src": "同类近 3 次 实际/估时 ×0.90",

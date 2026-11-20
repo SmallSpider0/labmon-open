@@ -65,7 +65,7 @@
   在跑的任务已跑过同类历史 1.5 倍又遇上共享盘慢时只记一条“读写拥塞嫌疑”事件。
 - 开跑时导出 LABMON_CPUS（开跑时给这个任务记账的核数，之后回收记账不改它），项目拿它设线程数；任务环境里没设的
   OMP_NUM_THREADS、MKL_NUM_THREADS、OPENBLAS_NUM_THREADS 缺省同它（cpu_env；清单行与 .env 里设了的不盖）。
-- 任务要跑多久（duration）：同类跑过的实际耗时、实际/估时 比值折算 est_min（各主机的 usage.jsonl 一起看）；各清单每个任务的预计时长
+- 任务要跑多久（duration）：同类跑过的实际耗时、实际/估时 比值折算 est_min（同类没有时依次借同 tag、同前缀、同一清单、本项目的比值；各主机的 usage.jsonl 一起看）；各清单每个任务的预计时长
   写进 status.json 给看板排预计时间，截止前的准入在它上面再乘 DUR_MARGIN。
 
 只用 Python 3.8 标准库（服务器镜像自带 3.8）；不依赖 labmon 包，单文件部署到共享盘。
@@ -101,6 +101,7 @@ PROC = os.environ.get("LABMON_PROC", "/proc")          # 只用于统计用量�
 CG = os.environ.get("LABMON_CGROUP", "/sys/fs/cgroup")
 NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 HOLD_RE = re.compile(r"(?i)(?:^|[_.\-\d])(?:hold|pause)(?:$|[_.\-\d])")   # 只在 is_hold 里用
+GROUP_RE = re.compile(r"([^_-]+)[_-]")   # 名字前缀（第一个 _ 或 - 及之前）：与看板自动归组的 config.AUTO_GROUP_RE 同一条，duration 借同前缀的比例用（#113）
 GIB = 2 ** 30
 DATA_ROOT = os.path.dirname(HOME.rstrip("/"))          # 共享盘根（worker 装在 <data_root>/labmon）
 LOCAL = os.environ.get("LABMON_LOCAL", "/tmp/labmon")   # 容器本地盘上 labmon 管的目录：单格临时、项目缓存、单元申请
@@ -133,7 +134,7 @@ VOID_CPU = 1.0           # 整机独占时 labmon 之外的进程占这么多核
 IDLE_CORES = 0.2         # 不用卡、平均不到这么多核的任务（如等单元放行的监督进程）：整机独占不等它，也不算打扰
 VOID_KEEP_S = 86400      # 作废记录在状态里留这么久（看板据此告诉实验会话）
 HIST_N = 5               # 估计值看同类任务最近几次
-RATIO_N = 20             # 项目的 实际/估时 比值看最近这么多个跑成功的任务
+RATIO_N = 20             # 借来的 实际/估时 比值（同 tag、同前缀、同一清单、本项目）各看最近这么多个跑成功的任务
 DUR_MARGIN = 1.2         # 截止前（续租、约定归还）的准入：预计时长再乘这么多（估时偏一点是常事，跑不完这一格就白跑）
 OVER_FRAC, OVER_MIN_S = 0.2, 600   # 剩余时长说不准时（超了预计；看板那边还有进度刚开始、没估时或已超估时）按已跑的这么多比例估、至少这么多秒（overrun_left）
 UTIL_WIN_S = 600         # 各卡利用率取近这么久的平均（状态的 util10，fit 列出来看；吃满程度 gpu_busy 的 m10 同一个长度）
@@ -2054,7 +2055,7 @@ class Worker:
         self.hinted, self.hint_v, self.hint_ix = set(), -1, None   # 已按跑完提前重扫过的用量行（disk_ends）、那时的 hist_v 与索引
         self.reload_hist()
         self.qlists, self.durs, self.durs_key = {}, {}, None   # 各清单的 (fsig, [(名称, 资源提示)])、预计时长（queue_durs）
-        self.durk = {}                                        # (项目, 任务, 清单估时, 同卡任务数 k) → duration 的结果（dur_k；queue_durs 重算时清掉）
+        self.durk = {}                                        # (项目, 任务, 清单估时, tag, 清单 root, queue, 同卡任务数 k) → duration 的结果（dur_k；queue_durs 重算时清掉）
         self.qest = {}                        # 队列 key → {任务: 资源估计（estimate）}（queue_durs 与预计时长一起算）
         self.plan, self.plan_key = {"t": 0, "lanes": []}, None   # 推演结果（forecast）与算它时的输入
         self.starts = {}                      # (请求 key, 任务) → 推演里预计何时开始（forecast 算，写进等待列表）
@@ -2685,7 +2686,7 @@ class Worker:
         elif k is None:
             d = self.durs.get(r["key"], {}).get(r["name"])
         else:
-            d = self.dur_k(r.get("project"), r["name"], r.get("est_min"))(k)
+            d = self.dur_k(r)(k)
         d = d and d["min"]
         if is_hold(r["name"]) and r.get("project") and dep_keys(r):
             t0 = r.get("t0") or time.time()
@@ -3208,7 +3209,7 @@ class Worker:
             out = self.durs[q["key"]] = {}
             est = self.qest[q["key"]] = {}
             for n, h in lists.get(q["key"], (0, []))[1]:
-                d = self.dur_k(q["project"], n, h["est_min"])(kn)
+                d = self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"]))(kn)
                 if d:
                     out[n] = dict(d, min=round(d["min"], 1))
                 k = (q["key"], h["tag"], base_name(n), h["ram"], h["vram"], h["cpus"])      # 同类任务的估计一样，清单长时省得每个都扫一遍历史
@@ -3236,16 +3237,22 @@ class Worker:
         """在跑任务按日志进度估的总时长（模块级 run_tot，fit 也用）。"""
         return run_tot(self.running.values(), self.eta, self.eta_t)
 
-    def dur_k(self, project, name, est_min):
+    def dur_k(self, r):
         """清单里一个任务在同卡有 k 条 labmon 任务（含自己）时的预计时长（duration 的结果；估不出为 None）：返回 k → 结果 的函数，
-        推演按开跑时那几张卡上的任务数调它（job_spec 的 durk）。按 (任务, k) 缓存，清单、历史、在跑的变了（queue_durs 的 durs_key）就清掉。"""
-        run = [m for n, m in self.run_tot().get((project, base_name(name)), []) if n != name]
+        推演按开跑时那几张卡上的任务数调它（job_spec 的 durk）。r 是清单行（hints 加 name、project、root、queue）、请求或运行中任务（清单在 q 里）：
+        tag 与所在清单要传进 duration，同类没有历史时借同 tag、同一清单的比值（#113）。
+        按 (任务, k) 缓存，清单、历史、在跑的变了（queue_durs 的 durs_key）就清掉。"""
+        q = r.get("q") or {}
+        x = {"name": r["name"], "project": r.get("project"), "est_min": r.get("est_min"), "tag": r.get("tag"),
+             "root": r.get("root") or q.get("root"), "queue": r.get("queue") or q.get("jobs")}
+        run = [m for n, m in self.run_tot().get((x["project"], base_name(x["name"])), []) if n != x["name"]]
+        ck = (x["project"], x["name"], x["est_min"], x["tag"], x["root"], x["queue"])
 
         def f(k):
             k = min(CONC_MAX, max(1, int(round(k))))
-            c = self.durk.get((project, name, est_min, k), 0)
+            c = self.durk.get(ck + (k,), 0)
             if c == 0:
-                c = self.durk[(project, name, est_min, k)] = duration(self.hist, {"name": name, "project": project, "est_min": est_min}, self.model(), k, run)
+                c = self.durk[ck + (k,)] = duration(self.hist, x, self.model(), k, run)
             return c
         return f
 
@@ -3459,7 +3466,7 @@ class Worker:
                 pend = []
             jobs = [self.job_spec(n, h, self.qest.get(k, {}).get(n) or estimate(self.hist, dict(h, name=n, project=q["project"])),
                                   self.req_dur({"key": k, "name": n, "project": q["project"], "gang": None if is_hold(n) else h["gang"]}),
-                                  self.dur_k(q["project"], n, h["est_min"])) for n, h in pend]
+                                  self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"]))) for n, h in pend]
             qs.append({"key": k, "kind": "queue", "project": q["project"], "allowed": q["gpus"],
                        "since": heads[k]["since"] if k in heads else now, "jobs": jobs})
             info[k] = {"root": q["root"], "queue": q["jobs"], "project": q["project"], "kind": "queue"}
@@ -3705,7 +3712,8 @@ class Worker:
                  "gpus": cards if cards and len(cards) < len(self.info.get("gpus") or []) else None,
                  "ends": {"%s|%s|%s" % (ln["host"], ln["root"], ln["queue"]): ln["end"] and round(ln["end"]) for ln in others if ln["project"] == p}}
             if free is None:                         # 只在是因为要挪的行没有估时才留一条 nodur（看板出 :est，让会话写 est_min；Codex 审 #63）
-                nd = next((c["name"] for c in cands if (self.dur_k(p, c["name"], c["h"]["est_min"])(self.k_now()) or {}).get("min") is None), None)
+                nd = next((c["name"] for c in cands if (self.dur_k(dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]))(self.k_now())
+                                                         or {}).get("min") is None), None)
                 if nd:
                     out.append(dict(o, stop=nd, why=None, nodur=True))
                 continue
@@ -3808,7 +3816,7 @@ class Worker:
         if None in cut:
             return {"stop": cut[None][0], "why": "推演里没有它所在的清单", "nodur": False}
         for c in sorted(cs, key=lambda c: (c["lane"], c["i"])) if local is False else ():
-            f = self.dur_k(p, c["name"], c["h"]["est_min"])         # 与 forecast 拼本机清单行同口径：dur 取此刻的 k，durk 给推演按开跑时同卡的条数取
+            f = self.dur_k(dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]))   # 与 forecast 拼本机清单行同口径：dur 取此刻的 k，durk 给推演按开跑时同卡的条数取
             jobs.append(self.job_spec(c["name"], c["h"], estimate(self.hist, dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"])),
                                       (f(self.k_now()) or {}).get("min"), f))
         jobs = [x for x in jobs if not (x["deps"] or x["deps_any"])] + [x for x in jobs if x["deps"] or x["deps_any"]]
@@ -5835,15 +5843,16 @@ def run_tot(running, eta, eta_t):
 
 
 def duration(hist, r, model=None, k=1, run=None):
-    """任务要跑多久（分钟，中间值）：看板的预计时间与截止前的准入（再乘 DUR_MARGIN）共用这一处。依次看：
+    """任务要跑多久（分钟，中间值）：看板的预计时间与截止前的准入（再乘 DUR_MARGIN）共用这一处。r 是请求（项目、名字、est_min，有的再带 tag、清单 root + queue）。依次看：
     - 同类（项目 + 去掉种子编号的名字）跑成功过的：这一个与记录都有估时就按同类 实际/估时 的中位数折算，否则取同类实际用时的中位数；
     - 同类还没有跑完的、有在跑的：run 给的各个在跑同类按日志进度估的总时长（看板写来的 eta.json）的中位数；
-    - 本项目最近 RATIO_N 个的 Σ实际/Σ估时（按时长加权，几分钟的探针不占分量；至少 2 个，截到 [1/3, 3]）折算 est_min；
+    - 这一个有估时的，借别的名字的 实际/估时 折算 est_min（#113）：同 tag › 同名字前缀（GROUP_RE，同看板自动归组）› 同一清单 › 本项目，
+      各档取这一档最近 2×RATIO_N 个里按并行数挑的 RATIO_N 个，至少 2 个才用；比值取各条的中位数（不按时长加权：几条要跑几小时的不主导），截到 [1/3, 3]；
     - 清单的 est_min。
-    只认跑完的（停下重排的只跑了一段）、同型号 GPU 的记录（没记型号的旧记录都认）。同类与项目比值的记录都按同卡并行数挑（near）：
+    只认跑完的（停下重排的只跑了一段）、同型号 GPU 的记录（没记型号的旧记录都认）。同类与借来的比值的记录都按同卡并行数挑（near）：
     k 是这个任务预计会遇到的同卡 labmon 任务数（含自己），取并行数与它最接近的那几条——几条任务分时共用一张卡时，有的类几乎不拖慢、有的拖慢好几倍，
     单跑的记录估不了挤着跑的（#67：27 上的小任务并行 4 条与 6 条都是 20 分钟，sm_vit 并行 4 条要 300 分钟）。
-    占位任务等的是条件、不是算力：就按清单估时，不看同类、不折算，它的时长也不进项目比值（写了依赖的另由 dep_end 算）。
+    占位任务等的是条件、不是算力：就按清单估时，不看同类、不折算，它的时长也不进借来的比值（写了依赖的另由 dep_end 算）。
     返回 {"min", "src", "k"（实际/估时，不知道为 None）, "cls"（同类名）, "same"（是不是同类历史给的：读写拥塞嫌疑只认它）}；没有估时也没有同类记录为 None。"""
     cls, proj, e = base_name(r["name"]), r["project"], r.get("est_min")
     if is_hold(r["name"]):
@@ -5865,10 +5874,18 @@ def duration(hist, r, model=None, k=1, run=None):
         return {"min": m, "src": "同类在跑的 %d 个按进度估" % len(run), "k": round(m / e, 3) if e else None, "cls": cls, "same": False}
     if not e:
         return None
-    pr = near([h for h in ok if h.get("est_min") and not is_hold(h.get("name"))][-2 * RATIO_N:], k, RATIO_N)
-    if len(pr) >= 2:
-        q = min(3.0, max(1 / 3, sum(h["min"] for h in pr) / sum(h["est_min"] for h in pr)))
-        return {"min": e * q, "src": "本项目近 %d 个 实际/估时 ×%.2f（按时长加权）" % (len(pr), q), "k": round(q, 3), "cls": cls, "same": False}
+    pre = lambda n: (GROUP_RE.match(n or "") or [None])[0]   # noqa: E731 — 名字前缀，没有 _ 或 - 的为 None
+    rated = [h for h in ok if h.get("est_min") and not is_hold(h.get("name"))]
+    tiers = ([("同 tag %s " % r["tag"], lambda h: h.get("tag") == r["tag"])] if r.get("tag") else []) \
+        + ([("同前缀 %s " % pre(r["name"]), lambda h: pre(h.get("name")) == pre(r["name"]))] if pre(r["name"]) else []) \
+        + ([("同一清单", lambda h: (h.get("root"), h.get("queue")) == (r["root"], r["queue"]))] if r.get("root") and r.get("queue") else []) \
+        + [("本项目", lambda h: True)]
+    for label, f in tiers:
+        pr = near([h for h in rated if f(h)][-2 * RATIO_N:], k, RATIO_N)
+        if len(pr) >= 2:
+            q = min(3.0, max(1 / 3, statistics.median(h["min"] / h["est_min"] for h in pr)))
+            return {"min": e * q, "src": "%s近 %d 个 实际/估时 ×%.2f" % (label, len(pr), q),
+                    "k": round(q, 3), "cls": cls, "same": False}
     return {"min": e, "src": "清单估时", "k": None, "cls": cls, "same": False}
 
 

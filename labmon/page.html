@@ -679,7 +679,7 @@ function groupsCard() {
   const span = g => Math.min(...ks(g)) === Math.max(...ks(g)) ? f1(ks(g)[0], 2) : `${f1(Math.min(...ks(g)), 2)}–${f1(Math.max(...ks(g)), 2)}`;
   const withR = D.groups.filter(g => g.ratios.length && !old(g));
   const cal = withR.map(g => `${esc(g.label)} ×${span(g)}`).join(" · ");
-  const calTip = "各类任务（去掉种子编号的名字）实际耗时 / 清单估时；排队任务的预计时长已按此折算。同类还没跑完过的按本项目的比值（按时长加权）\n"
+  const calTip = "各类任务（去掉种子编号的名字）实际耗时 / 清单估时；排队任务的预计时长已按此折算。同类还没跑完过的依次借同 tag、同名字前缀、同一清单、本项目的比值（各取中位数）\n"
     + withR.map(g => g.label + "\n" + g.ratios.map(x => "  " + ratioText(x) + (x.open ? "" : "（都跑完了）")).join("\n")).join("\n");
   return `<div class="card"><div class="row"><span class="hd">计划项</span><span class="sp"></span><span class="sm mut">完成数 · 预计完成</span></div>${rows}
     ${cal ? `<div class="sm mut" style="margin-top:4px" ${tip(calTip)}>实际 / 估时：${cal}</div>` : ""}</div>`;

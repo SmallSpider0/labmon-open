@@ -1517,7 +1517,7 @@ t("project", "任务明细（全部）：预计时长、已用 / 实际、开始
   run(P, 'LS.get = (k, d) => k === "filter" ? "all" : d; render()'); const h = app(P); clean(h, "任务明细");
   has(h, `<td class="r">${run(P, "dur(28.5 * 60)")}</td>`, "实际");
   has(h, `<td class="r hide-sm">${run(P, `tsNear(${NOW - 5 * H})`)}</td><td class="r">${run(P, `tsNear(${NOW - 4.5 * H})`)}</td>`, "开始 / 结束");
-  has(h, `<td class="r">${run(P, "dur(120 * 60)")}</td>`, "已用"); has(h, `清单估时 ${run(P, "dur(300 * 60)")}，预计按本项目近 11 个`, "估时提示");
+  has(h, `<td class="r">${run(P, "dur(120 * 60)")}</td>`, "已用"); has(h, `清单估时 ${run(P, "dur(300 * 60)")}，预计按同 tag alpha-train 近 11 个`, "估时提示");
   has(h, "被终止"); has(h, "暂停中");
   has(h, `<td class="r">—</td>`, "没有估时");
 });
