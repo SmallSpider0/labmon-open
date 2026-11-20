@@ -1569,6 +1569,22 @@ t("project", "时间线按主机分组：主机一行表头（利用率、事件
   run(A, 'TL.v = null; LS.set("tl", "week"); drawTimeline()');
   ok((el(A, "tlbox").innerHTML.match(/r="2.5"/g) || []).length === 3, "7 天里 srv-a 车道 1 跑了 probe、alpha，借 OWNER 车道 1 跑了 eval");
 });
+t("project", "#108 车道名的清单名长、计划项多：左栏按行名放宽，放不下时留住「车道 N」与清单名末段，圆点收成个数，悬停是全名", () => {
+  const A = pjCtx(J("project_longq.json"), EVN), labs = () => [...el(A, "tlbox").innerHTML.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
+  for (const w of [1200, 375, 330]) {
+    el(A, "tlbox").clientWidth = w; run(A, 'TL.v = null; LS.set("tl", "week"); drawTimeline()');
+    const tl = el(A, "tlbox").innerHTML, L = run(A, "TL.g.L"), ls = labs(), a = ls.find(x => x.startsWith("车道 1")), b = ls.find(x => x.startsWith("车道 2"));
+    ok(L > (w < 600 ? 82 : 116) && L <= (w < 600 ? 128 : 200), w + " 宽左栏该放宽到上限之内：" + L);
+    const e = w > 340 ? "part0" : "0";     // 手机宽（330）最窄：至少留住序号
+    ok(a && a.endsWith(e + "7") && b && b.endsWith(e + "8") && a.startsWith("车道 1") && b.startsWith("车道 2"), w + " 宽车道名该留住「车道 N」与清单名的末段：" + JSON.stringify(ls));
+    if (w > 600) ok(a.startsWith("车道 1 · gpu") && b.startsWith("车道 2 · cpu"), "宽屏车道名该留住「车道 N · 」与 gpu/cpu：" + JSON.stringify(ls));
+    ok(ls.every(x => run(A, `textW(${JSON.stringify(x)})`) <= L - 18), w + " 宽车道名超出了左栏：" + JSON.stringify(ls));
+    has(tl, '<text x="', "圆点收成个数"); ok(/fill:var\(--muted\)">4<\/text>/.test(tl), w + " 宽车道 1 跑了四个计划项，该收成一个点加 4");
+    has(tips(tl), "车道 1 · gpu_srvx_sweep_part07", "悬停是全名");
+  }
+  el(A, "tlbox").clientWidth = 900; run(A, 'drawTimeline()');
+  ok(run(A, 'laneFit({label: "车道 2", queue: "q.txt"}, 200)') === "车道 2 · q", "放得下照原样");
+});
 t("project", "fit：缺省从尾部截，mid 省略中间，字符串是原样留着的前缀", () => {
   ok(run(P, 'fit("p1_cifar_vit_wu_nz_exampleb_s42_memfix", 120)') === "p1_cifar_vit_wu_nz…");
   ok(run(P, 'fit("p1_cifar_vit_wu_nz_exampleb_s42_memfix", 120, true)') === "p1_cifar_…42_memfix");
@@ -1583,6 +1599,30 @@ t("project", "hostBands：换容器只按带 started 的事件画，掉线区间
   ok(a.ticks.filter(x => x.k === "renew").length === 4, "续租、重新拉起、作废、中断各一个刻度：" + JSON.stringify(a.ticks.map(x => x.short)));
   ok(!b.iv.some(x => x.k === "deadline"), "约定归还在到点之前不该画成区间：" + JSON.stringify(b.iv));
   ok(!leak(JSON.stringify([a, b])));
+});
+t("project", "#103 借来的主机过了约定时间：约定归还与到点自动下的 drain 并成一条「约定归还 → 跑完就还」，画到在跑的预计跑完，标签不叠", () => {
+  const A = pjCtx(J("project_overdue.json"), J("events_overdue.json")), cut = NOW - 30 * 60;
+  const b = run(A, 'hostBands("srv-b")').iv.filter(x => x.k !== "nospan");
+  ok(b.length === 1 && b[0].k === "ret" && b[0].t0 === cut && b[0].t1 === NOW + 15 * 60, JSON.stringify(b));
+  ok(b[0].short === "约定归还 → 跑完就还", b[0].short);
+  has(b[0].text, `约定 ${run(A, `ts(${cut})`)} 还给 OWNER：到点不再放新任务`, "悬停写约定");
+  has(b[0].text, "到了约定时间：不再放新任务，正在跑的跑完就还给 OWNER", "悬停写跑完就还"); has(b[0].text, `预计 ${run(A, `ts(${NOW + 15 * 60})`)} 跑完归还`);
+  // 用户先点了「跑完就还」、后到约定时间：仍是一条，先写跑完就还
+  const r = run(A, `(() => { const E0 = EV; EV = {...EV, events: {...EV.events, "srv-b": [...EV.events["srv-b"].slice(0, 2),
+      {t: ${NOW - 2 * H + 30}, kind: "override", msg: "临时指令：drain 主机", act: "add", okind: "drain", target: null, until: null, at: ${NOW - 2 * H + 30}},
+      {t: ${NOW - 2 * H + 31}, kind: "borrow", act: "return", now: false, host: "srv-b", msg: "要还"}]}};
+    const b = hostBands("srv-b").iv.filter(x => x.k !== "nospan"); EV = E0; return b.map(x => [x.k, x.t0, x.short]); })()`);
+  ok(JSON.stringify(r) === JSON.stringify([["ret", NOW - 2 * H + 30, "跑完就还 · 约定 " + run(A, `tsHM(${cut})`)]]), JSON.stringify(r));
+  // 主机行底边：两条带起点重叠时只写一个标签（别的指令同理）
+  for (const w of [1200, 375]) {
+    el(A, "tlbox").clientWidth = w; run(A, `TL.v = {a: ${-3 * H}, b: ${H}}; EV.events["srv-b"].push({t: ${cut + 100}, kind: "override", msg: "x", act: "add", okind: "pause", target: "proj-a", until: null, at: ${cut + 100}}); drawTimeline()`);
+    const tl = el(A, "tlbox").innerHTML, xs = [...tl.matchAll(/<text x="([\d.]+)" y="[\d.]+" style="font-size:9.5px[^>]*>(.*?)<\/text>/g)].map(m => [+m[1], m[2]]);
+    ok(xs.some(([, t]) => t.startsWith("约定归")), w + " 宽缺约定归还的标签：" + JSON.stringify(xs));
+    ok(!xs.some(([, t]) => t === "drain"), w + " 宽不该再有单独的 drain 标签：" + JSON.stringify(xs));
+    const sorted = xs.sort((a, b) => a[0] - b[0]);
+    ok(sorted.every(([x, t], i) => !i || x >= sorted[i - 1][0] + run(A, `textW(${JSON.stringify(sorted[i - 1][1])})`)), w + " 宽标签叠在一起：" + JSON.stringify(xs));
+    run(A, 'EV.events["srv-b"].pop()');
+  }
 });
 t("project", "#96 hostBands：项目级的暂停（glob）与这台单独下的各自配对，撤一个不关另一个的区间（Codex P2）", () => {
   const r = run(P, `(() => { const E0 = EV; EV = {...EV, events: {...EV.events, "srv-a": [

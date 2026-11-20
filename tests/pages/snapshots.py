@@ -753,6 +753,37 @@ def project_evil() -> dict:
     return d
 
 
+def project_longq() -> dict:
+    """srv-a 两条车道的清单名都长（gpu_… / cpu_…，区分它们的在末尾），车道 1 近一天跑过四个计划项（#108：左栏放不下时车道名怎么截）。"""
+    d = copy.deepcopy(project())
+    d["lanes"][0]["queue"], d["lanes"][1]["queue"] = "jobs/gpu_srvx_sweep_part07.txt", "jobs/cpu_srvx_sweep_part08.txt"
+    la = d["lanes"][0]["id"]
+    d["jobs"] += [{"id": f"{g}x_s{k}", "est_min": 30.0, "status": "done", "start_ts": NOW - (8 + k) * H, "end_ts": NOW - (7.5 + k) * H, "lane": la, "hold": False, "group": g,
+                   "dur_min": 30.0, "dur_src": "清单估时", "actual_min": 30.0} for k, g in enumerate(["eval_", "old_"])]
+    return d
+
+
+def project_overdue() -> dict:
+    """借来的 srv-b 已过约定时间（半小时前）、在跑的那格还没跑完（还要 15 分钟）：到点时看板自己下了 drain，跑完就还（#103）。"""
+    d = copy.deepcopy(project())
+    cut = NOW - 30 * 60
+    d["hosts"][1]["borrow"].update(until=cut, cutoff=cut, why="约定的时间", returning=round(cut + 90), overdue=True)
+    j = next(j for j in d["jobs"] if j["id"] == "alpha_eval_s7")
+    j.update(status="running", start_ts=NOW - 2 * H, elapsed_min=120.0, speed=[], eta_source="清单估时", remaining_min=15.0, eta_ts=NOW + 15 * 60, last_line="eval 9/10")
+    return d
+
+
+def project_events_overdue() -> dict:
+    """project_overdue 的事件：约定归还的截止指令（worker 记的 until 为空、at 是约定时刻），到点后那一轮 borrow.check 下的 drain（不记要还的事件）。"""
+    d = project_events()
+    e = lambda t, kind, msg, **kw: {"t": t, "kind": kind, "msg": msg, "host": "srv-b", **kw}  # noqa: E731
+    cut = NOW - 30 * 60
+    d["events"]["srv-b"] = [e(NOW - 16 * H, "borrow", "借来 OWNER（srv-b）：约定今天还，只给 proj-a 用", who="OWNER"),
+                            e(NOW - 16 * H + 60, "override", "临时指令：续租截止 borrow", act="add", okind="deadline", target="borrow", until=None, at=cut),
+                            e(cut + 90, "override", "临时指令：drain 主机", act="add", okind="drain", target=None, until=None, at=cut + 90)]
+    return d
+
+
 def project_events_evil() -> dict:
     d = project_events()
     d["events"]["srv-a"][0]["msg"] = "事" + BAD
@@ -901,5 +932,6 @@ def overview_user() -> dict:
 
 
 EXTRA = {"overview_user": overview_user, "records": records, "records_evil": records_evil, "events": project_events, "events_evil": project_events_evil,
+         "project_overdue": project_overdue, "project_longq": project_longq, "events_overdue": project_events_overdue,
          "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many}
 
