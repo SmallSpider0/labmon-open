@@ -352,9 +352,11 @@ const laneName = (lane, hosts) => {
 };
 // 按估计字宽截断（中文约 12px，其余约 6.6px），超出加省略号。mid 时头尾各留一半、省略中间（任务名能区分的种子、变体常在结尾）；
 // mid 是字符串时它是原样留着的前缀（如“⏸ ”、项目名），后面的再省略中间
+const charW = c => c.charCodeAt(0) > 0x2e80 ? 12 : 6.6;
+const textW = s => [...String(s)].reduce((w, c) => w + charW(c), 0);     // 按同一估计算的整串宽度（px）
 function fit(s, px, mid = false) {
-  const cw = c => c.charCodeAt(0) > 0x2e80 ? 12 : 6.6;
-  if (typeof mid === "string") return mid + fit(s, px - [...mid].reduce((w, c) => w + cw(c), 0), true);
+  const cw = charW;
+  if (typeof mid === "string") return mid + fit(s, px - textW(mid), true);
   const a = [...String(s)];
   let w = 0, i = 0;
   while (i < a.length && (w += cw(a[i])) <= px) i++;

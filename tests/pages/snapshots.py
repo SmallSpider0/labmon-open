@@ -753,6 +753,27 @@ def project_evil() -> dict:
     return d
 
 
+def project_overdue() -> dict:
+    """借来的 srv-b 已过约定时间（半小时前）、在跑的那格还没跑完（还要 15 分钟）：到点时看板自己下了 drain，跑完就还（#103）。"""
+    d = copy.deepcopy(project())
+    cut = NOW - 30 * 60
+    d["hosts"][1]["borrow"].update(until=cut, cutoff=cut, why="约定的时间", returning=round(cut + 90), overdue=True)
+    j = next(j for j in d["jobs"] if j["id"] == "alpha_eval_s7")
+    j.update(status="running", start_ts=NOW - 2 * H, elapsed_min=120.0, speed=[], eta_source="清单估时", remaining_min=15.0, eta_ts=NOW + 15 * 60, last_line="eval 9/10")
+    return d
+
+
+def project_events_overdue() -> dict:
+    """project_overdue 的事件：约定归还的截止指令（worker 记的 until 为空、at 是约定时刻），到点后那一轮 borrow.check 下的 drain（不记要还的事件）。"""
+    d = project_events()
+    e = lambda t, kind, msg, **kw: {"t": t, "kind": kind, "msg": msg, "host": "srv-b", **kw}  # noqa: E731
+    cut = NOW - 30 * 60
+    d["events"]["srv-b"] = [e(NOW - 16 * H, "borrow", "借来 OWNER（srv-b）：约定今天还，只给 proj-a 用", who="OWNER"),
+                            e(NOW - 16 * H + 60, "override", "临时指令：续租截止 borrow", act="add", okind="deadline", target="borrow", until=None, at=cut),
+                            e(cut + 90, "override", "临时指令：drain 主机", act="add", okind="drain", target=None, until=None, at=cut + 90)]
+    return d
+
+
 def project_events_evil() -> dict:
     d = project_events()
     d["events"]["srv-a"][0]["msg"] = "事" + BAD
@@ -901,5 +922,6 @@ def overview_user() -> dict:
 
 
 EXTRA = {"overview_user": overview_user, "records": records, "records_evil": records_evil, "events": project_events, "events_evil": project_events_evil,
+         "project_overdue": project_overdue, "events_overdue": project_events_overdue,
          "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many}
 

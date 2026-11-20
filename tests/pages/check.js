@@ -1584,6 +1584,30 @@ t("project", "hostBands：换容器只按带 started 的事件画，掉线区间
   ok(!b.iv.some(x => x.k === "deadline"), "约定归还在到点之前不该画成区间：" + JSON.stringify(b.iv));
   ok(!leak(JSON.stringify([a, b])));
 });
+t("project", "#103 借来的主机过了约定时间：约定归还与到点自动下的 drain 并成一条「约定归还 → 跑完就还」，画到在跑的预计跑完，标签不叠", () => {
+  const A = pjCtx(J("project_overdue.json"), J("events_overdue.json")), cut = NOW - 30 * 60;
+  const b = run(A, 'hostBands("srv-b")').iv.filter(x => x.k !== "nospan");
+  ok(b.length === 1 && b[0].k === "ret" && b[0].t0 === cut && b[0].t1 === NOW + 15 * 60, JSON.stringify(b));
+  ok(b[0].short === "约定归还 → 跑完就还", b[0].short);
+  has(b[0].text, `约定 ${run(A, `ts(${cut})`)} 还给 OWNER：到点不再放新任务`, "悬停写约定");
+  has(b[0].text, "到了约定时间：不再放新任务，正在跑的跑完就还给 OWNER", "悬停写跑完就还"); has(b[0].text, `预计 ${run(A, `ts(${NOW + 15 * 60})`)} 跑完归还`);
+  // 用户先点了「跑完就还」、后到约定时间：仍是一条，先写跑完就还
+  const r = run(A, `(() => { const E0 = EV; EV = {...EV, events: {...EV.events, "srv-b": [...EV.events["srv-b"].slice(0, 2),
+      {t: ${NOW - 2 * H + 30}, kind: "override", msg: "临时指令：drain 主机", act: "add", okind: "drain", target: null, until: null, at: ${NOW - 2 * H + 30}},
+      {t: ${NOW - 2 * H + 31}, kind: "borrow", act: "return", now: false, host: "srv-b", msg: "要还"}]}};
+    const b = hostBands("srv-b").iv.filter(x => x.k !== "nospan"); EV = E0; return b.map(x => [x.k, x.t0, x.short]); })()`);
+  ok(JSON.stringify(r) === JSON.stringify([["ret", NOW - 2 * H + 30, "跑完就还 · 约定 " + run(A, `tsHM(${cut})`)]]), JSON.stringify(r));
+  // 主机行底边：两条带起点重叠时只写一个标签（别的指令同理）
+  for (const w of [1200, 375]) {
+    el(A, "tlbox").clientWidth = w; run(A, `TL.v = {a: ${-3 * H}, b: ${H}}; EV.events["srv-b"].push({t: ${cut + 100}, kind: "override", msg: "x", act: "add", okind: "pause", target: "proj-a", until: null, at: ${cut + 100}}); drawTimeline()`);
+    const tl = el(A, "tlbox").innerHTML, xs = [...tl.matchAll(/<text x="([\d.]+)" y="[\d.]+" style="font-size:9.5px[^>]*>(.*?)<\/text>/g)].map(m => [+m[1], m[2]]);
+    ok(xs.some(([, t]) => t.startsWith("约定归")), w + " 宽缺约定归还的标签：" + JSON.stringify(xs));
+    ok(!xs.some(([, t]) => t === "drain"), w + " 宽不该再有单独的 drain 标签：" + JSON.stringify(xs));
+    const sorted = xs.sort((a, b) => a[0] - b[0]);
+    ok(sorted.every(([x, t], i) => !i || x >= sorted[i - 1][0] + run(A, `textW(${JSON.stringify(sorted[i - 1][1])})`)), w + " 宽标签叠在一起：" + JSON.stringify(xs));
+    run(A, 'EV.events["srv-b"].pop()');
+  }
+});
 t("project", "#96 hostBands：项目级的暂停（glob）与这台单独下的各自配对，撤一个不关另一个的区间（Codex P2）", () => {
   const r = run(P, `(() => { const E0 = EV; EV = {...EV, events: {...EV.events, "srv-a": [
       {t: ${NOW - 3 * H}, kind: "override", msg: "全局暂停", act: "add", okind: "pause", target: "proj-a", glob: true},

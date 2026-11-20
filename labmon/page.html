@@ -341,6 +341,7 @@ tlInit({get: (k, d) => LS.get(k, d), set: (k, v) => LS.set(k, v), now: () => NOW
 // 临时指令事件 → {act, okind, target, until, at, glob}：worker 记事件时就带这些字段；glob 是项目级的（所有主机，serve.proj_events 标的），
 // 与这台单独下的同种指令各自配对增撤
 const GLOB_KEY = "|所有主机";
+const AUTO_RET_S = 900;      // 到了约定时间，borrow.check 在之后那一轮工作台采集里下 drain：约定归还开始后这么久内起的 drain 算它
 function ovrOf(e) {
   return e.act ? {act: e.act, okind: e.okind, target: e.target || null, until: e.until, at: e.at, glob: !!e.glob} : null;
 }
@@ -366,22 +367,32 @@ function hostBands(hid) {
     const key = o.okind + "|" + (o.target || "") + (o.glob ? GLOB_KEY : "");
     if (open[key]) close(key, e.t);             // 同一指令被撤销、到期或被新的同类指令替换：区间到这里
     const borrow = o.okind === "deadline" && o.target === "borrow";      // 约定归还：到点以后才挡新任务（之前只挡跑不完的）
-    if (o.act === "add") open[key] = {k: o.okind, t0: borrow && o.at ? Math.max(e.t, o.at) : e.t, until: o.until, p: 4,
+    if (o.act === "add") open[key] = {k: o.okind, t0: borrow && o.at ? Math.max(e.t, o.at) : e.t, until: o.until, p: 4, borrow,
       short: borrow ? "约定归还" : {drain: "drain", pause: "暂停 " + (o.target || ""), deadline: "续租截止"}[o.okind] || o.okind, text: `${ts(e.t)} ${e.msg}`};
   }
   for (const a of Object.values(open)) { const t1 = Math.min(NOW, a.until || NOW); if (t1 > a.t0) iv.push({...a, t1, open: true}); }
-  // 借来的主机上点「跑完就还」下的 drain：单独画，还没还的画到正在跑的预计跑完（那时自动归还）
-  // 要还的事件带 act、now（borrow.request_return）
-  const hb = D.hosts.find(h => h.id === hid)?.borrow;
-  for (const x of iv) {
-    const ask = x.k === "drain" && E.find(e => e.kind === "borrow" && e.act === "return" && e.t >= x.t0 - 5 && e.t <= x.t0 + 120);
-    if (!ask) continue;
-    const now = !!ask.now, end = x.open && hb?.returning ? Math.max(NOW, ...D.lanes.filter(l => l.host === hid).flatMap(l => jobsOf(l.id))
+  // 借来的主机上要还时下的 drain：点「跑完就还」「现在停」的（要还的事件带 act、now：borrow.request_return），或到了约定时间
+  // borrow.check 自己下的（不记要还的事件：约定归还那段开始后 AUTO_RET_S 内起的 drain）。单独画，还没还的画到正在跑的预计跑完（那时自动归还）；
+  // 与它重叠的约定归还那段并进这一条（#103：两条从同一时刻起、画在同一位置，标签叠在一起读不出），悬停两件事都写
+  const hb = D.hosts.find(h => h.id === hid)?.borrow, who = hb?.holder || "对方";
+  const dls = iv.filter(x => x.borrow), meets = (a, b) => a.t0 <= b.t1 && b.t0 <= a.t1;
+  for (const x of iv.filter(x => x.k === "drain")) {
+    const ask = E.find(e => e.kind === "borrow" && e.act === "return" && e.t >= x.t0 - 5 && e.t <= x.t0 + 120);
+    const auto = !ask && dls.find(d => x.t0 >= d.t0 - 5 && x.t0 <= d.t0 + AUTO_RET_S);
+    if (!ask && !auto) continue;
+    const now = !!ask?.now, end = x.open && hb?.returning ? Math.max(NOW, ...D.lanes.filter(l => l.host === hid).flatMap(l => jobsOf(l.id))
       .filter(j => j.status === "running" && j.eta_ts).map(j => j.eta_ts)) : null;
     Object.assign(x, {k: "ret", t1: end ?? x.t1, short: now ? "停下就还" : "跑完就还",
-      text: `${ts(x.t0)} 点了${now ? "现在停" : "跑完就还"}：不再放新任务，正在跑的${now ? "停下" : "跑完"}就还给 ${hb?.holder || "对方"}`
+      text: (auto ? `${ts(x.t0)} 到了约定时间` : `${ts(x.t0)} 点了${now ? "现在停" : "跑完就还"}`) + `：不再放新任务，正在跑的${now ? "停下" : "跑完"}就还给 ${who}`
         + (end && end > NOW ? `\n预计 ${ts(end)} 跑完归还（画到那时）` : x.open ? "" : `\n${ts(x.t1)} ${E.some(e => e.kind === "borrow_return" && e.t === x.t1) ? "还掉了" : "结束"}`)});
+    const d = dls.find(d => !d.merged && meets(d, x));
+    if (!d) continue;
+    d.merged = true;
+    const first = d.t0 <= x.t0 + AUTO_RET_S;          // 到点才要还（或点的就在约定时刻前后）：先写约定归还
+    Object.assign(x, {t0: Math.min(x.t0, d.t0), t1: Math.max(x.t1, d.t1), short: first ? `约定归还 → ${x.short}` : `${x.short} · 约定 ${tsHM(d.t0)}`,
+      text: `约定 ${ts(d.t0)} 还给 ${who}：到点不再放新任务（之前只放跑得完的）\n` + x.text});
   }
+  iv.splice(0, iv.length, ...iv.filter(x => !x.merged));
   const sp = D.spans || [];
   for (let i = 1; i < sp.length; i++) if (sp[i][0] - sp[i - 1][1] > GAP_S)
     iv.push({k: "nospan", t0: sp[i - 1][1], t1: sp[i][0], p: 1, short: "未采集", text: `${ts(sp[i - 1][1])} → ${ts(sp[i][0])} labmon 没在采集（本机看板没开），这段的主机状态不清楚`});
@@ -523,13 +534,18 @@ function hostRow(host, hb, ev, y, h, c) {
     s += `<path d="${l}L${c.X(sg[sg.length - 1][0])},${ub}L${c.X(sg[0][0])},${ub}Z" fill="var(--accent)" fill-opacity=".13"/><path d="${l}" fill="none" stroke="var(--accent)" stroke-width="1" stroke-opacity=".7"/>`;
   }
   s += `</g>`;
-  for (const x of hb.iv) {
-    if (!ev || !c.win(x.t0, x.t1)) continue;
-    const xa = c.cl(x.t0), w = Math.max(2, c.cl(x.t1) - xa);
+  // 底边色带按起点排；标签只写到后面那条能写标签的带的起点，起点被前一个标签盖住的不写（悬停照旧），重叠的带不叠字（#103）
+  const bs = ev ? hb.iv.filter(x => c.win(x.t0, x.t1)).map(x => ({x, xa: c.cl(x.t0), w: Math.max(2, c.cl(x.t1) - c.cl(x.t0))})).sort((a, b) => a.xa - b.xa) : [];
+  let free = -Infinity;
+  bs.forEach(({x, xa, w}, i) => {
     c.seen.add(["down", "nospan", "ret"].includes(x.k) ? x.k : "warn");
     s += bandRect(x.k, xa, y + h - 9, w, 8, tip(x.text));
-    if (w > 40) s += `<text x="${xa + 4}" y="${y + h - 2}" style="font-size:9.5px;pointer-events:none;fill:${x.k === "down" ? "#fff" : "var(--fg)"}">${esc(fit(x.short, w - 8))}</text>`;
-  }
+    const room = Math.min(w, (bs.slice(i + 1).find(b => b.xa > xa + 40)?.xa ?? Infinity) - xa);     // 挨得很近的后一条本来也写不下标签
+    if (room <= 40 || xa < free) return;
+    const t = fit(x.short, room - 8);
+    free = xa + 4 + textW(t) + 4;
+    s += `<text x="${xa + 4}" y="${y + h - 2}" style="font-size:9.5px;pointer-events:none;fill:${x.k === "down" ? "#fff" : "var(--fg)"}">${esc(t)}</text>`;
+  });
   for (const x of hb.ticks) {
     if (x.t < c.t0 || x.t > c.t1) continue;
     c.seen.add("restart");
