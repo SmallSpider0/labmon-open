@@ -47,7 +47,7 @@ class LocalQueueTest(unittest.TestCase):
         st.parent.mkdir(parents=True)
         now, root = time.time(), str(self.d / "proj")
         st.write_text(json.dumps({"t": now, "waiting": [], "queues": [{"root": root, "jobs": "jobs/q.txt", "dur": {
-            "b_next": {"min": 12.0, "src": "本项目近 3 个 实际/估时 ×0.60（按时长加权）", "k": 0.6, "cls": "b_next"}}}],
+            "b_next": {"min": 12.0, "src": "同一清单近 3 个 实际/估时 ×0.60", "k": 0.6, "cls": "b_next"}}}],
             "plan": {"t": now, "lanes": [{"root": root, "queue": "jobs/q.txt", "project": "out", "kind": "queue", "stuck": "推演到 7 天后还没轮到",
                                           "jobs": [{"name": "a_run", "t0": now - 600, "t1": now + 600, "gpus": [0], "run": True},
                                                    {"name": "b_next", "t0": now + 1200, "t1": now + 1920, "gpus": [0], "after": [["other", "x1"]]}]}]}}))
@@ -61,7 +61,7 @@ class LocalQueueTest(unittest.TestCase):
         lane = snap["lanes"][0]
         self.assertEqual((lane["eta_ts"], lane["stuck"]), (None, "推演到 7 天后还没轮到"))
         g = {x["id"]: x for x in snap["groups"]}
-        self.assertEqual(g["B"]["ratios"], [{"cls": "b_next", "k": 0.6, "src": "本项目近 3 个 实际/估时 ×0.60（按时长加权）", "open": True}])
+        self.assertEqual(g["B"]["ratios"], [{"cls": "b_next", "k": 0.6, "src": "同一清单近 3 个 实际/估时 ×0.60", "open": True}])
         self.assertEqual(g["A"]["ratios"], [])
 
     def test_queued_aligned_to_running(self):

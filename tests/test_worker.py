@@ -4594,7 +4594,7 @@ class SimulateTest(unittest.TestCase):
 
 
 class DurationTest(unittest.TestCase):
-    """任务要跑多久（duration）：同类的 实际/估时、项目的加权比值、清单估时；各主机的历史一起看；写进状态给看板。"""
+    """任务要跑多久（duration）：同类的 实际/估时、借来的比值（同 tag › 同前缀 › 同一清单 › 本项目，中位数）、清单估时；各主机的历史一起看；写进状态给看板。"""
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -4620,16 +4620,61 @@ class DurationTest(unittest.TestCase):
         self.assertAlmostEqual(d["min"], 124.5, delta=0.1)                     # 同类 实际/估时 中位数，不被探针与 vit 拉低
         self.assertIn("同类近 2 次 实际/估时", d["src"])
         self.assertEqual((d["cls"], d["same"]), ("p1_sst2_bert_clean", True))                  # same：同类历史给的（读写拥塞嫌疑只认它）
-        d = self.dur(hist, "p1_cifar_vit_wu_s42", 420)                         # 新类型：本项目按时长加权的比值
+        d = self.dur(hist, "p1_cifar_vit_wu_s42", 420)                         # 新类型：借同前缀 p1_ 的比值，取中位数（两个探针不拉低，#113）
         self.assertFalse(d["same"])
-        self.assertAlmostEqual(d["k"], (122 + 127 + 247 + 241 + 0.8 + 1) / (160 * 2 + 400 * 2 + 25), delta=0.001)
-        self.assertIn("按时长加权", d["src"])
+        self.assertEqual((d["k"], d["src"]), (0.61, "同前缀 p1_ 近 6 个 实际/估时 ×0.61"))
         self.assertEqual(self.m.duration(hist, {"name": "p1_sst2_bert_clean_s44", "project": "a1", "est_min": 30})["src"], "清单估时")   # 别的项目的记录不看
         self.assertIsNone(self.dur(hist, "p1_new"))                            # 没估时、没同类
         hist.append(self.rec("p1_hold_s42", 30.0, 900))
         self.assertEqual(self.dur(hist, "p1_hold_s43", 900), {"min": 900, "src": "清单估时", "k": None, "cls": "p1_hold", "same": False})   # 占位任务：不看同类、不折算
         self.assertIsNone(self.dur(hist, "p1_hold_s43"))
         self.assertEqual(self.dur(hist, "p1_cifar_vit_clean_s44")["min"], 244.0)   # 没写估时：同类实际用时中位数
+
+    def test_fallback_tiers(self):
+        # #113：没有同名历史时依次借 同 tag › 同名字前缀 › 同一清单 › 本项目 的 实际/估时（各取中位数、至少 2 条），不被要跑几小时的长任务主导
+        R = "/data/bp"
+        hist = [self.rec("exp_m1_s1", 10.0, 25, tag="proj-b", root=R, queue="q1"), self.rec("exp_m2_s1", 12.5, 25, tag="proj-b", root=R, queue="q1"),
+                self.rec("exp_m3_s1", 15.0, 25, tag="proj-b", root=R, queue="q1"),                          # 同 tag：0.4、0.5、0.6
+                self.rec("exp_n1_s1", 20.0, 25, root=R, queue="q2"), self.rec("exp_n2_s1", 22.5, 25, root=R, queue="q2"),   # 同前缀 exp_ 另两条：0.8、0.9
+                self.rec("z_a1", 30.0, 25, root=R, queue="q2"), self.rec("z_a2", 35.0, 25, root=R, queue="q2"),           # 同清单 q2 另两条：1.2、1.4
+                self.rec("big_s1", 900.0, 300, root=R, queue="q3"), self.rec("big_s2", 900.0, 300, root=R, queue="q3"),   # 长训练：×3
+                self.rec("solo_a1", 50.0, 25, tag="solo", root=R, queue="q3")]                                          # 同 tag 只有 1 条：×2
+        dur = lambda name, **kw: self.m.duration(hist, dict({"name": name, "project": "bp", "est_min": 25}, **kw))   # noqa: E731
+        d = dur("exp_m4_s1", tag="proj-b", root=R, queue="q1")
+        self.assertEqual((d["min"], d["src"], d["k"], d["same"]), (12.5, "同 tag proj-b 近 3 个 实际/估时 ×0.50", 0.5, False))
+        d = dur("exp_k1_s1", root=R, queue="q9")
+        self.assertEqual((d["min"], d["src"]), (15.0, "同前缀 exp_ 近 5 个 实际/估时 ×0.60"))
+        d = dur("y_k1", root=R, queue="q2")
+        self.assertEqual((round(d["min"], 6), d["src"]), (26.25, "同一清单近 4 个 实际/估时 ×1.05"))
+        d = dur("y_k1", tag="solo", root=R, queue="q9")                     # 同 tag 只有 1 条不够，前缀、清单都没有：本项目的中位数，不按时长加权（加权是 ×2.0）
+        self.assertEqual((round(d["min"], 6), d["src"]), (25 * 1.05, "本项目近 10 个 实际/估时 ×1.05"))
+        self.assertIsNone(dur("exp_m4_s1", tag="proj-b", root=R, queue="q1", est_min=None))   # 没写估时：借来的比例不给时长
+        self.assertEqual(self.m.duration(hist, {"name": "exp_m4_s1", "project": "a1", "est_min": 25, "tag": "proj-b"})["src"], "清单估时")   # 别的项目的不借
+        lo = [self.rec("p_%d" % i, 1.0, 30, tag="probe") for i in range(3)]   # 比例截到 [1/3, 3]
+        self.assertEqual(self.m.duration(lo, {"name": "q_1", "project": "bp", "est_min": 30, "tag": "probe"})["k"], round(1 / 3, 3))
+
+    def test_group_regex_matches_board(self):
+        # worker 不 import 本包，前缀那一档用自己的一份正则，须与看板自动归组的 config.AUTO_GROUP_RE 同一条
+        from labmon import config
+        self.assertEqual(self.m.GROUP_RE.pattern, config.AUTO_GROUP_RE.pattern)
+
+    def test_list_rows_pass_tag_and_list(self):
+        # #113：清单任务经 Worker.dur_k 算时长，要把清单行的 tag 与所在清单传进 duration；别的主机的同 tag 记录一样借（多主机）
+        h = Hosts(self.d / "hosts")
+        try:
+            qs = h.queues({"bp": ["exp_m4_s1|true   # tag=proj-b est_min=25", "y_k1|true   # est_min=25"]})
+            root = qs[0]["root"]
+            h.usage("29", [self.rec("exp_m1_s1", 10.0, 25, tag="proj-b"), self.rec("exp_m2_s1", 15.0, 25, tag="proj-b"),
+                           self.rec("big_s1", 600.0, 200, root=root, queue="jobs/q.txt"), self.rec("big_s2", 600.0, 200, root=root, queue="jobs/q.txt")])
+            w = h.worker("t")
+            w.queue_durs(qs)
+            self.assertEqual((w.durs["bp"]["exp_m4_s1"]["min"], w.durs["bp"]["exp_m4_s1"]["src"]), (12.5, "同 tag proj-b 近 2 个 实际/估时 ×0.50"))
+            self.assertEqual(w.durs["bp"]["y_k1"]["src"], "同一清单近 2 个 实际/估时 ×3.00")
+            self.assertEqual(w.req_dur({"key": "bp", "kind": "queue", "name": "exp_m4_s1"}), 12.5)    # 截止前的准入取的同一份
+            j = {"name": "exp_m4_s1", "project": "bp", "est_min": 25.0, "tag": "proj-b", "q": qs[0], "kind": "queue", "t0": h.now(), "gpus": []}
+            self.assertEqual(w.req_dur(j, 1), 12.5)                                                  # 运行中任务（run_end 传 k）：清单从 j["q"] 取
+        finally:
+            h.close()
 
     def test_filters(self):
         hist = [self.rec("x_s1", 100.0, 100), self.rec("x_s2", 50.0, 100, gpu="V100"),        # 别的型号不认
