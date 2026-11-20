@@ -366,7 +366,11 @@ class LocalQueueTest(unittest.TestCase):
         a = al["cpu_low:a_run"]
         self.assertEqual(a["to"], "agent")
         self.assertIn("任务 a_run（本机 车道 1 训练方）近 10 分钟平均用了 1.0 核，给的 1 核基本用满", a["msg"])
-        self.assertIn("cpus=2", a["msg"])
+        self.assertIn("写 cpus=2 试试（cpus= 优先于历史", a["msg"])
+        # #112：worker 按配额、同机别的任务与同类条数封顶过（cpu_budget），告警里写出来
+        rm = {"per": 3, "cap": 7, "other": 1.0, "out": 0.5, "same": 2, "kept": False}
+        a = alerts(run(dict(low, sug=3, room=rm)))["cpu_low:a_run"]
+        self.assertIn("写 cpus=3 试试（这台配额 7 核，同类 2 条同时在跑，别的任务记了 1 核，labmon 之外占 0.5 核，每条最多 3 核，再写大会超配额；", a["msg"])
         al = alerts(run(high, cpus=5.0))
         self.assertEqual(list(al), ["cpu_high:a_run"])
         self.assertIn("清单写了 cpus=5（给 5 核），跑到现在 1 分钟峰值只有 1.2 核", al["cpu_high:a_run"]["msg"])
@@ -387,6 +391,21 @@ class LocalQueueTest(unittest.TestCase):
         self.assertEqual(alerts({"kind": "queue", "project": "out", "name": "a_run", "root": str(root), "queue": "jobs/q.txt"}), {})   # 旧 worker 没写这个字段
         old = {k: v for k, v in low.items() if k not in ("by", "cls")}
         self.assertEqual(list(alerts(run(old, name="a_s1"), run(old, name="a_s2"))), ["cpu_low:a_s1", "cpu_low:a_s2"])   # 还没升级的 worker 不给 cls：按任务名各一条
+
+    def test_cpu_low_per_host_sug(self):
+        """#112：同类在两台上都给少了，两台的配额不同：建议值按主机分写、各写配额，不取最大值（照最大值写在配额小的那台上会超）。"""
+        cfg = {"id": "out", "alerts": {"gpu_idle_min": 30, "gpu_idle_util": 5.0},
+               "hosts": [{"id": "a", "checks": []}, {"id": "b", "checks": []}]}
+        lane = lambda h, n: {"id": f"{h}{n}", "host": h, "label": f"车道 {n}", "root": "/r", "queue": "jobs/q.txt"}   # noqa: E731
+        snap = {"hosts": [{"id": "a", "ok": True, "label": "甲"}, {"id": "b", "ok": True, "label": "乙"}],
+                "lanes": [lane("a", 1), lane("b", 1)], "jobs": [], "alerts": []}
+        fit = lambda sug, cap, same: {"how": "low", "avg": 1.9, "peak": 2.0, "give": 2, "sug": sug, "by": "tag", "cls": "sm",   # noqa: E731
+                                      "room": {"per": cap // same, "cap": cap, "other": 0.0, "out": 0.0, "same": same, "kept": False}}
+        run = lambda n, f: {"kind": "queue", "project": "out", "name": n, "cpus": 2.0, "cpu_fit": f, "root": "/r", "queue": "jobs/q.txt"}   # noqa: E731
+        C._host_alerts(cfg, snap, {}, [], {"hosts": [{"id": "a", "status": {"running": [run("a_s1", fit(3, 7, 2)), run("a_s2", fit(3, 7, 2))]}},
+                                                     {"id": "b", "status": {"running": [run("a_s3", fit(4, 16, 1))]}}]}, time.time())
+        msg = {x["key"]: x["msg"] for x in snap["alerts"]}["cpu_low:sm"]
+        self.assertIn("按主机写 甲 上 cpus=3、乙 上 cpus=4 试试（甲 配额 7 核，同类 2 条同时在跑，每条最多 3 核；乙 配额 16 核，每条最多 16 核，再写大会超配额；", msg)
 
     def test_cpu_fit_alert_merged_across_hosts(self):
         """#91：同一类分布在两台主机上的任务合成一条 cpu_high:，wait 只叫醒一次；同类后面的任务接着被判出来（key 不变）6 小时内不再叫醒（#88）。"""

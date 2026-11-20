@@ -4323,13 +4323,14 @@ class Worker:
         return {"thr": r["thr"], "psi": raw["psi"], "nfs": nf,
                 "disk": {"dev": raw["disk"]["name"], "busy": r["busy"], "await": r["await"]} if raw["disk"] else None}
 
-    def cpu_hints(self, cap, util):
+    def cpu_hints(self, S, util):
         """运行中任务开跑核数给少、给多（cpu_fit，#46）：同一次运行一旦判出来就留到跑完（j 的 cpu_fit，写进状态、接管时找回）。
         测量在门槛两侧来回时不反复出现、消失：看板的 cpu_low:、cpu_high: 只在条件出现时叫醒一次，消失后 6 小时内再出现不再叫醒（waits._new_alerts）。
+        给少了的建议核数按这台此刻的快照 S 封顶（cpu_budget：配额减同机别的任务已记的、同类几条同时在跑就均分，#112）。
         fit 开车道（gpu_slack）要的是此刻的样子，照旧现算，不用这份。"""
         for j in self.running.values():
             if not j.get("cpu_fit"):
-                j["cpu_fit"] = cpu_fit(j, cap, util)
+                j["cpu_fit"] = cpu_fit(j, S["cpu_cap"], util, cpu_budget(S, j))
 
     def throttle(self, now):
         """状态的 throttle（#39）：这一段 CPU 限流（thr_step）的起点 since、已持续 for 秒、此刻的 thr、持续满 THR_HOLD_S 的 alert，
@@ -4911,7 +4912,7 @@ class Worker:
         """写 status.json（看板探针读；字段是看板 ↔ worker 的契约，tests/test_contract.py 守着）。"""
         S = self.snapshot(limits)
         u10 = self.util10(now)                # 各卡「在用时多高」：fit、cpu_fit 与同机多开车道（local_cards）用
-        self.cpu_hints(S["cpu_cap"], u10)
+        self.cpu_hints(S, u10)
         hits = [round(t) for t in self.ka_hits if t > now - FIGHT_S]   # 近 FIGHT_S 秒保活被拉起的时刻（kafight，重启后 load_prev 找回）
         write(self.p.status, json.dumps({
             "t": time.time(), "pid": os.getpid(), "host": self.host, "info": self.info, "gpu_procs": self.gprocs,
@@ -5903,14 +5904,56 @@ def cpu_from_peak(peak):
     return max(1, job_cpus(1.1 * peak))
 
 
-def cpu_fit(j, cap, util):
+def cpu_budget(S, j):
+    """在跑的任务 j 那一类每条最多能给几个核（cpu_fit 给少了的建议值封顶用，#112）：这台 labmon 全停时能给的（快照的 cpu_room，已扣 labmon 之外的、
+    给对方的预留与停不了的保活）减去同机别的任务（别的项目的、本项目别的类的）已记的核，再按本项目同一类（cpu_cls）此刻同时在跑的条数均分、向下取整：
+    同类几条车道照同一条建议改清单，加起来不能超过配额。返回 {per 每条最多几核, cap 记账上限, other 别的任务已记, out labmon 之外与预留占的, same 同类几条, kept 有没有给对方留}；
+    读不到配额为 None（不记 CPU，建议不封顶）。"""
+    if S["cpu_room"] is None:
+        return None
+    cls = (j.get("project"), cpu_cls(j)["cls"])
+    mine = [not x["hold"] and (x.get("project"), cpu_cls(x)["cls"]) == cls for x in S["jobs"]]
+    other = sum(x["cpu"] for x, m in zip(S["jobs"], mine) if not m)
+    n = max(1, sum(mine))
+    return {"per": max(0, int((S["cpu_room"] - other) / n + 1e-6)), "cap": S["cpu_cap"], "other": round(other, 1),
+            "out": round(S["cpu_cap"] - S["cpu_room"], 1), "same": n, "kept": bool(S.get("kept"))}
+
+
+def cpu_line(st):
+    """一台 status.json 里的 CPU 说成一句（#112；`labmon worker status`、`worker fit` 每台的开头与看板的 `labmon status` 共用）：容器配额与记账上限
+    （nproc 报的是宿主机的核数）、labmon 在跑的任务记了几核、labmon 之外（借来的主机上含给对方的预留）占几核、还能给新任务几核（状态的 room.cpu）。
+    状态里没有主机信息为 None。"""
+    info, room = st.get("info") or {}, st.get("room") or {}
+    if not info:
+        return None
+    q, n = info.get("cpu_quota"), info.get("nproc")
+    host = "nproc 报的 %d 是宿主机的核数" % n if n else ""
+    if not q:
+        return "CPU：容器没设配额，不按核记账" + ("（%s）" % host if host else "")
+    cap = room.get("cpu_cap") or cpu_cap(q)
+    run = [j for j in st.get("running") or [] if (j.get("acct") or {}).get("cpu")]
+    used = sum(j["acct"]["cpu"] for j in run)
+    s = "CPU：配额 %g 核%s" % (round(q, 2), "（按 %d 核记账）" % cap if abs(q - cap) > 1e-6 else "")
+    s += "，%s" % host if host else ""
+    s += "；labmon 在跑 %d 个任务记 %g 核" % (len(run), round(used, 1)) if run else "；labmon 没有任务记着核"
+    free = room.get("cpu")
+    if free is not None:
+        out = cap - free - used
+        if out >= 0.1:
+            s += "，labmon 之外%s占 %g 核" % ("与给对方的预留" if (st.get("guest") or {}).get("keep") else "", round(out, 1))
+        s += "，还能给新任务 %g 核" % max(0.0, round(free, 1))
+    return s
+
+
+def cpu_fit(j, cap, util, room=None):
     """在跑的任务 j（状态 running 的形状：name、gpus、est、use）开跑时给的核数是给少了还是给多了（#46；#37 的“被 CPU 卡住”也是它）。
     从开始量窗口核数起满 CPU_WARM_S（cpu_warm）才判；给的核数 give 是开跑时导出的 LABMON_CPUS（cpus_export(cpu_threads)）；util 各卡近 UTIL_WIN_S 的利用率 {uuid: %}。
     - low（给少了、被 CPU 卡住）：近 CPU_WARM_S 各 1 分钟窗口核数（use.pks）的平均不少于 give × CPU_BOUND_FRAC，且所用的卡里有利用率低于 UTIL_LOW 的
-      （卡吃饱了加核也没用；不用卡的不判，单线程脚本本来就只用 1 核）。sug 建议写的 cpus= 是 give 的 2 倍封顶到记账上限 cap；已给到 cap 为 None。
+      （卡吃饱了加核也没用；不用卡的不判，单线程脚本本来就只用 1 核）。sug 建议写的 cpus= 是 give 的 2 倍，封顶到这一类每条最多能给的（room：cpu_budget 的结果，#112；
+      不给时封顶到记账上限 cap）；不比 give 多（已给到上限、配额被别的任务与同类分完了）为 None。low 另带 room 原样（看板写进告警：配额、别的任务记了多少）。
     - high（给多了）：估计来自清单的 cpus=（est.cpu_src 是“提示值”；按历史估的会往实测靠、按实测收小了记账的已经让出，都不判），跑到现在的 1 分钟峰值 use.cores_peak
       不超过 give × CPU_SPARE_FRAC、且少至少 CPU_SPARE_MIN 核（看整段峰值：开头加载阶段用过的核不算多给）。sug 按峰值估（cpu_from_peak，同 estimate）。
-    返回 {how, avg 近 10 分钟平均核数, peak 整段峰值, give, sug}，都不是为 None。占位任务、没有估计的不判。
+    返回 {how, avg 近 10 分钟平均核数, peak 整段峰值, give, sug}（low 另有 room），都不是为 None。占位任务、没有估计的不判。
     gpu_slack（fit 开车道）只取 low；状态里运行中任务的 cpu_fit 是它，看板据此出只给实验会话的 cpu_low:、cpu_high: 告警。"""
     u, e = j.get("use") or {}, j.get("est")
     if is_hold(j.get("name")) or not e or not cpu_warm(u):
@@ -5920,7 +5963,8 @@ def cpu_fit(j, cap, util):
     peak = u.get("cores_peak") or max(x[1] for x in u["pks"])
     out = {"avg": avg, "peak": peak, "give": give}
     if avg >= give * CPU_BOUND_FRAC and any((util.get(g) is not None and util[g] < UTIL_LOW) for g in j.get("gpus") or []):
-        return dict(out, how="low", sug=None if cap is not None and give >= cap else min(2 * give, cap or 2 * give))
+        lim = room["per"] if room else cap
+        return dict(out, how="low", sug=2 * give if lim is None else min(2 * give, lim) if lim > give else None, room=room)
     if e.get("cpu_src") == "提示值" and e.get("cpus") and peak <= give * CPU_SPARE_FRAC and give - peak >= CPU_SPARE_MIN:
         return dict(out, how="high", sug=cpu_from_peak(peak))
     return None
@@ -5989,7 +6033,7 @@ class FitHost:
         self.solo, self.solo_host = {}, None              # 这次分给只有提示值的行的卡 {uuid: 任务}（之后哪一行都不与它同卡）；不用卡的那种占了整台：任务名
 
     def card_lines(self):
-        """各卡此刻的样子（可用显存、利用率、在跑谁、CPU 受限）与限流：fit 先列出来。"""
+        """各卡此刻的样子（可用显存、利用率、在跑谁、CPU 受限）、这台的 CPU 配额与记账（cpu_line，#112）与限流：fit 先列出来。"""
         free, out = card_free(self.S), []
         for c in self.cards:
             jobs = [j["name"] for j in self.S["jobs"] if c["uuid"] in j["gpus"]]
@@ -5998,6 +6042,8 @@ class FitHost:
                 c["i"], max(0.0, free[c["uuid"]]) / 1024, "%d%%" % c["util"] if c["util"] is not None else "—（样本不够）",
                 "（在跑 %s）" % "、".join(jobs) if jobs else "（空着）",
                 "；%s 跑满了给的核（CPU 受限）" % "、".join("%s %.1f/%d 核" % x for x in b) if b else ""))
+        if cpu_line(self.st):
+            out.append(cpu_line(self.st))
         if self.slack["throttle"] is not None:
             out.append(self.slack["throttle"])
         return out
@@ -6659,6 +6705,8 @@ def main(argv=None):
         print("  找到的保活看门狗（没动）：" + wd_text(wd["seen"]))
     for ln in ka_lines(st):
         print("  " + ln)
+    if cpu_line(st):
+        print("  " + cpu_line(st))
     th = st.get("throttle")
     if th:
         print("  CPU 被配额限流 %s%%（%s 起，%d 分钟%s）%s" % (th.get("thr"), now_str(th["since"])[5:16], th["for"] // 60, "，已告警" if th["alert"] else "",
@@ -6670,8 +6718,9 @@ def main(argv=None):
                                      "（空着：清单里没有待办，不占卡）" if q.get("empty") else ""))
     for j in st.get("running", []):
         gang = "，成组 %s（与 %s 一起开跑）" % (j["gang"], "、".join("%s（%s）" % (w[1], w[0]) for w in j.get("gang_with") or []) or "—") if j.get("gang") else ""
-        print("  运行 %s：%s（PID %d，%s 起，GPU %s%s）%s" % (j.get("queue") or "单元 " + str(j.get("project")), j["name"], j["pid"], now_str(j["t0"]),
-                                                       ",".join(j["gpus"]) or "无", gang, shrunk_text(j.get("est"))))
+        cores = (j.get("acct") or {}).get("cpu")
+        print("  运行 %s：%s（PID %d，%s 起，GPU %s%s%s）%s" % (j.get("queue") or "单元 " + str(j.get("project")), j["name"], j["pid"], now_str(j["t0"]),
+                                                         ",".join(j["gpus"]) or "无", "，CPU 记 %g 核" % cores if cores else "", gang, shrunk_text(j.get("est"))))
     for w in st.get("waiting", []):               # 排位与预计开始取状态里的 pos、start，与看板的等待表一致；被临时指令挡住的没有排位
         pos, start = w.get("pos"), w.get("start")
         rank = "（排第 %d%s，预计开始 %s）" % (pos["n"], "，屏障" if pos.get("barrier") else "",

@@ -17,7 +17,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj [--gpu
                                                           # “只给谁用”、作废的唤醒都按它认，看板不按目录猜；--gpus 限定只用某些卡
 labmon worker add pool /root/data1/alice/proj jobs/p.txt --project proj    # 交给算力池（成员才能交；不许 --gpus、--stop boundary、gang=、占位任务），见 fleet.md「算力池」
 labmon worker limit 29 heavy=2                           # 同 tag 同时运行数的上限（heavy= 删掉）：整台主机共用，各项目同名的 tag 合并计数
-labmon worker status 29                                  # 登记的队列（清单跑空的标“空着”）、运行中与等待中的任务（等待行带排第几、是不是屏障、预计开始）；末尾一句与哪几台共用 worker 目录（看板按主机清单补）
+labmon worker status 29                                  # 这台的 CPU 配额与已记的核、登记的队列（清单跑空的标“空着”）、运行中（各记几核）与等待中的任务（等待行带排第几、是不是屏障、预计开始）；末尾一句与哪几台共用 worker 目录（看板按主机清单补）
 labmon worker fit 29 x4_s110_seed2 [--project a1]        # 开并行车道前：与真放行同一份准入放不放得下，同卡并行时同类约要多久、卡吃不满是不是 CPU 受限（见“资源估计”）
 labmon worker fit 29 ROOT JOBS --list --project a1      # 这条清单还会跑的行此刻能在共用 worker 目录的几台上再开几条车道
 labmon worker rm 29 /root/data1/alice/proj jobs/a6000.txt  # 按清单文件认登记：ROOT 与 JOBS 拼起来是同一个文件就算（status 列的 ROOT/JOBS 从哪里断开都行，目录已删也撤得掉），只删这一条；已归还的主机经与它共用 worker_home 的在用主机代办（不连已归还的那台）
@@ -280,9 +280,11 @@ worker 每轮现读主机容量（各卡显存与利用率、cgroup 内存上限
   按 `LABMON_CPUS` 设并行数的任务（现在也包括没自己设线程数的 BLAS/OpenMP 任务），历史峰值只会照着给它的核数长（给 1 核就只开 1 个、量到的也是 1 核），所以第一次要写 `cpus=`；没写又没历史的按 1 核。
 - **开跑核数给多给少**（`cpu_fit`，#46；状态里运行中任务的 `cpu_fit`）：开跑满 10 分钟（`cpu_warm`，接管的从接管起量）才判，给的核数是开跑时导出的 `LABMON_CPUS`。
   “给少了”（`low`）：近 10 分钟各 1 分钟窗口核数（`use.pks`）的平均不少于给的 × 0.9（`CPU_BOUND_FRAC`），且所用的卡里有近 10 分钟利用率低于 50%（`UTIL_LOW`）的：卡吃饱了加核也没用，不用卡的不判（单线程脚本本来就只用 1 核）。
-  建议值 `sug` 是给的 2 倍、封顶到记账上限；已给到上限为 null。`fit` 的“先给它那条车道加核”就是它。
+  建议值 `sug` 是给的 2 倍，封顶到这一类每条最多能给的核（`cpu_budget`，#112）：labmon 全停时能给的（`cpu_room`，已扣 labmon 之外的、给对方的预留与停不了的保活）减去同机别的任务（别的项目的、本项目别的类的）已记的核，再按本项目同一类（`cpu_cls`）此刻同时在跑的条数均分、向下取整：
+  同类几条车道照同一条建议改清单，加起来也不超过配额（配额 7 核、同类两条各给 2 核时建议 3，不是 4）。不比给的多（已给到配额、配额被别的任务与同类分完了）为 null；读不到配额的不封顶。
+  给少了的另带 `room` `{per 每条最多几核, cap 记账上限, other 别的任务已记, out labmon 之外与预留占的, same 同类几条, kept 有没有给对方留}`（读不到配额为 null），看板写进告警。预算是判出那一刻的，跟着这次运行留到跑完。`fit` 的“先给它那条车道加核”就是它（只看 `how`，不看 `sug`）。
   “给多了”（`high`）：只认写了 `cpus=` 的（估计来自提示值；按历史估的会往实测靠，按实测收小了记账的已经让出，都不判），跑到现在的 1 分钟峰值 `cores_peak` 不超过给的一半（`CPU_SPARE_FRAC`）且少至少 1 核（`CPU_SPARE_MIN`）：看整段峰值，开头加载阶段用过的核不算多给。
-  建议值按峰值 ×1.1 取整（`cpu_from_peak`，与 `estimate` 按历史估同一处）。写成 `{how, avg, peak, give, sug}`，都不是为 null；占位任务不判。同一次运行判出来就留到跑完（`Worker.cpu_hints`，接管时找回），测量在门槛两侧来回时不反复出现、消失；`fit` 要此刻的样子，照旧现算。只做提示：准入与记账不看它（同类一直给多了的由 `estimate` 收小记账，见[准入](#准入)），看板据此出只给实验会话的 `cpu_low:`、`cpu_high:`（[workbench.md「告警」](workbench.md#告警)）；写进状态时补上类 `cls`（tag，没有 tag 取去掉种子编号的名字）与 `by`（`tag`/`name`，`cpu_cls`），看板按它合并同类。
+  建议值按峰值 ×1.1 取整（`cpu_from_peak`，与 `estimate` 按历史估同一处）。写成 `{how, avg, peak, give, sug}`（给少了另有 `room`），都不是为 null；占位任务不判。同一次运行判出来就留到跑完（`Worker.cpu_hints`，接管时找回），测量在门槛两侧来回时不反复出现、消失；`fit` 要此刻的样子，照旧现算。只做提示：准入与记账不看它（同类一直给多了的由 `estimate` 收小记账，见[准入](#准入)），看板据此出只给实验会话的 `cpu_low:`、`cpu_high:`（[workbench.md「告警」](workbench.md#告警)）；写进状态时补上类 `cls`（tag，没有 tag 取去掉种子编号的名字）与 `by`（`tag`/`name`，`cpu_cls`），看板按它合并同类。
 - **共享盘慢时让路**（`Worker.io_yield`）：共享盘慢时不开始新的共享盘扫描与本地盘扫描（`Disk.step`，共享盘的写在状态的 `disk.yield`），不起新的拷本地依赖的线程（等待原因写“共享盘慢…，推迟拷 N 个本地依赖”）；已经在做的不打断。
   同一件事连着推迟满 30 分钟（`IO_YIELD_MAX_S`）就照做一次、重新计时：一直慢时扫描每 30 分钟做一件，每个拷贝最多晚 30 分钟。开始推迟与推迟满照做时各记一行 worker.log。准入不看。
 - **读写拥塞嫌疑**（`Worker.io_suspect`，事件 `io_suspect`）：在跑的非占位任务已跑过同类历史给的预计时长（`duration` 的 `same`；项目比值、清单估时不算）的 1.5 倍（`SLOW_RATIO`），且此刻共享盘慢，记一条事件：已跑与同类时长、此刻 ms 与基线、每秒次数，以及同一物理机上在跑的别的任务。
@@ -467,6 +469,8 @@ worker 重启（部署的 `--replace`、`labmon worker start`、续租后拉起�
 新找到的各记一次“看门狗”事件，组内服务器抽屉的借用一节也列着，`labmon worker status` 同样打印。
 
 **命令行里的保活**（#61）：`labmon worker status <主机>` 与 `labmon status` 的主机行下各写一句这台的保活：在跑的写几点起、nvidia-smi 里的 PID（宿主机的；容器内 PID 不同时括号里另写）、在哪几张卡、占多少显存，以及有任务要卡时 worker 会自动停（停不下来的改写没停成的原因与次数，见上文「停不下来」）；停着的写 worker 何时为要卡的任务停的；没在跑的写不拉起的原因或等卡连着空两轮后拉起；借来的主机上 ka.sh 停不了的保活另起一句（那几张卡不放）；近 1 小时被拉起过的写次数与是谁。归属照 `sample` 认的（`gpu_owners`、`ka_owned`），命令行不另判。
+
+**命令行里的 CPU 配额**（#112）：`labmon worker status <主机>`、`labmon worker fit`（`--list` 每台的开头）与 `labmon status` 的主机行下各写一句这台的 CPU（`cpu_line`）：容器配额（不是整数的另写按几核记账）、`nproc` 报的是宿主机的核数、labmon 在跑几个任务记了几核、labmon 之外（借来的主机上含给对方的预留）占几核、还能给新任务几核（状态的 `room.cpu`）；没设配额的写不按核记账。`worker status` 的运行行另写这个任务记几核（状态 `running[].acct.cpu`）。
 
 **出借方自己的保活管理器**（#31，以 BOB 的 `keepalive_control.py` 为例）：guardian 起 watchdog，watchdog 每 5 秒按登记文件（`keeper_identity.json`）看 keeper，不在、又没有它登记的实验就拉起；
 keeper 用 `start_new_session` 起，只做 setsid、不改父进程：由 `run`、`start` 这类会退出的命令起的，命令退出后父进程是 1 号；watchdog 自己拉回的是 watchdog 的子进程，
