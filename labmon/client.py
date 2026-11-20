@@ -79,8 +79,9 @@ def ca_hint(reasons) -> str:
     """连不上的原因里有证书校验没过（CERTIFICATE_VERIFY_FAILED）时接在后面的那句（#96）：向谁要哪张证书、写到哪。call、login、取更新包共用；别的原因回空串。"""
     if not any("CERTIFICATE_VERIFY_FAILED" in str(r) for r in reasons):
         return ""
-    return (f"。证书校验没过：内网入口用私有 CA 时，向看板管理员要签发内网入口证书的 CA 公钥（ca.crt，不是私钥），存到 {conf_file().parent / 'ca' / 'ca.crt'}，"
-            f"在 {conf_file()} 那个入口的 [[servers]] 里写 ca = \"~/.config/labmon/ca/ca.crt\"；已写了 ca 的，核对它是不是签发这个入口证书的那张")
+    ca = conf_file().parent / "ca" / "ca.crt"    # 存到哪与 ca 写什么同一个路径（LABMON_CLIENT 改了目录时也对得上）
+    return (f"。证书校验没过：内网入口用私有 CA 时，向看板管理员要签发内网入口证书的 CA 公钥（ca.crt，不是私钥），存到 {ca}，"
+            f"在 {conf_file()} 那个入口的 [[servers]] 里写 ca = \"{ca}\"；已写了 ca 的，核对它是不是签发这个入口证书的那张")
 
 
 def conf_file() -> Path:
