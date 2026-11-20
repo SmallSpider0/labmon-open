@@ -1521,15 +1521,50 @@ t("project", "任务明细（全部）：预计时长、已用 / 实际、开始
   has(h, "被终止"); has(h, "暂停中");
   has(h, `<td class="r">—</td>`, "没有估时");
 });
+// 时间线上的依赖连线（depLines）：[[等的, 等它的, 类名]]
+const depOf = html => [...html.matchAll(/<g class="dl([^"]*)" data-a="([^"]*)" data-b="([^"]*)"/g)].map(m => [m[2], m[3], m[1].trim().split(" ").filter(Boolean)]);
 t("project", "依赖：时间线从本项目等的任务结束连一条线到它开始，悬停写等谁（别的项目的只写在悬停里），图例有依赖", () => {
   const A = pjCtx(PJ, EVN); app(A); run(A, "drawTimeline()");
-  const tl = el(A, "tlbox").innerHTML, n = (tl.match(/class="dl"/g) || []).length;
-  ok(n === 1, `依赖连线应只有 1 条（alpha_train_s1 → alpha_train_s3），实际 ${n}`);
+  const tl = el(A, "tlbox").innerHTML, ds = depOf(tl);
+  ok(ds.length === 1 && ds[0][0] === "alpha_train_s1" && ds[0][1] === "alpha_train_s3", `依赖连线应只有 1 条（alpha_train_s1 → alpha_train_s3），实际 ${JSON.stringify(ds)}`);
+  ok(!ds[0][2].includes("k"), "同一车道上的依赖平时不该画（清单顺序已说明先后）");
+  ok(tl.indexOf('<g class="dl') < tl.indexOf('class="j"'), "连线要压在任务条下面");
   has(tips(tl), "等 alpha_train_s1、proj-b 的 beta_eval_s7 跑完才开始", "任务条悬停");
   has(el(A, "tlkey").innerHTML, "依赖（after=）", "图例");
   const N = JSON.parse(JSON.stringify(PJ)); N.jobs.forEach(j => delete j.deps);
   const B = pjCtx(N, EVN); app(B); run(B, "drawTimeline()");
-  ok(!el(B, "tlbox").innerHTML.includes('class="dl"') && !el(B, "tlkey").innerHTML.includes("依赖（after=）"), "没写依赖时不画连线、不列图例");
+  ok(!el(B, "tlbox").innerHTML.includes('class="dl') && !el(B, "tlkey").innerHTML.includes("依赖（after=）"), "没写依赖时不画连线、不列图例");
+});
+t("project", "依赖多、跨两台主机（#111）：平时只画跨车道、不能经别的依赖推出来的；悬停一格只高亮它的上下游", () => {
+  const A = pjCtx(J("project_deps.json"), EVN); clean(app(A), "依赖多");
+  run(A, `TL.v = {a: ${-10 * H}, b: ${8 * H}}; drawTimeline()`);
+  const tl = el(A, "tlbox").innerHTML, ds = depOf(tl), cls = (a, b) => (ds.find(x => x[0] === a && x[1] === b) || [, , null])[2];
+  clean(tl, "依赖多的时间线");
+  ok(ds.length === 39, `39 条 after= 都该进图（平时藏起来的高亮时用），实际 ${ds.length}`);
+  const tr = [1, 2, 3, 4, 5, 6, 7];
+  const key = [...tr.map(i => `dp_prep2>dp_tr${i}`), ...tr.map(i => `dp_ev${i}>dp_merge`), "dp_merge>dp_report", "dp_side_a>dp_side_b"].sort();
+  const got = ds.filter(x => x[2].includes("k")).map(x => x[0] + ">" + x[1]).sort();
+  ok(JSON.stringify(got) === JSON.stringify(key), `平时画的应是跨车道的关键边，实际 ${got.join(" ")}`);
+  ok(!cls("dp_prep", "dp_prep2").includes("k"), "同一车道前后相连的不该画");
+  for (const i of tr) {
+    ok(!cls(`dp_tr${i}`, `dp_ev${i}`).includes("k"), "同一车道的不该画");
+    ok(!cls("dp_prep", `dp_tr${i}`).includes("k") && cls("dp_prep", `dp_tr${i}`).includes("t"), "传递边（prep → prep2 → tr）不该画");
+    ok(!cls("dp_prep2", `dp_ev${i}`).includes("k"), "经跨车道的依赖再加车道顺序推得出来的不该画");
+  }
+  ok(!tl.includes(' on"') && !el(A, "tlbox").classList.contains("dh"), "没悬停时不该有高亮");
+  ok(run(A, "depChain('dp_prep')") !== null && run(A, "depChain('alpha_train_s0')") === null, "没有上下游的格不高亮");
+  run(A, "DEPH.id = 'dp_tr3'; drawTimeline()");
+  const hl = el(A, "tlbox").innerHTML, hs = depOf(hl);
+  ok(el(A, "tlbox").classList.contains("dh"), "悬停后 #tlbox 该加 dh");
+  const onJ = [...hl.matchAll(/<g class="jg on" data-j="([^"]*)"/g)].map(m => m[1]).sort();
+  const chain = ["dp_ev3", "dp_merge", "dp_prep", "dp_prep2", "dp_report", "dp_tr3"];
+  ok(JSON.stringify(onJ) === JSON.stringify(chain), `高亮的格应是 dp_tr3 的上下游，实际 ${onJ.join(" ")}`);
+  const onE = hs.filter(x => x[2].includes("on")).map(x => x[0] + ">" + x[1]).sort();
+  const want = ["dp_ev3>dp_merge", "dp_merge>dp_report", "dp_prep2>dp_tr3", "dp_prep>dp_prep2", "dp_tr3>dp_ev3"].sort();
+  ok(JSON.stringify(onE) === JSON.stringify(want), `高亮的线应只是这条链上的（传递边不算），实际 ${onE.join(" ")}`);
+  ok(hl.includes('<g class="jg" data-j="dp_tr4"') && hl.includes('<g class="jg" data-j="dp_side_a"'), "链外的格不该高亮");
+  run(A, "DEPH.id = null; drawTimeline()");
+  ok(!el(A, "tlbox").classList.contains("dh"), "移开后取消高亮");
 });
 t("project", "占位任务写了 after=：卡片写预计放行、提示写等谁，时间线与 KPI 不再说按估时猜；没写的照旧", () => {
   const A = pjCtx(PJ, EVN), h = app(A), tp = tips(h), who = "等 alpha_train_s1、proj-b 的 beta_eval_s7 跑完";

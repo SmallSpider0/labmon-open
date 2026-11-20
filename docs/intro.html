@@ -600,7 +600,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <li><b>找不到</b>要持续 2 分钟才报：两边清单同时加行时，被等的那台可能还没认出新行，别的主机的状态又是每分钟读一次。时限内照样挡着，原因写“还没在哪台主机的清单里见到它”，不告警；起算时刻写进状态，worker 重启接管不重等。</li>
         <li><b>占位任务</b>：名字里按词含 <code>hold</code> 或 <code>pause</code>（<code>hold_x</code>、<code>pause-1</code> 算，<code>threshold</code> 不算），命令是“等某个标记再退出”。它不要卡、不独占、不受屏障限制，也不为它停保活；续租、约定归还的截止不挡它。时长只按 <code>est_min</code>。</li>
         <li>占位任务只留给 labmon 看不到的条件（外部数据到位、人工确认）；等别的任务跑完写依赖。也不要在 GPU 任务的命令里先等再跑：等的时候照样占着卡、记着份额。</li>
-        <li>项目页时间线从被等的任务结束连一条细线到它开始；<code>labmon worker status</code> 的“依赖”几行列出各任务等谁、预计何时开始。</li>
+        <li>项目页时间线从被等的任务结束连一条细线到它开始，压在任务条下面、走行缝；平时只画跨车道、推不出来的，悬停一个任务（触屏点一下）高亮它的整条上下游；<code>labmon worker status</code> 的“依赖”几行列出各任务等谁、预计何时开始。</li>
       </ul>
       <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/worker.md#依赖">worker.md「依赖」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/worker.md#资源提示">「资源提示」占位任务</a></p>
     </div></details>

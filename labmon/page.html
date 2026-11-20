@@ -86,6 +86,17 @@ svg { display: block; overflow: visible; }
 svg text { font-size: 11px; fill: var(--muted); }
 svg .lab { fill: var(--fg); font-size: 12px; }
 svg rect.j { cursor: pointer; }
+/* 依赖连线（depLines）：平时只显关键的；#tlbox.dh 时只显链上的、加深，链外的任务条淡出（#111） */
+#tlbox .dl { display: none; }
+#tlbox .dl path { fill: none; stroke: var(--fg); stroke-opacity: .35; }
+#tlbox .dl path.ar { fill: var(--fg); fill-opacity: .5; stroke: none; }
+#tlbox .dl.k { display: inline; }
+#tlbox.dh .dl { display: none; }
+#tlbox.dh .dl.on { display: inline; }
+#tlbox.dh .dl.on path { stroke: var(--accent); stroke-opacity: .95; stroke-width: 1.6; }
+#tlbox.dh .dl.on path.ar { fill: var(--accent); fill-opacity: 1; stroke: none; }
+#tlbox .jg { transition: opacity .12s; }
+#tlbox.dh .jg:not(.on) { opacity: .25; }
 #tlbox { touch-action: pan-y; cursor: grab; user-select: none; -webkit-user-select: none; }
 #tlbox.drag, #tlbox.drag * { cursor: grabbing; }
 .ch { width: 100%; cursor: crosshair; }
@@ -460,7 +471,8 @@ function tlItems(c) {
     ["failed", "失败", sw(jobBar("failed", false, 0, 1, 22, 10, "var(--bad)"))],
     ["killed", "被停下", sw(jobBar("failed", false, 0, 1, 22, 10, "var(--warn)"))],
     ["attempt", "失败的尝试（数字是挨在一起的次数）", sw(`<rect x="0" y="8" width="22" height="3" rx="1" fill="var(--bad)"/>` + attemptMark(11, 6, 1), 22)],
-    ["dep", "依赖（after=）：从等的任务结束连到它开始", sw(`<path d="M1 3C9 3 13 9 20 9" fill="none" stroke="var(--fg)" stroke-opacity=".45"/><circle cx="20" cy="9" r="2" fill="var(--fg)" fill-opacity=".6"/>`)],
+    ["dep", "依赖（after=）：跨车道的从等的任务结束连到它开始，同车道的、能经别的依赖推出来的不画；悬停（触屏点一下）任务看它的整条上下游",
+      sw(`<path d="M1 2H5V7H16V9" fill="none" stroke="var(--fg)" stroke-opacity=".5"/><path d="M13 8L16 12L19 8Z" fill="var(--fg)" fill-opacity=".6"/>`)],
     ["gap", "空档（标原因；往后的写推演里在等谁）", sw(`<line x1="0" x2="22" y1="6" y2="6" stroke="var(--faint)" stroke-dasharray="2 3"/>`)],
     ...occItems("var(--faint)", "同机别的项目："),
     ["util", "整机 GPU 利用率（主机行的浅底：近 10 分钟平均，保活按 0 算）", sw(`<path d="M0 11L5 4L10 6L15 2L22 7L22 12L0 12Z" fill="var(--accent)" fill-opacity=".13"/><path d="M0 11L5 4L10 6L15 2L22 7" fill="none" stroke="var(--accent)" stroke-opacity=".7"/>`)],
@@ -478,6 +490,7 @@ function timelineCard() {
 function drawTimeline() {
   const box = document.getElementById("tlbox"); if (!box?.clientWidth) return;     // 嵌在看板里又被隐藏了：再显示时看板会调它重画
   tlBind(box);
+  DEPH.ch = depChain(DEPH.id); box.classList.toggle("dh", !!DEPH.ch);     // 悬停着的那格的上下游：重画时照样高亮（laneRow、depLines 读 DEPH.ch）
   const {t0, t1} = tlRange(), win = (a, b) => a != null && b != null && b > t0 && a < t1;
   const showAll = LS.get("tlall", false), rows = [], used = new Set();
   let hidden = 0;
@@ -508,24 +521,69 @@ function drawTimeline() {
   // 左栏要多宽（#108）：主机短名、车道名（从 x=18 起，右边留计划项圆点）都写得下；tlSvg 再按上限截
   const lw = Math.max(...shown.flatMap(([h, vis]) => [textW(hostShort(h)) + 8,
     ...vis.map(l => 26 + 7 * Math.min(4, multi ? gsOf(l).length : 0) + textW(laneLabel(l) + laneTail(l)))]));
-  tlShow(box, rows, {markers: D.markers, more, over: depLines, lw, items: () => tlItems(gcolor([...used][0]))});
+  tlShow(box, rows, {markers: D.markers, more, under: depLines, lw, items: () => tlItems(gcolor([...used][0]))});
   const lg = document.getElementById("tllegend");
   if (lg) lg.innerHTML = D.groups.filter(g => used.has(g.id)).map(g => `<span class="nw"><span class="dot" style="background:${g.color}"></span> ${esc(g.label)}</span>`).join(" &nbsp;");   // 只列这段时间图上有的
 }
-// 依赖连线：任务写了 after= / afterany=（worker 推演的 deps）、等的是本项目图上画出来的任务时，从它结束连一条细线到这个任务开始，
-// 末端一个小圆点；等别的项目的、等的不在图上的只写在悬停里。条的位置是 laneRow 记进 c.pos 的。
-// 早于依赖结束就开始的不连（改成依赖之前起的占位任务，自己在等）
-function depLines(c) {
-  let s = "";
-  for (const j of D.jobs) for (const [p, n] of j.deps || []) {
-    const a = p === D.id && c.pos?.[n], b = c.pos?.[j.id];
-    if (!a || !b || b.x0 < a.x1 - 1) continue;
-    const dx = Math.max(6, Math.abs(b.x0 - a.x1) / 2);
-    c.seen.add("dep");
-    s += `<path class="dl" d="M${a.x1},${a.y}C${a.x1 + dx},${a.y} ${b.x0 - dx},${b.y} ${b.x0},${b.y}" fill="none" stroke="var(--fg)" stroke-opacity=".45"/>`
-      + `<circle cx="${b.x0}" cy="${b.y}" r="2" fill="var(--fg)" fill-opacity=".6"/>`;
+// 依赖连线（#111）：任务写了 after= / afterany=（worker 推演的 deps）、等的是本项目图上画出来的任务时连线；等别的项目的、等的不在图上的只写在悬停里，
+// 早于依赖结束就开始的不连（改成依赖之前起的占位任务，自己在等）。条的位置、行号 r 与行的上下沿 yt、yb 是 laneRow 记进 c.pos 的。
+// 平时只画关键的（类 k）：同一行的不画（车道是串行队列，清单顺序已说明先后），能经别的依赖或车道顺序推出来的（传递边）不画；
+// 悬停一格（触屏点一下，depHover）时它的整条上下游（depChain）上的条与线高亮（类 on，#tlbox 加 dh），链上在依赖里也是传递边的（类 t）仍不画。
+// 线压在条下面（tlSvg 的 under），直角折线：从结束处往右一点竖到等它的那格靠这边的行缝，沿行缝横走，从那格开头的上沿（或下沿）进去；
+// 同一格的几条依赖共用最后那根竖干、自然成束
+const DEPH = {id: null, ch: null};      // 高亮的是哪一格，它的上下游（drawTimeline 与 depHover 算）
+const JTAP = {id: null, t: 0};          // 触屏点任务条：第一次高亮，再点才跳到任务明细（tapTwice）
+const depEdges = () => D.jobs.flatMap(j => (j.deps || []).filter(([p]) => p === D.id).map(([, n]) => [n, j.id]));
+const depNext = es => { const m = new Map(); for (const [a, b] of es) (m.get(a) || m.set(a, []).get(a)).push(b); return m; };
+// 一格的整条上下游（只沿依赖，车道顺序不算）：它自己、祖先与子孙；没有上下游的给 null（不淡出别的）
+function depChain(id) {
+  if (!id) return null;
+  const es = depEdges(), out = new Set([id]);
+  for (const g of [depNext(es.map(([a, b]) => [b, a])), depNext(es)]) {
+    const st = [id];
+    while (st.length) for (const x of g.get(st.pop()) || []) if (!out.has(x)) { out.add(x); st.push(x); }
   }
-  return s && `<g clip-path="url(#tlclip)" style="pointer-events:none">${s}</g>`;
+  return out.size > 1 ? out : null;
+}
+const depOn = (ch, a, b, t) => !!ch && !t && ch.has(a) && ch.has(b);
+// 去掉 a→b 这一条以后，a 沿 g 还走得到 b 吗（传递边）
+function depVia(g, a, b) {
+  const st = (g.get(a) || []).filter(x => x !== b), seen = new Set(st);
+  while (st.length) { const x = st.pop(); if (x === b) return true; for (const y of g.get(x) || []) if (!seen.has(y)) { seen.add(y); st.push(y); } }
+  return false;
+}
+// 一条线怎么走：[折线, 箭头]。mid：同一行、中间隔着别的格
+function depRoute(A, B, mid) {
+  if (A.r === B.r && !mid) return [`M${A.x1},${A.y}H${B.x0}`, `M${B.x0 - 4},${B.y - 3}L${B.x0},${B.y}L${B.x0 - 4},${B.y + 3}Z`];     // 同一行紧挨着：直连，箭头朝右
+  const up = A.r === B.r || B.y < A.y, sx = A.x1 + 3, ex = Math.max(sx, Math.min(B.x0 + 4, (B.x0 + B.x1) / 2));
+  const cy = A.r === B.r ? A.yb + 1 : up ? B.yb + 1 : B.yt - 1, ey = up ? B.yb - 3 : B.yt + 3, k = up ? 4 : -4;     // cy：行缝；ey：那格的下沿或上沿
+  return [`M${A.x1},${A.y}H${sx}V${cy}H${ex}V${ey}`, `M${ex - 3},${ey + k}L${ex},${ey}L${ex + 3},${ey + k}Z`];
+}
+function depLines(c) {
+  const P = c.pos || {}, key = new Set();
+  const E = depEdges().filter(([a, b]) => P[a] && P[b] && P[b].x0 >= P[a].x1 - 1 && !key.has(a + "\n" + b) && key.add(a + "\n" + b));
+  if (!E.length) return "";
+  c.seen.add("dep");
+  const rows = {};
+  for (const [id, p] of Object.entries(P)) (rows[p.r] ||= []).push([p.x0, id]);
+  const lane = Object.values(rows).flatMap(xs => xs.sort((u, v) => u[0] - v[0]).slice(1).map((x, i) => [xs[i][1], x[1]]));     // 车道顺序：同一行相邻的两格
+  const gE = depNext(E), gEL = depNext([...E, ...lane]);
+  let s = "";
+  for (const [a, b] of E) {
+    const A = P[a], B = P[b], t = depVia(gE, a, b), k = A.r !== B.r && !depVia(gEL, a, b);
+    const [d, ar] = depRoute(A, B, A.r === B.r && rows[A.r].some(([x]) => x > A.x0 && x < B.x0));      // 同一行、中间隔着别的格：走这一行下沿的行缝
+    s += `<g class="dl${k ? " k" : ""}${t ? " t" : ""}${depOn(DEPH.ch, a, b, t) ? " on" : ""}" data-a="${esc(a)}" data-b="${esc(b)}"><path d="${d}"/><path class="ar" d="${ar}"/></g>`;
+  }
+  return `<g clip-path="url(#tlclip)" style="pointer-events:none">${s}</g>`;
+}
+// 悬停（触屏点一下）一格：只换类名，不整张重画；离开任务条给 null
+function depHover(id) {
+  if (id === DEPH.id) return;
+  DEPH.id = id; DEPH.ch = depChain(id);
+  const box = document.getElementById("tlbox"), ch = DEPH.ch; if (!box) return;
+  box.classList.toggle("dh", !!ch);
+  box.querySelectorAll("[data-j]").forEach(g => g.classList.toggle("on", !!ch?.has(g.dataset.j)));
+  box.querySelectorAll(".dl").forEach(g => g.classList.toggle("on", depOn(ch, g.dataset.a, g.dataset.b, g.classList.contains("t"))));
 }
 // 主机表头一行（上面有分隔线，这台的车道缩进挂在下面）：主机短名；整机 GPU 利用率画成浅底；ev 时底边一条事件色带
 // （连不上、drain、暂停、续租截止、没在采集），竖线是换容器、续租与作废重排
@@ -578,6 +636,7 @@ function othersRow(host, oc, y, h, c) {
 const laneTail = l => l.away ? "（在这台跑完）" : l.returned ? "（已归还）" : "";
 function laneRow(l, hb, gs, y, h, c, used) {
   let s = "";
+  const r = c.nrow = (c.nrow || 0) + 1;     // 行号：依赖连线认同一行（depLines）
   const js = rowJobs(l, l.away || l.host);
   const lt = l.away ? `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n清单已登记到 ${hostOf(l.host).label || l.host}，之后的任务在那台跑；`
     + `这一格是登记搬走前 ${hostOf(l.away).label || l.away} 放行的，在这台跑完` : `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n计划项：${laneGroups(js).map(g => GROUPS[g]?.label || g).join("、") || "—"}\n完成 ${l.done}/${l.total} · 排队 ${js.filter(j => j.status === "queued").length}${l.failed ? " · 失败 " + l.failed : ""}\n${laneState(l)}${l.eta_ts ? "\n本车道完成 " + ts(l.eta_ts) + (l.has_hold ? holdGuess(js) ? "（含暂停，时长是猜的）" : "（含暂停，按它等的任务算）" : "") + (l.overrun ? "（当前任务已超估时，会更晚）" : "") : ""}${l.fs_skew ? `\n共享盘时钟${l.fs_skew > 0 ? "快" : "慢"} ${f1(Math.abs(l.fs_skew) / 60)} 分（已校正）` : ""}`;
@@ -620,15 +679,16 @@ function laneRow(l, hb, gs, y, h, c, used) {
       + (j.status === "running" && !j.hold && j.eta_source ? `\n预计结束依据：${j.eta_source}` : "") + (j.host ? `\n${awayText(j)}（清单已搬到 ${hostShort(hostOf(l.host))}）` : "")
       + (j.last_line ? "\n" + j.last_line.slice(0, 90) : "");
     const yy = y + 3, hh = h - 6;
-    (c.pos ||= {})[j.id] = {x0: c.X(a0), x1: c.X(e0), y: yy + hh / 2};     // 依赖连线（depLines）从这里取
+    (c.pos ||= {})[j.id] = {x0: c.X(a0), x1: c.X(e0), y: yy + hh / 2, yt: y, yb: y + h, r};     // 依赖连线（depLines）从这里取
     c.seen.add(j.hold ? "hold" : j.status === "failed" ? (j.killed ? "killed" : "failed") : j.status);
     // 运行中的填色到“现在”：条从开始画到预计结束，条上的百分比也是现在线在条上的位置（runFrac）；按步数比例会因启动、加载那段没有步数、多段任务只报当前这段而对不上（Issue #33），步数进度写在悬停里
-    s += jobBar(j.status, j.hold, xa, yy, w, hh, col, j.status === "running" ? (c.cl(NOW) - xa) / w : 0, `class="j" data-id="${esc(j.id)}" ${tip(tt)}`);
+    s += `<g class="jg${DEPH.ch?.has(j.id) ? " on" : ""}" data-j="${esc(j.id)}">` + jobBar(j.status, j.hold, xa, yy, w, hh, col, j.status === "running" ? (c.cl(NOW) - xa) / w : 0, `class="j" data-id="${esc(j.id)}" ${tip(tt)}`);
     if (w > 56) {
       // 占位任务的斜纹已表明暂停，只加 ⏸；挂起的是在跑的任务被 SIGSTOP，写明
       const lab = barName(j) + (j.status !== "running" || j.hold || j.suspended ? "" : j.overrun_min ? " · 超估时" : j.eta_source === "无估时" ? " · 无估时" : ` · ${Math.round(runFrac(j) * 100)}%`);
       s += `<text x="${xa + 5}" y="${yy + hh / 2 + 4}" style="pointer-events:none;fill:${j.status === "done" && !j.hold ? "#fff" : "var(--fg)"}">${esc(fit(lab, w - 10, j.hold ? "⏸ " : j.suspended ? "⏸ 挂起 · " : true))}</text>`;
     }
+    s += "</g>";
   }
   // 失败的尝试（后来重跑成功的也留着）：车道底部细红条＋圆标，横向相距不到 14px 的合成一个标
   const fa = l.away ? [] : (D.attempts || []).filter(x => x.lane === l.id && c.win(x.t0, x.t1)).sort((a, b) => a.t0 - b.t0), cs = [];
@@ -654,9 +714,13 @@ function laneRow(l, hb, gs, y, h, c, used) {
 const COMPACT = {groups: 8, run: 6, sq: 48};
 // 点收起行的小方块（#115）：展开列表、滚到那一项那一行并闪一下。触屏没有悬停：第一次点只显示这一格的悬停（common.js 的 flashTip），3 秒内再点同一格才定位
 const GSQ = {id: null, t: 0};
+// 触屏没有悬停：同一格第一次点只看（悬停文字由 common.js 的 flashTip 显示），3 秒内再点同一格才动作；st 是各处自己的 {id, t}。鼠标总是动作
+function tapTwice(st, id) {
+  if (matchMedia("(hover: none)").matches && (st.id !== id || Date.now() - st.t > 3000)) { st.id = id; st.t = Date.now(); return false; }
+  st.id = null; return true;
+}
 function gsqClick(id) {
-  if (matchMedia("(hover: none)").matches && (GSQ.id !== id || Date.now() - GSQ.t > 3000)) { GSQ.id = id; GSQ.t = Date.now(); return false; }
-  GSQ.id = null;
+  if (!tapTwice(GSQ, id)) return false;
   const d = document.querySelector("details.gdone"); if (!d) return false;
   d.open = true; SS.set("gdone", true);
   const row = d.querySelector(`[data-gid="${CSS.escape(id)}"]`); if (!row) return false;
@@ -928,7 +992,7 @@ document.addEventListener("selectionchange", () => { if (PENDING) redraw(); });
 document.addEventListener("focusout", () => setTimeout(() => { if (PENDING) redraw(); }));
 document.addEventListener("click", e => {
   const t = e.target.closest("[data-tl],[data-tz],[data-tlall],[data-rw],[data-rv],[data-f],[data-g],[data-more],[data-now],[data-tlkey],[data-gsq],rect.j");
-  if (!t) return;
+  if (!t) { if (e.target.closest?.("#tlbox")) depHover(null); return; }      // 点时间线空白处：取消依赖高亮（触屏）
   if (t.matches("[data-gsq]")) { e.preventDefault(); gsqClick(t.dataset.gsq); }      // 不让外面的 <details> 自己开合
   else if (t.matches("[data-now]")) collectNow();
   else if (t.matches("[data-tl],[data-tz],[data-tlkey]")) tlClick(t);
@@ -940,6 +1004,7 @@ document.addEventListener("click", e => {
   else if (t.dataset.more) { const m = SS.get("more", {}); m[t.dataset.more] = 1; SS.set("more", m); rerender(); }
   else if (t.matches("rect.j")) {
     const id = t.dataset.id, j = D.jobs.find(x => x.id === id); if (!j) return;
+    if (!tapTwice(JTAP, id)) return depHover(id);      // 触屏第一次点：高亮它的上下游，再点才跳到任务明细
     if (j.status === "done" && LS.get("filter", "open") !== "all") LS.set("filter", "all");
     LS.set("gfilter", "");
     const m = SS.get("more", {}); m[j.lane] = 1; SS.set("more", m);
@@ -950,6 +1015,12 @@ document.addEventListener("click", e => {
   }
 });
 document.addEventListener("toggle", e => { if (e.target.matches?.("details")) saveView(); }, true);
+// 鼠标悬停任务条高亮它的上下游（depHover）；触屏、触控笔由点击（tapTwice）管，拖动平移时不换
+document.addEventListener("pointerover", e => {
+  if (e.pointerType !== "mouse" || TL.d?.moved) return;
+  const g = e.target.closest?.("#tlbox [data-j]");
+  depHover(g ? g.dataset.j : null);
+});
 window.addEventListener("beforeunload", saveView);
 let rt; window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(drawTimeline, 150); });
 function setData(d) { D = d; NOW = d.generated; GROUPS = Object.fromEntries((d.groups || []).map(g => [g.id, g])); }
