@@ -28,7 +28,7 @@ from . import pool as PO
 from . import projects as PJ
 from .config import AUTO_GROUP_RE, GIB, HOLD_RE, POOL, POOL_LABEL, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
 from .health import link_step
-from .state import load_json, load_rows, save_json, snapshot, usage_file, write_atomic
+from .state import load_json, load_rows, save_json, snapshot, usage_file, usage_hosts, write_atomic
 
 HERE = Path(__file__).resolve().parent
 SCHEMA = 2
@@ -486,7 +486,7 @@ def _lanes(cfg: dict, snap: dict, state: dict, raw_by_host: dict, t: float) -> t
             del work["susp"][k]
     busy = [ln for ln in snap["lanes"] if ln.get("unfinished")]
     snap["all_done_ts"] = max((ln["eta_ts"] for ln in busy if ln.get("eta_ts")), default=None)   # 有意暂停的车道没有 ETA，不计
-    snap["attempts"] = _attempts(snap["lanes"], cfg["id"], t)
+    snap["attempts"] = _attempts(snap, cfg["id"], t)
     state["multiseg"] = sorted(work["multi"])[-200:]
     return work["ratios"], quiet
 
@@ -1007,17 +1007,27 @@ def gpu_mine(pid: str, hids: list, glob_snap: dict, t: float) -> dict | None:
     return {"util": round(acc / w, 1), "card_s": round(w), "n": n} if w else None
 
 
-def _attempts(lanes: list[dict], pid: str, t: float) -> list[dict]:
+def _attempts(snap: dict, pid: str, t: float) -> list[dict]:
     """失败的尝试（任务后来重跑成功也留着）：时间线画成细红条，解释那段时间车道上发生了什么。
-    取工作台存的用量记录（state.usage_file：worker 跑完的任务一行，存 30 天），按主机、目录、清单对到本项目的车道。"""
-    out, rows = [], {}
-    for ln in lanes:
+    取工作台存的用量记录（state.usage_file：worker 跑完的任务一行，存 30 天），按主机、目录、清单对到本项目的车道。
+    交回算力池的车道（#99）：车道主机是 pool，跑过的行记在实际跑的那几台下，各台都看；失败的尝试带上那台（host），
+    跑完、失败的任务没有 host 的按最后一次的行补上那台，项目页把它们画在那台下面（#89：已经跑过的按实际跑的主机画）。"""
+    out, rows, last = [], {}, {}
+    for ln in snap["lanes"]:
         if not ln.get("root"):
             continue
-        if ln["host"] not in rows:
-            rows[ln["host"]] = load_rows(usage_file(ln["host"]))
-        out += [{"name": r["n"], "lane": ln["id"], "t0": r["s"], "t1": r["t"]} for r in rows[ln["host"]]
-                if r.get("st") == "failed" and r.get("p") == pid and (r.get("root"), r.get("queue")) == (ln["root"], ln["queue"]) and r["t"] >= t - KEEP_LONG_S]
+        hids = usage_hosts() if ln.get("pool") else [ln["host"]]
+        for h in hids:
+            if h not in rows:
+                rows[h] = load_rows(usage_file(h))
+        mine = [(h, r) for h in hids for r in rows[h] if r.get("p") == pid and (r.get("root"), r.get("queue")) == (ln["root"], ln["queue"])]
+        out += [{"name": r["n"], "lane": ln["id"], "t0": r["s"], "t1": r["t"], **({"host": h} if ln.get("pool") else {})}
+                for h, r in mine if r.get("st") == "failed" and r["t"] >= t - KEEP_LONG_S]
+        if ln.get("pool"):
+            last.update({(ln["id"], r["n"]): h for h, r in sorted(mine, key=lambda x: x[1]["t"]) if r.get("st") in ("done", "failed")})   # 最后一次的那台
+    for j in snap["jobs"]:
+        if j["status"] in ("done", "failed") and not j.get("host") and (j["lane"], j["id"]) in last:
+            j["host"] = last[(j["lane"], j["id"])]
     return out
 
 

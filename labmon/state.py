@@ -33,6 +33,12 @@ def usage_file(hid: str) -> Path:
     return state_dir() / "usage" / f"{hid}.jsonl"
 
 
+def usage_hosts() -> list[str]:
+    """存着用量记录的主机（usage_file 的那些文件）：不知道任务在哪台跑的时候各台都看（labmon wait --job、项目页池车道跑过的任务）。"""
+    d = state_dir() / "usage"
+    return sorted(f.stem for f in d.glob("*.jsonl")) if d.exists() else []
+
+
 def file_sig(path) -> tuple | None:
     """文件变没变的签名 (inode, 修改时刻纳秒, 大小)；没有或读不到为 None。按文件缓存读出内容的都拿它比：只比 st_mtime 时，
     同一个时间戳粒度里连写两次（Linux 上约 4 ms，共享盘更粗）第二次就漏读，要等下次再写才补上（#31）。

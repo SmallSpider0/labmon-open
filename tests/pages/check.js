@@ -1620,6 +1620,20 @@ t("project", "#100 清单搬走后原主机在跑完的那一格：画在原主�
   has(h, "借 OWNER 车道 1 · b2（在 srv-a 上跑完）", "运行中卡片"); has(h, "在 srv-z 上跑完", "运行中卡片");
   run(A, 'SS.set("jobsOpen", true); render()'); has(app(A), '<span class="sm mut nw">在 srv-a 上跑完</span>', "任务明细");
 });
+t("project", "#99 清单交回算力池后：跑过、在跑的任务与失败的尝试画在实际跑的那台下（另起一行），还没放的不进时间线，视图范围也算上它们", () => {
+  const A = pjCtx(J("project_pool_back.json"), EVN); run(A, `TL.v = {a: ${-6 * H}, b: ${6 * H}}; drawTimeline()`);
+  const tl = el(A, "tlbox").innerHTML, labs = [...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
+  ok(JSON.stringify(labs.slice(-2)) === JSON.stringify(["srv-y", "车道 1 · p（在这台跑完）"]), "回池的车道该在 srv-y 下另起一行：" + JSON.stringify(labs));
+  clean(tl, "时间线");
+  for (const id of ["alpha_pool_s0", "alpha_pool_s4"]) ok((tl.match(new RegExp(`data-id="${id}"`, "g")) || []).length === 1, id + " 该画一次");
+  ok(!tl.includes('data-id="alpha_pool_s1"'), "还在池里待放的不该画");
+  has(tips(tl), "失败的尝试", "srv-y 上失败的尝试该画在那一行");
+  has(tips(tl), "在 srv-y 上跑完（清单已交回算力池）", "条的悬停");
+  has(tips(tl), "清单已交回算力池，之后的任务等看板放到某台", "行名的悬停");
+  has(tl, "算力池 车道 1 · p（1 个任务）不在图上", "时间线下只数还没放的");
+  const near = run(A, "JSON.stringify(D.jobs.filter(j => !inPool(j)).map(j => j.id))");
+  ok(near.includes("alpha_pool_s0") && near.includes("alpha_pool_s4") && !near.includes("alpha_pool_s1"), "视图范围该算上跑过的、不算待放的：" + near);
+});
 t("project", "#108 车道名的清单名长、计划项多：左栏按行名放宽，放不下时留住「车道 N」与清单名末段，圆点收成个数，悬停是全名", () => {
   const A = pjCtx(J("project_longq.json"), EVN), labs = () => [...el(A, "tlbox").innerHTML.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
   for (const w of [1200, 375, 330]) {

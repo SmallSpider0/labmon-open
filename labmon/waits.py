@@ -16,7 +16,7 @@ from pathlib import Path
 from . import projects as PJ
 from .config import ConfigError, fmt_dur, fmt_time, stale_limit
 from .overview import USAGE_KEEP_S
-from .state import file_sig, load_json, load_rows, save_json, snapshot, state_dir
+from .state import file_sig, load_json, load_rows, save_json, snapshot, state_dir, usage_file, usage_hosts
 
 JOB_CONFIRM = 2       # wait --job：没见过它在跑、排队就已结束、找不到、不会再跑的，要连着这么多份开始等之后写出的快照都这样才报（#135）
 JOB_BAD_RC = 4        # wait --job 都有了结果、但不全是成功（失败、作废、找不到、不会再跑）的退出码；1 是新告警，2、3 已被参数错、配置错占着
@@ -243,8 +243,7 @@ class JobWatch:
                 self.final[k] = {"st": "missing", "text": gone}
                 continue
             if rows is None and not any(j["id"] == k[1] for j in (snap or {}).get("jobs", [])):
-                files = sorted((state_dir() / "usage").glob("*.jsonl"))
-                rows = [(f.stem, r) for f in files for r in load_rows(f) if (r.get("t") or 0) >= time.time() - USAGE_KEEP_S]   # 文件只在追加时修剪
+                rows = [(h, r) for h in usage_hosts() for r in load_rows(usage_file(h)) if (r.get("t") or 0) >= time.time() - USAGE_KEEP_S]   # 文件只在追加时修剪
             st = cur[k] = job_state(snap, k[1], [(h, r) for h, r in rows or () if (r.get("p"), r.get("n")) == k])
             if st["st"] in ("running", "queued"):
                 self.live.add(k)
