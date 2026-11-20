@@ -2848,6 +2848,42 @@ class RegDupTest(UnitBase):
         self.assertEqual(self.w.running, {})
         self.assertEqual(self.events("interrupt"), [])
 
+    def test_moved_lane_running_cell_stays_on_old_host(self):
+        # #100：搬登记时 o 正在跑队首 j1。车道跟着登记到 t，但 j1 仍在 o 上跑：t 上的探针读到 current 里放行的是 o，
+        # 项目快照里 j1 带 host=o（页面画到 o、标「在 o 上跑完」），wait --job 也照它说在 o 上跑；排队的 j2 不带
+        from labmon import collect as C
+        from labmon import waits as WT
+        from labmon.config import load
+        self.ft.unlink()
+        self.o_runs(who="o")
+        self.assertEqual(self.add("t")[0], 0)
+        out = self.d / "out"
+        mt = self.d / "monitor.toml"
+        mt.write_text(f'''id = "pa"
+out_dir = "{out}"
+[[hosts]]
+id = "t"
+[[hosts]]
+id = "o"
+[[queues]]
+id = "s"
+host = "t"
+root = "{self.q["root"]}"
+jobs = "jobs/q.txt"
+''')
+        raw = P.queue_gpu_queue({"root": self.q["root"], "jobs": "jobs/q.txt", "me": "t"})
+        self.assertEqual(raw["current"]["host"], "o")
+        now = time.time()
+        with mock.patch.dict(os.environ, {"LABMON_HOSTS": str(self.d / "none.toml"), "LABMON_STATE": str(self.d / "state")}):
+            snap = C.build(load(mt), {"t": ({"t": now, "queues": {"s": raw}}, None), "o": ({"t": now}, None)}, out)
+        js = {j["id"]: j for j in snap["jobs"]}
+        self.assertEqual((js["j1"]["status"], js["j1"].get("host")), ("running", "o"))
+        self.assertNotIn("host", js["j2"])
+        self.assertEqual(next(ln for ln in snap["lanes"] if ln["id"] == "s")["host"], "t")
+        st = WT.job_state(snap, "j1", [])
+        self.assertEqual(st["st"], "running")
+        self.assertTrue(st["text"].startswith("在 o 上跑"), st["text"])
+
     def test_add_expect_from_requires_source(self):
         # 算力池搬清单（#25）带 --expect-from 原来那台：在登记锁里核对那台还登记着它；会话已撤回、已搬走的不再重新登记（Codex 审查 #75）
         self.ft.unlink()

@@ -533,8 +533,11 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
         alerts.append(alert(f"cpu:{q['id']}", "agent", f"{where} 因 CPU 被挡 {lane['cpu_wait'] // 60} 分钟：{lane['waiting']}"))
     lane["started"] = "activity" not in raw or raw["activity"] is not None   # 从没启动过（预先登记的队列）
     plans = {j["id"]: j.get("plan") for j in jobs}      # worker 推演里的这一条（_job_times 取走，_queued_times 还要按车道排）
+    away = (raw.get("current") or {}).get("host")      # current 里放行的主机（#95）：清单搬走前那台放的，那台接着跑完手上这一格
     for j in jobs:
         j["lane"] = q["id"]
+        if j["status"] == "running" and away and away != q["host"]:
+            j["host"] = away                           # 运行中的这一格在哪台跑（#100）：车道仍按登记，项目页把它画到那台、标「在 X 上跑完」
         j["hold"] = bool(HOLD_RE.search(j["id"]))
         j["group"] = None if j["hold"] else _group_of(j["id"], cfg["groups"], cfg["auto_groups"])
         _job_times(j, q["id"], cfg["id"], cfg["alerts"], work, alerts, t, where, fresh=host_ok)

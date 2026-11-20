@@ -1569,6 +1569,22 @@ t("project", "时间线按主机分组：主机一行表头（利用率、事件
   run(A, 'TL.v = null; LS.set("tl", "week"); drawTimeline()');
   ok((el(A, "tlbox").innerHTML.match(/r="2.5"/g) || []).length === 3, "7 天里 srv-a 车道 1 跑了 probe、alpha，借 OWNER 车道 1 跑了 eval");
 });
+t("project", "#100 清单搬走后原主机在跑完的那一格：画在原主机下另起一行（只画那一格），登记所在主机那行不画它；运行中与明细标「在 X 上跑完」", () => {
+  const A = pjCtx(J("project_moved.json"), EVN); run(A, `TL.v = {a: ${-3 * H}, b: ${12 * H}}; drawTimeline()`);
+  const tl = el(A, "tlbox").innerHTML, labs = [...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
+  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1 · q1", "车道 2 · q2", "车道 1 · b2（在这台跑完）", "借 OWNER", "车道 1 · b2", "池 PERSON7", "车道 1 · h",
+    "srv-z", "车道 1 · b2（在这台跑完）"]), JSON.stringify(labs));
+  clean(tl, "时间线");
+  const rows = tl.split('stroke-opacity=".4"'), at = id => rows.findIndex(r => r.includes(`data-id="${id}"`));
+  ok(at("alpha_eval_s5") === 0 && at("alpha_train_s1") === 0, "alpha_eval_s5 该画在 srv-a 那组：" + at("alpha_eval_s5"));
+  ok(at("alpha_eval_s4") === rows.length - 1, "主机表里没有的 srv-z 另起一组：" + at("alpha_eval_s4"));
+  ok((tl.match(/data-id="alpha_eval_s5"/g) || []).length === 1, "这一格只该画一次（登记所在的 srv-b 那行不画）");
+  has(tips(tl), "在 srv-a 上跑完（清单已搬到 借 OWNER）", "条的悬停");
+  has(tips(tl), "这一格是登记搬走前 srv-a（A6000） 放行的，在这台跑完", "行名的悬停");
+  const h = app(A); clean(h, "项目页");
+  has(h, "借 OWNER 车道 1 · b2（在 srv-a 上跑完）", "运行中卡片"); has(h, "在 srv-z 上跑完", "运行中卡片");
+  run(A, 'SS.set("jobsOpen", true); render()'); has(app(A), '<span class="sm mut nw">在 srv-a 上跑完</span>', "任务明细");
+});
 t("project", "#108 车道名的清单名长、计划项多：左栏按行名放宽，放不下时留住「车道 N」与清单名末段，圆点收成个数，悬停是全名", () => {
   const A = pjCtx(J("project_longq.json"), EVN), labs = () => [...el(A, "tlbox").innerHTML.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
   for (const w of [1200, 375, 330]) {

@@ -264,6 +264,8 @@ def queue_gpu_queue(q):
         else:                                    # 已归还主机的（readonly）都不算在跑
             c["alive"] = False if ro else True if away else _pid_alive(c["pid"])
         c["stopped"] = _tree_stopped(c["pid"]) if c["alive"] and not away else None
+        if who:
+            c["host"] = who                      # 在哪台跑：清单搬走后原主机接着跑完手上那一格，项目页画到那台（#100）
         lf = os.path.join(logs, p[0] + ".log")
         lines = [l.rstrip() for l in _tail(lf).replace("\r", "\n").splitlines() if l.strip()]
         k = max((i for i, l in enumerate(lines) if START_RE.match(l)), default=-1)
