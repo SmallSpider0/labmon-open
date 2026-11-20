@@ -1,7 +1,7 @@
 """多主机负载均衡的提示（Issue #20 第一档“只提示”）：把各主机 worker 写的 offers 汇成每个项目一条挪法建议。
 
 各台 worker 用自己的放行与推演规则算“别的主机上这个项目的哪几行我能接、接来后几点跑完”（labmon_worker 的 offers）；
-这里按项目挑整批完工最早的一种挪法：哪台、挪前几行（同一台上多开一条车道也算一种，offer 带 local，#43），整批从何时提前到何时。
+这里按项目挑整批完工最早的一种挪法：哪台、挪前几行（同一台上多开一条车道、挪到同一台另一条早跑完的清单也算，offer 带 local，#43、#110），整批从何时提前到何时。
 整批至少提前 max(GAIN_MIN_S, min(GAIN_S, 剩余时间 × GAIN_SHORT_FRAC), 剩余时间 × GAIN_FRAC) 才建议（_need；维护者 2026-11-08 定 1 小时与 10%，
 #43 按推荐放宽短批：剩 2 小时的批早 36 分钟就报）；报过建议的项目降到阈值一半以下才收、目标主机沿用上一轮的（滞回，免得在阈值附近或几台之间来回叫醒）。挪不了的写原因（只在页面上，不叫醒）。
 整批没有够门槛的挪法（整批被挪不动的行撑着，或何时跑完推不出），而接收方此刻没有 labmon 任务在跑（offer 的 idle）时，改按行比：
@@ -79,17 +79,19 @@ def _text(p: dict, proj: str, label: dict, t: float) -> str:
         when = f"整批预计 {fmt_time(p['to'])} 跑完（现在有任务在原处跑不了，整批何时跑完推不出）"
     dep = [j["name"] for j in p["jobs"] if j.get("dep")]
     tail = f"；写了 after= 的 {'、'.join(dep)} 排在挪来的几行最后（等别的任务的行在前会堵住后面的）" if dep and len(dep) < len(p["jobs"]) else ""
+    lane = p.get("lane") and f"{p['lane'][0].rstrip('/')}/{p['lane'][1]}"
+    where = (f"插在 {lane} 里 {p['before']} 前面（它写了 after=，要等别的任务；接在它后面会被它堵住）" if lane and p.get("before")
+             else f"接在 {lane} 后面" if lane else None)
+    if p.get("local") and lane:        # 同机挪到另一条早跑完的清单（#110）：车道数不变，原清单在同一台排到别的清单跑完后才跑完
+        return f"把 {what} 挪到同一台上另一条早跑完的清单（{where}{tail}）：{when}{TAIL % fmt_time(t, date=False)}"
     if p.get("local"):                 # 同机多开一条车道（#43）：剪到新的长期清单，与原清单同目录、同环境
         # 推演只在没吃满的卡上排（offer 的 gpus）：登记时照样限卡，否则真放行可能放到吃满的卡上（Codex 审 #63）
         gp = f" --gpus {','.join(map(str, p['gpus']))}（只用这几张卡：别的卡已吃满）" if p.get("gpus") else ""
         return (f"在 {label.get(tid, tid)} 上多开一条车道：把 {what} 剪到一条新的长期清单（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；"
                 f"原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}{gp}，以后同类任务也往这条追加{tail}："
                 f"{when}{TAIL % fmt_time(t, date=False)}")
-    lane = p.get("lane") and f"{p['lane'][0].rstrip('/')}/{p['lane'][1]}"
-    where = (f"插在 {lane} 里 {p['before']} 前面（它写了 after=，要等别的任务；接在它后面会被它堵住）" if lane and p.get("before")
-             else f"接在 {lane} 后面" if lane
-             else f"这台还没有本项目同一种环境的清单：新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；原清单没有 .env 时也新建一个，只写这两行）"
-             f"并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}")
+    where = where or (f"这台还没有本项目同一种环境的清单：新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；"
+                      f"原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}")
     return f"把 {what} 挪到 {label.get(tid, tid)}（{where}{tail}）：{when}{TAIL % fmt_time(t, date=False)}"
 
 
@@ -153,7 +155,7 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
     报过建议的项目门槛减半（滞回）；上一轮的目标主机仍够门槛、跑完的时刻比最优的晚不到 STICK_S 时沿用它，免得几台一样空时每轮换一句。
     建议 {key 告警 key, target 挪到哪台, lane 接在它哪条清单后面, before 插在那条清单里哪一行前面（它写了依赖；None 接在末尾）,
     jobs [{host, root, queue, name, there, rest, end, own, dep 这一行写了 after=}], from 原来整批何时跑完
-    （推不出为 None）, to 挪后（推不出为 None）, cut 其中被借用约定挡住的清单 ["主机|目录|清单"], local 是不是同机多开一条车道, text}；
+    （推不出为 None）, to 挪后（推不出为 None）, cut 其中被借用约定挡住的清单 ["主机|目录|清单"], local 是不是同机的挪法（lane 为 None 是多开一条车道，否则挪到同一台的那条清单）, text}；
     整批没有够门槛的挪法、而有一台空着（offer 的 idle）时按行比（_idle_gain，#62）：建议另带 idle: True、there 这几行在原处最早何时跑完（说不出为 None）、
     done 挪过去后何时都跑完；挪不了的 {why [每台一句], from}；
     没有可挪的、却有一台有空（这个项目早就没活，或同机能多开车道）只因挪来的那一行没有估时推演算不出（offer 的 nodur）时，
@@ -220,7 +222,7 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
 def move_key(proj: str, p: dict) -> str:
     """挪法建议的告警 key（#109）：rebalance:<项目>:<挪到哪台>:<原主机>/<清单>/<第一行>。第一行是最先挪的那一行（排得最晚那条清单的队尾）：
     推演在抖、多挪少挪一行它不变，不重报；换了目标、换了清单、照做剪掉队尾后又建议接着挪，都是新的挪法，labmon wait 再叫醒一次
-    （同一挪法消失后 6 小时内再出现仍不叫醒，waits.REWAKE_S）。提前多少不进 key：每轮都在漂，句子里写最新的。同机多开车道的目标就是原主机。"""
+    （同一挪法消失后 6 小时内再出现仍不叫醒，waits.REWAKE_S）。提前多少不进 key：每轮都在漂，句子里写最新的。同机的两种挪法（挪到另一条清单、多开一条车道）目标都是原主机。"""
     j = p["jobs"][0]
     return f"rebalance:{proj}:{p['target']}:{j['host']}/{j['queue']}/{j['name']}"
 

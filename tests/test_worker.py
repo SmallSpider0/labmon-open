@@ -3298,13 +3298,14 @@ class OffersTest(UnitBase):
 
     def test_offer_numbers_and_suggestion(self):
         # o：a0 在跑还要 1 小时，a1–a5 各 2 小时，排到 11 小时后；t 空着。从 o 的队尾往前挑 a5、a4…，挪前 k 行后 t 在 2k 小时后跑完、
-        # o 那条清单提前到 11 − 2k 小时；整批最早是挪 3 行：6 小时后（早 5 小时）
+        # o 那条清单提前到 11 − 2k 小时；整批最早是挪 3 行：6 小时后（早 5 小时）。挪 3 行时挪来的（6 小时后）已比原处剩下的（5 小时后）晚跑完，
+        # 再挪只会更晚，不再往下试（moved_past，#110；以前 a2、a1 也各推演一遍）
         self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
         o = self.offer()["pa"]
-        self.assertEqual([j["name"] for j in o["jobs"]], ["a5", "a4", "a3", "a2", "a1"])
-        self.assertEqual([self.rel(j["end"]) for j in o["jobs"]], [2, 4, 6, 8, 10])
-        self.assertEqual([self.rel(j["rest"]) for j in o["jobs"]], [9, 7, 5, 3, 1])
-        self.assertEqual([self.rel(j["there"]) for j in o["jobs"]], [11, 9, 7, 5, 3])
+        self.assertEqual([j["name"] for j in o["jobs"]], ["a5", "a4", "a3"])
+        self.assertEqual([self.rel(j["end"]) for j in o["jobs"]], [2, 4, 6])
+        self.assertEqual([self.rel(j["rest"]) for j in o["jobs"]], [9, 7, 5])
+        self.assertEqual([self.rel(j["there"]) for j in o["jobs"]], [11, 9, 7])
         self.assertEqual((self.rel(o["free"]), o["lane"], o["why"]), (0, None, None))
         self.assertEqual([self.rel(v) for v in o["ends"].values()], [11])
         s = self.suggest()["pa"]
@@ -3779,7 +3780,7 @@ class OffersTest(UnitBase):
         self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
         self.busy_guest(self.w)
         o = self.offer()["pa"]
-        self.assertEqual(len(o["jobs"]), 5)
+        self.assertEqual(len(o["jobs"]), 3)                              # 第 3 行起挪来的比原处剩下的晚跑完（moved_past）
         self.assertIsNone(o["why"])
 
     def test_offers_error_keeps_last(self):
@@ -4100,6 +4101,83 @@ class OffersTest(UnitBase):
         self.assertTrue(self.w.idle(self.now))
         self.busy()
         self.assertFalse(self.w.idle(self.now))
+
+    # ---- #110：排得最晚的清单比同项目别的清单晚很多、行又短（同卡几条车道争卡，它排在别的车道后面才跑得完） ----
+    def lane_at(self, root, name, lines):
+        """t 上 pa 的一条清单，放在已有目录 root 下的 jobs/<name>.txt；.env 只写它自己的 QUEUE_STATE、QUEUE_LOGS（两条队列不共用状态目录），
+        所以与同目录的清单是同一种环境（list_env 不比这两行）。返回队列（状态目录已建）。"""
+        d = self.d / root / "jobs"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / (name + ".txt")).write_text("\n".join(lines) + "\n")
+        (d / (name + ".env")).write_text("QUEUE_STATE=state_%s\nQUEUE_LOGS=logs_%s\n" % (name, name))
+        q = self.m.load_queue({"_slug": name, "root": str(self.d / root), "jobs": "jobs/%s.txt" % name, "project": "pa"})
+        os.makedirs(q["state"], exist_ok=True)
+        return q
+
+    def heads(self, qs):
+        """几条本机清单的队首请求（同 tick：queue_durs 先算时长，new_req 拼、prep 补全）。"""
+        self.w.queue_durs(qs)
+        return [self.w.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_job(q)), self.now, {}) for q in qs]
+
+    def lane_end(self, root, queue):
+        """这一次推演里本机一条清单的最后一行何时跑完。"""
+        ln, = [ln for ln in self.w.plan["lanes"] if (ln["root"], ln["queue"]) == (root, queue)]
+        return max(j["t1"] for j in ln["jobs"])
+
+    def test_long_lane_of_short_rows_moves_more_than_five(self):
+        # #110：o 上 pa 三条清单：a、b 各 20 行 12 小时后跑完；c 40 行（各 36 分钟）排在它们后面（同卡只放得下两条），32 小时后才跑完。
+        # t 上 pa 有一条与 c 同目录、同一种环境的清单 r，12 小时后跑完。以前至多挑 5 行：整批只早 3 小时，不到剩余的 10%（3.2 小时），一直不建议；
+        # 现在挑到挪来的比原处剩下的晚跑完为止（第 17 行：r 22.2 小时后跑完，c 剩下的 21.8 小时），整批早近 10 小时
+        st = 0.6
+        rows = lambda p, n: ["%s%d|true   # est_min=36 vram=20" % (p, i) for i in range(n)]      # noqa: E731
+        self.lanes_on("o", [("a", rows("a", 20), st, st, st, None), ("b", rows("b", 20), st, st, st, None), ("c", rows("c", 40), None, 8, st, None)])
+        r = self.lane_at("c", "r", rows("r", 20))
+        o = self.offer([r], self.heads([r]))["pa"]
+        self.assertEqual((o["lane"], len(o["jobs"]), o["jobs"][0]["name"], o["jobs"][-1]["name"]), ([r["root"], "jobs/r.txt"], 17, "c39", "c23"))
+        self.assertEqual([self.rel(o["jobs"][k][x]) for k in (4, 16) for x in ("rest", "end")], [29, 15, 21.8, 22.2])
+        s = self.suggest()["pa"]
+        self.assertEqual((len(s["jobs"]), self.rel(s["from"]), self.rel(s["to"])), (17, 32, 22.2))
+        self.assertIn("接在 %s/jobs/r.txt 后面" % r["root"], s["text"])
+        self.assertIn("（早 9.8 小时）", s["text"])
+        # 照做：这 17 行接到 r 后面，t 的推演里 r 何时跑完与建议里的一样（同一份 simulate）
+        moved = [ln for ln in rows("c", 40) if ln.split("|")[0] in {j["name"] for j in s["jobs"]}]
+        Path(r["jobs_path"]).write_text("\n".join(rows("r", 20) + moved) + "\n")
+        self.offer([r], self.heads([r]))
+        self.assertEqual(self.lane_end(r["root"], r["jobs"]), s["to"])
+
+    def test_same_host_serial_lane_moves_to_shorter_lane(self):
+        # #110：t 一张 46 GiB 的卡上 pa 三条同目录的清单，每行 vram=20（同时只放得下两条）：x、y 各 20 行，z 40 行（各 36 分钟）。
+        # 推演里 z 与 x、y 轮着跑，x、y 跑完后 z 一条占着卡又跑十多个小时、卡空着一半。卡近 10 分钟吃满了（不出新开车道），以前什么都不建议；
+        # 现在把 z 的队尾接到最早跑完的那条后面：车道数不变、两条一起跑到最后，整批明显提前
+        rows = lambda p, n: ["%s%d|true   # est_min=36 vram=20" % (p, i) for i in range(n)]      # noqa: E731
+        qs = [self.lane_at("w", n, rows(n, k)) for n, k in (("x", 20), ("y", 20), ("z", 40))]
+        self.w.uwin = {"GPU-a": [(self.now - 60 * i, 95) for i in range(5)]}
+        self.offer(qs, self.heads(qs))
+        ends = {q["key"]: self.rel(self.lane_end(q["root"], q["jobs"])) for q in qs}
+        self.assertGreater(ends["z"] - max(ends["x"], ends["y"]), 10)
+        o, = [o for o in self.w.offer if o["project"] == "pa"]
+        first = min(("x", "y"), key=ends.get)
+        self.assertEqual((o["local"], o["lane"], o["gpus"], o["jobs"][0]["name"]), (True, [qs[0]["root"], "jobs/%s.txt" % first], None, "z39"))
+        s = RB.suggest([{"id": "t", "label": "t", "worker_up": True, "status": {"offers": self.w.offer, "todo": self.w.todo}}], None, self.now)["pa"]
+        self.assertTrue(s["local"])
+        self.assertEqual(s["key"], "rebalance:pa:t:t/jobs/z.txt/z39")
+        self.assertGreater(self.rel(s["from"]) - self.rel(s["to"]), 4)
+        self.assertIn("挪到同一台上另一条早跑完的清单（接在 %s/jobs/%s.txt 后面）" % (qs[0]["root"], first), s["text"])
+        self.assertNotIn("多开一条车道", s["text"])
+        # 照做：从 z 剪掉、接到那条后面，t 的推演里整批何时跑完与建议里的一样
+        names = {j["name"] for j in s["jobs"]}
+        Path(qs[2]["jobs_path"]).write_text("\n".join(ln for ln in rows("z", 40) if ln.split("|")[0] not in names) + "\n")
+        i = ("x", "y").index(first)
+        Path(qs[i]["jobs_path"]).write_text("\n".join(rows(first, 20) + [ln for ln in rows("z", 40) if ln.split("|")[0] in names]) + "\n")
+        self.offer(qs, self.heads(qs))
+        self.assertEqual(max(self.lane_end(q["root"], q["jobs"]) for q in qs), s["to"])
+        # 另一个目录（或 .env 不同）的清单不是同一种环境：不往那里挪
+        for q in qs[:2]:
+            Path(q["env"]).write_text("QUEUE_STATE=state_%s\nCUDA_HOME=/opt/%s\n" % (q["key"], q["key"]))
+        Path(qs[2]["jobs_path"]).write_text("\n".join(rows("z", 40)) + "\n")
+        Path(qs[i]["jobs_path"]).write_text("\n".join(rows(first, 20)) + "\n")
+        self.offer(qs, self.heads(qs))
+        self.assertEqual([o for o in self.w.offer if o["project"] == "pa"], [])
 
 
 class ForecastTest(UnitBase):

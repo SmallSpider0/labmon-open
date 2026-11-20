@@ -147,9 +147,9 @@ UTIL_FULL = 90           # 卡近 UTIL_WIN_S 的利用率不低于这个 % 算�
 CONC_MAX = 12            # 按同卡并行数挑同类记录（duration 的 k）时封顶到这么多（推演里查表、缓存用）
 FORECAST_S = 7 * 86400   # 推演（simulate）往后排多远
 FORECAST_EVERY = 120     # 推演的输入没变时多久重算一次（在跑的超了预计，后面的跟着往后挪）
-MOVE_MAX = 5             # 能接别处的任务（offers）：每个项目至多挑几行（从别的主机排得最晚的清单队尾往前取）
+MOVE_MAX = 20            # 能接别处的任务（offers）：每个项目一次至多挑几行（从排得最晚的清单队尾往前取；挪来的几行比原处剩下的晚跑完就不再往下挑，
+                         # Worker.moved_past）。以前在原处跑得了的只挑 5 行：行短、晚得多时（40 行串行排在同卡别的车道后面，#110）挪满 5 行也不到门槛，一直不建议
 MOVE_LEAD_S = 600        # 原处预计这么久内就开跑的不挑：会话剪行时它可能正好放行，两边都跑
-MOVE_TRAP_MAX = 20       # 原处跑不了的清单（约定、续租截止前跑不完，drain 着…）一次至多挑几行：挪完才推得出整批何时跑完，MOVE_MAX 常常不够
 PEAK_WIN = 60            # 任务的核数、读写峰值按这么长的窗口算（1 分钟峰值；窗口满了结一次，沿用每轮的采样）
 PRESS_WIN = 60           # 主机的 CPU 限流、共享盘延迟、本地盘忙碌，“此刻”取近这么久的计数差
 PRESS_EVERY = 300        # 多久往 press.jsonl 记一行这段时间的聚合值（共享盘延迟基线的历史）
@@ -3598,7 +3598,7 @@ class Worker:
     def offers(self, qs, base, now, pol, focus, use, info, held=()):
         """这台能接别的主机上哪些任务、接来后几点跑完（写进状态的 offers，看板汇总成挪法建议；labmon 不改清单、不改放行）。
         每个项目（别的在用主机上有没跑完的清单的）一项。挪哪些：从别的主机上这个项目排得最晚的清单（跑不了的算最晚）取队尾还没开跑的一行，
-        那条清单的完工随之提前到它前一行的预计结束，再取此刻最晚的，至多 MOVE_MAX 行（原处跑不了的至多 MOVE_TRAP_MAX 行）；队尾是占位任务、
+        那条清单的完工随之提前到它前一行的预计结束，再取此刻最晚的，至多 MOVE_MAX 行，挪来的已比原处剩下的晚跑完就不再往下试（moved_past）；队尾是占位任务、
         原处 MOVE_LEAD_S 内就开跑、needs= 缺了又补不了、有别处的任务 after= 等着它、清单文件里找不到、与前面挑的不是同一种环境（目录与 .env）的
         就到此为止（只从尾巴取：清单里没写 after= 的先后 labmon 看不出来）；这个项目有清单原处何时放行说不出（proj_lanes 的 unknown，
         那台 worker 不在：状态过了 STATUS_STALE_S、没 worker stop、DEP_STALE_S 内）的一行也不挑，整批推不出（#25）。
@@ -3657,21 +3657,39 @@ class Worker:
                           and self.list_env(info[q["key"]]["root"], info[q["key"]]["queue"]) == env),
                          key=lambda q: ends.get((info[q["key"]]["root"], info[q["key"]]["queue"])) or now)[:1]
             o["lane"] = [info[tgt[0]["key"]]["root"], info[tgt[0]["key"]]["queue"]] if tgt and cands else None
-            # 接在后面的清单里有写了 after= 的行：挪来的插在它前面（它要等别的任务，清单顺序也算依赖，接在它后面会被它堵住，#43）
-            o["before"] = next((x["name"] for x in tgt[0]["jobs"] if x["deps"] or x["deps_any"]), None) if o["lane"] else None
-            if o["before"]:                          # 挪来的有（间接）等它或它后面哪一行的：插在前面就成环（清单顺序也算依赖），接在末尾（Codex 审 #63）
-                tj = [x["name"] for x in tgt[0]["jobs"]]
-                if self.dep_reaches([k[:2] for c in cands for k in dep_keys(dict(c["h"], project=p))], {(p, n) for n in tj[tj.index(o["before"]):]}):
-                    o["before"] = None
+            o["before"] = self.move_before(p, cands, tgt[0]) if o["lane"] else None
+            src = {(ln["host"], ln["root"], ln["queue"]): ln["end"] for ln in lns}    # 原处各清单挪走前 k 行后何时跑完
             for k in range(1, len(cands) + 1):
                 got = self.try_move(p, cands[:k], tgt[0]["key"] if tgt else None, cx, before=o["before"])
                 if isinstance(got, dict):
                     o.update(got)
                     break
-                o["jobs"].append(dict({x: v for x, v in cands[k - 1].items() if x not in ("h", "i", "lane")}, end=got[0], own=got[1],
-                                      dep=bool(cands[k - 1]["h"]["deps"] or cands[k - 1]["h"]["deps_any"])))
+                c = cands[k - 1]
+                o["jobs"].append(dict({x: v for x, v in c.items() if x not in ("h", "i", "lane")}, end=got[0], own=got[1],
+                                      dep=bool(c["h"]["deps"] or c["h"]["deps_any"])))
+                src[(c["host"], c["root"], c["queue"])] = c["rest"]
+                if self.moved_past(got[0], list(src.values())):
+                    break
         out += self.local_offers(own, others, now, waiters, renew, cx)
         return out
+
+    def move_before(self, p, cands, q):
+        """项目 p 挪来的几行 cands 接进本机清单 q（这一遍推演里的那条，forecast 的 qs 项）时插在哪一行前面：q 里第一条写了 after=/afterany= 的行
+        （它要等别的任务，清单顺序也算依赖，接在它后面会被它堵住，#43）；挪来的有（直接或经别的清单间接）等它或它后面哪一行的不插
+        （插在前面就成环，Codex 审 #63），为 None：接在末尾。跨主机接过来（offers）与同机挪到另一条清单（lane_offer）共用。"""
+        b = next((x["name"] for x in q["jobs"] if x["deps"] or x["deps_any"]), None)
+        if b:
+            tj = [x["name"] for x in q["jobs"]]
+            if self.dep_reaches([k[:2] for c in cands for k in dep_keys(dict(c["h"], project=p))], {(p, n) for n in tj[tj.index(b):]}):
+                return None
+        return b
+
+    @staticmethod
+    def moved_past(end, rest):
+        """挪来的前 k 行都跑完的时刻 end 已不早于原处剩下的（rest：原处各清单挪走这 k 行后何时跑完）里最晚的：再往下多挪一行，挪来的只会更晚跑完、
+        原处剩下的也早不过它，整批与按行比（看板的 _idle_gain）都不会更好，offers 与同机的两种挪法据此不再往下试（每试一行要推演一遍，#110）。
+        原处有说不出何时跑完的（None）不判，照旧试到 MOVE_MAX。"""
+        return end is not None and bool(rest) and None not in rest and end >= max(rest)
 
     def idle(self, now):
         """这台此刻空着（#62）：没有 labmon 任务在跑（占位任务不算，保活不是 labmon 任务），这一次的推演里也没有 MOVE_LEAD_S 内就开跑的。
@@ -3683,11 +3701,14 @@ class Worker:
                        for ln in self.plan.get("lanes") or [] for x in ln["jobs"])
 
     def local_offers(self, own, others, now, waiters, renew, cx):
-        """同机多开一条车道（#43）：本机这个项目排得最晚的清单队尾几行剪到这台新开的一条车道，整批能提前多少。挑行（move_cands：从队尾往前、
-        占位、成组、有人 after= 等着、MOVE_LEAD_S 内开跑、缺本地文件的都停）、推演（try_move，同一份 simulate）、看板那头的门槛与挑法都同跨主机的，
-        只多两条：卡要有真余量（local_cards：限流、卡都吃满了、利用率低的卡上在跑的被 CPU 卡住都不出），估计只有提示值的 GPU 行不挪
-        （没有实测，同卡并行怕 OOM，同 fit）。每项同 offers 的形状，另带 local: true；lane 恒为 None（新开一条）；ends 是别的主机上这个项目各清单的，
-        free 是本机这个项目原推演里何时跑完；jobs 的 rest 是挪完后本机原清单何时跑完（新推演里，同卡变慢也算进去）。不出的不列（原因不叫醒、页面上也不写：fit 会说）。"""
+        """同机的两种挪法：本机这个项目排得最晚的清单队尾几行
+        - 挪到本机另一条清单（#110，lane_offer）：接在同一种环境、预计最早跑完的那条后面；
+        - 剪到这台新开的一条车道（#43）。
+        挑行（move_cands：从队尾往前、占位、成组、有人 after= 等着、MOVE_LEAD_S 内开跑、缺本地文件的都停）、推演（try_move，同一份 simulate）、
+        看板那头的门槛与挑法都同跨主机的。新开车道多两条：卡要有真余量（local_cards：限流、卡都吃满了、利用率低的卡上在跑的被 CPU 卡住都不出），
+        估计只有提示值的 GPU 行不挪（没有实测，同卡并行怕 OOM，同 fit）。每项同 offers 的形状，另带 local: true；lane 为 None 是新开一条，
+        否则是接在后面的那条清单；ends 是别的主机上这个项目各清单的，free 是本机这个项目原推演里何时跑完；jobs 的 rest 是挪完后本机原清单何时跑完
+        （新推演里，同卡变慢也算进去）。不出的不列（原因不叫醒、页面上也不写：fit 会说）。"""
         out = []
         if renew:
             return out
@@ -3697,6 +3718,10 @@ class Worker:
             lns = [ln for ln in own if ln["project"] == p and ln["state"] != "trapped"]
             mine_p = [ln for ln in own if ln["project"] == p]
             free = None if None in [ln["end"] for ln in mine_p] else max([now] + [ln["end"] for ln in mine_p])
+            ends = {"%s|%s|%s" % (ln["host"], ln["root"], ln["queue"]): ln["end"] and round(ln["end"]) for ln in others if ln["project"] == p}
+            lo = free is not None and self.lane_offer(p, lns, free, now, waiters, cx, ends)
+            if lo:
+                out.append(lo)
             cards, why = self.local_cards()
             if why:
                 continue
@@ -3709,30 +3734,62 @@ class Worker:
                     break
             # gpus：新车道只许用的卡（推演就按它排）；不是全部卡时建议的 worker add 带 --gpus，否则真放行可能放到吃满的卡上（Codex 审 #63）
             o = {"project": p, "local": True, "lane": None, "free": free and round(free), "jobs": [], "why": why, "stop": None,
-                 "gpus": cards if cards and len(cards) < len(self.info.get("gpus") or []) else None,
-                 "ends": {"%s|%s|%s" % (ln["host"], ln["root"], ln["queue"]): ln["end"] and round(ln["end"]) for ln in others if ln["project"] == p}}
+                 "gpus": cards if cards and len(cards) < len(self.info.get("gpus") or []) else None, "ends": ends}
             if free is None:                         # 只在是因为要挪的行没有估时才留一条 nodur（看板出 :est，让会话写 est_min；Codex 审 #63）
                 nd = next((c["name"] for c in cands if (self.dur_k(dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]))(self.k_now())
                                                          or {}).get("min") is None), None)
                 if nd:
                     out.append(dict(o, stop=nd, why=None, nodur=True))
                 continue
-            for k in range(1, len(cands) + 1):
-                got = self.try_move(p, cands[:k], None, cx, local=cards)
-                if isinstance(got, dict):
-                    o.update(got)
-                    break
-                o["jobs"].append(dict({x: v for x, v in cands[k - 1].items() if x not in ("h", "i", "lane")}, end=got[0], own=got[1],
-                                      dep=bool(cands[k - 1]["h"]["deps"] or cands[k - 1]["h"]["deps_any"]), rest=got[2].get((cands[k - 1]["root"], cands[k - 1]["queue"]), round(now))))   # 整条剪空、也没在跑的：现在就跑完了
+            self.local_moves(o, p, cands, None, cx, now, local=cards)
             if o["jobs"] or o["stop"]:
                 out.append(o)
         return out
 
+    def local_moves(self, o, p, cands, tgt, cx, now, local=None):
+        """同机挪法逐个加行：把前 k 个候选从本机原清单拿掉、挪到 tgt（本机清单的 key；None 新开一条只许用 local 这几张卡的车道）推演一遍，
+        结果记进 offer o 的 jobs（rest 是新推演里原清单何时跑完：整条剪空、也没在跑的现在就跑完了）；排不上的那一行与原因记进 o（try_move 的 stop、why、nodur）。
+        挪来的已比本机剩下的晚跑完（moved_past）就不再往下试。"""
+        for k in range(1, len(cands) + 1):
+            got = self.try_move(p, cands[:k], tgt, cx, local=local, before=o.get("before"))
+            if isinstance(got, dict):
+                o.update(got)
+                return
+            c = cands[k - 1]
+            o["jobs"].append(dict({x: v for x, v in c.items() if x not in ("h", "i", "lane")}, end=got[0], own=got[1],
+                                  dep=bool(c["h"]["deps"] or c["h"]["deps_any"]), rest=got[2].get((c["root"], c["queue"]), round(now))))
+            if self.moved_past(got[0], [got[1]]):
+                return
+
+    def lane_offer(self, p, lns, free, now, waiters, cx, ends):
+        """同机挪到另一条清单（#110）：本机这个项目排得最晚的清单（同卡几条车道争卡、它排在别的车道后面才跑完，或只是行多）队尾几行，
+        接到本机同一种环境（目录与 .env，list_env）、预计最早跑完的另一条清单后面（那条里有写了 after= 的行就插在它前面，move_before），整批能提前多少。
+        不加车道、同时跑的条数不变，所以不看卡的余量（local_cards）、只有提示值的 GPU 行照挪；挑行（move_cands）、推演（local_moves → try_move：
+        从原队列拿掉、接进那条清单）、看板的门槛都同跨主机的。返回 offers 的一项（local: true，lane 是接在后面的那条 [目录, 清单]），
+        没有能挪的为 None（不写原因，同新开车道）。lns：本机这个项目在原处跑得了的清单（proj_lanes）；free：本机这个项目原推演里何时跑完；
+        ends：别的主机上这个项目各清单何时跑完。"""
+        keys = {(v["root"], v["queue"]): k for k, v in cx["info"].items() if v.get("kind") == "queue"}
+        live = [ln for ln in lns if ln["end"] is not None and (ln["root"], ln["queue"]) in keys]
+        late = max(live, key=lambda ln: ln["end"], default=None)
+        if late is None or not late["pend"]:
+            return None
+        env = self.list_env(late["root"], late["queue"])
+        tgt = min((ln for ln in live if ln is not late and self.list_env(ln["root"], ln["queue"]) == env), key=lambda ln: ln["end"], default=None)
+        if tgt is None:
+            return None
+        cands, why = self.move_cands([ln for ln in lns if ln is not tgt], tgt["end"], now, waiters)
+        q = next(q for q in cx["qs"] if q["key"] == keys[(tgt["root"], tgt["queue"])])
+        o = {"project": p, "local": True, "lane": [tgt["root"], tgt["queue"]], "before": self.move_before(p, cands, q), "free": round(free),
+             "jobs": [], "why": why, "stop": None, "gpus": None, "ends": ends}
+        self.local_moves(o, p, cands, q["key"], cx, now)
+        return o if o["jobs"] else None
+
     def move_cands(self, lns, free, now, waiters, skip=False):
-        """offers 的候选：别的主机上这个项目的清单 lns 里，按“取此刻排得最晚的那条清单的队尾”挑出的几行（至多 MOVE_MAX，
-        从原处跑不了的清单挑时至多 MOVE_TRAP_MAX），与挑不下去的原因。各候选带 host、root、queue、name、there（原处预计结束，跑不了为 None）、
+        """offers 的候选：别的主机上这个项目的清单 lns 里（同机挪时是本机的清单），按“取此刻排得最晚的那条清单的队尾”挑出的几行（至多 MOVE_MAX），
+        与挑不下去的原因。各候选带 host、root、queue、name、there（原处预计结束，跑不了为 None）、
         rest（挪走它后那条清单何时跑完）、h（资源提示）、i（在原清单里排第几）、lane（第几条清单）：前 k 行加进推演时按 (lane, i) 排，
-        同一条清单里的照原先后。排得最晚的已不晚于本机这个项目何时跑完（free）的不再挑：挪过来只会更晚。
+        同一条清单里的照原先后。排得最晚的已不晚于本机这个项目何时跑完（free；挪到本机另一条清单时是那条清单何时跑完）的不再挑：挪过来只会更晚。
+        挑出的前几行挪过来以后已比原处剩下的晚跑完时，调用方不再往下试（moved_past）。
         waiters：{(项目, 任务): {写了 after= 等它的 (项目, 任务)}}（本机与别的主机的 todo）；有不在这批里的等着它就不挪：挪走后等它的何时开始会变。
         有清单原处何时放行说不出（state unknown）的一行也不挑：整批推不出，挪了也算不出提前多少。一批只取同一种环境（list_env：目录与 .env）的行。
         skip（接收方空着，Worker.idle，#62）：看板按行比、不要整批何时跑完，所以说不出何时放行的清单、队尾挪不动的清单（上面那些停的原因）
@@ -3751,9 +3808,9 @@ class Worker:
             if end[i] is not None and end[i] <= free:
                 break
             ln, (n, h, t0, t1) = lns[i], left[i][-1]
-            if len(out) >= (MOVE_MAX if end[i] is not None else MOVE_TRAP_MAX):
+            if len(out) >= MOVE_MAX:
                 if end[i] is None:
-                    return out, "%s 上 %s 在原处跑不了的超过 %d 行，一次只挑这么多" % (ln["host"], ln["queue"], MOVE_TRAP_MAX)
+                    return out, "%s 上 %s 在原处跑不了的超过 %d 行，一次只挑这么多" % (ln["host"], ln["queue"], MOVE_MAX)
                 break
             stop = self.cant_move(ln, n, h, t0, out, now, waiters)
             if stop:
@@ -3797,10 +3854,10 @@ class Worker:
         有排不上的返回 {stop 那一行, why 推演里的原因, nodur 是不是因为那一行没有估时（看板据此提醒会话写 est_min，#43）}。
         tgt：接在后面的本机清单的 key（None：当新的一条）；cx：forecast 这一遍的输入（qs、base、info…）。
         挪来的几行按在那条车道里的位置认（接在原有的行后面，车道按顺序放），不按名字：同项目几条清单可能有同名的行。
-        local（同机多开车道，local_offers）：候选是本机清单的队尾，从原队列里拿掉（原样搬过去，估计与时长不另算）、放进只许用这几张卡的新车道
-        （local 是卡号列表；None 不限）；队尾与候选对不上（清单刚变过）就不挪。
+        local（同机的挪法，local_offers；不是 False 时）：候选是本机清单的队尾，从原队列里拿掉（原样搬过去，估计与时长不另算），接进 tgt 那条本机清单
+        （同机挪到另一条清单，lane_offer），没给 tgt 就放进只许用这几张卡的新车道（local 是卡号列表；None 不限）；队尾与候选对不上（清单刚变过）就不挪。
         挪来的几行里没写 after=/afterany= 的排在写了的前面（清单顺序也算依赖：独立的行排在等别的任务的行后面会被它堵住，#43）；
-        接在本机清单后面时插在那条清单里第一条写了依赖的行 before 前面（offers 定，文字里写明）。"""
+        接在本机清单后面时插在那条清单里第一条写了依赖的行 before 前面（move_before 定，文字里写明）。"""
         jobs, qs, cut = [], [], {}
         if local is not False:
             keys = {(v["root"], v["queue"]): k for k, v in cx["info"].items() if v.get("kind") == "queue"}
