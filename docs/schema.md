@@ -170,7 +170,7 @@
   `running[]` 的 `est` 是资源估计（`estimate`）：`vram`（每卡 GiB）与来源 `src`、`ram`（GiB）与来源 `ram_src`（#61 起 `src` 只指显存；之前放行、被接管的任务没有 `ram_src`，与 `src` 同一来源）、`util`，带 `cpus`（估计核数，即记账的核数）、`cpu_src`（来源）、按实测收小了记账时另有 `cpus_set`（清单写的 `cpus=`，开跑仍按它给，#91），`acct` 带 `cpu`（记账核数 = max(估计封顶到 `cpu_cap`, 实测)，开跑满 10 分钟后估计那份换成近 10 分钟窗口核数的最大值、不超过给的核数、不低于 1（#65），占位任务 0），`io_sus` 是记了“读写拥塞嫌疑”的时刻（没记为 null），`cpu_fit` 是开跑核数给少了、给多了（`{how: low|high, avg, peak, give, sug, by, cls}`，`by`/`cls` 是类：`tag` 与 tag，或 `name` 与去种子号的名字，#91；没有或不满 10 分钟为 null，#46，[worker.md「CPU 与读写」](worker.md#cpu-与读写)）；
   `waiting[]` 的 `est` 同样带 `ram_src`、`cpus`、`cpu_src`，`cpu_wait` 是一直因 CPU 被挡满 10 分钟后已挡的秒数（不到为 null），`elsewhere` 是整条清单在等别的主机放行的那一格收尾时的 `[主机, 任务]`（`run_elsewhere`；没有为 null，算力池据此把它收回池里，#80）；`disk`（共享盘扫描，`mine` 为真的那台在扫）的 `yield` 是共享盘慢、推迟中的说明（没推迟为 null）；
   `running[].use` 另有 `rd`、`wr`（此刻 MiB/s）、`rd_b`、`wr_b`（累计字节）、`cores_peak`、`rd_peak`、`wr_peak`（1 分钟峰值），`conc`（运行期间同卡平均几条 labmon 任务，含自己；不用卡的没有），以及接管时续算用的内部键 `rchar`、`wchar`、`pw`、`conc_s`、`conc_w`、`pks`（近 10 分钟各 1 分钟窗口的 [结束时刻, 核数]，CPU 记账回收用）、`pk0`（从何时起量窗口核数）（看板不读），`running[]` 与 `waiting[]` 带清单的 `cpus`、`io`；
-  `done[]` 的这几项同名（`cores_peak`、`rd_peak`、`wr_peak`、`rd_b`、`wr_b`、`cpus`、`io`；11-08 前的行没有，读的地方当没有）。
+  `done[]` 的这几项同名（`cores_peak`、`rd_peak`、`wr_peak`、`rd_b`、`wr_b`、`cpus`、`io`；11-08 前的行没有，读的地方当没有）；`give` 是那次开跑导出的 `LABMON_CPUS`（按那台配额封顶后的，`cpu_shrink` 按它认，#99；没开跑就记失败的成组成员为 null，之前的行没有）。
   `done[]` 的 `oom` 是失败是不是 OOM：`"vram"`（CUDA 显存）、`"ram"`（容器内存被杀）或 null（跑成功、别的失败、停下重排、借来的主机上被挤掉的；11-10 前的行没有，当作 null），
   资源估计据此抬高同类（[worker.md「准入」](worker.md#准入)，#62）；`est` 是放行时的资源估计（同 `running[].est`）。
   成组（[worker.md「成组」](worker.md#成组)，#180）：`running[]` 带 `gang`（组名，不成组为 null）、`gn`（人数）、`gang_with`（一起开跑的同伴 `[[主机, 任务, 开跑时见过的它最近一次结束 t1（那台的时刻，没有为 0）]]`：之后的结束才算这一次的）、

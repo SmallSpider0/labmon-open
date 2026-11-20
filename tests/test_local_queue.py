@@ -362,27 +362,32 @@ class LocalQueueTest(unittest.TestCase):
         run = lambda f, **kw: dict({"kind": "queue", "project": "out", "name": "a_run", "cpus": None, "cpu_fit": f,   # noqa: E731
                                     "root": str(root) + "/", "queue": "jobs/q.txt"}, **kw)
         al = alerts(run(low))
-        self.assertEqual(list(al), ["cpu_low:a_run"])
-        a = al["cpu_low:a_run"]
+        self.assertEqual(list(al), ["cpu_low:name:a_run"])
+        a = al["cpu_low:name:a_run"]
         self.assertEqual(a["to"], "agent")
         self.assertIn("任务 a_run（本机 车道 1 训练方）近 10 分钟平均用了 1.0 核，给的 1 核基本用满", a["msg"])
         self.assertIn("写 cpus=2 试试（cpus= 优先于历史", a["msg"])
         # #112：worker 按配额、同机别的任务与同类条数封顶过（cpu_budget），告警里写出来
         rm = {"per": 3, "cap": 7, "other": 1.0, "out": 0.5, "same": 2, "kept": False}
-        a = alerts(run(dict(low, sug=3, room=rm)))["cpu_low:a_run"]
+        a = alerts(run(dict(low, sug=3, room=rm)))["cpu_low:name:a_run"]
         self.assertIn("写 cpus=3 试试（这台配额 7 核，同类 2 条同时在跑，别的任务记了 1 核，labmon 之外占 0.5 核，每条最多 3 核，再写大会超配额；", a["msg"])
         al = alerts(run(high, cpus=5.0))
-        self.assertEqual(list(al), ["cpu_high:a_run"])
-        self.assertIn("清单写了 cpus=5（给 5 核），跑到现在 1 分钟峰值只有 1.2 核", al["cpu_high:a_run"]["msg"])
-        self.assertIn("cpus=2", al["cpu_high:a_run"]["msg"])
-        self.assertIn("自动按实测记账", al["cpu_high:a_run"]["msg"])
+        self.assertEqual(list(al), ["cpu_high:name:a_run"])
+        self.assertIn("清单写了 cpus=5（给 5 核），跑到现在 1 分钟峰值只有 1.2 核", al["cpu_high:name:a_run"]["msg"])
+        self.assertIn("cpus=2", al["cpu_high:name:a_run"]["msg"])
+        self.assertIn("自动按实测记账", al["cpu_high:name:a_run"]["msg"])
         # 同类（tag）的几个任务合成一条：key 不带任务名，消息列出都有谁、峰值范围，建议取大
         tag = lambda n, pk, sug: run(dict(high, peak=pk, sug=sug, by="tag", cls="sm"), name=n, cpus=4.0)   # noqa: E731
         al = alerts(tag("a_s1", 1.0, 1), tag("a_s2", 1.2, 2))
-        self.assertEqual(list(al), ["cpu_high:sm"])
-        self.assertIn("同 tag sm 的 2 个任务（本机 车道 1 训练方：a_s1、a_s2）清单写了 cpus=4（给 5 核），跑到现在 1 分钟峰值只有 1.0–1.2 核", al["cpu_high:sm"]["msg"])
-        self.assertIn("cpus=2", al["cpu_high:sm"]["msg"])
-        self.assertEqual(list(alerts(tag("a_s1", 1.0, 1), run(low, name="b_s1"))), ["cpu_high:sm", "cpu_low:a_run"])   # 给少、给多各报各的
+        self.assertEqual(list(al), ["cpu_high:tag:sm"])
+        self.assertIn("同 tag sm 的 2 个任务（本机 车道 1 训练方：a_s1、a_s2）清单写了 cpus=4（给 5 核），跑到现在 1 分钟峰值只有 1.0–1.2 核", al["cpu_high:tag:sm"]["msg"])
+        self.assertIn("cpus=2", al["cpu_high:tag:sm"]["msg"])
+        self.assertEqual(list(alerts(tag("a_s1", 1.0, 1), run(low, name="b_s1"))), ["cpu_high:tag:sm", "cpu_low:name:a_run"])   # 给少、给多各报各的
+        # #99（Codex 审 #97）：tag 恰好等于另一类去种子号后的名字（tag=train 的 prep_s1、无 tag 的 train_s1）：不同类，各报一条、key 带来源
+        both = alerts(run(dict(low, by="tag", cls="train"), name="prep_s1"), run(dict(low, cls="train"), name="train_s1"))
+        self.assertEqual(sorted(both), ["cpu_low:name:train", "cpu_low:tag:train"])
+        self.assertIn("任务 prep_s1（", both["cpu_low:tag:train"]["msg"])
+        self.assertIn("任务 train_s1（", both["cpu_low:name:train"]["msg"])
         self.assertEqual(alerts(run(dict(low, sug=None))), {})                    # 已给到配额：写大也给不了
         self.assertEqual(alerts(run(low, project="other")), {})                   # 别的项目的
         self.assertEqual(alerts(run(low, kind="slot")), {})                       # 单元没有清单行可改
@@ -390,7 +395,7 @@ class LocalQueueTest(unittest.TestCase):
         self.assertEqual(alerts(run(low, root=str(self.d / "other"))), {})        # 同名任务在本项目别的清单上（不是这条车道）：不算到 q 头上（Codex 审 #65）
         self.assertEqual(alerts({"kind": "queue", "project": "out", "name": "a_run", "root": str(root), "queue": "jobs/q.txt"}), {})   # 旧 worker 没写这个字段
         old = {k: v for k, v in low.items() if k not in ("by", "cls")}
-        self.assertEqual(list(alerts(run(old, name="a_s1"), run(old, name="a_s2"))), ["cpu_low:a_s1", "cpu_low:a_s2"])   # 还没升级的 worker 不给 cls：按任务名各一条
+        self.assertEqual(list(alerts(run(old, name="a_s1"), run(old, name="a_s2"))), ["cpu_low:job:a_s1", "cpu_low:job:a_s2"])   # 还没升级的 worker 不给 cls：按任务名各一条
 
     def test_cpu_low_per_host_sug(self):
         """#112：同类在两台上都给少了，两台的配额不同：建议值按主机分写、各写配额，不取最大值（照最大值写在配额小的那台上会超）。"""
@@ -404,7 +409,7 @@ class LocalQueueTest(unittest.TestCase):
         run = lambda n, f: {"kind": "queue", "project": "out", "name": n, "cpus": 2.0, "cpu_fit": f, "root": "/r", "queue": "jobs/q.txt"}   # noqa: E731
         C._host_alerts(cfg, snap, {}, [], {"hosts": [{"id": "a", "status": {"running": [run("a_s1", fit(3, 7, 2)), run("a_s2", fit(3, 7, 2))]}},
                                                      {"id": "b", "status": {"running": [run("a_s3", fit(4, 16, 1))]}}]}, time.time())
-        msg = {x["key"]: x["msg"] for x in snap["alerts"]}["cpu_low:sm"]
+        msg = {x["key"]: x["msg"] for x in snap["alerts"]}["cpu_low:tag:sm"]
         self.assertIn("按主机写 甲 上 cpus=3、乙 上 cpus=4 试试（甲 配额 7 核，同类 2 条同时在跑，每条最多 3 核；乙 配额 16 核，每条最多 16 核，再写大会超配额；", msg)
 
     def test_cpu_fit_alert_merged_across_hosts(self):
@@ -423,14 +428,17 @@ class LocalQueueTest(unittest.TestCase):
             C._host_alerts(cfg, snap, {}, [], {"hosts": [{"id": "a", "status": {"running": a}}, {"id": "b", "status": {"running": b}}]}, time.time())
             return {x["key"]: x["msg"] for x in snap["alerts"]}
         al = alerts([run("a_s1", 1.0), run("a_s2", 1.1)], [run("a_s3", 1.2)])
-        self.assertEqual(list(al), ["cpu_high:sm"])
-        self.assertIn("同 tag sm 的 3 个任务（甲 车道 1：a_s1、a_s2；乙 车道 1：a_s3）", al["cpu_high:sm"])
+        self.assertEqual(list(al), ["cpu_high:tag:sm"])
+        self.assertIn("同 tag sm 的 3 个任务（甲 车道 1：a_s1、a_s2；乙 车道 1：a_s3）", al["cpu_high:tag:sm"])
         sf = self.d / "wait_state.json"
         t = time.time()
-        self.assertEqual(_new_alerts(sf, al, t), ["cpu_high:sm"])
+        self.assertEqual(_new_alerts(sf, al, t), ["cpu_high:tag:sm"])
         self.assertEqual(_new_alerts(sf, alerts([run("a_s1", 1.0)], []), t + 300), [])          # 有的跑完了：同一条，不再叫醒
         self.assertEqual(_new_alerts(sf, alerts([], []), t + 600), [])                          # 都跑完了
         self.assertEqual(_new_alerts(sf, alerts([], [run("a_s4", 1.0)]), t + 1200), [])         # 同类下一个又判出来：6 小时内不叫醒
+        # 无 tag、去种子号后恰好也叫 sm 的另一类（#99）：key 不同，第一次照样叫醒，不被 tag sm 的去冗余压掉
+        other = dict(run("sm_s1", 1.0), cpu_fit=dict(fit(1.0), by="name"))
+        self.assertEqual(_new_alerts(sf, alerts([], [other]), t + 1500), ["cpu_high:name:sm"])
 
     def test_borrow_cut_alert(self):
         """借来的主机上队首被约定归还挡住（borrow.check 在全局快照里给的 late 非空）：报 borrow_cut:<车道>，写主机全名、车道名与还剩几个任务；
