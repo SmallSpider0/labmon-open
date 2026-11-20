@@ -729,7 +729,7 @@ def _groups(cfg: dict, snap: dict, state: dict, ratios: dict) -> None:
 def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict, t: float) -> None:
     """主机级告警：GPU 空转（还有任务未完成、利用率却一直低，写明各车道在做什么）、CPU 持续被限流且本项目有超核的任务、开跑核数给少给多（只给会话）、drain 挡住本项目的任务、空闲关机风险（when_idle 检查）。"""
     al_cfg, alerts, hstate = cfg["alerts"], snap["alerts"], state.setdefault("hosts", {})
-    fits = {}                                     # (how, 类) → [(运行中任务, cpu_fit, 在哪, 类按什么认, 哪台)]：cpu_low:、cpu_high: 跨主机合并（_cpu_fit_alerts）
+    fits = {}                                     # (how, 类按什么认, 类) → [(运行中任务, cpu_fit, 在哪, 哪台)]：cpu_low:、cpu_high: 跨主机合并（_cpu_fit_alerts）
     for hd in snap["hosts"]:
         if not hd["ok"]:
             continue
@@ -784,8 +784,10 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
             f, lane = r.get("cpu_fit"), by_q.get(_qpath(r.get("root"), r.get("queue")))
             if not f or not f.get("sug") or r.get("kind") != "queue" or r.get("project") != cfg["id"] or lane is None:
                 continue
-            # 还没升级的 worker 不给 cls：按任务名各报一条（部署拉起新 worker 后就没有了）
-            fits.setdefault((f["how"], f.get("cls") or r["name"]), []).append((r, f, f"{hd['label']} {lane['label']}", f.get("by"), hd["label"]))
+            # 类连同来源（by：tag 还是去种子号的名字）认：tag 恰好等于另一类的名字时不合并（#99）。
+            # 还没升级的 worker 不给 cls：按任务名各报一条（by 记 job；部署拉起新 worker 后就没有了）
+            by, cls = (f.get("by") or "name", f["cls"]) if f.get("cls") else ("job", r["name"])
+            fits.setdefault((f["how"], by, cls), []).append((r, f, f"{hd['label']} {lane['label']}", hd["label"]))
         # drain 是整台主机的（续租预备、跑完就还、别的会话手动下的）：挡住本项目的任务时报一次，免得会话一直睡着不知道
         dr = [ln for ln in lanes if ln.get("held") == "drain" and ln.get("unfinished")]
         if dr:
@@ -813,17 +815,18 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
 
 def _cpu_fit_alerts(fits: dict) -> list:
     """开跑核数给少、给多的告警（只给会话，#46）：同一个项目同一类（tag，否则去种子号同名）的合成一条，跨主机（#91）。
-    key cpu_low:<类>、cpu_high:<类> 不带任务名：同类后面的任务接着被判出来时 key 不变，消失后 6 小时内再出现不再叫醒（waits._new_alerts，#88）。
+    key cpu_low:<来源>:<类>、cpu_high:<来源>:<类>（来源 tag 或 name，旧 worker 没给类的是 job:<任务名>）不带任务名：同类后面的任务接着被判出来时
+    key 不变，消失后 6 小时内再出现不再叫醒（waits._new_alerts，#88）；带来源，tag 恰好等于另一类的名字时两类不共用去冗余记录（#99）。
     给少了的建议值 worker 已按各台的配额、同机别的任务已记的核与同类几条同时在跑封顶（cpu_budget，#112）：各台的值不同时按主机分写，
     并写出各台配额多少、别的任务记了多少（照取最大值写，在配额小的那台上照做会超）。
-    fits 由 _host_alerts 收集：(how, 类) → [(运行中任务, cpu_fit, 在哪, 类按什么认, 哪台)]。"""
+    fits 由 _host_alerts 收集：(how, 类按什么认, 类) → [(运行中任务, cpu_fit, 在哪, 哪台)]。"""
     out = []
-    for (how, cls), xs in fits.items():
+    for (how, by, cls), xs in fits.items():
         if len(xs) == 1:
             subj = f"任务 {xs[0][0]['name']}（{xs[0][2]}）"
         else:                                     # 按主机车道列：本机 车道 1：a_s1、a_s2；别的主机 车道 2：a_s3
             who = "；".join(f"{w}：{'、'.join(x[0]['name'] for x in xs if x[2] == w)}" for w in dict.fromkeys(x[2] for x in xs))
-            subj = f"{'同 tag' if xs[0][3] == 'tag' else '同类'} {cls} 的 {len(xs)} 个任务（{who}）"
+            subj = f"{'同 tag' if by == 'tag' else '同类'} {cls} 的 {len(xs)} 个任务（{who}）"
 
         def rng(k):                               # 几个任务的平均核数、峰值：一样的写一个，否则写范围
             a, b = min(x[1][k] for x in xs), max(x[1][k] for x in xs)
@@ -832,13 +835,13 @@ def _cpu_fit_alerts(fits: dict) -> list:
         if how == "low":
             best = {}                             # 各台建议值最大的那一份（同一台同类的封顶相同，give 不同时 2 倍不同）
             for x in xs:
-                if x[4] not in best or x[1]["sug"] > best[x[4]]["sug"]:
-                    best[x[4]] = x[1]
+                if x[3] not in best or x[1]["sug"] > best[x[3]]["sug"]:
+                    best[x[3]] = x[1]
             sugs = {f["sug"] for f in best.values()}
             write = f"写 cpus={sugs.pop()}" if len(sugs) == 1 else "按主机写 " + "、".join(f"{h} 上 cpus={f['sug']}" for h, f in best.items())
             room = "；".join(_cpu_room_text(h if len(best) > 1 else "这台", f["room"]) for h, f in best.items() if f.get("room"))
             full = any(f.get("room") and f["sug"] >= f["room"]["per"] for f in best.values())   # 建议值已到每条最多能给的
-            out.append(alert(f"cpu_low:{cls}", "agent",
+            out.append(alert(f"cpu_low:{by}:{cls}", "agent",
                              f"{subj}近 10 分钟平均用了 {rng('avg')} 核，给的 {give} 核基本用满，所在的卡利用率不到 50%：可能给少了。"
                              f"没开跑的同类任务在清单那一行{write} 试试（{room + ('，再写大会超配额' if full else '') + '；' if room else ''}"
                              "cpus= 优先于历史；跑过以后可以删掉，历史只会往实测靠），"
@@ -846,7 +849,7 @@ def _cpu_fit_alerts(fits: dict) -> list:
         else:
             sug = max(x[1]["sug"] for x in xs)
             hint = "、".join(f"{c:g}" for c in sorted({x[0]["cpus"] for x in xs if x[0].get("cpus") is not None})) or "?"
-            out.append(alert(f"cpu_high:{cls}", "agent",
+            out.append(alert(f"cpu_high:{by}:{cls}", "agent",
                              f"{subj}清单写了 cpus={hint}（给 {give} 核），跑到现在 1 分钟峰值只有 {rng('peak')} 核：写多了。"
                              "同类跑完几次、峰值都不到一半后，没开跑的自动按实测记账（开跑仍按 cpus= 给核），不必改清单；"
                              f"想马上让出核，没开跑的改成 cpus={sug}，或删掉 cpus= 改按历史估；在跑的不必停"))

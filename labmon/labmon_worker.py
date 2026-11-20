@@ -4141,6 +4141,8 @@ class Worker:
                # 核数与读写的 1 分钟峰值（MiB/s）、累计读写字节（rchar / wchar，含共享盘与命中页缓存的），清单的 cpus=、io= 提示（cores_peak 是同类 CPU 估计的历史）
                "cores_peak": u.get("cores_peak"), "rd_peak": u.get("rd_peak"), "wr_peak": u.get("wr_peak"), "rd_b": u.get("rd_b"), "wr_b": u.get("wr_b"),
                "cpus": j.get("cpus"), "io": j.get("io"),
+               # 那次开跑导出的 LABMON_CPUS（cpus_for：按这台配额封顶后的；没开跑的为 None）：cpu_shrink 按它认峰值是不是在这么多线程下跑出来的（#99）
+               "give": self.cpus_for(j) if j.get("est") else None,
                # 运行期间同卡、同机有没有别的任务或进程：计时结果据此核对是否真的独占
                # void 只记重排了的作废（成组的作废记失败，不带 void：依赖与看板据此认失败）
                "with_gpu": u.get("with_gpu", []), "with_host": u.get("with_host", []), "void": j.get("void") if requeue else None,
@@ -5850,15 +5852,16 @@ def estimate(hist, r):
 
 def cpu_shrink(n, rows):
     """清单写了 cpus=n、同类历史 rows（estimate 给的：同 tag › 同名第一档有峰值的近 HIST_N 条，跑成功或跑满 5 分钟、非 OOM）一直远低于它时，
-    没开跑的行按几核记账（#91）；不收小为 None。要至少 CPU_SHRINK_N 条，且每一条都满足：那次开跑给的核数（用量行 est 的 cpu_threads：
-    收小过的是 cpus_set）不少于 n——量到的峰值才是在至少这么多线程下跑出来的，把 cpus= 改大以后旧行不算数——
+    没开跑的行按几核记账（#91）；不收小为 None。要至少 CPU_SHRINK_N 条，且每一条都满足：那次实际导出的核数（用量行的 give，即开跑时的
+    LABMON_CPUS：按那台的配额封顶过，#99）不少于 n——量到的峰值才是在至少这么多线程下跑出来的；在配额小的主机上跑的、把 cpus= 改大以后的旧行、
+    没记 give 的行（#99 之前的）都不算数——
     1 分钟峰值 cores_peak 不超过 n × CPU_SPARE_FRAC 且少至少 CPU_SPARE_MIN 核（与 cpu_fit 的“给多了”同一门槛）。
     记账取峰值最大值按 cpu_from_peak 估，比 n 小才算收小。只收记账：开跑仍按 n 给（cpu_threads），运行中照旧 max(估计, 实测) 与 #65 回收。"""
     if n < 2 or len(rows) < CPU_SHRINK_N:
         return None
     for h in rows:
-        e, pk = h.get("est") or {}, h["cores_peak"]
-        if e.get("cpus") is None or cpu_threads(e) < n or pk > n * CPU_SPARE_FRAC or n - pk < CPU_SPARE_MIN:
+        give, pk = h.get("give"), h["cores_peak"]
+        if give is None or give < n or pk > n * CPU_SPARE_FRAC or n - pk < CPU_SPARE_MIN:
             return None
     m = cpu_from_peak(max(h["cores_peak"] for h in rows))
     return m if m < n else None
@@ -5969,7 +5972,8 @@ def shrunk_text(e):
 
 
 def cpu_cls(j):
-    """同类任务的类（看板合并 cpu_low:、cpu_high: 用，#91）：有 tag 按 tag，否则去掉种子编号的名字（同 estimate 的同 tag › 同名）。"""
+    """同类任务的类（看板合并 cpu_low:、cpu_high: 用，#91；cpu_budget 认同类）：有 tag 按 tag，否则去掉种子编号的名字（同 estimate 的同 tag › 同名）。
+    认同类时 by 与 cls 一起比：tag 恰好等于别的任务去种子号后的名字时是两类（#99）。"""
     return {"by": "tag", "cls": j["tag"]} if j.get("tag") else {"by": "name", "cls": base_name(j["name"])}
 
 
@@ -5985,8 +5989,8 @@ def cpu_budget(S, j):
     读不到配额为 None（不记 CPU，建议不封顶）。"""
     if S["cpu_room"] is None:
         return None
-    cls = (j.get("project"), cpu_cls(j)["cls"])
-    mine = [not x["hold"] and (x.get("project"), cpu_cls(x)["cls"]) == cls for x in S["jobs"]]
+    cls = (j.get("project"), cpu_cls(j))          # 类连同来源（tag 还是去种子号的名字）比：tag 恰好等于别的任务去种子号后的名字时不是同一类（#99）
+    mine = [not x["hold"] and (x.get("project"), cpu_cls(x)) == cls for x in S["jobs"]]
     other = sum(x["cpu"] for x, m in zip(S["jobs"], mine) if not m)
     n = max(1, sum(mine))
     return {"per": max(0, int((S["cpu_room"] - other) / n + 1e-6)), "cap": S["cpu_cap"], "other": round(other, 1),
