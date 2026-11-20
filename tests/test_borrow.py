@@ -73,6 +73,10 @@ class Base(unittest.TestCase):
     def server(self) -> dict:
         return next(s for s in tomllib.loads((self.d / "hosts.toml").read_text())["fleet"]["servers"] if s["id"] == SID)
 
+    def ep(self, key="borrow_since") -> int:
+        """wake 的借用 key 带的这一次借用（借来的时刻；已还的取归还时刻，#109）。"""
+        return round(K.parse_time(self.server()[key]))
+
     def begin(self, work=(), until=None, projects=None, ssh_out="", light=False, away=False, account="me", ssh_err="", **a):
         a, self.remote = {"work": list(work), **a}, []
         with mock.patch.object(F, "parse", lambda raw: raw), mock.patch.object(F, "analyze", lambda smp, cfg: a):
@@ -363,14 +367,14 @@ class BorrowTest(Base):
         msgs, wake = B.check([e], t, finish_fn=fin, ovr=self.ovr)
         self.assertEqual(self.calls, [])                                      # 指令齐了：不再下
         self.assertTrue(any("约定" in m and "还有" in m for m in msgs))      # 提前 2 小时内提醒
-        self.assertEqual([w["key"] for w in wake], [f"borrow:{SID}"])
+        self.assertEqual([w["key"] for w in wake], [f"borrow:{SID}:{self.ep()}"])
         self.assertEqual(wake[0]["projects"], ["a1"])
         self.assertIn("4 张 A6000", wake[0]["msg"])
         msgs, wake = B.check([self.host_entry(running=[("x1", 5)], overrides=ov)], cut + 1, finish_fn=fin, ovr=self.ovr)
         self.assertIn(("add", "drain", SID, None, None), self.calls)        # 到点：不再放新任务，不停正在跑的
         self.assertTrue(any("到了约定时间" in m and "x1 跑完就还" in m for m in msgs))
         self.assertEqual(done, [])
-        self.assertIn(f"borrow_due:{SID}", [w["key"] for w in wake])
+        self.assertIn(f"borrow_due:{SID}:{self.ep()}", [w["key"] for w in wake])
         msgs, _ = B.check([self.host_entry(running=[("hold_x", 9)], overrides=ov)], cut + 60, finish_fn=fin, ovr=self.ovr)
         self.assertEqual(done, [(SID, [9])])                                  # 只剩占位任务：归还，并停掉占位任务
         self.assertIn("已还", msgs)
@@ -406,7 +410,7 @@ class BorrowTest(Base):
         # 弹给用户的提醒写人话（late_say），给会话的 wake 写操作（late_do），#142
         self.assertFalse([m for m in msgs if "labmon worker add" in m], msgs)
         self.assertTrue(any(m.endswith(B.late_do("约定", user=True)) for m in msgs if "到了约定时间" in m), msgs)
-        due = next(w["msg"] for w in wake if w["key"] == f"borrow_due:{SID}")
+        due = next(w["msg"] for w in wake if w["key"] == f"borrow_due:{SID}:{self.ep()}")
         self.assertIn("给已有清单追加行也不要", due)
         self.assertIn("排着的 4 个任务在约定前跑不完", due)
         self.assertTrue(due.endswith(B.late_do("约定")), due)
@@ -539,7 +543,19 @@ class BorrowTest(Base):
         with self.assertRaises(ConfigError):
             B.request_return(SID)
         _, wake = B.check([], time.time(), ovr=self.ovr)
-        self.assertEqual([w["key"] for w in wake], [f"borrow_done:{SID}"])
+        self.assertEqual([w["key"] for w in wake], [f"borrow_done:{SID}:{self.ep('borrow_returned')}"])
+        # #109：同一台还了又借（6 小时内），借到、要还、已还都是新的一次：key 带这一次借用，labmon wait 照样叫醒
+        sf = self.d / "w109.json"
+        from labmon.waits import _new_alerts
+        first = {w["key"]: w["msg"] for w in wake}
+        self.assertEqual(_new_alerts(sf, first), list(first))
+        self.begin(until=time.time() + 600, projects="a1")
+        K.set_fleet_keys({"borrow_since": K.fmt_time(time.time() + 120, year=True)}, "测试：第二次借的时刻与第一次不同分钟", sid=SID)
+        ov = [{"kind": "guest", "target": "a1", "keep": self.KEEP}]
+        _, wake = B.check([self.host_entry(overrides=ov)], time.time(), finish_fn=lambda *a, **k: "已还", ovr=self.ovr)
+        again = {w["key"]: w["msg"] for w in wake}
+        self.assertEqual(list(again), [f"borrow:{SID}:{self.ep()}"])
+        self.assertEqual(_new_alerts(sf, again), list(again))
 
     def pool_begin(self, work=(), fetch=None, **a):
         """算力池自动借（#25）：不记借的人、写 borrow_pool；探到的容器启动时刻记进 borrow.json 的 pool 子项。持有人开着入池（全天）。"""
@@ -747,7 +763,7 @@ class BorrowTest(Base):
         set_fleet_keys({"borrow_until": "明天下午"}, "手改", sid=SID)
         msgs, wake = B.check([self.host_entry()], t, ovr=self.ovr)
         self.assertEqual([m for m in msgs if "认不出" in m and "YYYY-MM-DD HH:MM" in m and "明天下午" in m].__len__(), 1)
-        self.assertEqual([w["key"] for w in wake], [f"borrow:{SID}"])          # 没约定时间
+        self.assertEqual([w["key"] for w in wake], [f"borrow:{SID}:{self.ep()}"])   # 没约定时间
         msgs, _ = B.check([self.host_entry()], t + 60, ovr=self.ovr)
         self.assertFalse(any("认不出" in m for m in msgs))
 

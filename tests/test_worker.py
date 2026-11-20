@@ -3262,7 +3262,7 @@ class OffersTest(UnitBase):
         self.assertEqual([self.rel(v) for v in o["ends"].values()], [11])
         s = self.suggest()["pa"]
         self.assertEqual((s["target"], [j["name"] for j in s["jobs"]], self.rel(s["from"]), self.rel(s["to"])), ("t", ["a5", "a4", "a3"], 11, 6))
-        self.assertEqual((s["key"], s["cut"]), ("rebalance:pa", []))
+        self.assertEqual((s["key"], s["cut"]), ("rebalance:pa:t:o/jobs/q.txt/a5", []))   # 目标与第一行（#109）
         self.assertIn("把 o 上 %s/jobs/q.txt 的 a3、a4、a5 挪到 t（这台还没有本项目同一种环境的清单：新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add t %s 新清单 --project pa）"
                       % (self.d / "a", self.d / "a"), s["text"])
         self.assertIn("（早 5.0 小时）", s["text"])
@@ -3541,7 +3541,7 @@ class OffersTest(UnitBase):
         self.origin(["a0|true   # est_min=180", "a1|true   # est_min=50"], run=3, step=50 / 60)
         self.offer()
         self.assertEqual(self.suggest(), {})
-        self.assertEqual(self.suggest({"pa": {"key": "rebalance:pa"}})["pa"]["key"], "rebalance:pa")
+        self.assertEqual(self.suggest({"pa": {"key": "rebalance:pa:t:o/jobs/q.txt/a1"}})["pa"]["key"], "rebalance:pa:t:o/jobs/q.txt/a1")
         # 整批还要 21 小时：挪一行早 1.5 小时，不到剩余的 10%（2.1 小时）不建议；早 3 小时的建议
         job = {"host": "o", "root": "/r", "queue": "q.txt", "name": "x", "there": self.now + 21 * self.H, "end": self.now + 1.5 * self.H, "own": self.now}
         o = {"project": "pa", "lane": None, "free": self.now, "ends": {"o|/r|q.txt": self.now + 21 * self.H}, "why": None,
@@ -3553,7 +3553,7 @@ class OffersTest(UnitBase):
 
     def test_key_stable_across_rounds(self):
         # 阻塞 3：两台一样空的接收方 B、C 各约 2 分钟重算一次、相位不同，谁的完工早每轮都可能换（差一分钟）；原处两条清单的预计结束也在漂、
-        # 第一行跟着换。key 只按项目、目标沿用上一轮的（差不到 STICK_S）：连续多轮只叫醒一次（_new_alerts 同 labmon wait）
+        # 第一行跟着换。目标沿用上一轮的（差不到 STICK_S）；key 带挪法（目标与第一行，#109）：两种挪法来回换，各叫醒一次，之后不再叫醒（REWAKE_S，_new_alerts 同 labmon wait）
         from labmon.waits import _new_alerts
         H, now = self.H, self.now
 
@@ -3572,14 +3572,47 @@ class OffersTest(UnitBase):
             keys.append(prev["pa"]["key"])
             targets.append(prev["pa"]["target"])
             woke += _new_alerts(sf, {prev["pa"]["key"]: prev["pa"]["text"]})
-        self.assertEqual((set(keys), set(targets), woke), ({"rebalance:pa"}, {targets[0]}, ["rebalance:pa"]))
-        # 另一台明显更好（早 STICK_S 以上）才换过去；key 不变、不再叫醒
+        tg = targets[0]
+        want = {f"rebalance:pa:{tg}:o/jobs/{n}.txt/{n}" for n in "xy"}
+        self.assertEqual((set(keys), set(targets), set(woke), len(woke)), (want, {tg}, want, 2))
+        # 另一台明显更好（早 STICK_S 以上）才换过去；换了目标是新的挪法，叫醒一次
         hosts = [{"id": "B", "label": "B", "worker_up": True, "status": {"offers": [off(0, "x")]}},
                  {"id": "C", "label": "C", "worker_up": True, "status": {"offers": [off(0, "x")]}}]
-        other = "B" if targets[0] == "C" else "C"
+        other = "B" if tg == "C" else "C"
         hosts[0 if other == "B" else 1]["status"]["offers"][0]["jobs"][0]["end"] -= H
         s = RB.suggest(hosts, prev, now)["pa"]
-        self.assertEqual((s["target"], _new_alerts(sf, {s["key"]: s["text"]})), (other, []))
+        self.assertEqual((s["target"], _new_alerts(sf, {s["key"]: s["text"]})), (other, [f"rebalance:pa:{other}:o/jobs/x.txt/x"]))
+
+    def test_key_follows_move(self):
+        # #109：挪法建议出现 → 消失 → 换了挪法（别的清单的队尾）再出现，labmon wait 要叫醒（以前 key 只按项目，6 小时内再出现不叫醒）；
+        # 同一挪法推演时刻在抖、多挪少挪一行都不重报；一直在场时换成别的清单同样叫醒；会话照做剪掉队尾后又建议接着挪，第一行换了，也叫醒
+        from labmon.waits import _new_alerts
+        H, now, sf = self.H, self.now, self.d / "wait109.json"
+
+        def hosts(q, names, d=0):
+            js = [{"host": "o", "root": "/r", "queue": q, "name": n, "there": now + 10 * H, "rest": now + (8 - i) * H,
+                   "end": now + (2 + i) * H + d, "own": now} for i, n in enumerate(names)]
+            return [{"id": "B", "label": "B", "worker_up": True,
+                     "status": {"offers": [{"project": "pa", "lane": None, "free": now, "ends": {f"o|/r|{q}": now + 10 * H}, "jobs": js, "why": None}]}}]
+        prev, woke = None, []
+
+        def rnd(hs, t=now):
+            nonlocal prev
+            prev = RB.suggest(hs, prev, t)
+            cur = {prev["pa"]["key"]: prev["pa"]["text"]} if prev.get("pa", {}).get("key") else {}
+            new = _new_alerts(sf, cur, t)
+            woke.append(new)
+            return prev.get("pa", {}).get("key")
+        k1 = rnd(hosts("jobs/a.txt", ["a9", "a8"]))
+        self.assertEqual(k1, "rebalance:pa:B:o/jobs/a.txt/a9")
+        rnd(hosts("jobs/a.txt", ["a9", "a8", "a7"], d=120), now + 120)       # 推演在抖、多挪一行：key 不变，不叫醒
+        rnd([], now + 240)                                                   # 消失
+        rnd(hosts("jobs/a.txt", ["a9"], d=-60), now + 360)                   # 同一挪法 6 小时内再出现：不叫醒
+        k2 = rnd(hosts("jobs/b.txt", ["b5", "b4"]), now + 480)              # 一直在场、换了清单：叫醒
+        rnd([], now + 600)
+        k3 = rnd(hosts("jobs/b.txt", ["b3", "b2"]), now + 720)              # 照做剪掉了 b5、b4，又建议接着挪：第一行换了，叫醒
+        self.assertEqual(woke, [[k1], [], [], [], [k2], [], [k3]])
+        self.assertEqual((k2, k3), ("rebalance:pa:B:o/jobs/b.txt/b5", "rebalance:pa:B:o/jobs/b.txt/b3"))
 
     def test_why_when_batch_unknown(self):
         # 整批推不出（原处有跑不了的、这台又接不了）：原因不说“没有本项目的任务”
@@ -3781,7 +3814,7 @@ class OffersTest(UnitBase):
             RB.keep_offers(hosts, old, t0 + 60 * (i + 1))
             self.assertIn("offers_kept", hosts[0])
             s = RB.suggest(hosts, prev, t0 + 60 * (i + 1))
-            self.assertEqual(s["pa"]["key"], "rebalance:pa")
+            self.assertEqual(s["pa"]["key"], "rebalance:pa:t:o/jobs/q.txt/a5")       # 同一挪法：key 不变，不重报
             old = {"generated": t0 + 60 * (i + 1), "hosts": hosts}
         hosts = [{"id": "t", "label": "t", "error": "连不上", "status": None}]
         RB.keep_offers(hosts, old, t0 + STALE_S + 1)
@@ -3939,7 +3972,7 @@ class OffersTest(UnitBase):
         self.assertTrue(o["idle"])
         s = self.suggest()["pa"]
         self.assertEqual((s["key"], s["idle"], [j["name"] for j in s["jobs"]], self.rel(s["there"]), self.rel(s["done"])),
-                         ("rebalance:pa", True, ["b2", "b1", "b0"], 20.5, 1.5))
+                         ("rebalance:pa:t:o/jobs/q.txt/b2", True, ["b2", "b1", "b0"], 20.5, 1.5))
         self.assertEqual((self.rel(s["from"]), self.rel(s["to"])), (21.5, 20))
         from labmon.config import fmt_time
         self.assertIn("把 o 上 %s/jobs/q.txt 的 b0、b1、b2 挪到 t（这台还没有本项目同一种环境的清单" % (self.d / "b"), s["text"])
@@ -3998,7 +4031,7 @@ class OffersTest(UnitBase):
         o = self.offer()["pa"]
         self.assertEqual(([j["name"] for j in o["jobs"]], o["idle"]), (["b0"], True))
         self.assertEqual(self.suggest(), {})
-        self.assertEqual(self.suggest({"pa": {"key": "rebalance:pa", "target": "t"}})["pa"]["key"], "rebalance:pa")
+        self.assertEqual(self.suggest({"pa": {"key": "rebalance:pa:t:o/jobs/q.txt/b0", "target": "t"}})["pa"]["key"], "rebalance:pa:t:o/jobs/q.txt/b0")
 
     def test_idle_receiver_prefers_batch_rule(self):
         # #62 R1：整批门槛够（x0 还要 5 小时，整批早 1.5 小时）时照旧用整批的建议（有“早多少”），不按行比

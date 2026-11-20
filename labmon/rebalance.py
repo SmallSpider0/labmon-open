@@ -11,7 +11,7 @@ labmon 不改任何清单、不改放行规则：建议由实验会话照做（�
 看板这头每轮再核对一遍（#25）：offers 里的行这一轮已在原处开跑、已不在原处的 todo（剪过、跑完了）就截掉（各 worker 读别的主机的状态最多晚几分钟）；
 一台这一轮读失败时沿用它上一轮的 offers（keep_offers，照 borrow_cut 的先例），到它的状态按 STALE_S 过期为止，免得建议消失一轮再出现、重复叫醒。
 原因句由这里拼（worker 的 why 只放原因、stop 是挪不动的那一行）。
-结果放在工作台全局快照的 rebalance {项目: {...}}（overview.collect 算），项目看板据此出 rebalance:<项目> 告警、页面写一句；
+结果放在工作台全局快照的 rebalance {项目: {...}}（overview.collect 算），项目看板据此出 rebalance:<项目>:<挪法> 告警（move_key）、页面写一句；
 被借用约定挡住的车道（borrow.late_jobs）上的任务由 borrow_cut 告警带上“能挪到哪台、几点跑完”，这一轮出了那条就不在 rebalance 里再报。
 """
 from __future__ import annotations
@@ -149,7 +149,7 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
     """各项目的挪法建议 {项目: 建议}。hosts：工作台这一轮的各主机（worker 状态在 status，借用的 borrow.late 已由 borrow.check 补上）；
     prev：上一轮的结果（滞回用）。只读 worker 在跑、状态新鲜、这轮连上了的主机（过期、worker stop 过的不读；本机不在内网时 overview 沿用上一轮的结果）；
     这轮读失败的读 keep_offers 沿用的 offers_kept。offers 里已不在原处的行按这一轮读到的来源状态截掉（_fresh）。
-    key 只按项目（rebalance:<项目>）：同一项目一直有建议时只叫醒一次，换目标、换挪哪几行都不算新的；建议消失后再出现才再叫醒。
+    key 带挪法（move_key：目标与第一行，#109）：同一挪法一直在、推演在抖时只叫醒一次，换目标、换清单、第一行换了算新的。
     报过建议的项目门槛减半（滞回）；上一轮的目标主机仍够门槛、跑完的时刻比最优的晚不到 STICK_S 时沿用它，免得几台一样空时每轮换一句。
     建议 {key 告警 key, target 挪到哪台, lane 接在它哪条清单后面, before 插在那条清单里哪一行前面（它写了依赖；None 接在末尾）,
     jobs [{host, root, queue, name, there, rest, end, own, dep 这一行写了 after=}], from 原来整批何时跑完
@@ -205,7 +205,8 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
             else:                      # 没有整批的建议、有一台空着：按行比的（#62），挪得多的在前、再看跑完早的；上一轮的目标还成立就沿用
                 rank = lambda x: (-len(x["jobs"]), x["done"])
                 best, same = min(idles, key=rank), [x for x in idles if x["target"] == was.get("target") and not was.get("local")]
-            best = dict(min(same or [best], key=rank), key=f"rebalance:{proj}")
+            best = dict(min(same or [best], key=rank))
+            best["key"] = move_key(proj, best)
             best["cut"] = sorted({_lane(j) for j in best["jobs"]} & late)
             best["text"] = _text(best, proj, label, t)
             out[proj] = best
@@ -214,6 +215,14 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
             if est:
                 out[proj].update(key=f"rebalance:{proj}:est", est=True, text=_est_text(est, proj, label))
     return out
+
+
+def move_key(proj: str, p: dict) -> str:
+    """挪法建议的告警 key（#109）：rebalance:<项目>:<挪到哪台>:<原主机>/<清单>/<第一行>。第一行是最先挪的那一行（排得最晚那条清单的队尾）：
+    推演在抖、多挪少挪一行它不变，不重报；换了目标、换了清单、照做剪掉队尾后又建议接着挪，都是新的挪法，labmon wait 再叫醒一次
+    （同一挪法消失后 6 小时内再出现仍不叫醒，waits.REWAKE_S）。提前多少不进 key：每轮都在漂，句子里写最新的。同机多开车道的目标就是原主机。"""
+    j = p["jobs"][0]
+    return f"rebalance:{proj}:{p['target']}:{j['host']}/{j['queue']}/{j['name']}"
 
 
 def _est_text(est: list, proj: str, label: dict) -> str:
