@@ -537,7 +537,7 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
     for s in cfg.get("servers", []):                 # 还了的：一天内 wait 还报，登记在上面的队列要换主机（算力池的由 pool 搬回池里）
         rt = parse_time(s.get("borrow_returned"))
         if s.get("borrow_since") and rt and t - rt < DONE_KEEP_S and not s.get("borrow_pool"):
-            wake.append({"key": f"borrow_done:{s['id']}", "projects": _projects(s.get("borrow_for")), "host": s["id"],
+            wake.append({"key": f"borrow_done:{s['id']}:{round(rt)}", "projects": _projects(s.get("borrow_for")), "host": s["id"],
                          "msg": f"{s['id']} 已于 {fmt_time(rt)} 还给 {s['holder']}：登记在它上面、没跑完的队列要换到别的主机（labmon worker add）"})
     for h in user_hosts():
         b, hid = h.get("borrow"), str(h.get("id"))
@@ -625,6 +625,7 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
                 say(f"nofin:{st['returning']}", "borrow_return", f"{name} 没还成：{x}；连上了会自动再还")
         out += msgs
         ps = b.get("for")
+        ep = f"{hid}:{round(b['since'])}" if b.get("since") else hid      # wake 的 key 带这一次借用（#109）：还了又借是新的一次，6 小时内也叫醒；换给自己的没有起点
         kp = None if swap else _keep(hid, t)
         e["borrow"] = {**b, "cutoff": cut, "why": why, "returning": st.get("returning"), "now": bool(st.get("returning") and st.get("now")), "back": back, "tight": tight,
                        "overdue": bool(cut and t >= cut and run), "keep": kp, "other": g.get("other"),
@@ -633,11 +634,11 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
             continue
         if st.get("returning") or (cut and t >= cut):           # 要还的原因照实写：到点、用户点了跑完就还、现在停
             due = f"到了约定时间（{fmt_time(cut)}）" if cut and t >= cut else "正在停下，停完就还" if st.get("now") else "要还了（用户点了跑完就还）"
-            wake.append({"key": f"borrow_due:{hid}", "projects": ps, "host": hid,
+            wake.append({"key": f"borrow_due:{ep}", "projects": ps, "host": hid,
                          "msg": f"{hid} {due}，不再放新任务" + ("" if swap or st.get("now") else "，跑完就还") + "：别再往它上面加任务，给已有清单追加行也不要" + _late_text(late, why)})
         else:
             gpus = (ws.get("info") or {}).get("gpus") or []
-            wake.append({"key": f"borrow:{hid}", "projects": ps,
+            wake.append({"key": f"borrow:{ep}", "projects": ps,
                          "msg": f"借到 {who} 的 {hid}" + (f"（{len(gpus)} 张 {gpus[0].get('name')}）" if gpus else "")
                          + (f"，到 {fmt_time(cut)}：之前跑得完的任务才放行（按预计时长估：同类跑过的实际耗时，或按 实际/估时 折算的 est_min）" if cut else "")
                          + (f"，只给 {'、'.join(ps)} 用" if ps else "")

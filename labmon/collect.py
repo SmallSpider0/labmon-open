@@ -934,7 +934,7 @@ def write_text(js: list[dict]) -> str:
 
 def _rebalance(snap: dict) -> None:
     """多主机负载均衡的提示（snap["rebalance"]，rebalance.suggest 算的）：页面在“全部完成”下写那一句；有具体挪法时出
-    rebalance:<项目> 告警叫醒实验会话（key 只按项目：建议一直在时只叫醒一次，换目标、换行都不算新的）。
+    rebalance:<项目>:<挪法> 告警叫醒实验会话（key 是 rebalance.move_key：同一挪法一直在时只叫醒一次，换目标、换清单、第一行换了再叫醒，#109）。
     这一轮已有带上这句的 borrow_cut 告警（_lane；挪的有被借用约定挡住的清单）就不再报；挪的清单没配进项目的车道、borrow_cut 不出时照报。
     挪不了的原因只写在页面上，不叫醒。整句只给实验会话（labmon wait、命令行）：to="agent"，页面上不算告警数、只收在折叠的「给实验会话的提示」里，
     「全部完成」旁标「⇄ 可提前」、悬停看（common.js 的 rebalMark；#40）。"""

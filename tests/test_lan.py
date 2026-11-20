@@ -183,7 +183,7 @@ class LanTest(unittest.TestCase):
             with mock.patch.object(O, "fetch", return_value=(None, "连不上")):
                 snap = O.collect([], use_ssh=True)
             self.assertEqual(snap["hosts"][0]["offers_kept"]["offers"], [off])
-            self.assertEqual(snap["rebalance"]["pa"]["key"], "rebalance:pa")
+            self.assertEqual(snap["rebalance"]["pa"]["key"], "rebalance:pa:h:o/q.txt/x")     # 沿用上一轮的 offers：同一挪法（#109）
         finally:
             os.environ["LABMON_HOSTS"] = old_env
             os.environ["LABMON_LAN"] = "off"

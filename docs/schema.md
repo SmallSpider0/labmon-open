@@ -191,7 +191,7 @@
   算力池里登记着的每条清单（都跑完了的 head 为 null、n 为 0，#86）；`pool_t` 是这份 pool_heads 读池目录的时刻（epoch 秒，worker 每 60 秒读一次）。
   看板逐条合并池那个 worker_home 下各台的（`pool._heads`：没有 err 的优先，再取 `pool_t` 最晚的），哪一份里都没有的算还没有 worker 读到。
   `offers_kept` 只在这一轮读这台失败（`error`、`status_error`，没 `worker stop`）、沿用它上一轮的 offers 时出现：`{t 那份状态写下的时刻（本机时钟 epoch 秒）, offers}`，按 `STALE_S` 过期（`rebalance.keep_offers`）。
-- 顶层 `rebalance` 是各项目的挪法建议 `{项目: …}`（`rebalance.suggest`，[workbench.md「挪法建议」](workbench.md#挪法建议)）：有建议的 `{key 告警 key（rebalance:<项目>）, target 挪到哪台, lane, before, local 是不是同机多开一条车道, gpus 同机时登记要限的卡（offer 的 gpus）, jobs（offers 的前几项）,
+- 顶层 `rebalance` 是各项目的挪法建议 `{项目: …}`（`rebalance.suggest`，[workbench.md「挪法建议」](workbench.md#挪法建议)）：有建议的 `{key 告警 key（rebalance:<项目>:<目标>:<原主机>/<清单>/<第一行>，`rebalance.move_key`，#109）, target 挪到哪台, lane, before, local 是不是同机多开一条车道, gpus 同机时登记要限的卡（offer 的 gpus）, jobs（offers 的前几项）,
   from 原来整批何时跑完（推不出为 null）, to 挪后（推不出为 null）, idle 是不是接收方空着、按行比的（这时另带 there 这几行在原处最早何时跑完（说不出为 null）、done 挪过去后何时都跑完，#62）, cut 其中被借用约定挡住的清单 ["主机|目录|清单"]（这句写进 borrow_cut，不另报）, text 那一句（句尾“按 HH:MM 的推演”）}`；
   只有原因的 `{why [每台一句：“主机 上本项目 X 后没活，接不了 任务：原因”，整批推不出时“主机 接不了 任务：原因”], from}`；有主机有空、只因挪来的那一行没有估时推演算不出的，
   另带 `key`（`rebalance:<项目>:est`）、`est: true` 与 `text`（让会话写 est_min 或 fit --list，#43）；都没有的项目不列。offers 里已不在原处的行这一轮截掉（[workbench.md「挪法建议」](workbench.md#挪法建议)）。

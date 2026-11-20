@@ -349,7 +349,7 @@ def _disk() -> dict:
 
 
 # 挪法建议（rebalance.suggest 给的一项；text 由看板写好，页面原样摆）
-REBAL = {"key": "rebalance:proj-a", "target": "srv-b", "jobs": [{"host": "srv-a", "queue": "jobs/q1.txt", "name": "alpha_train_s3"}],
+REBAL = {"key": "rebalance:proj-a:srv-b:srv-a/jobs/q1.txt/alpha_train_s3", "target": "srv-b", "jobs": [{"host": "srv-a", "queue": "jobs/q1.txt", "name": "alpha_train_s3"}],
          "from": NOW + 7 * H, "to": NOW + 4 * H, "cut": [],
          "text": "把 srv-a 上 jobs/q1.txt 的 alpha_train_s3 挪到 srv-b（这台还没有本项目同一种环境的清单：新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add srv-b /data/proj-a 新清单 --project proj-a）：整批预计从 11-11 02:59 提前到 11-10 23:59（早 3.0 小时）；按 20:59 的推演"}
 
