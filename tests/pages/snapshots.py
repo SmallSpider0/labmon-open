@@ -763,6 +763,19 @@ def project_longq() -> dict:
     return d
 
 
+def project_moved() -> dict:
+    """#100：借 OWNER 车道 1（b2 清单）原先登记在 srv-a，搬到 srv-b 时 srv-a 正在跑 alpha_eval_s5：车道按登记在 srv-b，
+    这一格仍在 srv-a 上跑完（任务的 host）；还有一格在已不属于本项目的 srv-z 上跑完（主机表里没有它）。"""
+    d = copy.deepcopy(project())
+    lc = d["lanes"][2]["id"]
+    run = {"est_min": 180.0, "status": "running", "lane": lc, "hold": False, "group": "eval_", "dur_min": 180.0, "dur_src": "清单估时", "speed": [],
+           "eta_source": "清单估时", "last_line": "eval 3/9"}
+    d["jobs"] += [dict(run, id="alpha_eval_s5", host="srv-a", start_ts=NOW - H, elapsed_min=60.0, remaining_min=120.0, eta_ts=NOW + 2 * H),
+                  dict(run, id="alpha_eval_s4", host="srv-z", start_ts=NOW - 2 * H, elapsed_min=120.0, remaining_min=60.0, eta_ts=NOW + H)]
+    d["lanes"][2].update(total=4, unfinished=3)
+    return d
+
+
 def project_overdue() -> dict:
     """借来的 srv-b 已过约定时间（半小时前）、在跑的那格还没跑完（还要 15 分钟）：到点时看板自己下了 drain，跑完就还（#103）。"""
     d = copy.deepcopy(project())
@@ -932,6 +945,6 @@ def overview_user() -> dict:
 
 
 EXTRA = {"overview_user": overview_user, "records": records, "records_evil": records_evil, "events": project_events, "events_evil": project_events_evil,
-         "project_overdue": project_overdue, "project_longq": project_longq, "events_overdue": project_events_overdue,
+         "project_overdue": project_overdue, "project_longq": project_longq, "project_moved": project_moved, "events_overdue": project_events_overdue,
          "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many}
 

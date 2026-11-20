@@ -65,6 +65,8 @@
   "jobs": [{
     "id": "x4_s146_seed0", "lane": "r9_a6000", "group": "E4",
     "status": "done|failed|running|queued",
+    "host": null,                                // 运行中、且在车道之外的主机上跑时才有：current 里放行的主机（清单搬走后原主机接着跑完手上那一格，#95）；
+                                                 // 项目页把这一格画到那台、标「在 X 上跑完」，wait --job 照它说在哪跑（#100）
     "hold": false,                               // 暂停任务（名字按词含 hold / pause，config.HOLD_RE）：group 为 null
     "killed": null,                              // 失败且退出码为 130/137/143 时为退出码（被信号终止）
     "suspended": false,                          // 运行中且任务进程（或其子孙）被 SIGSTOP 挂起（探针读 /proc）

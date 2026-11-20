@@ -129,7 +129,10 @@ def job_state(snap: dict | None, name: str, rows: list[tuple[str, dict]]) -> dic
     run = next((j for j in js if j["status"] == "running"), None)
     if run:
         eta = f"，预计 {fmt_time(run['eta_ts'])} 跑完" if run.get("eta_ts") else ""
-        return {"st": "running", "text": f"在 {where(lanes.get(run['lane'], {'id': run['lane']}))} 上跑{eta}"}
+        ln = lanes.get(run["lane"], {"id": run["lane"]})
+        if run.get("host"):                  # 清单搬走前那台放的、在那台跑完这一格（#100）：车道已跟着登记走
+            return {"st": "running", "text": f"在 {labels.get(run['host'], run['host'])} 上跑{eta}（清单已搬到 {where(ln)}，这一格在原主机跑完）"}
+        return {"st": "running", "text": f"在 {where(ln)} 上跑{eta}"}
     queued = [j for j in js if j["status"] == "queued"]
     if queued:
         j = next((x for x in queued if not stuck(x)), None)
