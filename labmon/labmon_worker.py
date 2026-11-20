@@ -6053,7 +6053,10 @@ class FitHost:
         busy = ({u for j in S["jobs"] if not j["hold"] for u in j["gpus"]} | {u for j in S["ext"] for u in j.get("gpus") or []}
                 | {g["uuid"] for g in self.st.get("gpu_procs") or [] if g.get("owner") != "keepalive"})
         free = card_free(S)
-        full = place(dict(x), dict(S, holds={}), t)
+        S0 = dict(S, holds={})
+        full = place(dict(x), S0, t)
+        if full[0] is None and (S0["code"] or "").startswith("nofit"):    # labmon 全停也放不下（nofit）：这台跑不了，排在已有车道后面也不会跑（#94）
+            return None, full[1] + " → 这台跑不了"
         if gpu:
             sel = [c["i"] for c in S["cards"] if (x["allowed"] is None or c["i"] in x["allowed"])
                    and c["uuid"] not in self.slack["bound"] and c["uuid"] not in self.solo and not (hint and c["uuid"] in busy)]

@@ -844,6 +844,18 @@ class AdmissionUnitTest(UnitBase):
         self.hosts.status(host, info=info, room=room, util10=util or {},
                           running=running if running is not None else [running_job("r0", "bp", gpus=["GPU-a"])], **kw)
 
+    def test_fit_nofit_not_queued_behind_lanes(self):
+        # #94：一张卡的主机上问 gpus=2 的行：原因说卡数不够（与真放行同一句），结论是这台跑不了，不说“排在已有车道后面”
+        self.hosts.queues({"g": ["two|true   # gpus=2 vram=2"]}, project="bp")
+        self.hosts.register("t", "g", "bp")
+        now = self.hosts.now()
+        self.hosts.status("t", info={"gpus": [{"i": 0, "uuid": "GPU-a", "total": 46068.0, "free": 45000.0}], "mem": {}, "disk": [], "started": now - 3600},
+                          room={"ram": 50.0, "margin": 8.0, "gpus": {"GPU-a": 45000.0}, "cpu": 6.0, "cpu_cap": 8},
+                          running=[running_job("r0", "bp", gpus=["GPU-a"])])
+        out = self.fit_out(["two"])["two"]
+        self.assertIn("放不下：要 2 张 GPU，这台只检测到 1 张；换有足够卡数的主机或减少用卡数 → 这台跑不了", out)
+        self.assertNotIn("排在已有车道后面", out)
+
     def test_fit_goes_through_place(self):
         # #37/#35 B：fit 的判断就是真放行的 place：tag 到上限、登记的 --gpus 限卡、对方超出预留的卡（状态 room.owner）都照挡；
         # 旧 fit 只看显存、内存、CPU 三段，这几种都会说“可以开车道”
