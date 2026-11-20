@@ -753,6 +753,16 @@ def project_evil() -> dict:
     return d
 
 
+def project_longq() -> dict:
+    """srv-a 两条车道的清单名都长（gpu_… / cpu_…，区分它们的在末尾），车道 1 近一天跑过四个计划项（#108：左栏放不下时车道名怎么截）。"""
+    d = copy.deepcopy(project())
+    d["lanes"][0]["queue"], d["lanes"][1]["queue"] = "jobs/gpu_srvx_sweep_part07.txt", "jobs/cpu_srvx_sweep_part08.txt"
+    la = d["lanes"][0]["id"]
+    d["jobs"] += [{"id": f"{g}x_s{k}", "est_min": 30.0, "status": "done", "start_ts": NOW - (8 + k) * H, "end_ts": NOW - (7.5 + k) * H, "lane": la, "hold": False, "group": g,
+                   "dur_min": 30.0, "dur_src": "清单估时", "actual_min": 30.0} for k, g in enumerate(["eval_", "old_"])]
+    return d
+
+
 def project_overdue() -> dict:
     """借来的 srv-b 已过约定时间（半小时前）、在跑的那格还没跑完（还要 15 分钟）：到点时看板自己下了 drain，跑完就还（#103）。"""
     d = copy.deepcopy(project())
@@ -922,6 +932,6 @@ def overview_user() -> dict:
 
 
 EXTRA = {"overview_user": overview_user, "records": records, "records_evil": records_evil, "events": project_events, "events_evil": project_events_evil,
-         "project_overdue": project_overdue, "events_overdue": project_events_overdue,
+         "project_overdue": project_overdue, "project_longq": project_longq, "events_overdue": project_events_overdue,
          "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many}
 

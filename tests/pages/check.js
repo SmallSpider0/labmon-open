@@ -1569,6 +1569,22 @@ t("project", "时间线按主机分组：主机一行表头（利用率、事件
   run(A, 'TL.v = null; LS.set("tl", "week"); drawTimeline()');
   ok((el(A, "tlbox").innerHTML.match(/r="2.5"/g) || []).length === 3, "7 天里 srv-a 车道 1 跑了 probe、alpha，借 OWNER 车道 1 跑了 eval");
 });
+t("project", "#108 车道名的清单名长、计划项多：左栏按行名放宽，放不下时留住「车道 N」与清单名末段，圆点收成个数，悬停是全名", () => {
+  const A = pjCtx(J("project_longq.json"), EVN), labs = () => [...el(A, "tlbox").innerHTML.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
+  for (const w of [1200, 375, 330]) {
+    el(A, "tlbox").clientWidth = w; run(A, 'TL.v = null; LS.set("tl", "week"); drawTimeline()');
+    const tl = el(A, "tlbox").innerHTML, L = run(A, "TL.g.L"), ls = labs(), a = ls.find(x => x.startsWith("车道 1")), b = ls.find(x => x.startsWith("车道 2"));
+    ok(L > (w < 600 ? 82 : 116) && L <= (w < 600 ? 128 : 200), w + " 宽左栏该放宽到上限之内：" + L);
+    const e = w > 340 ? "part0" : "0";     // 手机宽（330）最窄：至少留住序号
+    ok(a && a.endsWith(e + "7") && b && b.endsWith(e + "8") && a.startsWith("车道 1") && b.startsWith("车道 2"), w + " 宽车道名该留住「车道 N」与清单名的末段：" + JSON.stringify(ls));
+    if (w > 600) ok(a.startsWith("车道 1 · gpu") && b.startsWith("车道 2 · cpu"), "宽屏车道名该留住「车道 N · 」与 gpu/cpu：" + JSON.stringify(ls));
+    ok(ls.every(x => run(A, `textW(${JSON.stringify(x)})`) <= L - 18), w + " 宽车道名超出了左栏：" + JSON.stringify(ls));
+    has(tl, '<text x="', "圆点收成个数"); ok(/fill:var\(--muted\)">4<\/text>/.test(tl), w + " 宽车道 1 跑了四个计划项，该收成一个点加 4");
+    has(tips(tl), "车道 1 · gpu_srvx_sweep_part07", "悬停是全名");
+  }
+  el(A, "tlbox").clientWidth = 900; run(A, 'drawTimeline()');
+  ok(run(A, 'laneFit({label: "车道 2", queue: "q.txt"}, 200)') === "车道 2 · q", "放得下照原样");
+});
 t("project", "fit：缺省从尾部截，mid 省略中间，字符串是原样留着的前缀", () => {
   ok(run(P, 'fit("p1_cifar_vit_wu_nz_exampleb_s42_memfix", 120)') === "p1_cifar_vit_wu_nz…");
   ok(run(P, 'fit("p1_cifar_vit_wu_nz_exampleb_s42_memfix", 120, true)') === "p1_cifar_…42_memfix");
