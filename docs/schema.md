@@ -66,7 +66,8 @@
     "id": "x4_s146_seed0", "lane": "r9_a6000", "group": "E4",
     "status": "done|failed|running|queued",
     "host": null,                                // 运行中、且在车道之外的主机上跑时才有：current 里放行的主机（清单搬走后原主机接着跑完手上那一格，#95）；
-                                                 // 项目页把这一格画到那台、标「在 X 上跑完」，wait --job 照它说在哪跑（#100）
+                                                 // 项目页把这一格画到那台、标「在 X 上跑完」，wait --job 照它说在哪跑（#100）；
+                                                 // 交回算力池的车道上跑完、失败的也有：用量记录里这条清单最后一次跑它的那台（collect._attempts，#99）
     "hold": false,                               // 暂停任务（名字按词含 hold / pause，config.HOLD_RE）：group 为 null
     "killed": null,                              // 失败且退出码为 130/137/143 时为退出码（被信号终止）
     "suspended": false,                          // 运行中且任务进程（或其子孙）被 SIGSTOP 挂起（探针读 /proc）
@@ -111,7 +112,8 @@
                                                // 按 卡数 × 落在窗口里的秒数 加权；card_s 卡·秒，n 任务数；窗口里没有用卡的任务为 null
   "attempts": [{"name": "x4_s20_seed1", "lane": "r9_a6000", "t0": 1793850748, "t1": 1793850780}],
                                                // 30 天内失败的尝试（任务后来重跑成功的也在）：取工作台存的用量记录 overview/usage/<主机>.jsonl，
-                                               // 按项目 id 与车道的 root、queue 对上（collect._attempts）；只有 worker 管的车道有
+                                               // 按项目 id 与车道的 root、queue 对上（collect._attempts）；只有 worker 管的车道有；
+                                               // 交回算力池的车道看各台的记录，另带 host：在哪台失败的（#99）
 
   "thresholds": {"stale_s": 420},               // 页面据此标“N 分钟未更新”：config.stale_limit 算的秒数，与 labmon wait 的 collector_stale 同一门槛（#141）
 
