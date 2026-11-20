@@ -87,6 +87,16 @@ class _Base(unittest.TestCase):
 
 
 class CallTest(_Base):
+    def test_ca_hint_only_on_cert_failure(self):
+        """连不上时只在证书校验没过才说向谁要 CA、写到哪（#96）。"""
+        self.assertEqual("", client.ca_hint(["Connection refused", "HTTP 503"]))
+        hint = client.ca_hint(["[SSL: CERTIFICATE_VERIFY_FAILED] certificate verify failed"])
+        self.assertIn("向看板管理员要签发内网入口证书的 CA 公钥", hint)
+        self.assertIn(str(client.conf_file()), hint)
+        with mock.patch.dict(os.environ, {"LABMON_CLIENT": str(self.d / "alt" / "client.toml")}):   # 存到哪与 ca 写什么是同一个路径（自定义 LABMON_CLIENT 时也是）
+            ca = self.d / "alt" / "ca" / "ca.crt"
+            self.assertIn(f'ca = "{ca}"', client.ca_hint(["CERTIFICATE_VERIFY_FAILED"]))
+
     def test_report_and_watcher_cli(self):
         base, hits = self.fake([(201, {"rc": 0, "out": "已提交报告"}), (200, {"reports": []})])
         self.servers(base)

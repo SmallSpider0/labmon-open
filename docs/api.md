@@ -164,7 +164,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 
 ## 客户端分发
 
-- `GET /api/client/install.sh?base=<看板根地址>` 下载 `labmon-install.sh`。页面传自己的根地址（含公网路径前缀）；服务端检查协议和当前入口的 Host 白名单。脚本内有 wheel 和入口配置。内网 HTTPS 配有 `[server].ca_cert` 时随附 CA 公钥证书；未附时脚本说明私有 CA 的手动配置方式。
+- `GET /api/client/install.sh?base=<看板根地址>` 下载 `labmon-install.sh`。页面传自己的根地址（含公网路径前缀）；服务端检查协议和当前入口的 Host 白名单。脚本内有 wheel 和入口配置。内网 HTTPS 配有 `[server].ca_cert` 时随附 CA 公钥证书；未附时脚本说明私有 CA 的手动配置方式；装好后连内网入口证书校验没过时，命令行（各命令、`labmon login`、`labmon update`）在“连不上”那句后面同样说向谁要哪张 CA、写到 `client.toml` 的哪里（`client.ca_hint`，#96）。
 - `GET /api/client/wheel` 返回同版本的 wheel，响应头 `X-Labmon-Commit` 是完整提交号。`labmon update` 用命令行令牌取包并安装。包从看板启动时运行的 main 提交构建，版本带提交号。备用入口回 409，客户端接着试下一个入口。更新先验证新版本，再切换命令入口；切换后删掉没有入口指着、也没有进程在用的旧版本目录（看板装的命令行起来就对自己那版加共享锁 `dist.hold_version`，别的会话里还在跑、在退避的旧 `wait` 那版留着；切换前那版也留着，#18）。
 - 包里带着配套 skill（`skills/lab-experiments`），以及它链接到的 `README.md`、`docs/*.md`、`examples/`。这些文件按仓库里的相对位置放在包目录下（#57）。安装与更新时，skill 的固定入口跟着命令入口一起切换，智能体的 skill 入口只在没有时才建（[README「配套 skill」](../README.md#安装)）。
   `labmon wait` 换了版本时，旧进程把自己那份 skill 的位置交给新进程；新进程逐节比对两份，有改动就报一条 `skill_updated` 并退出 1，没改动就接着等。`labmon update` 也会打出同样一句。

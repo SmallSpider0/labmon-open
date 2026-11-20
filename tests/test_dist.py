@@ -459,6 +459,8 @@ raise SystemExit(main(["host", "list"]))
                 failed = connect()
                 self.assertEqual(2, failed.returncode, failed.stderr)
                 self.assertIn("CERTIFICATE_VERIFY_FAILED", failed.stderr)
+                self.assertIn("向看板管理员要签发内网入口证书的 CA 公钥", failed.stderr)    # 装好以后连不上时也说清向谁要哪张、写到哪（#96）
+                self.assertIn(str(config), failed.stderr)
                 self.assertEqual([], requests)
 
                 hint = install(None)
