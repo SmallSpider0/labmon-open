@@ -24,7 +24,7 @@ from labmon import projects as PJ  # noqa: E402
 from labmon import serve as SV  # noqa: E402
 from labmon.config import GIB  # noqa: E402
 from labmon.records import log_events  # noqa: E402
-from labmon.state import save_json, state_dir  # noqa: E402
+from labmon.state import load_json, save_json, state_dir  # noqa: E402
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -103,6 +103,16 @@ class ReadsTest(unittest.TestCase):
         self.assertIn("h1（A6000）：正常；卡 0 97% 30.0/45 GiB\n    GPU 保活：在跑（", out)
         self.assertIn("PID 5300（容器内 300），卡 0 占 6.7 GiB；有任务要卡时 worker 自动停", out)
         self.assertEqual(out.count("GPU 保活"), 1)
+        # 这台的 CPU 配额与已记的核（#112，同 worker status 的 cpu_line）；worker 不在的主机不报
+        self.assertIn("6.7 GiB；有任务要卡时 worker 自动停\n    CPU：容器没设配额，不按核记账\n", out)
+        self.assertEqual(out.count("CPU："), 1)
+        g = load_json(state_dir() / "snapshot.json", {})
+        st = g["hosts"][0]["status"]
+        st["info"]["cpu_quota"], st["info"]["nproc"], st["room"] = 7.0, 64, {"cpu": 2.0, "cpu_cap": 7}
+        st["running"][0]["acct"], st["running"][1]["acct"] = {"cpu": 3.0}, {"cpu": 2.0}
+        save_json(state_dir() / "snapshot.json", g)
+        rc, out, _ = run(["status", "p1"])
+        self.assertIn("    CPU：配额 7 核，nproc 报的 64 是宿主机的核数；labmon 在跑 2 个任务记 5 核，还能给新任务 2 核\n", out)
         rc, out, _ = run(["status", "p1", "--json"])
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(out)["rebalance"]["key"], "rebalance:p1")

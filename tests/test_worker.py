@@ -723,6 +723,17 @@ class AdmissionUnitTest(UnitBase):
         self.assertIn("其中 1 个记账比实测多（实测共 0.5 核）；labmon 之外占 0.5）；实际空着的够，是在跑的记账比实测多，开跑满 10 分钟后按实测回收 → 排在已有车道后面", fit("x_s1"))
         self.hosts.status("t", info=info, room=dict(room, cpu=3.5), running=[])
         self.assertIn("y_s1：可以开车道并行", fit("y_s1"))
+        # #112：fit 与 worker status 每台都写配额与已记的核（cpu_line），status 的运行行写这个任务记几核
+        info = dict(info, cpu_quota=4.0, nproc=64)
+        self.hosts.status("t", info=info, room=room, running=[running_job("r", "b", acct={"ram": 1.0, "vram": 0, "cpu": 2.0})])
+        line = "CPU：配额 4 核，nproc 报的 64 是宿主机的核数；labmon 在跑 1 个任务记 2 核，labmon 之外占 0.5 核，还能给新任务 1.5 核"
+        self.assertIn("\n" + line + "\n", fit("x_s1"))
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            self.assertEqual(self.m.main(["ls", "--host", "t"]), 0)
+        self.assertIn("\n  " + line + "\n", out.getvalue())
+        self.assertIn("  运行 jobs/q.txt：r（PID 1，", out.getvalue())
+        self.assertIn("GPU 无，CPU 记 2 核）", out.getvalue())
 
     def fit_out(self, names, project=None, host="t"):
         """在主机 host 上跑 labmon worker fit（状态由 fit_status 写好），返回各任务那一行 {任务: 句子}。"""
@@ -731,7 +742,7 @@ class AdmissionUnitTest(UnitBase):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
             self.assertEqual(self.m.fit(self.m.Paths(host), list(names), project), 0)
-        return {ln.split("：", 1)[0]: ln.split("：", 1)[1] for ln in out.getvalue().splitlines() if not ln.startswith(("卡 ", "容器 CPU 在限流"))}
+        return {ln.split("：", 1)[0]: ln.split("：", 1)[1] for ln in out.getvalue().splitlines() if not ln.startswith(("卡 ", "CPU：", "容器 CPU 在限流"))}
 
     def fit_status(self, host="t", cpu=6.0):
         """一张 44 GiB 空闲的卡、内存与 CPU 都够（cpu 为还能给的核数），卡上有一个任务在跑。"""
@@ -5131,7 +5142,7 @@ class PressTest(UnitBase):
         job = lambda cpus, use, gpus=("GPU-a",), src="同名 近 3 次峰值 ×1.1", name="x_s1": {"name": name, "gpus": list(gpus), "use": use,   # noqa: E731
                                                                                            "est": {"cpus": cpus, "cpu_src": src, "ram": 1.0, "vram": 1.0}}
         low = {"GPU-a": 30}
-        self.assertEqual(fit(job(1, warm(0.98)), 8, low), {"how": "low", "avg": 0.98, "peak": 0.98, "give": 1, "sug": 2})
+        self.assertEqual(fit(job(1, warm(0.98)), 8, low), {"how": "low", "avg": 0.98, "peak": 0.98, "give": 1, "sug": 2, "room": None})
         self.assertEqual(fit(job(3, warm(2.9)), 4, low)["sug"], 4)                       # 2 倍超过配额：封顶到配额
         self.assertIsNone(fit(job(4, warm(3.9)), 4, low)["sug"])                         # 已给到配额：写大也给不了
         self.assertEqual(fit(job(2, warm(1.9)), None, low)["sug"], 4)                    # 没有配额：不封顶
@@ -5151,7 +5162,13 @@ class PressTest(UnitBase):
         shrunk = job(1, warm(0.98, 1.2), src="清单 cpus=4 偏大")
         shrunk["est"]["cpus_set"] = 4
         self.assertIsNone(fit(shrunk, 8, low))
-        self.assertEqual(fit(dict(shrunk, use=warm(3.8)), 8, low), {"how": "low", "avg": 3.8, "peak": 3.8, "give": 4, "sug": 8})
+        self.assertEqual(fit(dict(shrunk, use=warm(3.8)), 8, low), {"how": "low", "avg": 3.8, "peak": 3.8, "give": 4, "sug": 8, "room": None})
+        # 每条最多能给的（cpu_budget，#112）：封顶到它，不比给的多时不建议
+        rm = lambda per: {"per": per, "cap": 7, "other": 0.0, "out": 0.0, "same": 2, "kept": False}   # noqa: E731
+        self.assertEqual(fit(job(2, warm(1.9)), 7, low, rm(3))["sug"], 3)
+        self.assertEqual(fit(job(2, warm(1.9)), 7, low, rm(3))["room"], rm(3))
+        self.assertIsNone(fit(job(3, warm(2.9)), 7, low, rm(3))["sug"])
+        self.assertEqual(fit(job(2, warm(1.9)), 7, low, rm(6))["sug"], 4)
         # 状态里的 cpu_fit 带类（看板按它合并同类的告警，#91）：tag › 去种子号同名
         self.assertEqual(self.m.cpu_cls({"name": "x_s1_seed2", "tag": "sm"}), {"by": "tag", "cls": "sm"})
         self.assertEqual(self.m.cpu_cls({"name": "x_s1_seed2", "tag": None}), {"by": "name", "cls": "x"})
@@ -5164,16 +5181,60 @@ class PressTest(UnitBase):
         use = lambda avg: {"t": t, "pk0": t - 700, "pks": [[t - 60 * i, avg] for i in range(10)], "cores": avg, "cores_peak": avg}   # noqa: E731
         j = {"key": "a", "name": "x_s1", "project": "pa", "t0": t - 700, "gpus": ["GPU-a"], "est": {"ram": 1.0, "vram": 1.0, "cpus": 1, "cpu_src": "缺省 1 核"},
              "use": use(0.98)}
+        self.w.info = dict(self.w.info, cpu_quota=8.0)
         self.w.running = {"a": j}
-        self.w.cpu_hints(8, {"GPU-a": 30})
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 30})
         self.assertEqual(j["cpu_fit"]["how"], "low")
         j["use"] = use(0.5)                                                  # 降到门槛下
-        self.w.cpu_hints(8, {"GPU-a": 30})
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 30})
         self.assertEqual(j["cpu_fit"]["how"], "low")
         k = dict(j, key="b", name="x_s2", cpu_fit=None)
         self.w.running = {"b": k}
-        self.w.cpu_hints(8, {"GPU-a": 30})
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 30})
         self.assertIsNone(k["cpu_fit"])
+
+    def test_cpu_low_sug_within_quota(self):
+        # #112：配额 7 核，同一类两条车道各给 2 核、都跑满了：旧的建议各自是 2 倍 = 4（只封顶到配额），两条照改就要 8 核；
+        # 现在按配额减同机别的任务已记的、同类同时在跑的条数均分：每条最多 3 核。别的项目、本项目别的类记的核先扣掉
+        t = self.hosts.now()
+        use = lambda avg: {"t": t, "pk0": t - 700, "pks": [[t - 60 * i, avg] for i in range(10)], "cores": avg, "cores_peak": avg}   # noqa: E731
+        job = lambda key, name, project="pa", cpus=2, gpu="GPU-a": {   # noqa: E731
+            "key": key, "name": name, "project": project, "t0": t - 700, "gpus": [gpu], "use": use(cpus - 0.05),
+            "est": {"ram": 1.0, "vram": 1.0, "cpus": cpus, "cpu_src": "提示值"}}
+        self.w.info = dict(self.w.info, cpu_quota=7.0)
+        util = {"GPU-a": 30, "GPU-b": 30}
+
+        def hints(*jobs):
+            self.w.running = {j["key"]: j for j in jobs}
+            self.w.cpu_hints(self.w.snapshot({}), util)
+            return [j["cpu_fit"] for j in jobs]
+        a, b = hints(job("a", "x_s1"), job("b", "x_s2", gpu="GPU-b"))
+        self.assertEqual((a["sug"], b["sug"]), (3, 3))
+        self.assertEqual(a["room"], {"per": 3, "cap": 7, "other": 0.0, "out": 0.0, "same": 2, "kept": False})
+        a, = hints(job("a", "x_s1"))                                         # 只有它一条：2 倍 = 4，没超
+        self.assertEqual(a["sug"], 4)
+        a, _ = hints(job("a", "x_s1", cpus=3), job("o", "y_s1", project="pb", cpus=3, gpu="GPU-b"))   # 别的项目记 3 核：每条最多 4 核
+        self.assertEqual((a["sug"], a["room"]["other"], a["room"]["same"]), (4, 3.0, 1))
+        a, _, _ = hints(job("a", "x_s1", cpus=3), job("b", "x_s2", cpus=3), job("o", "y_s1", cpus=1, gpu="GPU-b"))   # (7 − 1) / 2 = 3，不比给的多
+        self.assertIsNone(a["sug"])
+        self.w.info = dict(self.w.info, cpu_quota=None)                      # 没设配额：照旧 2 倍
+        a, b = hints(job("a", "x_s1"), job("b", "x_s2"))
+        self.assertEqual((a["sug"], a["room"]), (4, None))
+
+    def test_cpu_line(self):
+        # #112：一台的 CPU 一句（worker status、fit、labmon status 共用）：配额、nproc 是宿主机的、labmon 记了几核、labmon 之外占的、还能给几核
+        L = self.m.cpu_line
+        self.assertIsNone(L({}))
+        run = [{"name": "a", "acct": {"cpu": 2.0}}, {"name": "b", "acct": {"cpu": 3.0}}, {"name": "hold_x", "acct": {"cpu": 0.0}}]
+        st = {"info": {"cpu_quota": 7.0, "nproc": 64}, "room": {"cpu": 1.5, "cpu_cap": 7}, "running": run}
+        self.assertEqual(L(st), "CPU：配额 7 核，nproc 报的 64 是宿主机的核数；labmon 在跑 2 个任务记 5 核，labmon 之外占 0.5 核，还能给新任务 1.5 核")
+        self.assertEqual(L(dict(st, info={"cpu_quota": 7.5, "nproc": 64}, room={"cpu": 2.0, "cpu_cap": 7}, guest={"keep": {"cpu": 1}})),
+                         "CPU：配额 7.5 核（按 7 核记账），nproc 报的 64 是宿主机的核数；labmon 在跑 2 个任务记 5 核，还能给新任务 2 核")
+        self.assertEqual(L(dict(st, room={"cpu": 1.0, "cpu_cap": 7}, guest={"keep": {"cpu": 1}})),
+                         "CPU：配额 7 核，nproc 报的 64 是宿主机的核数；labmon 在跑 2 个任务记 5 核，labmon 之外与给对方的预留占 1 核，还能给新任务 1 核")
+        self.assertEqual(L({"info": {"cpu_quota": 7.0}, "room": {"cpu": -0.5, "cpu_cap": 7}, "running": run}),
+                         "CPU：配额 7 核；labmon 在跑 2 个任务记 5 核，labmon 之外占 2.5 核，还能给新任务 0 核")
+        self.assertEqual(L({"info": {"cpu_quota": None, "nproc": 64}, "room": {"cpu": None}}), "CPU：容器没设配额，不按核记账（nproc 报的 64 是宿主机的核数）")
 
     def test_throttle_status_alert_and_restore(self):
         # 持续限流 10 分钟才标 alert，指出超核的任务（占位任务不算）；限流结束为 None；状态里的起点重启后找回（#39）

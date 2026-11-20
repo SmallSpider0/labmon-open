@@ -726,7 +726,7 @@ def _groups(cfg: dict, snap: dict, state: dict, ratios: dict) -> None:
 def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict, t: float) -> None:
     """主机级告警：GPU 空转（还有任务未完成、利用率却一直低，写明各车道在做什么）、CPU 持续被限流且本项目有超核的任务、开跑核数给少给多（只给会话）、drain 挡住本项目的任务、空闲关机风险（when_idle 检查）。"""
     al_cfg, alerts, hstate = cfg["alerts"], snap["alerts"], state.setdefault("hosts", {})
-    fits = {}                                     # (how, 类) → [(运行中任务, cpu_fit, 在哪, 类按什么认)]：cpu_low:、cpu_high: 跨主机合并（_cpu_fit_alerts）
+    fits = {}                                     # (how, 类) → [(运行中任务, cpu_fit, 在哪, 类按什么认, 哪台)]：cpu_low:、cpu_high: 跨主机合并（_cpu_fit_alerts）
     for hd in snap["hosts"]:
         if not hd["ok"]:
             continue
@@ -774,7 +774,7 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                                 "（OMP_NUM_THREADS 等、torch.set_num_threads、DataLoader num_workers、进程池；按 nproc 取的是宿主机的核数），改成按 $LABMON_CPUS；"
                                 "确实要更多核就在清单那一行写 cpus=，下次放行按它记账", say))
         # 开跑给的核数给少了、给多了（#46）：worker 判的（运行中任务的 cpu_fit，门槛只在 worker 的 cpu_fit），本项目的清单任务才报、只给会话；
-        # 车道按清单认（目录 + 清单，_qpath）：同一台上两条清单可以有同名任务。给少的已给到配额（sug 为 None）写大也给不了，不报。
+        # 车道按清单认（目录 + 清单，_qpath）：同一台上两条清单可以有同名任务。给少的加不了核（sug 为 None：已给到配额，或配额被同机别的任务与同类分完了，#112）不报。
         # 按类（cpu_fit 的 cls：tag，否则去种子号同名）跨主机合并、循环后一起报（#91）
         by_q = {_qpath(ln["root"], ln["queue"]): ln for ln in lanes if ln.get("root") and ln.get("queue")}
         for r in (st or {}).get("running") or []:
@@ -782,7 +782,7 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
             if not f or not f.get("sug") or r.get("kind") != "queue" or r.get("project") != cfg["id"] or lane is None:
                 continue
             # 还没升级的 worker 不给 cls：按任务名各报一条（部署拉起新 worker 后就没有了）
-            fits.setdefault((f["how"], f.get("cls") or r["name"]), []).append((r, f, f"{hd['label']} {lane['label']}", f.get("by")))
+            fits.setdefault((f["how"], f.get("cls") or r["name"]), []).append((r, f, f"{hd['label']} {lane['label']}", f.get("by"), hd["label"]))
         # drain 是整台主机的（续租预备、跑完就还、别的会话手动下的）：挡住本项目的任务时报一次，免得会话一直睡着不知道
         dr = [ln for ln in lanes if ln.get("held") == "drain" and ln.get("unfinished")]
         if dr:
@@ -811,32 +811,55 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
 def _cpu_fit_alerts(fits: dict) -> list:
     """开跑核数给少、给多的告警（只给会话，#46）：同一个项目同一类（tag，否则去种子号同名）的合成一条，跨主机（#91）。
     key cpu_low:<类>、cpu_high:<类> 不带任务名：同类后面的任务接着被判出来时 key 不变，消失后 6 小时内再出现不再叫醒（waits._new_alerts，#88）。
-    fits 由 _host_alerts 收集：(how, 类) → [(运行中任务, cpu_fit, 在哪, 类按什么认)]。"""
+    给少了的建议值 worker 已按各台的配额、同机别的任务已记的核与同类几条同时在跑封顶（cpu_budget，#112）：各台的值不同时按主机分写，
+    并写出各台配额多少、别的任务记了多少（照取最大值写，在配额小的那台上照做会超）。
+    fits 由 _host_alerts 收集：(how, 类) → [(运行中任务, cpu_fit, 在哪, 类按什么认, 哪台)]。"""
     out = []
     for (how, cls), xs in fits.items():
         if len(xs) == 1:
             subj = f"任务 {xs[0][0]['name']}（{xs[0][2]}）"
         else:                                     # 按主机车道列：本机 车道 1：a_s1、a_s2；别的主机 车道 2：a_s3
-            who = "；".join(f"{w}：{'、'.join(r['name'] for r, _, w2, _ in xs if w2 == w)}" for w in dict.fromkeys(w for _, _, w, _ in xs))
+            who = "；".join(f"{w}：{'、'.join(x[0]['name'] for x in xs if x[2] == w)}" for w in dict.fromkeys(x[2] for x in xs))
             subj = f"{'同 tag' if xs[0][3] == 'tag' else '同类'} {cls} 的 {len(xs)} 个任务（{who}）"
-        sug = max(f["sug"] for _, f, _, _ in xs)
 
         def rng(k):                               # 几个任务的平均核数、峰值：一样的写一个，否则写范围
-            a, b = min(f[k] for _, f, _, _ in xs), max(f[k] for _, f, _, _ in xs)
+            a, b = min(x[1][k] for x in xs), max(x[1][k] for x in xs)
             return f"{a:.1f}" if round(a, 1) == round(b, 1) else f"{a:.1f}–{b:.1f}"
-        give = "、".join(f"{g:g}" for g in sorted({f["give"] for _, f, _, _ in xs}))
+        give = "、".join(f"{g:g}" for g in sorted({x[1]["give"] for x in xs}))
         if how == "low":
+            best = {}                             # 各台建议值最大的那一份（同一台同类的封顶相同，give 不同时 2 倍不同）
+            for x in xs:
+                if x[4] not in best or x[1]["sug"] > best[x[4]]["sug"]:
+                    best[x[4]] = x[1]
+            sugs = {f["sug"] for f in best.values()}
+            write = f"写 cpus={sugs.pop()}" if len(sugs) == 1 else "按主机写 " + "、".join(f"{h} 上 cpus={f['sug']}" for h, f in best.items())
+            room = "；".join(_cpu_room_text(h if len(best) > 1 else "这台", f["room"]) for h, f in best.items() if f.get("room"))
+            full = any(f.get("room") and f["sug"] >= f["room"]["per"] for f in best.values())   # 建议值已到每条最多能给的
             out.append(alert(f"cpu_low:{cls}", "agent",
                              f"{subj}近 10 分钟平均用了 {rng('avg')} 核，给的 {give} 核基本用满，所在的卡利用率不到 50%：可能给少了。"
-                             f"没开跑的同类任务在清单那一行写 cpus={sug} 试试（cpus= 优先于历史；跑过以后可以删掉，历史只会往实测靠），"
+                             f"没开跑的同类任务在清单那一行{write} 试试（{room + ('，再写大会超配额' if full else '') + '；' if room else ''}"
+                             "cpus= 优先于历史；跑过以后可以删掉，历史只会往实测靠），"
                              "线程数、DataLoader 进程数按 $LABMON_CPUS 取；在跑的不必停"))
         else:
-            hint = "、".join(f"{c:g}" for c in sorted({r["cpus"] for r, _, _, _ in xs if r.get("cpus") is not None})) or "?"
+            sug = max(x[1]["sug"] for x in xs)
+            hint = "、".join(f"{c:g}" for c in sorted({x[0]["cpus"] for x in xs if x[0].get("cpus") is not None})) or "?"
             out.append(alert(f"cpu_high:{cls}", "agent",
                              f"{subj}清单写了 cpus={hint}（给 {give} 核），跑到现在 1 分钟峰值只有 {rng('peak')} 核：写多了。"
                              "同类跑完几次、峰值都不到一半后，没开跑的自动按实测记账（开跑仍按 cpus= 给核），不必改清单；"
                              f"想马上让出核，没开跑的改成 cpus={sug}，或删掉 cpus= 改按历史估；在跑的不必停"))
     return out
+
+
+def _cpu_room_text(where: str, rm: dict) -> str:
+    """cpu_low: 里一台的核预算（worker 的 cpu_budget）：配额、同类几条同时在跑、别的任务已记的、labmon 之外占的、每条最多几核。"""
+    bits = [f"{where}配额 {rm['cap']} 核" if where == "这台" else f"{where} 配额 {rm['cap']} 核"]
+    if rm.get("same", 1) > 1:
+        bits.append(f"同类 {rm['same']} 条同时在跑")
+    if rm.get("other", 0) >= 0.1:
+        bits.append(f"别的任务记了 {rm['other']:g} 核")
+    if rm.get("out", 0) >= 0.1:
+        bits.append(f"labmon 之外{'与给对方的预留' if rm.get('kept') else ''}占 {rm['out']:g} 核")
+    return "，".join(bits) + f"，每条最多 {rm['per']} 核"
 
 
 NO_WORK_WAKE_S = 86400   # 项目跑空后这么久内给实验会话那条 no_work:（只给会话，#43）

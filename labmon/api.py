@@ -17,7 +17,7 @@ from . import pool as P
 from . import projects as PJ
 from . import workerctl as W
 from .config import HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
-from .labmon_worker import ka_lines
+from .labmon_worker import cpu_line, ka_lines
 from .records import EVENT_KINDS, project_rows
 from .state import load_json, snapshot
 
@@ -275,7 +275,7 @@ def _lane_state(ln: dict) -> str:
 
 def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict:
     """labmon status（#52）：项目快照（docs/schema.md）排成几段：各主机与卡、各车道、运行中（进度、预计结束、此刻 CPU、日志最后一行）、
-    排队的预计开始、最近失败、计划项、挪法建议、此刻的告警。glob：看的人能看的全局快照（users.view 过的），取本项目在跑任务的 CPU 与各主机的保活（worker 状态，ka_lines）。
+    排队的预计开始、最近失败、计划项、挪法建议、此刻的告警。glob：看的人能看的全局快照（users.view 过的），取本项目在跑任务的 CPU、各主机的保活与 CPU 配额（worker 状态，ka_lines、cpu_line）。
     快照还没有：rc 0、一句话；已归档的另写那句（projects.archived_msg）。data 是项目快照原样（没有为 None）。"""
     now = time.time() if now is None else now
     o = Out()
@@ -311,8 +311,10 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
         st = "正常" if h.get("ok") else f"连不上：{h.get('error')}" + (f"（上次 {fmt_time(h['last_ok'])}）" if h.get("last_ok") else "")
         cards = "，".join(_card(g) for g in h.get("gpus") or [])
         o.p(f"  {name}：{st}" + (f"；{cards}" if cards else "") + (f"；{borrow_text(h['borrow'])}" if h.get("borrow") else ""))
-        for ln in ka_lines(wst.get(h["id"]) or {}) if h.get("ok") else []:   # 这台的 GPU 保活（#61）：nvidia-smi 里哪个进程是 labmon 的保活
-            o.p(f"    {ln}")
+        hst = (wst.get(h["id"]) or {}) if h.get("ok") else {}
+        for ln in ka_lines(hst) + [cpu_line(hst)] if hst else []:   # 这台的 GPU 保活（#61：nvidia-smi 里哪个进程是 labmon 的保活）与 CPU 配额、已记的核（#112）
+            if ln:
+                o.p(f"    {ln}")
     lanes = {ln["id"]: ln for ln in snap.get("lanes") or []}
     o.p("车道：")
     for ln in lanes.values():
