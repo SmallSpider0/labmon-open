@@ -776,6 +776,21 @@ def project_moved() -> dict:
     return d
 
 
+def project_pool_back() -> dict:
+    """#99：池车道 pq（还在池里待放 alpha_pool_s1）先前被放到池借来的 srv-y 上跑过，srv-y 还掉、清单回到池里：跑完的 alpha_pool_s0、
+    失败的尝试按用量记录带着 srv-y（collect._attempts），srv-y 那一格还在跑完的 alpha_pool_s4 带着 current 里放行的主机（#100）。"""
+    d = copy.deepcopy(project())
+    lp = "pq/jobs/p.txt"
+    d["jobs"] += [{"id": "alpha_pool_s0", "est_min": 60.0, "status": "done", "start_ts": NOW - 5 * H, "end_ts": NOW - 4 * H, "lane": lp, "hold": False, "group": None,
+                   "dur_min": 60.0, "dur_src": "清单估时", "actual_min": 60.0, "host": "srv-y"},
+                  {"id": "alpha_pool_s4", "est_min": 60.0, "status": "running", "start_ts": NOW - 30 * 60, "lane": lp, "hold": False, "group": None, "dur_min": 60.0,
+                   "dur_src": "清单估时", "elapsed_min": 30.0, "speed": [], "eta_source": "清单估时", "remaining_min": 30.0, "eta_ts": NOW + 30 * 60, "last_line": "epoch 1",
+                   "host": "srv-y"}]
+    d["attempts"].append({"name": "alpha_pool_s0", "lane": lp, "t0": NOW - 5.5 * H, "t1": NOW - 5.4 * H, "host": "srv-y"})
+    d["lanes"][3].update(total=3, done=1, unfinished=2)
+    return d
+
+
 def project_overdue() -> dict:
     """借来的 srv-b 已过约定时间（半小时前）、在跑的那格还没跑完（还要 15 分钟）：到点时看板自己下了 drain，跑完就还（#103）。"""
     d = copy.deepcopy(project())
@@ -989,7 +1004,7 @@ def overview_user() -> dict:
 
 
 EXTRA = {"overview_user": overview_user, "records": records, "records_evil": records_evil, "events": project_events, "events_evil": project_events_evil,
-         "project_overdue": project_overdue, "project_longq": project_longq, "project_moved": project_moved, "events_overdue": project_events_overdue,
+         "project_overdue": project_overdue, "project_longq": project_longq, "project_moved": project_moved, "project_pool_back": project_pool_back, "events_overdue": project_events_overdue,
          "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many,
          "project_deps": project_deps}
 

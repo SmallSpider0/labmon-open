@@ -154,10 +154,11 @@ const ST = {done: ["完成", "b-ok"], failed: ["失败", "b-bad"], running: ["�
 // 任务的显示状态：暂停任务（清单里等条件放行的占位任务）与被信号终止的失败单独标出
 const stOf = j => j.suspended && j.status === "running" ? ["已挂起", "b-warn"] : j.hold ? ({running: ["暂停中", "b-warn"], queued: ["暂停（排队）", "b-mute"], done: ["已放行", "b-mute"], failed: ["暂停出错", "b-bad"]})[j.status]
   : j.status === "failed" && j.killed ? ["被终止", "b-warn"] : ST[j.status];
-const retShown = h => D.lanes.some(l => l.host === h.id && l.unfinished);
-// 交给算力池、还没放到哪台的车道（#89）：池不是主机，没有卡、没有推演，这些车道与任务不进时间线，在时间线下面与「运行中」里写原因
+const retShown = h => D.lanes.some(l => l.host === h.id && l.unfinished);     // 已归还的主机还单列：它上面还有任务没跑完
+// 交给算力池、还没放到哪台的车道（#89）：池不是主机，没有卡、没有推演，池车道不画一行，在时间线下面与「运行中」里写原因；
+// 它跑过、在跑的任务带着实际那台（host：跑完的按用量记录补，collect._attempts，#99），照 #100 画在那台下面，只有还没放的不进时间线
 const poolLanes = () => D.lanes.filter(l => l.pool);
-const inPool = j => !!D.lanes.find(l => l.id === j.lane)?.pool;     // 已归还的主机还单列：它上面还有任务没跑完
+const inPool = j => !j.host && !!D.lanes.find(l => l.id === j.lane)?.pool;
 // 车道此刻的状态类别：判断顺序只在这一处，laneState 的整句与紧凑视图“没在跑”那一行的计数都按它（#86）
 const laneKind = l => l.returned ? "returned" : l.paused ? "paused" : l.holding ? "holding" : l.alive ? "alive" : l.waiting ? "waiting"
   : l.started === false ? "unstarted" : l.unfinished ? (l.managed ? "managed" : "gone") : "done";
@@ -494,15 +495,15 @@ function drawTimeline() {
   const {t0, t1} = tlRange(), win = (a, b) => a != null && b != null && b > t0 && a < t1;
   const showAll = LS.get("tlall", false), rows = [], used = new Set();
   let hidden = 0;
-  const extra = [...new Set(D.jobs.map(j => j.host).filter(id => id && !D.hosts.some(h => h.id === id)))].map(hostOf);
+  const att = D.attempts || [], extra = [...new Set([...D.jobs, ...att].map(j => j.host).filter(id => id && !D.hosts.some(h => h.id === id)))].map(hostOf);
   const shown = [...D.hosts.filter(h => !h.pool), ...extra].map(h => {
-    const lanes = D.lanes.filter(l => l.host === h.id && !l.missing);
-    const vis = lanes.filter(l => showAll || l.unfinished || rowJobs(l, h.id).some(j => win(jobT0(j), jobT1(j)))
-      || (D.attempts || []).some(x => x.lane === l.id && win(x.t0, x.t1)));
-    hidden += lanes.length - vis.length;
-    // 清单已搬到别的主机、这台还在跑完手上那一格（#100）：照这条车道另起一行挂在这台下面，只画那一格
-    const away = D.lanes.filter(l => l.host !== h.id && rowJobs(l, h.id).length).map(l => ({...l, away: h.id}));
-    return [h, [...vis, ...away]];
+    const lanes = D.lanes.filter(l => l.host === h.id && !l.missing), ran = (l, hid) => att.some(x => x.lane === l.id && (x.host || l.host) === hid && win(x.t0, x.t1));
+    const vis = lanes.filter(l => showAll || l.unfinished || rowJobs(l, h.id).some(j => win(jobT0(j), jobT1(j))) || ran(l, h.id));
+    // 清单已搬到别的主机、这台还在跑完手上那一格（#100），或交回算力池的清单在这台跑过、在跑的（#99）：照这条车道另起一行挂在这台下面，只画这台的那几格
+    const left = D.lanes.filter(l => l.host !== h.id && (rowJobs(l, h.id).length || att.some(x => x.lane === l.id && x.host === h.id)));
+    const away = left.filter(l => showAll || rowJobs(l, h.id).some(j => j.status === "running" || win(jobT0(j), jobT1(j))) || ran(l, h.id));
+    hidden += lanes.length - vis.length + left.length - away.length;
+    return [h, [...vis, ...away.map(l => ({...l, away: h.id}))]];
   }).filter(([, vis]) => vis.length);
   // 车道名右边用计划项配色的圆点标出这段时间里它跑的计划项：图上不止一个计划项时才画（只有一个时标题旁已列出）
   const gsOf = l => laneGroups(rowJobs(l, l.away || l.host).filter(j => win(jobT0(j), jobT1(j))));
@@ -516,7 +517,8 @@ function drawTimeline() {
     vis.forEach(l => rows.push({h: 24, draw: (y, hh, c) => laneRow(l, hb, multi ? gsOf(l) : [], y, hh, c, used)}));
   }
   // 池里待放的（#89）：一条清单一行，写原因与已等多久
-  const pool = poolLanes().filter(l => l.unfinished).map(l => `<div class="sm mut" style="margin-top:2px" ${tip("交给算力池、还没放到哪台：放到某台后这条车道跟到那台画；已经跑过的按实际跑的主机画")}>${esc(laneName(l, D.hosts))}（${l.unfinished} 个任务）不在图上：${esc(laneState(l))}</div>`).join("");
+  const left = l => jobsOf(l.id).filter(j => inPool(j) && (j.status === "queued" || j.status === "running")).length;     // 跑过、在跑的已画在那台下（#99）
+  const pool = poolLanes().filter(left).map(l => `<div class="sm mut" style="margin-top:2px" ${tip("交给算力池、还没放到哪台：放到某台后这条车道跟到那台画；已经跑过的按实际跑的主机画")}>${esc(laneName(l, D.hosts))}（${left(l)} 个任务）不在图上：${esc(laneState(l))}</div>`).join("");
   const more = pool + (hidden || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? "收起这段时间没有任务的车道" : `另有 ${hidden} 条车道这段时间没有任务，显示`}</span></div>` : "");
   // 左栏要多宽（#108）：主机短名、车道名（从 x=18 起，右边留计划项圆点）都写得下；tlSvg 再按上限截
   const lw = Math.max(...shown.flatMap(([h, vis]) => [textW(hostShort(h)) + 8,
@@ -638,8 +640,8 @@ function laneRow(l, hb, gs, y, h, c, used) {
   let s = "";
   const r = c.nrow = (c.nrow || 0) + 1;     // 行号：依赖连线认同一行（depLines）
   const js = rowJobs(l, l.away || l.host);
-  const lt = l.away ? `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n清单已登记到 ${hostOf(l.host).label || l.host}，之后的任务在那台跑；`
-    + `这一格是登记搬走前 ${hostOf(l.away).label || l.away} 放行的，在这台跑完` : `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n计划项：${laneGroups(js).map(g => GROUPS[g]?.label || g).join("、") || "—"}\n完成 ${l.done}/${l.total} · 排队 ${js.filter(j => j.status === "queued").length}${l.failed ? " · 失败 " + l.failed : ""}\n${laneState(l)}${l.eta_ts ? "\n本车道完成 " + ts(l.eta_ts) + (l.has_hold ? holdGuess(js) ? "（含暂停，时长是猜的）" : "（含暂停，按它等的任务算）" : "") + (l.overrun ? "（当前任务已超估时，会更晚）" : "") : ""}${l.fs_skew ? `\n共享盘时钟${l.fs_skew > 0 ? "快" : "慢"} ${f1(Math.abs(l.fs_skew) / 60)} 分（已校正）` : ""}`;
+  const lt = l.away ? `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n` + (l.pool ? `清单已交回算力池，之后的任务等看板放到某台；这一行是它在 ${hostOf(l.away).label || l.away} 跑过、在跑的任务`
+    : `清单已登记到 ${hostOf(l.host).label || l.host}，之后的任务在那台跑；这一格是登记搬走前 ${hostOf(l.away).label || l.away} 放行的，在这台跑完`) : `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n计划项：${laneGroups(js).map(g => GROUPS[g]?.label || g).join("、") || "—"}\n完成 ${l.done}/${l.total} · 排队 ${js.filter(j => j.status === "queued").length}${l.failed ? " · 失败 " + l.failed : ""}\n${laneState(l)}${l.eta_ts ? "\n本车道完成 " + ts(l.eta_ts) + (l.has_hold ? holdGuess(js) ? "（含暂停，时长是猜的）" : "（含暂停，按它等的任务算）" : "") + (l.overrun ? "（当前任务已超估时，会更晚）" : "") : ""}${l.fs_skew ? `\n共享盘时钟${l.fs_skew > 0 ? "快" : "慢"} ${f1(Math.abs(l.fs_skew) / 60)} 分（已校正）` : ""}`;
   const dc = l.away ? "var(--ok)" : l.returned ? "var(--faint)" : l.paused || l.holding || l.waiting ? "var(--warn)" : l.alive || l.managed && l.unfinished ? "var(--ok)" : l.unfinished && l.started !== false ? "var(--bad)" : "var(--faint)";
   // 车道名缩进挂在主机表头下面，一行；跑的计划项是标签栏右端的小圆点（各车道对齐，最多 4 个），名字见悬停。
   // 车道名放不下时圆点收成一个点加个数，车道名按 laneFit 截（留住「车道 N · 」与清单名的头尾，#108）
@@ -676,7 +678,7 @@ function laneRow(l, hb, gs, y, h, c, used) {
     const tt = `${j.id}\n${stOf(j)[0]} · ${ts(a0)} → ${ts(e0)}` + (j.hold && j.status !== "done" ? `（${j.deps ? j.dur_src : "时长按估时猜"}）` : "")
       + (j.deps && !j.hold ? `\n${j.status === "queued" ? `等 ${afterText(j.deps, D.id)} 跑完才开始` : "依赖 " + afterText(j.deps, D.id)}` : "") + (j.progress ? `\n进度 ${j.progress[0]}/${j.progress[1]}` : "")
       + (j.dur_min ? `\n预计 ${dur(j.dur_min * 60)}` : "") + (j.overrun_min ? ` · 已超 ${dur(j.overrun_min * 60)}` : "") + (j.actual_min != null ? ` · 实际 ${dur(j.actual_min * 60)}` : "")
-      + (j.status === "running" && !j.hold && j.eta_source ? `\n预计结束依据：${j.eta_source}` : "") + (j.host ? `\n${awayText(j)}（清单已搬到 ${hostShort(hostOf(l.host))}）` : "")
+      + (j.status === "running" && !j.hold && j.eta_source ? `\n预计结束依据：${j.eta_source}` : "") + (j.host ? `\n${awayText(j)}（${l.pool ? "清单已交回算力池" : "清单已搬到 " + hostShort(hostOf(l.host))}）` : "")
       + (j.last_line ? "\n" + j.last_line.slice(0, 90) : "");
     const yy = y + 3, hh = h - 6;
     (c.pos ||= {})[j.id] = {x0: c.X(a0), x1: c.X(e0), y: yy + hh / 2, yt: y, yb: y + h, r};     // 依赖连线（depLines）从这里取
@@ -691,7 +693,7 @@ function laneRow(l, hb, gs, y, h, c, used) {
     s += "</g>";
   }
   // 失败的尝试（后来重跑成功的也留着）：车道底部细红条＋圆标，横向相距不到 14px 的合成一个标
-  const fa = l.away ? [] : (D.attempts || []).filter(x => x.lane === l.id && c.win(x.t0, x.t1)).sort((a, b) => a.t0 - b.t0), cs = [];
+  const fa = (D.attempts || []).filter(x => x.lane === l.id && (x.host || l.host) === (l.away || l.host) && c.win(x.t0, x.t1)).sort((a, b) => a.t0 - b.t0), cs = [];
   for (const x of fa) {
     const xa = c.cl(x.t0);
     s += `<rect x="${xa}" y="${y + h - 4}" width="${Math.max(2.5, c.cl(x.t1) - xa)}" height="3" rx="1" fill="var(--bad)"/>`;

@@ -364,7 +364,7 @@ class RegLanesTest(Base):
         from labmon import pool as PO
         from labmon import waits as WT
         from labmon.config import fmt_time
-        from labmon.state import save_json, state_dir
+        from labmon.state import append_row, save_json, state_dir, usage_file
         hf = self.d / "hosts.toml"
         base = hf.read_text() + ('\n[fleet]\ninterval = 600\n\n[[fleet.servers]]\nid = "a"\nholder = "AA"\nssh = "root@h"\nport = 1\npool = "P"\nlend = true\n'
                                  f'borrow_since = "{fmt_time(time.time() - 3600, year=True)}"\nborrow_pool = true\n')
@@ -403,12 +403,20 @@ class RegLanesTest(Base):
         PO.tick(glob, {}, move=lambda to, items, pool="": moves.append(to), fit=fit, start=lambda *x, **y: None, ret=lambda *x: None, fin=lambda *x, **y: "")
         self.assertEqual(moves, ["pool"])
         save_json(state_dir() / "snapshot.json", glob)
+        # #99：工作台存的 a 的用量记录里有这条清单跑过的（先失败一次、再跑成）：回池后跑完的那格带着 a、失败的尝试也带着 a，项目页画在 a 下面
+        # （旧代码按车道主机 pool 找用量记录，什么也找不到，跑完的那格挂在不画的池车道上，从时间线消失）
+        now, row = time.time(), {"p": "p1", "root": str(self.root), "queue": "jobs/q.txt", "n": "a_done", "g": []}
+        for r in (dict(row, s=now - 3000, t=now - 2900, st="failed"), dict(row, s=now - 2800, t=now - 2000, st="done"), dict(row, n="x", s=now - 2800, t=now - 2000, st="done")):
+            append_row(usage_file("a"), r, 86400, now)
         snap = C.collect(self.cfg())
         ln, = snap["lanes"]
         self.assertEqual((ln["host"], ln.get("pool")), ("pool", True))
         done = next(j for j in snap["jobs"] if j["id"] == "a_done")
         self.assertEqual(done["status"], "done")
         self.assertTrue(done["start_ts"] and done["end_ts"])
+        self.assertEqual(done.get("host"), "a")
+        self.assertEqual([(x["name"], x.get("host")) for x in snap["attempts"]], [("a_done", "a")])
+        self.assertNotIn("host", next(j for j in snap["jobs"] if j["status"] == "queued"))     # 还没放的不带主机，不进时间线
         self.assertEqual(WT.job_state(snap, "a_done", [])["st"], "done")
 
     def test_pool_returned_old_list_alerts(self):
