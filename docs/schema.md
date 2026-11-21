@@ -45,7 +45,9 @@
     "paused": null,                              // 队列进程不在且状态目录有 paused 标记时为其内容（原因）；此时 eta_ts 为 null
     "managed": true, "waiting": null,            // worker 在管这条队列（status.json 新鲜且登记了它）：没有锁也不报 lock_dead；waiting 为 worker 说的等待原因
     "held": null,                                // 挡住它的临时指令种类（drain、pause、deadline、guest，worker 给）：没有在跑的任务时按暂停算（paused 写 waiting）
+    "held_t": null,                              // 那种指令最晚下的时刻（worker 状态 overrides 的 t，探针取）：drain: 告警的 key 带它（#129）
     "dep": null,                                 // 队首的依赖没满足（worker 给）：wait 在等；failed 等的跑失败了、missing 找不到、cycle 成环，这三种出 dep: 告警；都不报 GPU 空转
+    "head": null,                                // 队首等待项的任务名（worker 等待项的 name，探针取）：dep: 告警的 key 带它（#129）
     "stuck": null,                               // worker 推演里排不上的原因（放不下、截止前跑不完等）：此时 eta_ts 为 null
     "cpu_wait": null,                            // 队首一直因 CPU 被挡满 10 分钟后已挡的秒数（worker 的 cpu_wait，阈值只在 worker）：出 cpu: 告警
     "holding": false, "has_hold": false,         // 正在跑暂停任务 / 未完成任务里有暂停任务
@@ -94,7 +96,7 @@
               "ratios": [{"cls": "x4_s146", "k": 0.79, "src": "同类近 3 次 实际/估时 ×0.79", "open": true}],   // 各类任务的 实际/估时（open：还有没跑完的）
               "done_when": {"file": "tasks.md", "pattern": "^\\s*- \\[x\\] E4"}}],   // 配了 done_when 的：跑完待汇总时页面提示勾哪里
 
-  "alerts": [{"key": "lock_dead:r9_a6000", "to": "agent", "msg": "…"}],   // collect.alert 产出（#142）：to 给谁看 user / agent / both；
+  "alerts": [{"key": "lock_dead:r9_a6000:6341", "to": "agent", "msg": "…"}],   // collect.alert 产出（#142）：key 带“这一次”（#129，见 workbench.md「告警」）；to 给谁看 user / agent / both；
                                                // msg 给实验会话（labmon wait 与命令行）；page 只在 both 时有：给用户的那句人话（collect.user_alerts、页面的 forUser 取它，
                                                // 没有就是 msg）；to=agent 的页面上不计数、只收在折叠的「给实验会话的提示」里
 

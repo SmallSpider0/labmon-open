@@ -676,8 +676,8 @@ def project() -> dict:
             "hosts": hosts, "lanes": lanes, "jobs": jobs, "groups": groups,
             # 告警给谁看（collect.alert 的 to，#142）：失败、空转、挪法建议只给实验会话（页面上折叠）；借用约定挡住两边都要（page 给用户）
             "alerts": [{"key": "failed:alpha_probe_s9", "to": "agent", "msg": "任务被终止（退出码 137）：alpha_probe_s9（srv-a 车道 1）；要重跑请删除 /data/me/proj-a/q1/results/_queue/alpha_probe_s9.failed"},
-                       {"key": "gpu_idle:srv-b", "to": "agent", "msg": "srv-b：还有 1 个任务未完成，GPU 利用率已 15 分钟低于 5%（车道 1 等待中：等 beta_eval_s7 跑完）"},
-                       {"key": "borrow_cut:b3", "to": "both", "msg": "srv-b（借 OWNER） 车道 2 还有 2 个任务不会在这台放行：约定归还 11-14 09:00 前跑不完（估 330 分钟）；"
+                       {"key": "gpu_idle:srv-b:1793770000", "to": "agent", "msg": "srv-b：还有 1 个任务未完成，GPU 利用率已 15 分钟低于 5%（车道 1 等待中：等 beta_eval_s7 跑完）"},
+                       {"key": "borrow_cut:b3:srv-b:1793700000", "to": "both", "msg": "srv-b（借 OWNER） 车道 2 还有 2 个任务不会在这台放行：约定归还 11-14 09:00 前跑不完（估 330 分钟）；"
                         "换到别的在用主机（labmon worker add）；截止取的是 OWNER 的租期到期，提前 1 小时，延长约定推不迟它",
                         "page": "srv-b（借 OWNER） 车道 2 还有 2 个任务不会在这台放行：约定归还 11-14 09:00 前跑不完（估 330 分钟）；"
                         "截止取的是 OWNER 的租期到期，提前 1 小时，延长约定推不迟它，由实验会话换到别的在用主机"},
@@ -832,7 +832,7 @@ def project_sparse() -> dict:
                        "waiting": None, "held": None, "stuck": None, "started": True, "holding": False, "has_hold": False, "overrun": False, "total": 1, "done": 0, "failed": 0,
                        "unfinished": 1, "eta_ts": None}],
             "jobs": [{"id": "r_job", "est_min": None, "status": "queued", "lane": "auto:r1/r1", "hold": False, "group": None, "dur_min": None, "dur_src": None}],
-            "groups": [], "alerts": [{"key": "returned_unfinished:auto:r1/r1", "to": "both", "msg": "srv-r 已归还，车道 1 还有 1 个任务没跑完：把这条清单 labmon worker add 到别的在用主机（车道跟着登记走，monitor.toml 不用改）",
+            "groups": [], "alerts": [{"key": "returned_unfinished:auto:r1/r1:srv-r:1793600000", "to": "both", "msg": "srv-r 已归还，车道 1 还有 1 个任务没跑完：把这条清单 labmon worker add 到别的在用主机（车道跟着登记走，monitor.toml 不用改）",
                                   "page": "srv-r 已归还，车道 1 还有 1 个任务没跑完：可在项目的「管理」里换到别的主机，或由实验会话登记到别的主机"}], "markers": [],
             "spans": [], "util_hourly": {}, "history": [], "all_done_ts": None, "attempts": [], "no_work_since": NOW - 86400,
             "thresholds": {"stale_s": stale_limit(120, 5)},

@@ -209,7 +209,7 @@ def parse_gpu_queue(raw: dict, t: float) -> tuple[dict, list[dict]]:
         jobs.append(row)
     lane = {"alive": bool(raw.get("lock_alive")), "pid": raw.get("lock_pid"), "state_dir": raw.get("state_dir"), "logs_dir": raw.get("logs_dir"),
             "paused": raw.get("paused") if not raw.get("lock_alive") else None,
-            "managed": raw.get("worker") is not None, "waiting": wk.get("wait"), "held": wk.get("held"), "dep": wk.get("dep"), "stuck": wk.get("stuck"),
+            "managed": raw.get("worker") is not None, "waiting": wk.get("wait"), "held": wk.get("held"), "held_t": wk.get("held_t"), "dep": wk.get("dep"), "head": wk.get("head"), "stuck": wk.get("stuck"),
             "cpu_wait": wk.get("cpu")}      # 队首一直因 CPU 被挡满 10 分钟（worker 定）后已挡的秒数
     return lane, jobs
 
@@ -522,7 +522,8 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     if lane.get("held") and not lane.get("paused") and not any(j["status"] == "running" for j in jobs):
         lane["paused"] = lane["waiting"]          # 被临时指令挡住（drain、本项目暂停、续租截止、约定归还）：按暂停算，不报空转（约定归还挡住的另报 borrow_cut）
     if lane.get("dep") not in (None, "wait"):    # 队首等的依赖跑失败了、找不到、成环：不改就一直不放行（labmon wait 与实验会话据此处理）
-        alerts.append(alert(f"dep:{q['id']}", "agent", f"{where} 卡在依赖上：{lane['waiting']}"))
+        # key 带队首与依赖状态（#129）：处理完这一个、下一个队首又等不来是新的一件，6 小时内也叫醒；同一个队首卡着时不变
+        alerts.append(alert(f"dep:{q['id']}:{lane.get('head')}:{lane['dep']}", "agent", f"{where} 卡在依赖上：{lane['waiting']}"))
     if lane.get("cpu_wait"):                     # 队首一直因 CPU 被挡满 10 分钟（阈值在 worker）：只报给这条车道的项目
         alerts.append(alert(f"cpu:{q['id']}", "agent", f"{where} 因 CPU 被挡 {lane['cpu_wait'] // 60} 分钟：{lane['waiting']}"))
     lane["started"] = "activity" not in raw or raw["activity"] is not None   # 从没启动过（预先登记的队列）
@@ -569,7 +570,8 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     elif returned:
         if unfinished:
             left = f"{hcfg[q['host']]['label']} 已归还，{q['name']} 还有 {unfinished} 个任务没跑完"
-            alerts.append(alert(f"returned_unfinished:{q['id']}", "both",
+            # key 带主机与归还时刻（#129）：搬到别的主机、那台又还掉是新的一件；归还期间不变
+            alerts.append(alert(f"returned_unfinished:{q['id']}:{q['host']}:{int(returned)}", "both",
                                 f"{left}：把这条清单 labmon worker add 到别的在用主机（车道跟着登记走，monitor.toml 不用改）",
                                 f"{left}：可在项目的「管理」里换到别的主机，或由实验会话登记到别的主机"))
     elif lane.get("held") == "deadline" and unfinished and (bw := next(x for x in snap["hosts"] if x["id"] == q["host"]).get("borrow") or {}).get("late") \
@@ -583,10 +585,13 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
         mv = rb.get("text") if f"{q['host']}|{lane.get('root')}|{lane.get('queue')}" in (rb.get("cut") or []) else None
         # 两边都要：会话那份写怎么办（borrow.late_do）与挪法；用户那份写人话（late_say：改约定或交给会话），挪法那半句不铺，「⇄ 可提前」图标悬停看（#40）
         head = f"{where} 还有 {unfinished} 个任务不会在这台放行：{lane['waiting']}"
-        alerts.append(alert(f"borrow_cut:{q['id']}" + (":rebalance" if mv else ""), "both",
+        # key 带主机与这一次借用（借用起点，同 borrow: 的 ep，#109、#129）：换到另一台借来的又被挡是新的一件；不带截止（可能取对方租期，各轮差几秒）
+        ep = f"{q['host']}:{round(bw['since'])}" if bw.get("since") else q["host"]
+        alerts.append(alert(f"borrow_cut:{q['id']}:{ep}" + (":rebalance" if mv else ""), "both",
                             f"{head}；{bw.get('late_do')}" + (f"。可以这样挪：{mv}" if mv else ""), f"{head}；{bw.get('late_say')}"))
     elif host_ok and unfinished and not lane["alive"] and not lane["managed"] and lane["started"] and not lane.get("paused"):
-        alerts.append(alert(f"lock_dead:{q['id']}", "agent", f"{where} 的队列进程不在（PID {lane.get('pid')}），还有 {unfinished} 个任务没跑"))
+        # key 带锁里的 PID（#129）：拉起后又挂是新的一件；没有锁文件时不带
+        alerts.append(alert(f"lock_dead:{q['id']}" + (f":{lane['pid']}" if lane.get("pid") else ""), "agent", f"{where} 的队列进程不在（PID {lane.get('pid')}），还有 {unfinished} 个任务没跑"))
 
 
 def _job_times(j: dict, lane_id: str, pid: str, al_cfg: dict, work: dict, alerts: list, t: float, where: str, fresh: bool = True) -> None:
@@ -644,14 +649,16 @@ def _job_times(j: dict, lane_id: str, pid: str, al_cfg: dict, work: dict, alerts
             rem, j["eta_source"] = 0.0, "无估时"
         j["remaining_min"] = rem / 60
         j["eta_ts"] = t + rem
+        # key 带这一次的开跑时刻（#129）：重跑后又卡住是新的一件；开跑时刻只是这一轮的现在（日志与 current 都没有）时不带，免得每轮变
+        run = f":{int(j['start_ts'])}" if j.get("start_ts") and j["start_ts"] != t else ""
         if fresh and j.get("overrun_min") and not seg.get("seen") and not j.get("suspended") and el >= NOPROG_MIN_S:
             # 超了折算估时、这一次一直没见过进度行：看板估不出到哪了，让漏写进度行的项目自己暴露（#68）。占位任务不设 overrun_min
-            alerts.append(alert(f"noprogress:{j['id']}", "agent",
+            alerts.append(alert(f"noprogress:{j['id']}{run}", "agent",
                                 f"任务 {j['id']}（{where}）已跑 {fmt_dur(el)}，超出预计 {fmt_dur(j['overrun_min'] * 60)}，这一次的日志里一直没有进度行（PROGRESS k/N），"
                                 "看板估不出它到哪了、何时跑完；先看它还在不在干活（工作台运行中任务展开看 CPU 与日志末尾），"
                                 "还没开跑的同类任务先给脚本补上进度行（docs/worker.md「进度行」）"))
         if fresh and al_cfg["log_silent_min"] and j.get("log_mtime") and t - j["log_mtime"] > al_cfg["log_silent_min"] * 60:
-            alerts.append(alert(f"log_silent:{j['id']}", "agent", f"任务 {j['id']} 的日志已 {(t - j['log_mtime']) / 60:.0f} 分钟没更新"))
+            alerts.append(alert(f"log_silent:{j['id']}{run}", "agent", f"任务 {j['id']} 的日志已 {(t - j['log_mtime']) / 60:.0f} 分钟没更新"))
 
 
 def _queued_times(jobs: list[dict], plans: dict, t: float, pid: str) -> None:
@@ -741,8 +748,11 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
         recent = [x for x in hist if x.get("host") == hd["id"] and t - x["t"] <= win + 60 and x.get("ok")]
         # 每次采样看各卡近 10 分钟的吃满程度（busy：只有保活时按 0，#51），不看瞬时值：数据加载的空档不会误报，保活也挡不住；
         # 没有 worker 的主机（采样里没有 busy）只有探针的瞬时值
-        if unfinished and hd.get("gpus") and recent and t - recent[0]["t"] >= win - 150 and \
-                all(max([u or 0 for u in x.get("busy") or x.get("util") or [0]]) < al_cfg["gpu_idle_util"] for x in recent):
+        hs = hstate.setdefault(hd["id"], {})
+        idle_gpu = bool(unfinished and hd.get("gpus") and recent and t - recent[0]["t"] >= win - 150 and
+                        all(max([u or 0 for u in x.get("busy") or x.get("util") or [0]]) < al_cfg["gpu_idle_util"] for x in recent))
+        since = _idle_stretch(hs, idle_gpu, win, t)
+        if idle_gpu:
             # 写明各车道当前在做什么，便于判断是有意让出 GPU 还是卡住了
             why = []
             for ln in lanes:
@@ -761,7 +771,7 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                 elif j.get("log_mtime"):
                     why.append(f"{j['id']} 日志 {(t - j['log_mtime']) / 60:.0f} 分钟前更新")
             why = [w for w in why if w]
-            alerts.append(alert(f"gpu_idle:{hd['id']}", "agent", f"{hd['label']}：还有 {unfinished} 个{'要用卡的' if any(ln.get('no_gpu') for ln in lanes) else ''}任务未完成，"
+            alerts.append(alert(f"gpu_idle:{hd['id']}:{since}", "agent", f"{hd['label']}：还有 {unfinished} 个{'要用卡的' if any(ln.get('no_gpu') for ln in lanes) else ''}任务未完成，"
                                 f"GPU 利用率（近 10 分钟平均，只有保活时按 0）已 {al_cfg['gpu_idle_min']} 分钟低于 {al_cfg['gpu_idle_util']:.0f}%"
                                 + (f"（{'；'.join(why)}）" if why else "")))
         # CPU 被配额限流（#39）：worker 判的（Worker.throttle，门槛只在那边），持续满时本项目有超核的任务才报；key 带这一段的起点，同一段只叫醒一次
@@ -791,7 +801,8 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
         # drain 是整台主机的（续租预备、跑完就还、别的会话手动下的）：挡住本项目的任务时报一次，免得会话一直睡着不知道
         dr = [ln for ln in lanes if ln.get("held") == "drain" and ln.get("unfinished")]
         if dr:
-            alerts.append(alert(f"drain:{hd['id']}", "agent", f"{hd['label']} 不放新任务（{dr[0]['waiting']}），本项目还有 "
+            ht = max((ln.get("held_t") or 0 for ln in dr), default=0)   # 这条 drain 下的时刻（#129）：撤了再下是新的一件
+            alerts.append(alert(f"drain:{hd['id']}" + (f":{ht}" if ht else ""), "agent", f"{hd['label']} 不放新任务（{dr[0]['waiting']}），本项目还有 "
                                 f"{sum(ln['unfinished'] for ln in dr)} 个任务在等；drain 管整台主机，可能是续租预备、跑完就还或别的会话下的，看工作台的临时指令"))
         # 空闲关机风险：卡上有进程、或有任务在跑就不算空闲。任务看本项目的车道，同机别的项目的经工作台快照里 worker 的状态看
         # （刚起来还没占卡的也算）；暂停占位不算，它不占卡、只能靠保活。
@@ -802,7 +813,6 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
         hcfg = next(h for h in cfg["hosts"] if h["id"] == hd["id"])
         idle = [c for c, cd in zip(hcfg["checks"], hd.get("checks") or []) if c.get("when_idle") and cd.get("state") == "fail" and not busy]
         # 队列跑完到 worker 拉起保活之间有约半分钟空档，平台按空闲关机要几个小时：连续空闲 IDLE_GRACE_S 才报
-        hs = hstate.setdefault(hd["id"], {})
         hs["idle_since"] = (hs.get("idle_since") or t) if idle else None
         for c in idle if hs["idle_since"] and t - hs["idle_since"] >= IDLE_GRACE_S else []:
             idle_say = f"{hd['label']}：{c['when_idle']}（卡上没有进程、也没有任务在跑）"
@@ -811,6 +821,21 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                                 f"worker 不在就 labmon worker start {hd['id']}；保活由 worker 管，不自己 ka.sh start", idle_say))
 
     alerts.extend(_cpu_fit_alerts(fits))
+
+
+def _idle_stretch(hs: dict, idle: bool, gap: float, t: float) -> int | None:
+    """GPU 空转的这一段从何时起（gpu_idle: 的 key 带它，#129）：条件第一次成立时记下（看板状态里这台的 gpu_idle.since）；
+    不成立时记 off，连续满 gap（gpu_idle_min，与起报同一个窗口）才算这一段结束。门槛两侧短暂来回仍是同一段、同一个 key，
+    labmon wait 不重复叫醒；GPU 真用起来过一阵再空转是新的一段，6 小时内也叫醒。返回此刻这一段的起点（不在空转为 None）。"""
+    gi = hs.get("gpu_idle") or {}
+    if gi.get("off") and t - gi["off"] >= gap:
+        gi = {}
+    if idle:
+        gi = {"since": gi.get("since") or round(t)}
+    elif gi:
+        gi["off"] = gi.get("off") or round(t)
+    hs["gpu_idle"] = gi or None
+    return gi.get("since") if idle else None
 
 
 def _cpu_fit_alerts(fits: dict) -> list:

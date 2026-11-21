@@ -88,7 +88,7 @@ jobs = "jobs/q.txt"
         self.assertEqual(jobs["a_done"], "done")
         self.assertEqual(jobs["a_run"], "queued")          # 进程在别的机器上，这里不当它在跑
         keys = [a["key"] for a in snap["alerts"]]
-        self.assertEqual(keys, ["returned_unfinished:q"])   # 不报队列进程不在、连接失败或保活不在
+        self.assertEqual(keys, [f"returned_unfinished:q:gone:{int(parse_time('2026-11-04 18:40'))}"])   # 不报队列进程不在、连接失败或保活不在；key 带主机与归还时刻（#129）
 
     def test_no_shared_disk(self):
         cfg = self.setup_hosts(shared=False)
@@ -524,13 +524,13 @@ class RegLanesTest(Base):
         self.regs(("here", "active", [("p1", str(self.root), "jobs/q.txt")]))
         snap = C.collect(self.cfg(q))
         self.assertEqual([(ln["id"], ln["host"], ln["label"], ln.get("returned")) for ln in snap["lanes"]], [("q", "here", "车道 1 训练方", None)])
-        self.assertNotIn("returned_unfinished:q", [a["key"] for a in snap["alerts"]])
+        self.assertFalse(any(a["key"].startswith("returned_unfinished:") for a in snap["alerts"]))
         self.assertEqual({j["id"]: j["status"] for j in snap["jobs"]}["a_run"], "running")
         # 登记还在已还的 gone 上（没搬走）：车道在 gone 上，经 here 代读（项目里没有 here，从主机清单补一台能代读的），照报没跑完
         self.regs(("gone", "returned", [("p1", str(self.root), "jobs/q.txt")]), ("here", "active", []))
         snap = C.collect(self.cfg(q))
         self.assertEqual([(ln["id"], ln["host"], ln["read_via"]) for ln in snap["lanes"]], [("q", "gone", "here")])
-        self.assertIn("returned_unfinished:q", [a["key"] for a in snap["alerts"]])
+        self.assertTrue(any(a["key"].startswith("returned_unfinished:q:gone:") for a in snap["alerts"]))
 
     def done_list(self, name: str, age: float, jobs: int = 2, done: bool = True) -> Path:
         """一份清单 <d>/<name>/jobs/<name>.txt：jobs 个任务，done 时都已跑完（完成标记与队列日志是 age 秒前的），否则从没启动过。"""
@@ -571,7 +571,7 @@ class RegLanesTest(Base):
         self.assertEqual([(ln["id"], ln["host"], ln["label"]) for ln in snap["lanes"]],
                          [("kept", "here", "车道 1"), ("fresh/jobs/fresh.txt", "here", "车道 2"), ("gpend/jobs/gpend.txt", "gone", "车道 1"),
                           ("proj/jobs/q.txt", "here", "车道 3"), ("recent/jobs/recent.txt", "here", "车道 4")])     # 收起的不占号
-        self.assertIn("returned_unfinished:gpend/jobs/gpend.txt", [a["key"] for a in snap["alerts"]])
+        self.assertTrue(any(a["key"].startswith("returned_unfinished:gpend/jobs/gpend.txt:gone:") for a in snap["alerts"]))
         # 收起的车道所在的主机还是项目的主机：labmon wait 的要还、已还照样报给它
         self.assertEqual([h["id"] for h in snap["hosts"]], ["here", "gone"])
         # 都跑完以后：车道收起，“暂时没实验”的起点是最后一次活动，不是现在

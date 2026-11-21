@@ -267,9 +267,10 @@ class LocalQueueTest(unittest.TestCase):
         self.assertEqual((lane["unfinished"], lane["no_gpu"]), (3, 1))
 
     def test_dead_lock_alerts(self):
-        snap, _ = self.run_collect(dead_pid())
+        pid = dead_pid()
+        snap, _ = self.run_collect(pid)
         self.assertFalse(snap["lanes"][0]["alive"])
-        self.assertIn("lock_dead:q", [a["key"] for a in snap["alerts"]])
+        self.assertIn(f"lock_dead:q:{pid}", [a["key"] for a in snap["alerts"]])    # 带锁里的 PID（#129）
 
     def test_worker_waiting(self):
         """worker 在管、空着等显存的队列（跑完上一个任务就删了锁）：显示 worker 说的等待原因，不报 lock_dead；worker 状态过期了照报。"""
@@ -288,10 +289,10 @@ class LocalQueueTest(unittest.TestCase):
         snap = status(5)
         lane = snap["lanes"][0]
         self.assertEqual((lane["alive"], lane["managed"], lane["waiting"]), (False, True, why))
-        self.assertNotIn("lock_dead:q", [a["key"] for a in snap["alerts"]])
+        self.assertFalse(any(a["key"].startswith("lock_dead:") for a in snap["alerts"]))
         snap = status(600)
         self.assertFalse(snap["lanes"][0]["managed"])
-        self.assertIn("lock_dead:q", [a["key"] for a in snap["alerts"]])
+        self.assertTrue(any(a["key"].startswith("lock_dead:q:") for a in snap["alerts"]))
 
     def test_held_lane_is_paused(self):
         """worker 说被临时指令挡住（本项目暂停、drain）的空闲车道按暂停算；drain 另报一条，告诉会话整台主机不放新任务。"""
@@ -466,27 +467,83 @@ class LocalQueueTest(unittest.TestCase):
         say = "截止取的是 EVA 的租期 11-08 19:00 到期，提前 1 小时，延长约定推不迟它，由实验会话换到别的在用主机"         # late_do(user=True) 给的
         snap = status("deadline", {"holder": "EVA", "late": late, "late_do": do, "late_say": say})
         al = {a["key"]: a["msg"] for a in snap["alerts"]}
-        self.assertIn("borrow_cut:q", al)
-        self.assertIn("本机（借 EVA） 车道 1 训练方 还有 3 个任务不会在这台放行", al["borrow_cut:q"])
-        self.assertIn(why, al["borrow_cut:q"])
-        self.assertTrue(al["borrow_cut:q"].endswith("；" + do))                 # 怎么办的那句只由 borrow.late_do 生成
+        self.assertIn("borrow_cut:q:here", al)
+        self.assertIn("本机（借 EVA） 车道 1 训练方 还有 3 个任务不会在这台放行", al["borrow_cut:q:here"])
+        self.assertIn(why, al["borrow_cut:q:here"])
+        self.assertTrue(al["borrow_cut:q:here"].endswith("；" + do))                 # 怎么办的那句只由 borrow.late_do 生成
         # 两边都要（#142）：会话那份写操作，页面上给用户的写人话（late_say）
-        bc = next(a for a in snap["alerts"] if a["key"] == "borrow_cut:q")
+        bc = next(a for a in snap["alerts"] if a["key"] == "borrow_cut:q:here")
         self.assertEqual(bc["to"], "both")
-        self.assertEqual(C.user_alerts(snap["alerts"]), [al["borrow_cut:q"][:-len(do)] + say])
+        self.assertEqual(C.user_alerts(snap["alerts"]), [al["borrow_cut:q:here"][:-len(do)] + say])
         self.assertEqual(snap["lanes"][0]["paused"], why)                       # 照旧按暂停算，不报空转
-        self.assertNotIn("borrow_cut:q", [a["key"] for a in status("deadline", None)["alerts"]])                   # 续租截止
-        self.assertNotIn("borrow_cut:q", [a["key"] for a in status("deadline", {"holder": "EVA", "late": []})["alerts"]])   # 续租截止更早
-        self.assertNotIn("borrow_cut:q", [a["key"] for a in status(None, {"holder": "EVA", "late": late})["alerts"]])  # 跑得完了
-        ret = status("deadline", {"holder": "EVA", "late": late}, returned="2026-11-08 18:00")["alerts"]
+        self.assertNotIn("borrow_cut:q:here", [a["key"] for a in status("deadline", None)["alerts"]])                   # 续租截止
+        self.assertNotIn("borrow_cut:q:here", [a["key"] for a in status("deadline", {"holder": "EVA", "late": []})["alerts"]])   # 续租截止更早
+        self.assertNotIn("borrow_cut:q:here", [a["key"] for a in status(None, {"holder": "EVA", "late": late})["alerts"]])  # 跑得完了
+        ret = status("deadline", {"holder": "EVA", "late": late}, returned=parse_time("2026-11-08 18:00"))["alerts"]
         keys = [a["key"] for a in ret]
-        self.assertNotIn("borrow_cut:q", keys)
-        self.assertIn("returned_unfinished:q", keys)
-        ru = next(a for a in ret if a["key"] == "returned_unfinished:q")       # 两边都要：用户在「管理」里换主机，会话 worker add
+        self.assertNotIn("borrow_cut:q:here", keys)
+        self.assertIn(f"returned_unfinished:q:here:{int(parse_time('2026-11-08 18:00'))}", keys)   # 带主机与归还时刻（#129）
+        ru = next(a for a in ret if a["key"].startswith("returned_unfinished:q:here:"))       # 两边都要：用户在「管理」里换主机，会话 worker add
         self.assertEqual(ru["to"], "both")
         self.assertIn("labmon worker add", ru["msg"])
         self.assertIn("「管理」", ru["page"])
         self.assertNotIn("labmon", ru["page"])
+
+    def woke(self, sf, snap, t, kind):
+        """这一轮 labmon wait 会叫醒哪几条（waits._new_alerts，只看 kind 开头的告警）。"""
+        from labmon.waits import _new_alerts
+        return [k.split(":")[0] for k in _new_alerts(sf, {a["key"]: a["msg"] for a in snap["alerts"] if a["key"].startswith(kind)}, t)]
+
+    def test_rewake_new_instance(self):
+        """#129：dep、drain、returned_unfinished、borrow_cut 的 key 带“这一次”：同一处 6 小时内第二件事叫醒（旧 key 只带车道或主机，被当成
+        上一件的抖动压掉）；同一件事消失又出现（读失败一轮、门槛来回）key 不变，仍不叫醒。"""
+        root, out = self.d / "proj", PJ.out_dir("out")
+        make_queue(root, dead_pid(), self.cur.pid)
+        cfg = write_config(self.d, root, out)
+        cfg.write_text(cfg.read_text().replace('label = "本机"', f'label = "本机（借 EVA）"\nworker_home = "{self.d}/wh"'))
+        st = self.d / "wh" / "hosts" / "here" / "status.json"
+        st.parent.mkdir(parents=True)
+        (root / "state" / "current").unlink()
+        why = "约定归还 11-08 18:00 前跑不完（估 183 分钟）"
+        late = [{"project": "out", "root": str(root), "queue": "jobs/q.txt", "name": "b_next", "why": why, "n": 3}]
+
+        def snap(head="b_next", dep=None, held=None, ovr=(), borrow=None, returned=None):
+            st.write_text(json.dumps({"t": time.time(), "queues": [{"root": str(root), "jobs": "jobs/q.txt"}], "overrides": list(ovr),
+                                      "waiting": [{"queue": "jobs/q.txt", "root": str(root), "name": head, "why": "等不来" if dep else why,
+                                                   "dep": dep, "held": held}]}))
+            c = load(cfg)
+            if returned:
+                c["hosts"][0]["returned"] = returned
+            with mock.patch.object(C, "snapshot", lambda: {"hosts": [{"id": "here", "borrow": borrow}] if borrow else []}):
+                return C.collect(c)
+        t0 = time.time()
+        steps = {   # 每种：[(这一轮的快照参数, 叫醒吗)]：第一件、消失、同一件又出现（抖动）、6 小时内的第二件
+            "dep:": [({"dep": "failed"}, True), ({}, False), ({"dep": "failed"}, False), ({"head": "b_noest", "dep": "missing"}, True)],
+            "drain:": [({"held": "drain", "ovr": [{"kind": "drain", "target": "here", "t": t0 - 60}]}, True), ({}, False),
+                       ({"held": "drain", "ovr": [{"kind": "drain", "target": "here", "t": t0 - 60}]}, False),
+                       ({"held": "drain", "ovr": [{"kind": "drain", "target": "here", "t": t0 + 600}]}, True)],
+            "returned_unfinished:": [({"returned": t0 - 3600}, True), ({}, False), ({"returned": t0 - 3600}, False), ({"returned": t0 + 600}, True)],
+            "borrow_cut:": [({"held": "deadline", "borrow": {"holder": "EVA", "since": t0 - 7200, "late": late}}, True), ({}, False),
+                            ({"held": "deadline", "borrow": {"holder": "EVA", "since": t0 - 7200, "late": late}}, False),
+                            ({"held": "deadline", "borrow": {"holder": "EVA", "since": t0 + 300, "late": late}}, True)],
+        }
+        for kind, seq in steps.items():
+            sf = self.d / f"w-{kind[:-1]}.json"
+            with self.subTest(kind=kind):
+                for i, (kw, want) in enumerate(seq):
+                    self.assertEqual(self.woke(sf, snap(**kw), t0 + 600 * i, kind), [kind[:-1]] if want else [], (kind, i))
+
+    def test_rewake_lock_dead(self):
+        """#129：lock_dead 的 key 带锁里的 PID：拉起后又挂（PID 变了）6 小时内也叫醒；同一个 PID 消失又出现不叫醒。"""
+        sf, t0 = self.d / "w.json", time.time()
+        p1, p2 = dead_pid(), dead_pid()
+        root = self.d / "proj"
+        make_queue(root, p1, self.cur.pid)
+        cfg = load(write_config(self.d, root, PJ.out_dir("out")))
+        for i, (pid, want) in enumerate(((p1, True), (self.lock.pid, False), (p1, False), (p2, True))):
+            (root / "state" / "lock").write_text(str(pid))
+            snap = C.collect(cfg)
+            self.assertEqual(self.woke(sf, snap, t0 + 600 * i, "lock_dead:"), ["lock_dead"] if want else [], i)
 
     def test_rebalance_alert(self):
         """挪法建议（全局快照的 rebalance，rebalance.suggest 算的）：项目看板出 rebalance:<项目> 告警（叫醒 labmon wait，
@@ -526,14 +583,14 @@ class LocalQueueTest(unittest.TestCase):
         do, say = "换到别的在用主机（labmon worker add），或请用户延长约定", "可在主机页「改约定」延长，或由实验会话换到别的在用主机"
         bw = {"holder": "EVA", "late": late, "late_do": do, "late_say": say}
         snap = status(None, "deadline", bw)
-        self.assertTrue({a["key"]: a["msg"] for a in snap["alerts"]}["borrow_cut:q"].endswith("；" + do))
-        self.assertIn("borrow_cut:q", w())
+        self.assertTrue({a["key"]: a["msg"] for a in snap["alerts"]}["borrow_cut:q:here"].endswith("；" + do))
+        self.assertIn("borrow_cut:q:here", w())
         snap = status(dict(rb, cut=[f"here|{root}|jobs/q.txt"]), "deadline", bw)
         al = {a["key"]: a["msg"] for a in snap["alerts"]}
         self.assertNotIn("rebalance:out", al)
-        self.assertTrue(al["borrow_cut:q:rebalance"].endswith("；" + do + "。可以这样挪：" + text))
+        self.assertTrue(al["borrow_cut:q:here:rebalance"].endswith("；" + do + "。可以这样挪：" + text))
         self.assertEqual([m[-len(say) - 1:] for m in C.user_alerts(snap["alerts"])], ["；" + say])   # 页面上的那条不带挪法，写给用户的那句
-        self.assertEqual(sorted(w()), ["borrow_cut:q:rebalance"])
+        self.assertEqual(sorted(w()), ["borrow_cut:q:here:rebalance"])
         # 被挡的清单没配进本项目的车道（borrow_cut 不出）：照报 rebalance
         snap = status(dict(rb, cut=[f"here|{root}/other|jobs/q.txt"]), "deadline", bw)
         al = {a["key"]: a["msg"] for a in snap["alerts"]}
@@ -577,7 +634,7 @@ class LocalQueueTest(unittest.TestCase):
         self.assertEqual(lane["paused"], "给 E5 腾卡")
         self.assertIsNone(lane["eta_ts"])
         self.assertIsNone(snap["all_done_ts"])
-        self.assertNotIn("lock_dead:q", [a["key"] for a in snap["alerts"]])
+        self.assertFalse(any(a["key"].startswith("lock_dead:") for a in snap["alerts"]))
 
     def test_noprogress_alert(self):
         """#68：在跑的任务超了估时、已跑满 30 分钟、这一次的日志里一直没有进度行：报 noprogress（写明车道与已跑多久）；
@@ -590,18 +647,19 @@ class LocalQueueTest(unittest.TestCase):
         (root / "logs" / "a_run.log").write_text("PROGRESS 9/10\n===== 2027-01-01 00:00:00 labmon 开始（GPU 0）=====\n加载数据\n")
         cfg = load(write_config(self.d, root, out))
         al = {a["key"]: a["msg"] for a in C.collect(cfg)["alerts"]}
-        self.assertIn("noprogress:a_run", al)
-        self.assertIn("（本机 车道 1 训练方）", al["noprogress:a_run"])
-        self.assertIn("已跑 2.0 小时", al["noprogress:a_run"])
+        k = f"noprogress:a_run:{int(parse_time(start))}"                           # 带这一次的开跑时刻（#129）
+        self.assertIn(k, al)
+        self.assertIn("（本机 车道 1 训练方）", al[k])
+        self.assertIn("已跑 2.0 小时", al[k])
         real = C.L.gather
         with mock.patch.object(C.L, "gather", lambda *a, **k: ({"ok": False, "since": time.time()}, real(*a, **k)[1])):
-            self.assertNotIn("noprogress:a_run", [a["key"] for a in C.collect(cfg)["alerts"]])
+            self.assertNotIn(k, [a["key"] for a in C.collect(cfg)["alerts"]])
         # #86：在内网、只是这一台探针失败，车道用上一次的数据：同样不报
         fail = lambda *a, **k: (lambda r: (r[0], {h: (None, "探针失败") for h in r[1]}))(real(*a, **k))     # noqa: E731
         with mock.patch.object(C.L, "gather", fail):
             snap = C.collect(cfg)
         self.assertTrue(snap["lanes"][0]["stale"])
-        self.assertNotIn("noprogress:a_run", [a["key"] for a in snap["alerts"]])
+        self.assertNotIn(k, [a["key"] for a in snap["alerts"]])
 
     def test_not_started_no_alert(self):
         """预先登记、从没启动过的队列（状态目录里什么都没有）：显示未启动，不报 lock_dead。"""
@@ -612,7 +670,7 @@ class LocalQueueTest(unittest.TestCase):
         snap = C.collect(load(write_config(self.d, root, out)))
         lane = snap["lanes"][0]
         self.assertEqual((lane["started"], lane["alive"], lane["unfinished"]), (False, False, 4))
-        self.assertNotIn("lock_dead:q", [a["key"] for a in snap["alerts"]])
+        self.assertFalse(any(a["key"].startswith("lock_dead:") for a in snap["alerts"]))
 
 
 class DiscoverTest(unittest.TestCase):
@@ -706,7 +764,35 @@ class NoProgressTest(unittest.TestCase):
              "dur": None, "plan": None, "hold": False, "group": None, "log_mtime": t - 30, **kw}
         alerts = []
         C._job_times(j, "q", "p", {"log_silent_min": kw2.get("silent", 0)}, self.work, alerts, t, "29 车道 1", fresh=kw2.get("fresh", True))
-        return [a["key"] for a in alerts]
+        return [a["key"].rsplit(":", 1)[0] if a["key"].endswith(f":{int(j['start_ts'])}") else a["key"] for a in alerts]   # 去掉 key 末尾的开跑时刻（#129）
+
+    def test_key_has_run_start(self):
+        """#129：key 带这一次的开跑时刻，重跑后又卡住是新的一件；开跑时刻只是这一轮的现在（日志与 current 都没有）时不带，免得每轮变。"""
+        j = {"id": "x", "lane": "q", "status": "running", "start_ts": self.T - 7200, "est_min": 60.0, "dur": None, "plan": None,
+             "hold": False, "group": None, "log_mtime": self.T - 3600}
+        alerts = []
+        C._job_times(dict(j), "q", "p", {"log_silent_min": 10}, self.work, alerts, self.T, "29 车道 1")
+        self.assertEqual([a["key"] for a in alerts], [f"noprogress:x:{int(self.T - 7200)}", f"log_silent:x:{int(self.T - 7200)}"])
+        alerts = []
+        C._job_times(dict(j, start_ts=self.T + 7200), "q", "p", {"log_silent_min": 10}, self.work, alerts, self.T + 7200, "29 车道 1")
+        self.assertEqual([a["key"] for a in alerts], ["log_silent:x"])
+
+    def test_rewake_after_rerun(self):
+        """#129：重跑（开跑时刻变了）后又卡住是新的一件，6 小时内也叫醒；同一次运行这一轮读失败没报、下一轮又报，不叫醒。"""
+        from labmon.waits import _new_alerts
+        sf = Path(tempfile.mkdtemp()) / "w.json"
+
+        def woke(start, t, fresh=True):
+            j = {"id": "x", "lane": "q", "status": "running", "start_ts": start, "est_min": 60.0, "dur": None, "plan": None,
+                 "hold": False, "group": None, "log_mtime": t - 3600}
+            alerts = []
+            C._job_times(j, "q", "p", {"log_silent_min": 10}, self.work, alerts, t, "29 车道 1", fresh=fresh)
+            return sorted(k.split(":")[0] for k in _new_alerts(sf, {a["key"]: a["msg"] for a in alerts}, t))
+        T = self.T
+        self.assertEqual(woke(T - 7200, T), ["log_silent", "noprogress"])
+        self.assertEqual(woke(T - 7200, T + 300, fresh=False), [])
+        self.assertEqual(woke(T - 7200, T + 600), [])                      # 同一次：不叫醒
+        self.assertEqual(woke(T + 900, T + 900 + 7200), ["log_silent", "noprogress"])   # 重跑后又卡住
 
     def test_reported(self):
         self.assertEqual(self.keys(120), ["noprogress:x"])
@@ -931,7 +1017,7 @@ class ParseGpuQueueTest(unittest.TestCase):
                          (parse_time("2027-01-01 10:00:00"), [3, 12], "step 3", t - 5))
         self.assertNotIn("suspended", j["r"])
         self.assertEqual((j["q"]["est_min"], j["q"]["dur"], j["q"]["plan"], j["n"]["est_min"]), (20, None, None, None))
-        self.assertEqual(lane, {"alive": True, "pid": 7, "state_dir": "/s", "logs_dir": None, "paused": None, "managed": False, "waiting": None, "held": None, "dep": None, "stuck": None, "cpu_wait": None})
+        self.assertEqual(lane, {"alive": True, "pid": 7, "state_dir": "/s", "logs_dir": None, "paused": None, "managed": False, "waiting": None, "held": None, "held_t": None, "dep": None, "head": None, "stuck": None, "cpu_wait": None})
 
     def test_worker_and_edge_cases(self):
         t = self.T

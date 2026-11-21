@@ -323,7 +323,8 @@ def expand_queues(qs, explicit_jobs=()):
 
 def worker_view(path, stale):
     """worker 的 status.json：worker 在跑（状态 stale 秒内更新过，与工作台判 worker 在不在同一口径）时返回
-    {清单路径: {"wait": 等待原因或 None, "held": 挡住它的临时指令种类或 None, "dep": 依赖没满足（wait、failed、missing、cycle）或 None,
+    {清单路径: {"wait": 等待原因或 None, "held": 挡住它的临时指令种类或 None, "held_t": 那种指令最晚下的时刻（overrides 的 t）或 None,
+    "dep": 依赖没满足（wait、failed、missing、cycle）或 None, "head": 队首等待项的任务名或 None,
     "cpu": 一直因 CPU 被挡满 10 分钟后已挡的秒数（worker 的 cpu_wait）或 None,
     "dur": {任务: 预计时长}, "plan": {任务: {t0, t1, gpus, after, deps}}, "stuck": 推演里排不上的原因或 None}}，即它在管的队列；不在跑返回 {}。
     队列的锁只在 worker 跑这条队列的任务时才有，空着等资源的队列靠这个认。预计时长是 worker 的 duration 算的；
@@ -337,8 +338,13 @@ def worker_view(path, stale):
 
     def key(root, jobs):
         return os.path.normpath(os.path.join(root or "", jobs or ""))
-    out = {key(q.get("root"), q.get("jobs")): {"wait": None, "held": None, "dep": None, "cpu": None, "dur": q.get("dur") or {}, "plan": {}, "stuck": None}
+    out = {key(q.get("root"), q.get("jobs")): {"wait": None, "held": None, "held_t": None, "dep": None, "head": None, "cpu": None,
+                                               "dur": q.get("dur") or {}, "plan": {}, "stuck": None}
            for q in st.get("queues", [])}
+    ovt = {}                                    # 各种临时指令最晚下的时刻：告警 key 带它（drain:，#129），同种同目标再下一次就是新的
+    for o in st.get("overrides") or []:
+        if o.get("t"):
+            ovt[o.get("kind")] = max(ovt.get(o.get("kind")) or 0, int(o["t"]))
     for ln in (st.get("plan") or {}).get("lanes", []):
         k = key(ln.get("root"), ln.get("queue"))
         if ln.get("root") and k in out:
@@ -346,7 +352,7 @@ def worker_view(path, stale):
     for w in st.get("waiting", []):
         k = key(w.get("root"), w.get("queue"))
         if w.get("root") and k in out and out[k]["wait"] is None:
-            out[k].update(wait=w.get("why"), held=w.get("held"), dep=w.get("dep"), cpu=w.get("cpu_wait"))
+            out[k].update(wait=w.get("why"), held=w.get("held"), held_t=ovt.get(w.get("held")), dep=w.get("dep"), head=w.get("name"), cpu=w.get("cpu_wait"))
     return out
 
 
