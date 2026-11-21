@@ -188,7 +188,7 @@
 - [SKILL](../skills/lab-experiments/SKILL.md) 里实验会话要不要改做法（只写它要做的事，细节链接到 docs）；旧说法删掉。
 - `labmon wait` 的消息：新事件有没有给 wait 的 key，醒来后会话知道该做什么吗；几件事接连发生时会不会漏掉后面的。
 - 实验会话会怎么读这件事：`worker status`、项目页的文字会不会让它误判（以为别人在抢卡、以为任务卡死）；
-  被挡住时它会不会想绕开（改任务名、换 tag、改清单），报问题用 `labmon report`，由总控核实后转成 `from-experiment` Issue（[SKILL「发现 labmon 的问题」](../skills/lab-experiments/SKILL.md#发现-labmon-的问题)）。
+  被挡住时它会不会想绕开（改任务名、换 tag、改清单），报问题用 `labmon report`，由总控评估，值得跟进的开成 `from-experiment` Issue（[SKILL「发现 labmon 的问题」](../skills/lab-experiments/SKILL.md#发现-labmon-的问题)）。
 
 相关代码：`waits.wait_check`、`collect.build`（告警）、`labmon_worker.py` 的 `status` 命令文字；`skills/lab-experiments/SKILL.md`。
 

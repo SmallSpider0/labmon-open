@@ -417,8 +417,8 @@ html { scroll-behavior: smooth; }
   <ol class="chain" aria-label="报问题的四步">
     <li>实验会话向看板报告<small>写现象、证据、主机、时刻；原因写成“猜测”</small></li>
     <li>总控的等待发现报告<small>只读报告编号与报告人</small></li>
-    <li>总控转单，开发 agent 核实<small>标 <code>from-experiment</code>，只写脱敏摘要或合成复现；原报告与关联留私有</small></li>
-    <li>按档修<small>总控定档：单点小修直接提交 main，局部 bug 走小改，改行为的走设计说明</small></li>
+    <li>总控评估，值得跟进的开单<small>查原文、核实、查重、判影响；开 <code>from-experiment</code> Issue 写评估结论，不派实现；只写脱敏摘要或合成复现，原报告与关联留私有；不值得开的记私有并告诉维护者</small></li>
+    <li>维护者说要做，再按档修<small>总控定档：单点小修直接提交 main，局部 bug 走小改，改行为的走设计说明</small></li>
   </ol>
 <pre><code>labmon report "&lt;一句话现象&gt;" --host "&lt;主机 id&gt;" --at "11-13 14:30" \
   --evidence "&lt;实际与预期、对实验的影响、日志证据&gt;"</code></pre>
