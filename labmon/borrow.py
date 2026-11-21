@@ -213,14 +213,20 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
 def _tell_retime(s: dict, keys: dict, what: str, src: str) -> None:
     """改约定（时间、只给哪些项目、说好不用）后告诉用这台的项目的实验会话（#127）：borrow.check 借到的那条 wake 的 key 同一次借用里不变，wait 不会再报。
     s：改之前的这台，keys：改成的 borrow_until、borrow_for、borrow_away。都没变不说。告诉谁：改前、改后 borrow_for 的并集；
-    有一边是「不限」（空）时就是看板上所有项目（与借到的那条 wake 不带 projects 同一口径）。原先能用、现在不给用的那几个另说一句。"""
+    有一边是「不限」（空）时就是看板上所有项目（与借到的那条 wake 不带 projects 同一口径）。原先能用、现在不给用的那几个另说一句。
+    正在要还（borrow.json 的 returning：改约定不撤 drain 与要还标记）的照实说不放新任务，撤销还由用户做；现在停的撤不了。"""
     if all((s.get(k) or None) == (v or None) for k, v in keys.items()):
         return
     old, new = s.get("borrow_for") or None, keys["borrow_for"]
     who = PJ.project_ids() if old is None or new is None else sorted(set(old) | set(new))
     head = f"改了借用 {label(s)} 的约定：{what}"
+    st = load_json(state_dir() / "borrow.json", {}).get(s["id"]) or {}
     for pid in who:
-        if new is not None and pid not in new:
+        if st.get("returning") and st.get("now"):
+            text = f"{head}。这台正在停下（用户点了现在停），停完就还：别往上加任务，正在这台排着的换到别的在用主机（labmon worker add）"
+        elif st.get("returning"):
+            text = f"{head}。这台仍在要还，不再放新任务、跑完就还：别往上加任务；要接着用请用户先点「撤销还」（labmon host restore {s['id']}）"
+        elif new is not None and pid not in new:
             text = f"{head}。这台不再放行 {pid} 的新任务，正在跑的照常跑完；排在它上面的要接着跑就换到别的在用主机（labmon worker add）"
         elif keys["borrow_until"]:
             text = f"{head}。worker 按新的约定准入，之前跑不完的不放行：按新时间安排这台上的任务（labmon worker fit 看能不能接）"

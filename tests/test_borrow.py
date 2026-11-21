@@ -149,6 +149,22 @@ class BorrowTest(Base):
             B.begin(SID, None, None, ovr=self.ovr, account="me")              # 改成不限项目：看板上所有项目
         self.assertEqual(sorted(x["projects"][0] for x in told()[4:]), ["a1", "c3", "demo-b"])
 
+    def test_retime_while_returning(self):
+        """要还期间改约定（Codex 审 #128）：drain 与要还标记都还在，通知不说“可以接着加任务”，说要还、请用户撤销还；现在停的撤不了。"""
+        from labmon.records import told
+        self.begin(until=time.time() + 3600, projects=["a1"])
+        B.request_return(SID, ovr=self.ovr)
+        B.begin(SID, None, ["a1"], ovr=self.ovr, account="me")
+        m = told()[-1]["msg"]
+        self.assertNotIn("可以接着加任务", m)
+        self.assertIn("别往上加任务", m)
+        self.assertIn("撤销还", m)
+        B.request_return(SID, now=True, ovr=self.ovr)
+        B.begin(SID, time.time() + 7200, ["a1"], ovr=self.ovr, account="me")
+        m = told()[-1]["msg"]
+        self.assertNotIn("撤销还", m)
+        self.assertIn("正在停下", m)
+
     def test_begin_refuses(self):
         train = {"kind": "job", "label": "train", "names": [], "owner": None, "mb": 1000}
         with self.assertRaises(ConfigError) as c:
