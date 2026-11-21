@@ -37,7 +37,8 @@ from . import fleet as F
 from . import fleetops as FO
 from . import lease as LS
 from .config import GIB, HOSTS_LOCK, ConfigError, _read_toml, check_future, fmt_time, guest_host, host_defaults, hosts_file, parse_time, set_fleet_keys, user_hosts
-from .records import log_events
+from . import projects as PJ
+from .records import log_events, tell
 from .renew import eta_of
 from .service import log
 from .state import load_json, load_rows, save_json, state_dir
@@ -113,7 +114,7 @@ BEGIN_STEPS = ["探一次：对方空着或轻用", "查共享盘、Python 与�
 
 
 def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=None, start=None, ovr=_ovr, step=None, light: bool = False,
-          away: bool = False, *, account: str | None = None, pool: bool = False) -> str:
+          away: bool = False, *, account: str | None = None, pool: bool = False, src: str = "看板页面上") -> str:
     """借来用（已在借的就改约定时间与给哪些项目用）。先探一次：对方要么空着（GPU 上没有进程或只有 ka.sh 管的保活，worker 要卡时会停它；
     认作保活的 GPU 进程逐个核对在不在 ka.sh running 列出的进程组里，相对路径起的同一脚本 ka.sh 也认，#29），
     要么轻用（using：有 VS Code、终端或小实验，且 share 判为轻用）——轻用的要 light（页面上勾「对方在轻用」）；
@@ -122,7 +123,8 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
     away：对方说好约定时间前不用（不给对方留余量），要有约定时间；改约定时按它重写（不勾就去掉）。
     pool：算力池自动借（pool.want_borrow 经 fleetops 调，#25）：持有人开了入池就是同意，不记借的人（borrow_by），记 borrow_pool；
     只许 GPU 上除保活外没有进程（VS Code、终端这类轻用照样给主人留预留）；until 是入池时段结束（全天的为 None）。
-    borrow.json 这台的 pool 子项记下容器的启动时刻（started：换了容器就还，pool._returns），再借时留着休息期、退避这些记忆。"""
+    borrow.json 这台的 pool 子项记下容器的启动时刻（started：换了容器就还，pool._returns），再借时留着休息期、退避这些记忆。
+    改约定真改了什么时经 records.tell 告诉用这台的项目（_tell_retime，#127）；src 是 tell 那句的来源（命令行 api.borrow 传「命令行 labmon borrow」）。"""
     LS.need("借用")                                  # 备用的看板服务不借（#163）：主那台在管这台的指令与归还
     via_op, step = step is not None, step or (lambda note=None: None)
     check_future(until, "约定时间")
@@ -141,6 +143,7 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
         _sync(sid, ovr)
         msg = f"借用 {label(s)} 的约定改为{what}"
         log_events([{"kind": "borrow", "host": sid, "who": s["holder"], "msg": msg}])
+        _tell_retime(s, keys, what, src)
         return msg
     person, error = (None, None) if pool else person_of(account)
     if error or (not pool and not person):
@@ -205,6 +208,25 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
     msg = f"{'算力池借来' if pool else '借来'} {label(s)}：{what}；{keep_text(kp)}；{'，'.join(notes)}"
     log_events([{"kind": "borrow", "host": sid, "who": s["holder"], "msg": msg, "detail": out.strip()[-400:], **({"pool": True} if pool else {})}])
     return msg
+
+
+def _tell_retime(s: dict, keys: dict, what: str, src: str) -> None:
+    """改约定（时间、只给哪些项目、说好不用）后告诉用这台的项目的实验会话（#127）：borrow.check 借到的那条 wake 的 key 同一次借用里不变，wait 不会再报。
+    s：改之前的这台，keys：改成的 borrow_until、borrow_for、borrow_away。都没变不说。告诉谁：改前、改后 borrow_for 的并集；
+    有一边是「不限」（空）时就是看板上所有项目（与借到的那条 wake 不带 projects 同一口径）。原先能用、现在不给用的那几个另说一句。"""
+    if all((s.get(k) or None) == (v or None) for k, v in keys.items()):
+        return
+    old, new = s.get("borrow_for") or None, keys["borrow_for"]
+    who = PJ.project_ids() if old is None or new is None else sorted(set(old) | set(new))
+    head = f"改了借用 {label(s)} 的约定：{what}"
+    for pid in who:
+        if new is not None and pid not in new:
+            text = f"{head}。这台不再放行 {pid} 的新任务，正在跑的照常跑完；排在它上面的要接着跑就换到别的在用主机（labmon worker add）"
+        elif keys["borrow_until"]:
+            text = f"{head}。worker 按新的约定准入，之前跑不完的不放行：按新时间安排这台上的任务（labmon worker fit 看能不能接）"
+        else:
+            text = f"{head}。不再按约定截止（对方租期到期前 1 小时照样截止），这台可以接着加任务"
+        tell(pid, "borrow", text, src=src)
 
 
 def _ka_miss(s: dict, kw: dict, res: str, err: str) -> list[str]:

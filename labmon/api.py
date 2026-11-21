@@ -109,7 +109,7 @@ def borrow(sid: str, until: float | None, projects: str | None, holder: str | No
     o = Out()
     try:
         if any(s["id"] == sid for s in (F.conf() or {}).get("servers", [])):
-            o.p("[labmon] " + B.begin(sid, until, projects, light=True, away=away, account=account))     # 命令行等于页面上缺省勾着「对方在轻用」
+            o.p("[labmon] " + B.begin(sid, until, projects, light=True, away=away, account=account, src="命令行 labmon borrow"))     # 命令行等于页面上缺省勾着「对方在轻用」
         elif any(str(h.get("id")) == sid and not h.get("returned") for h in user_hosts()):
             if away:
                 raise ConfigError(f"{sid} 是自用主机（换给自己借来的）：--away 只用于直接借的组内服务器")

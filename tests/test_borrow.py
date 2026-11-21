@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
 import sys
@@ -115,6 +116,38 @@ class BorrowTest(Base):
         self.assertEqual(F.borrower(self.server(), F.conf()), "second")
         B.begin(SID, time.time() + 3600, ovr=self.ovr, account="third")
         self.assertEqual(self.server()["borrow_by"], "second")
+
+    def test_retime_tells_projects(self):
+        """改约定后经 records.tell 告诉用这台的项目（#127）：借到的那条 wake 的 key 同一次借用里不变，wait 不会再报。
+        告诉谁：改前、改后 borrow_for 的并集，有一边不限就是看板上所有项目；不再给用的另说；没变不说；命令行来的 src 写明。"""
+        from labmon import api
+        from labmon.records import told
+        t0 = time.time()
+        self.begin(until=t0 + 3600, projects=["a1"])
+        self.assertEqual(told(), [])                                          # 借来本身由 borrow.check 的 wake 报，不经 tell
+        until = round(t0 + 7200)
+        B.begin(SID, until, ["a1", "demo-b"], ovr=self.ovr, account="me")    # 页面上改约定：延长、多给一个项目
+        w = told()
+        self.assertEqual(sorted(x["projects"][0] for x in w), ["a1", "demo-b"])
+        self.assertTrue(all(x["key"].startswith("page:borrow:") for x in w))
+        m = next(x["msg"] for x in w if x["projects"] == ["a1"])
+        self.assertTrue(m.startswith("看板页面上 "))
+        self.assertIn(f"到 {K.fmt_time(until)}", m)
+        self.assertIn("之前跑不完的不放行", m)
+        B.begin(SID, until, ["a1", "demo-b"], ovr=self.ovr, account="me")    # 同样再提交一次：没变不说
+        self.assertEqual(len(told()), 2)
+        with mock.patch.object(B.PJ, "project_ids", lambda: ["a1", "demo-b", "c3"]):
+            with mock.patch.object(B, "begin", functools.partial(B.begin, ovr=self.ovr)):
+                api.borrow(SID, None, "demo-b", None, False, account="me")   # 命令行：不约定、只给 demo-b
+        w = told()[2:]
+        self.assertEqual(sorted(x["projects"][0] for x in w), ["a1", "demo-b"])
+        a1 = next(x["msg"] for x in w if x["projects"] == ["a1"])
+        self.assertTrue(a1.startswith("命令行 labmon borrow "))
+        self.assertIn("不再放行 a1 的新任务", a1)
+        self.assertIn("不再按约定截止", next(x["msg"] for x in w if x["projects"] == ["demo-b"]))
+        with mock.patch.object(B.PJ, "project_ids", lambda: ["a1", "demo-b", "c3"]):
+            B.begin(SID, None, None, ovr=self.ovr, account="me")              # 改成不限项目：看板上所有项目
+        self.assertEqual(sorted(x["projects"][0] for x in told()[4:]), ["a1", "c3", "demo-b"])
 
     def test_begin_refuses(self):
         train = {"kind": "job", "label": "train", "names": [], "owner": None, "mb": 1000}
