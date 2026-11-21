@@ -477,10 +477,12 @@ def _place(items: list[dict], cands: list[dict], regs: dict, t: float, move, fit
         it["need"] = (res or {}).get("need")
         if to is None:
             whys = [f"{h}：{(oks.get(h) or {}).get('why') or '放不下'}" for h in hs]
+            later = any(e["id"] in used for e in cands if e["id"] != it["host"])   # 有候选只因这一轮已放过一条被跳过：下一轮再看，不算放不下
             it["why"] = ("这一轮问得够多了，下一轮接着看" if not asked else
                          "没问到 worker 这条清单要多少资源" if res is None else
-                         "池里借着的服务器都放不下（" + "；".join(whys[:2]) + "）" if whys else "池里没有借着、空得出来的服务器")
-            it["nofit"] = res is not None               # 问到了（含缓存）、一台都放不下；tick 再看借不借得到（#130）
+                         "池里借着的服务器都放不下（" + "；".join(whys[:2]) + "）" if whys and not later else
+                         "这一轮已往空得出来的服务器各放了一条，下一轮接着放" if later else "池里没有借着、空得出来的服务器")
+            it["nofit"] = res is not None and not later   # 问到了（含缓存）、所有候选都放不下；tick 再看借不借得到（#130）
             left.append(it)
             continue
         if _move(it, to, move, t, snap):

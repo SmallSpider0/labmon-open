@@ -451,6 +451,13 @@ class PoolPlaceTest(TickBase):
             out = self.tick(self.snap([self.lent("a", {"room": {"gpus": {}}})], [self.pool_list()]), t=NOW + P.POOL_RETRY_S + 1)
         self.assertNotIn("nofit", out["lists"][k])
         P._FIT.clear()
+        P._FIT.clear()
+        self.fit_res = lambda it, hs: {"need": {"ngpu": 1, "vram": 20.0}, "hosts": {h: {"ok": True} for h in hs}}
+        k2 = P.key("/r/y", "jobs/y.txt")                                              # Codex 审 #132：a 这一轮已放了一条（每台每轮一条），第二条只是等下一轮，不算 nofit
+        out = self.tick(self.snap([self.lent("a", {"room": {"gpus": {}}})], [self.pool_list(), self.pool_list("/r/y", "jobs/y.txt")]), t=NOW + 2)
+        self.assertEqual([m[0] for m in self.moves[-1:]], ["a"])
+        self.assertNotIn("nofit", out["lists"][k2])
+        P._FIT.clear()
         self.fit_res = lambda it, hs: None                                             # 没问到要多少资源：不知道放不放得下
         out = self.tick(self.snap([self.lent("a", {"room": {"gpus": {}}})], [self.pool_list()]), t=NOW + 1)
         self.assertNotIn("nofit", out["lists"][k])
