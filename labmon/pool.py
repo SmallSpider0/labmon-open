@@ -8,7 +8,7 @@
 - 自动借还（tick，工作台每轮、只在持有服务租约时，overview.collect 里快照写盘前）：
   还（_returns）：池借着的主机（主机项 borrow.pool）主人回来（worker 状态的 guest.owner）、关了入池或出了时段、POOL_IDLE_S 没有池任务在跑
   （从借来、最近有池任务在跑、最近往上放清单里取晚的起算）就 borrow.request_return（在跑的跑完就还；时段结束、租期截止由 borrow.check 的约定时间照旧管）；换了容器（组内探测的 started 与借来时记的不同）
-  直接 borrow.finish(gone=True)。放（_place）：池里待放的、要还的池主机上的、在池主机上队首因资源等满 POOL_WAIT_S 的清单，按 fair_key 排先后，
+  直接 borrow.finish(gone=True)。放（_place）：池里待放的、要还的池主机上的、在池主机上队首因资源等满 POOL_WAIT_S 的池清单（_ours，会话自己的不动，#130），按 fair_key 排先后，
   经 fit --list --json 判各台放不放得下，serve.reg_move 放过去（要还的主机上放不下的回池里待放）；
   交给池之前在别的主机放行的那一格还没收尾的（worker 的 elsewhere）不放，已在池主机上的放回池里，等它跑完（#80）。借（want_borrow）：还有放不下的、
   平台操作格空着时，挑一台入池、在时段内、GPU 空着或只有保活、主人空闲够久的，fleetops.start("borrow", pool=True)。
@@ -44,7 +44,7 @@ POOL_NOFIT_S = 86400           # 借来后哪条都没跑起来、按 R4 还掉�
 POOL_DONE = "清单里的行都跑完了：不用了就 labmon worker rm pool 撤掉，往清单里加了行会接着放"   # 池里跑完的清单那一句（#86；pool.lists 带 done）
 POOL_FIT_MAX = 4               # 每轮最多问几次 fit（每次一条 ssh，走长连接）
 POOL_RETRY_S = 5 * 60          # 同一（清单, 候选主机）这么久内不重判
-POOL_TELL_S = 2 * 3600         # 池里待放满这么久，只给实验会话报一次 pool_wait:（collect）
+POOL_TELL_S = 2 * 3600         # 池里待放满这么久，给实验会话报 pool_wait:（collect：一条清单一条，放不下也借不到时另报一次，#130）
 _FIT: dict = {}                # (清单, 候选主机) → (时刻, fit 的结果)：只在内存里，重启后重判
 
 
@@ -450,7 +450,7 @@ def _shift(snap: dict, it: dict, to: str, t: float) -> None:
 
 def _place(items: list[dict], cands: list[dict], regs: dict, t: float, move, fit, budget: list, snap: dict | None = None) -> list[dict]:
     """把放不下的清单放到候选的池主机上（fit 判；每台每轮一条，免得读到旧的 room 放多了）；要还的主机上放不下的回池里（back）。
-    budget[0]：这一轮还能问几次 fit。返回仍放不下的（带 need 与原因 why）。"""
+    budget[0]：这一轮还能问几次 fit。返回仍放不下的（带 need 与原因 why；问到了 fit、一台都放不下的带 nofit）。"""
     left, used = [], set()
     new = {it["key"] for it in items if not any(k[0] == it["key"] for k in _FIT)}   # 还没问过的清单：先给它们留预算，免得前面放不下的每轮重问把预算吃光
     for it in items:
@@ -477,9 +477,12 @@ def _place(items: list[dict], cands: list[dict], regs: dict, t: float, move, fit
         it["need"] = (res or {}).get("need")
         if to is None:
             whys = [f"{h}：{(oks.get(h) or {}).get('why') or '放不下'}" for h in hs]
+            later = any(e["id"] in used for e in cands if e["id"] != it["host"])   # 有候选只因这一轮已放过一条被跳过：下一轮再看，不算放不下
             it["why"] = ("这一轮问得够多了，下一轮接着看" if not asked else
                          "没问到 worker 这条清单要多少资源" if res is None else
-                         "池里借着的服务器都放不下（" + "；".join(whys[:2]) + "）" if whys else "池里没有借着、空得出来的服务器")
+                         "池里借着的服务器都放不下（" + "；".join(whys[:2]) + "）" if whys and not later else
+                         "这一轮已往空得出来的服务器各放了一条，下一轮接着放" if later else "池里没有借着、空得出来的服务器")
+            it["nofit"] = res is not None and not later   # 问到了（含缓存）、所有候选都放不下；tick 再看借不借得到（#130）
             left.append(it)
             continue
         if _move(it, to, move, t, snap):
@@ -523,14 +526,16 @@ def _stuck(e: dict, regs: dict, t: float, out: list, move, snap: dict, *, only_p
     放过来时别的主机放行的那一格还没收尾（worker 等待项的 elsewhere）：这台一行也开不了，回池里等它跑完再放（#80）；
     back（这台不再收池清单的原因：要还了、自用主机关了入池等）：还要跑的加进 out 当要还的主机上的去放（借着的只剩在跑的那一格或都跑完了的不用搬，
     跑完随主机一起还；自用主机上池放的都搬，免得之后再往清单里加行还在这台跑）；
-    否则队首因资源等满 POOL_WAIT_S 还没放行的（不算被临时指令、依赖挡着的）加进 out 去挪。only_pool：只看池放的（自用主机上，#79）。"""
+    否则队首因资源等满 POOL_WAIT_S 还没放行的（不算被临时指令、依赖挡着的）加进 out 去挪。
+    只动池的登记：自用主机上认 pool 标记（only_pool，#79），借来的池主机上认 _ours；别的（借给池之前就登记在这台的会话自己的清单）池不收、不挪，
+    在原处照旧排，主机还掉以后 returned_unfinished 叫会话自己搬（#88 E、#130：以前要还与等满两条不过 _ours，会话的清单被悄悄搬成池清单）。"""
     ws = (e.get("status") or {}) if e.get("worker_up") else {}
     for q in (regs.get(e["id"]) or {}).get("queues") or []:
-        if only_pool and not q.get("pool"):
+        if not (q.get("pool") if only_pool else _ours(q)):
             continue
         it = _item(e["id"], q, t)
         w = next((w for w in ws.get("waiting") or [] if w.get("queue") and key(w.get("root"), w["queue"]) == it["key"]), None)
-        if w and w.get("elsewhere") and (only_pool or _ours(q)):
+        if w and w.get("elsewhere"):
             _move(dict(it, reason=_elsewhere(w["elsewhere"])), POOL, move, t, snap)
         elif back is not None:
             if only_pool or not ws or _todo(ws, q["root"], q["jobs"]):
@@ -545,7 +550,7 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
     当要还的主机上的去放（放不下回池里，在跑的那一格由这台跑完）。各台的入池（lend_view）写进快照的主机项与组内页 fleet.mine 的 lend。
     sw：这一轮下发的调度设置（config.sched 加 owner）：排先后用 fair_key（与 worker 同一份，人的用量取 worker 状态的 share）。
     move(to, items, pool=原因)：serve.reg_move。fit、start、ret、fin 是 fit_head、fleetops.start、borrow.request_return、borrow.finish（测试换掉）。
-    返回全局快照的 pool：{lists {键: {project, root, jobs, host, since 待放从何时起, why 为什么还没放}}, gone [换了容器的主机]}。"""
+    返回全局快照的 pool：{lists {键: {project, root, jobs, host, since 待放从何时起, why 为什么还没放, nofit 借着的都放不下、也借不到（只在为真时带）}}, gone [换了容器的主机]}。"""
     if not LS.primary():
         return {}
     t = time.time() if t is None else t
@@ -627,6 +632,8 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
         sid, until, why = want_borrow(it["need"], cfg, fst, bst, t, busy, regs)
         if not sid:
             lv["why"] = f"{lv['why']}；没有能借的入池服务器（{why}）"
+            if it.get("nofit"):
+                lv["nofit"] = True                    # 池里此刻放不下、也借不到：pool_wait 另报一次（collect，#130）
             continue
         asked = True
         _mem(sid, want={"ngpu": it["need"].get("ngpu") or 0, "vram": it["need"].get("vram") or 0})
@@ -643,7 +650,7 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
 
 def reclaim(sid: str, who: Ident, ops: bool, move, snap: dict | None = None, ovr=None) -> str:
     """收回（POST /api/pool/reclaim）：持有人本人，或能做平台操作的管理员（ops）。按各清单的停法停下池任务（借来的：request_return now，停下的重新排队、不记失败），
-    这台上的清单登记回池里待放（下一轮放到别处）；这台休息 POOL_REST_S。返回给人看的一句。
+    这台上池的清单登记（_ours）回池里待放（下一轮放到别处），借给池之前就登记在这台的会话自己的清单不搬（#130）；这台休息 POOL_REST_S。返回给人看的一句。
     自用主机（#79）不借不还：只把池放的（登记带 pool）搬回池里，再给这些清单在跑的项目在这台下 pause --now --once（ovr，缺省 workerctl.override_each）；
     同一项目在这台还有主人自己的清单的不停（只搬，在跑的跑完）。"""
     cfg = F.conf() or {}
@@ -667,7 +674,9 @@ def reclaim(sid: str, who: Ident, ops: bool, move, snap: dict | None = None, ovr
     elif not (F.borrowed(s) and s.get("borrow_pool")):
         raise Denied(409, f"{sid} 没借给算力池")
     else:
-        pq, msg = qs, B.request_return(sid, True, (e.get("status") or {}).get("running"))
+        pq, msg = [q for q in qs if _ours(q)], B.request_return(sid, True, (e.get("status") or {}).get("running"))   # 只收池的（#130），别的见下面那句
+        if len(pq) < len(qs):
+            msg += (f"；{len(qs) - len(pq)} 条借给池之前就登记在这台的清单池不收，留在这台，还掉后会话会收到 returned_unfinished 自己搬")
     _mem(sid, rest=round(t + POOL_REST_S), rest_why="收回过")
     its = [_item(sid, q, t, reason=f"{s['holder'] or '管理员'} 收回了 {sid}") for q in pq]
     moved = sum(_move(it, POOL, move, t) for it in its)

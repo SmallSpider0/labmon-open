@@ -470,14 +470,8 @@ def _lanes(cfg: dict, snap: dict, state: dict, raw_by_host: dict, t: float) -> t
             "running": set(),                                        # 运行中任务的 车道/任务 键
             "hcfg": {h["id"]: h for h in cfg["hosts"]}}
     specs, quiet, snap["quiet"] = _lane_specs(cfg, raw_by_host, t)
-    work["pool_wait"] = []
     for q in specs:
         _lane(q, cfg, snap, raw_by_host, work, t)
-    if work["pool_wait"]:
-        # 池里待放满 2 小时的清单：每个项目一条、列出各条（#88：key 不带清单与起点，清单回池重新计时、别的清单跟着等满都不再叫醒），只给会话：池里排队是常态，不标红
-        snap["alerts"].append(alert(f"pool_wait:{cfg['id']}", "agent",
-                                    f"有 {len(work['pool_wait'])} 条清单在算力池里等了 {PO.POOL_TELL_S // 3600} 小时以上：{'；'.join(work['pool_wait'])}。"
-                                    "不急就接着等；要早点跑可以登记到自己能用的主机（labmon worker add <主机> ROOT JOBS --project <项目>，一条清单只归一台，它就出了池）"))
     for k in list(work["prog"]):                       # 只为运行中的任务保留进度采样
         if k not in work["running"]:
             del work["prog"][k]
@@ -563,7 +557,13 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     snap["lanes"].append(lane)
     pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {} if lane.get("pool") else {}
     if pv.get("since") and unfinished and not pv.get("done") and not lane.get("paused") and t - pv["since"] >= PO.POOL_TELL_S:
-        work["pool_wait"].append(f"{q.get('jobs')} 等了 {fmt_dur(t - pv['since'])}（{pv.get('why') or '还没放到哪台'}）")   # 项目一条，_lanes 汇总
+        # 池里待放满 2 小时：一条清单一条，只给会话（池里排队是常态，不标红）。key 带车道不带起点：别的清单等满另报，回池重新计时不变（REWAKE_S 内不再叫醒）；
+        # 借着的都放不下、也借不到（pool.tick 的 nofit）换一个 key 另报一次（#130：以前 key 只带项目，第一条报过以后都不再叫醒）
+        nofit = bool(pv.get("nofit"))
+        alerts.append(alert(f"pool_wait:{cfg['id']}:{q['id']}" + (":nofit" if nofit else ""), "agent",
+                            f"{q.get('jobs')} 在算力池里等了 {fmt_dur(t - pv['since'])}（{pv.get('why') or '还没放到哪台'}）。"
+                            + ("池里此刻放不下它、也没有能借的入池服务器：要早点跑就登记到自己能用的主机" if nofit else "不急就接着等；要早点跑可以登记到自己能用的主机")
+                            + "（labmon worker add <主机> ROOT JOBS --project <项目>，一条清单只归一台，它就出了池）"))
     if returned and (hcfg[q["host"]].get("borrow") or {}).get("pool") and PO._ours({"stop": q.get("reg_stop")}):
         pass                                         # 算力池借过的主机还掉了：池的清单由看板搬回池里（pool.tick），不叫会话换主机；借给池之前留下的旧登记池不收，照下面报（#88 E）
     elif returned:

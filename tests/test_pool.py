@@ -427,6 +427,41 @@ class PoolPlaceTest(TickBase):
         self.tick(self.snap([a, b], [], regs=regs))
         self.assertEqual(self.moves, [])
 
+    def test_own_list_waiting_on_lent_host_stays(self):
+        # #130：借给池之前就登记在 a 上的会话自己的清单（停法没写或 boundary，pool._ours 不认），队首等满 POOL_WAIT_S 也不挪：
+        # 池不收、不问 fit（旧代码当池清单挪到 b，reg_move 带 --pool，会话的清单悄悄成了池清单）
+        (self.d / "hosts.toml").write_text(HOSTS.format(extra="lend = true\n") + "lend = true\n")      # b 也入池
+        for stop in (None, "boundary"):
+            q = dict(self.pool_list(), stop=stop)
+            wa = {"kind": "queue", "root": q["root"], "queue": q["jobs"], "project": "pa", "name": "x", "since": NOW - P.POOL_WAIT_S - 5}
+            a, b = self.lent("a", {"waiting": [wa]}), self.lent("b")
+            out = self.tick(self.snap([a, b], [], regs=[{"host": "a", "state": "active", "queues": [q]}]))
+            self.assertEqual((self.moves, self.fits), ([], []), stop)
+            self.assertEqual(out["lists"], {}, stop)
+
+    def test_nofit(self):
+        # #130：问到了 fit、借着的都放不下，也挑不出能借的入池服务器：lists 带 nofit（pool_wait 据此另报一次）；放得下或这一轮没问到的不带
+        self.fit_res = lambda it, hs: {"need": {"ngpu": 4, "vram": 70.0}, "hosts": {h: {"ok": False, "why": "卡不够"} for h in hs}}
+        k = P.key("/r/x", "jobs/x.txt")
+        out = self.tick(self.snap([self.lent("a", {"room": {"gpus": {}}})], [self.pool_list()]))
+        self.assertTrue(out["lists"][k].get("nofit"), out["lists"][k])
+        self.assertIn("池里借着的服务器都放不下", out["lists"][k]["why"])
+        self.assertIn("没有能借的入池服务器", out["lists"][k]["why"])
+        with mock.patch.object(P, "want_borrow", return_value=("b", None, "")):      # 挑得出能借的：正在借，不算 nofit
+            out = self.tick(self.snap([self.lent("a", {"room": {"gpus": {}}})], [self.pool_list()]), t=NOW + P.POOL_RETRY_S + 1)
+        self.assertNotIn("nofit", out["lists"][k])
+        P._FIT.clear()
+        P._FIT.clear()
+        self.fit_res = lambda it, hs: {"need": {"ngpu": 1, "vram": 20.0}, "hosts": {h: {"ok": True} for h in hs}}
+        k2 = P.key("/r/y", "jobs/y.txt")                                              # Codex 审 #132：a 这一轮已放了一条（每台每轮一条），第二条只是等下一轮，不算 nofit
+        out = self.tick(self.snap([self.lent("a", {"room": {"gpus": {}}})], [self.pool_list(), self.pool_list("/r/y", "jobs/y.txt")]), t=NOW + 2)
+        self.assertEqual([m[0] for m in self.moves[-1:]], ["a"])
+        self.assertNotIn("nofit", out["lists"][k2])
+        P._FIT.clear()
+        self.fit_res = lambda it, hs: None                                             # 没问到要多少资源：不知道放不放得下
+        out = self.tick(self.snap([self.lent("a", {"room": {"gpus": {}}})], [self.pool_list()]), t=NOW + 1)
+        self.assertNotIn("nofit", out["lists"][k])
+
 
 class PoolHomeTest(TickBase):
     def test_heads_only_from_pool_home(self):
@@ -632,6 +667,26 @@ class PoolReturnTest(TickBase):
         self.assertEqual(P.load_json(P.state_dir() / "borrow.json", {})["a"]["pool"]["rest_why"], "收回过")
         with mock.patch.object(B, "request_return", return_value="要还了"):
             self.assertIn("boss 代收", P.reclaim("a", who("boss", "admin"), True, mv, snap))
+
+    def test_reclaim_leaves_own_lists(self):
+        # #130：收回借给池的 a，只把池放的（pool._ours）搬回池里；借给池之前就登记在上面的会话自己的清单留着，那句话里写明（旧代码 pq = qs 全搬）
+        q, own = self.pool_list(), dict(self.pool_list("/r/own", "jobs/own.txt"), stop=None)
+        self.lent("a")
+        snap = self.snap([fake_host("a", {"running": []})], [], regs=[{"host": "a", "state": "active", "queues": [q, own]}])
+        moves = []
+        with mock.patch.object(B, "request_return", return_value="要还了"):
+            say = P.reclaim("a", who("AA"), False, lambda to, items, pool="": moves.append((to, [i["jobs"] for i in items])), snap)
+        self.assertEqual(moves, [("pool", ["jobs/x.txt"])])
+        self.assertIn("1 条清单回池里", say)
+        self.assertIn("1 条借给池之前就登记在这台的清单池不收", say)
+
+    def test_owner_back_leaves_own_lists(self):
+        # #130：主人回来、a 要还了：池的清单回池里待放，会话自己的清单（停法没写）不搬，留给还掉以后的 returned_unfinished（旧代码一起搬回池里）
+        q, own = self.pool_list(), dict(self.pool_list("/r/own", "jobs/own.txt"), stop=None)
+        todo = [{"root": x["root"], "queue": x["jobs"], "jobs": ["x"]} for x in (q, own)]
+        e = self.lent("a", {"guest": {"owner": ["卡 0：对方用 3.0 GiB 显存"]}, "todo": todo})
+        self.tick(self.snap([e], [], regs=[{"host": "a", "state": "active", "queues": [q, own]}]))
+        self.assertEqual(self.moves, [("pool", ["jobs/x.txt"], "a 要还了")])
 
     def test_lend_view_says(self):
         s = self.server("a")
