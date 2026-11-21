@@ -245,14 +245,14 @@ class BorrowTest(Base):
         self.assertEqual(len(msgs), 1, msgs)                                  # 同一件事一条：不再另说“用得比预留多”
         self.assertNotIn("borrow_away", self.server())
         self.assertNotIn("away", self.keeps[-1])
-        self.assertIn(f"borrow_back:{SID}:away", [w["key"] for w in wake])
+        self.assertIn(f"borrow_back:{SID}:{self.ep()}:away:{round(t)}", [w["key"] for w in wake])   # 带这一次借用与作废的时刻（#129）
         self.assertFalse(e["borrow"].get("away"))
         e["status"]["guest"].update(back=[], away=None)                       # 看板重下了不带 away 的指令；对方在预留以内（back 为空）
         msgs, wake = B.check([e], t + 60, ovr=self.ovr)
         self.assertFalse(any("现在回来了" in m for m in msgs))               # 清掉以后不再说
-        self.assertIn(f"borrow_back:{SID}:away", [w["key"] for w in wake])  # wait 一小时内照样报（back 为空也报）
+        self.assertIn(f"borrow_back:{SID}:{self.ep()}:away:{round(t)}", [w["key"] for w in wake])  # wait 一小时内照样报（back 为空也报）
         _, wake = B.check([e], t + 3700, ovr=self.ovr)
-        self.assertNotIn(f"borrow_back:{SID}:away", [w["key"] for w in wake])
+        self.assertFalse(any(":away:" in w["key"] for w in wake))
 
     def test_check_away_flicker_and_rechecked(self):
         """说好不用还有效时，新出现的对方 GPU 进程（worker 那张卡当轮不放，连着两轮才作废）不提醒、不报 borrow_back；
@@ -423,7 +423,7 @@ class BorrowTest(Base):
         self.assertIn(("add", "drain", SID, None, None), self.calls)        # 到点：不再放新任务，不停正在跑的
         self.assertTrue(any("到了约定时间" in m and "x1 跑完就还" in m for m in msgs))
         self.assertEqual(done, [])
-        self.assertIn(f"borrow_due:{SID}:{self.ep()}", [w["key"] for w in wake])
+        self.assertTrue(any(w["key"].startswith(f"borrow_due:{SID}:{self.ep()}:") for w in wake))
         msgs, _ = B.check([self.host_entry(running=[("hold_x", 9)], overrides=ov)], cut + 60, finish_fn=fin, ovr=self.ovr)
         self.assertEqual(done, [(SID, [9])])                                  # 只剩占位任务：归还，并停掉占位任务
         self.assertIn("已还", msgs)
@@ -459,7 +459,7 @@ class BorrowTest(Base):
         # 弹给用户的提醒写人话（late_say），给会话的 wake 写操作（late_do），#142
         self.assertFalse([m for m in msgs if "labmon worker add" in m], msgs)
         self.assertTrue(any(m.endswith(B.late_do("约定", user=True)) for m in msgs if "到了约定时间" in m), msgs)
-        due = next(w["msg"] for w in wake if w["key"] == f"borrow_due:{SID}:{self.ep()}")
+        due = next(w["msg"] for w in wake if w["key"].startswith(f"borrow_due:{SID}:{self.ep()}:"))
         self.assertIn("给已有清单追加行也不要", due)
         self.assertIn("排着的 4 个任务在约定前跑不完", due)
         self.assertTrue(due.endswith(B.late_do("约定")), due)
@@ -483,7 +483,7 @@ class BorrowTest(Base):
         _, wake = B.check([e], t, ovr=self.ovr)
         late = e["borrow"]["late"]
         self.assertEqual([(x["queue"], x["n"]) for x in late], [("jobs/p1f.txt", 2)])
-        self.assertIn(f"borrow_back:{SID}", [w["key"] for w in wake])
+        self.assertIn(f"borrow_back:{SID}:{self.ep()}", [w["key"] for w in wake])
         for down in (fake_host(SID, label="27（借 BOB）", error="timeout"),                          # 连不上
                      fake_host(SID, label="27（借 BOB）", status_error="JSON 读不出")):               # 状态读不出
             _, wake = B.check([down], t + 60, ovr=self.ovr)
@@ -491,12 +491,12 @@ class BorrowTest(Base):
             self.assertEqual(down["borrow"]["late_do"], B.late_do("约定"))
             self.assertEqual(down["borrow"]["back"], ["卡 0：对方用 5.0 GiB 显存，预留 2"])
             self.assertEqual(down["borrow"]["tight"], "卡 0：快满")
-            self.assertIn(f"borrow_back:{SID}", [w["key"] for w in wake])
+            self.assertIn(f"borrow_back:{SID}:{self.ep()}", [w["key"] for w in wake])
         e = entry(held=None, back=())
         e["status"]["guest"].pop("tight")
         _, wake = B.check([e], t + 120, ovr=self.ovr)                         # 拿到状态：跑得完了、对方回落，清掉
         self.assertEqual((e["borrow"]["late"], e["borrow"]["back"], e["borrow"]["tight"], e["borrow"]["late_do"]), ([], [], None, None))
-        self.assertNotIn(f"borrow_back:{SID}", [w["key"] for w in wake])
+        self.assertNotIn(f"borrow_back:{SID}:{self.ep()}", [w["key"] for w in wake])
 
     def test_late_after_cutoff_until_returned(self):
         """到了约定时间以后，看板下了 drain，但 deadline 指令在列表里排在 drain 前面（override add 追加到末尾），队首仍是 held=deadline：
@@ -530,6 +530,49 @@ class BorrowTest(Base):
         self.assertIn("BOB 的租期", say)
         self.assertIn("实验会话", say)
 
+    def test_rewake_due_and_back(self):
+        """#129：borrow_due 的 key 带要还的时刻：点了跑完就还、撤销、再点是新的一次，6 小时内也叫醒；
+        borrow_back 的 key 带这一次借用、不带超出的时刻：对方用量在预留线上下来回（back 一轮为空）不重复叫醒。"""
+        from labmon.waits import _new_alerts
+        t = time.time()
+        self.begin(until=t + 86400, projects="a1")
+        ov = [{"kind": "guest", "target": "a1", "keep": self.KEEP}, {"kind": "deadline", "target": "borrow", "at": K.parse_time(self.server()["borrow_until"])}]
+        fin = lambda *a, **k: self.fail("还有任务在跑，不该还")      # noqa: E731
+
+        def woke(sf, at, kind, **kw):
+            _, wake = B.check([self.host_entry(running=[("x1", 5)], overrides=ov, **kw)], at, finish_fn=fin, ovr=self.ovr)
+            return [k.split(":")[0] for k in _new_alerts(self.d / sf, {w["key"]: w["msg"] for w in wake if w["key"].startswith(kind)}, at)]
+        back = ["卡 0：对方用 5.0 GiB 显存，预留 2"]
+        self.assertEqual(woke("b.json", t + 10, "borrow_back:", back=back), ["borrow_back"])
+        self.assertEqual(woke("b.json", t + 70, "borrow_back:"), [])
+        self.assertEqual(woke("b.json", t + 130, "borrow_back:", back=back), [])           # 同一次借用里来回：不叫醒
+        for k, (act, want) in enumerate((("return", True), ("cancel", False), ("return", True))):
+            with mock.patch.object(B.time, "time", return_value=t + 200 + 100 * k):
+                B.request_return(SID, ovr=self.ovr) if act == "return" else B.cancel_return(SID, ovr=self.ovr)
+            self.assertEqual(woke("d.json", t + 250 + 100 * k, "borrow_due:"), ["borrow_due"] if want else [], act)
+
+    def test_rewake_away_voided_again(self):
+        """#129：说好不用又被对方作废一次（用户重新勾了“这段时间不用”）是新的一件：key 带作废的时刻，6 小时内也叫醒。"""
+        from labmon.waits import _new_alerts
+        t = time.time()
+        until = round(t + 86400)
+        self.begin(until=until, away=True)
+        sf = self.d / "w.json"
+
+        def void(at):
+            away = K.parse_time(self.server()["borrow_away"])
+            ov = [{"kind": "guest", "target": None, "keep": dict(self.KEEP, away=round(away))},
+                  {"kind": "deadline", "target": "borrow", "at": K.parse_time(self.server()["borrow_until"])}]
+            e = self.host_entry(overrides=ov)
+            e["status"]["guest"]["away"] = {"until": round(away), "end": round(at), "why": "卡 0 上有了对方的 GPU 进程"}
+            _, wake = B.check([e], at, ovr=self.ovr)
+            return [k.split(":")[0] for k in _new_alerts(sf, {w["key"]: w["msg"] for w in wake if ":away:" in w["key"]}, at)]
+        self.assertEqual(void(t), ["borrow_back"])
+        B.check([self.host_entry()], t + 3700, ovr=self.ovr)
+        _new_alerts(sf, {}, t + 3700)                                                    # 一小时后不再报
+        B.begin(SID, until, None, away=True, ovr=self.ovr)                               # 又勾了“这段时间不用”
+        self.assertEqual(void(t + 4000), ["borrow_back"])
+
     def test_check_back_once(self):
         t = time.time()
         self.begin(until=t + 86400)
@@ -538,7 +581,7 @@ class BorrowTest(Base):
         self.calls.clear()
         msgs, wake = B.check([self.host_entry(back=back, overrides=ov)], t, ovr=self.ovr)
         self.assertTrue(any("用得比预留多（卡 0" in m for m in msgs))
-        self.assertIn(f"borrow_back:{SID}", [w["key"] for w in wake])
+        self.assertIn(f"borrow_back:{SID}:{self.ep()}", [w["key"] for w in wake])
         msgs, _ = B.check([self.host_entry(back=back, overrides=ov)], t + 60, ovr=self.ovr)
         self.assertFalse(any("用得比预留多" in m for m in msgs))             # 同一段只提醒一次
         self.assertEqual(self.calls, [])                                      # 预留没变：不重下指令
@@ -873,7 +916,7 @@ class BorrowTest(Base):
         msgs, wake = B.check([e], cut + 1, finish_fn=lambda *a, **k: self.fail("换给自己的不自动还"), ovr=self.ovr)
         self.assertEqual(self.calls, [("add", "deadline", "29", "borrow", round(cut))])   # 只下约定截止，不下 guest、不 drain
         self.assertTrue(any("换回给 CAROL" in m for m in msgs))
-        self.assertEqual([w["key"] for w in wake], ["borrow_due:29"])
+        self.assertEqual([w["key"] for w in wake], [f"borrow_due:29:{round(cut)}"])   # 换给自己的没有起点、没有 returning：取约定时刻
         B.set_swap("29", None, None, ovr=self.ovr)
         self.assertIn(("rm", "deadline", "29", "borrow", None), self.calls)
         self.assertNotIn("borrow", next(x for x in user_hosts() if x["id"] == "29"))
