@@ -662,7 +662,8 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
             continue
         if st.get("returning") or (cut and t >= cut):           # 要还的原因照实写：到点、用户点了跑完就还、现在停
             due = f"到了约定时间（{fmt_time(cut)}）" if cut and t >= cut else "正在停下，停完就还" if st.get("now") else "要还了（用户点了跑完就还）"
-            wake.append({"key": f"borrow_due:{ep}", "projects": ps, "host": hid,
+            # key 再带要还的时刻（#129）：点了跑完就还、撤销、再点是新的一次；换给自己的没有 returning，取约定时刻
+            wake.append({"key": f"borrow_due:{ep}:{st.get('returning') or round(cut)}", "projects": ps, "host": hid,
                          "msg": f"{hid} {due}，不再放新任务" + ("" if swap or st.get("now") else "，跑完就还") + "：别再往它上面加任务，给已有清单追加行也不要" + _late_text(late, why)})
         else:
             gpus = (ws.get("info") or {}).get("gpus") or []
@@ -678,11 +679,11 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
                 wake.append({"key": f"borrow_idle:{hid}:{st['idle']}", "projects": ps,
                              "msg": f"借来的 {hid} 从 {fmt_time(st['idle'])} 起空着（没有任务在跑、也没有在等的，卡上只有保活）："
                              f"有活就追加到它上面的长期清单或 labmon worker add {hid} ROOT JOBS --project <项目>；用不上了告诉用户，可以早点还给 {who}"})
-        if back and not away_on:
-            wake.append({"key": f"borrow_back:{hid}", "projects": ps, "host": hid, "msg": f"{who} 在用 {hid}（{'；'.join(back[:3])}）：这部分不再放新任务"})
+        if back and not away_on:                     # key 带这一次借用（#129）；不带对方开始超出的时刻：back 一轮为空就清掉重记，门槛上下来回会反复叫醒
+            wake.append({"key": f"borrow_back:{ep}", "projects": ps, "host": hid, "msg": f"{who} 在用 {hid}（{'；'.join(back[:3])}）：这部分不再放新任务"})
         ab = st.get("away_back")                     # 说好不用被对方作废：一小时内 wait 都报（back 可能为空：hold 为真且在预留以内、因 OOM 作废）
         if ab and t - ab["t"] < OVER_S:
-            wake.append({"key": f"borrow_back:{hid}:away", "projects": ps, "host": hid, "msg": ab["msg"]})
+            wake.append({"key": f"borrow_back:{ep}:away:{ab['t']}", "projects": ps, "host": hid, "msg": ab["msg"]})
     log_events(evs, t)
 
     def merge(cur):                                  # 只并本轮改的几项：命令行、页面可能同时在改 returning（要还、撤销）
