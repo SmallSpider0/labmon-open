@@ -454,16 +454,69 @@ class RegLanesTest(Base):
         save_json(state_dir() / "snapshot.json", snap)
         out = C.collect(self.cfg())
         a, = out["alerts"]
-        # #88：每个项目一条（key 只带项目），消息列出在等的各条清单；清单回池重新计时（since 变了）key 不变，不再叫醒。旧代码 key 带车道与起点
-        self.assertEqual((a["key"], a["to"]), ("pool_wait:p1", "agent"))
-        self.assertIn("在算力池里等了 2 小时以上：jobs/q.txt 等了", a["msg"])
+        # #130：一条清单一条（key 带项目与车道，不带起点）；清单回池重新计时（since 变了）key 不变，不再叫醒
+        lid = ln["id"]
+        self.assertEqual((a["key"], a["to"]), (f"pool_wait:p1:{lid}", "agent"))
+        self.assertIn("jobs/q.txt 在算力池里等了", a["msg"])
         snap["pool"]["lists"][k]["since"] = since - 2 * PO.POOL_TELL_S
         save_json(state_dir() / "snapshot.json", snap)
-        self.assertEqual([a["key"] for a in C.collect(self.cfg())["alerts"]], ["pool_wait:p1"])
+        self.assertEqual([a["key"] for a in C.collect(self.cfg())["alerts"]], [f"pool_wait:p1:{lid}"])
+        snap["pool"]["lists"][k].update(nofit=True, why="池里借着的服务器都放不下（a：卡不够）；没有能借的入池服务器（借着 1 台）")
+        save_json(state_dir() / "snapshot.json", snap)
+        a, = C.collect(self.cfg())["alerts"]                # 放不下、也借不到：换一个 key，另报一次
+        self.assertEqual(a["key"], f"pool_wait:p1:{lid}:nofit")
+        self.assertIn("池里借着的服务器都放不下", a["msg"])
+        snap["pool"]["lists"][k].pop("nofit")
         snap["pool"]["lists"][k].update(why=PO.POOL_DONE, done=True)    # #86：池里跑完了的不算在等
         save_json(state_dir() / "snapshot.json", snap)
         out = C.collect(self.cfg())
         self.assertIsNone(out["lanes"][0]["waiting"])
+
+    def test_pool_wait_each_list(self):
+        # #130：池里两条清单先后等满 POOL_TELL_S：第二条另报一次（旧代码 key 只带项目，第一条报过以后第二条、转成放不下都不再叫醒）；
+        # 叫没叫醒经 waits._new_alerts 认：清单放出去又回池里重新等满（REWAKE_S 内）、在等着与放不下之间来回，都不再叫醒
+        import time
+        from labmon import pool as PO
+        from labmon import waits as WT
+        from labmon.state import load_json, save_json, state_dir
+        (self.root / "jobs" / "r.txt").write_text("c_one|echo e\n")
+        (self.root / "jobs" / "r.env").write_text("QUEUE_STATE=state2\nQUEUE_LOGS=logs2\n")
+        (self.root / "state2").mkdir()
+        (self.root / "logs2").mkdir()
+        self.regs(("pool", "pool", [("p1", str(self.root), "jobs/q.txt"), ("p1", str(self.root), "jobs/r.txt")]), ("here", "active", []))
+        kq, kr = PO.key(str(self.root), "jobs/q.txt"), PO.key(str(self.root), "jobs/r.txt")
+        now = time.time()
+        snap = load_json(state_dir() / "snapshot.json", {})
+        lists = {kq: {"project": "p1", "since": now - PO.POOL_TELL_S - 60, "why": "正在借 AA 的 a"},
+                 kr: {"project": "p1", "since": now - 600, "why": "正在借 AA 的 a"}}
+        sf, t = self.d / "wait_state.json", now
+
+        def wake(**upd):
+            nonlocal t
+            for kk, v in upd.items():
+                lists[kk].update(v)
+                [lists[kk].pop(x) for x in [x for x, y in v.items() if y is None]]
+            snap["pool"] = {"lists": lists}
+            save_json(state_dir() / "snapshot.json", snap)
+            out = C.collect(self.cfg())
+            t += 300
+            return out["alerts"], WT._new_alerts(sf, {a["key"]: a["msg"] for a in out["alerts"]}, t)
+
+        al, new = wake()
+        self.assertEqual(len(new), 1, al)
+        self.assertTrue(new[0].startswith("pool_wait:p1:") and new[0].endswith("q.txt"), new)
+        al, new = wake(**{kr: {"since": now - PO.POOL_TELL_S - 60}})       # 第二条也等满：另报
+        self.assertEqual(len(al), 2)
+        self.assertEqual(len(new), 1)
+        self.assertTrue(new[0].endswith("r.txt"), new)
+        al, new = wake(**{kr: {"nofit": True}})                              # r 放不下、也借不到：换 key，另报一次
+        self.assertEqual(new, [new[0]])
+        self.assertTrue(new[0].endswith("r.txt:nofit"), new)
+        self.assertEqual(wake(**{kr: {"nofit": None}})[1], [])               # 来回不再叫醒
+        self.assertEqual(wake(**{kr: {"nofit": True}})[1], [])
+        al, new = wake(**{kq: {"since": now - 60}})                          # q 放出去又回池里重新计时：没等满，不报
+        self.assertEqual(new, [])
+        self.assertEqual(wake(**{kq: {"since": now - PO.POOL_TELL_S - 60}})[1], [])   # 再等满（REWAKE_S 内）：不再叫醒
 
     def test_registration_overrides_returned_host(self):
         # monitor.toml 写着 host = 已还的 gone，清单已登记到 here：车道在 here 上、id 与用途沿用 monitor.toml 的，不报 returned_unfinished（旧代码会报）
