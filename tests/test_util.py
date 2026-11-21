@@ -149,6 +149,20 @@ class CollectTest(Tmp):
             self.assertEqual(step(k, 50.0), [])             # 用了 20 分钟
         self.assertEqual(step(8, 0.0), ["gpu_idle"])        # 新的一段：叫醒
 
+    def test_idle_single_spike_same_stretch(self):
+        """Codex 审 #133：滑动窗口里只有一个超线样本（6%，其余 0%）时，窗口条件会假上 gpu_idle_min 分钟，但 GPU 并没真用起来：
+        仍是同一段、同一个 key，不重复叫醒（旧做法拿条件的否定计时，第 20 分钟就换了 key）。"""
+        from labmon.waits import _new_alerts
+        state, sf, t0, hist, woke = {}, Path(self.tmp.name) / "w2.json", 1_800_000_000.0, [], []
+        for i in range(-8, 40):                             # 每两分钟一个采样
+            t = t0 + 120 * i
+            hist.append({"t": t, "host": "h", "ok": True, "busy": [6.0 if i == 1 else 0.0]})
+            snap = {"hosts": [{"id": "h", "label": "h", "ok": True, "gpus": [{}]}], "lanes": [{"id": "l", "host": "h", "label": "车道 1", "unfinished": 1}],
+                    "jobs": [], "alerts": []}
+            C._host_alerts(self.cfg(), snap, state, hist, {"hosts": []}, t)
+            woke += _new_alerts(sf, {a["key"]: a["msg"] for a in snap["alerts"] if a["key"].startswith("gpu_idle:")}, t)
+        self.assertEqual(len(woke), 1, woke)
+
     def test_idle_skips_cpu_only(self):
         """不用卡的任务（车道的 no_gpu，#73）不算 gpu_idle 的未完成：只有纯 CPU 任务在跑、卡上只有保活时不报；
         同机还有要卡的任务时照报，只数要卡的、只列那条车道。"""

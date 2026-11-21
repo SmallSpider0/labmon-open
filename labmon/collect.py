@@ -751,7 +751,8 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
         hs = hstate.setdefault(hd["id"], {})
         idle_gpu = bool(unfinished and hd.get("gpus") and recent and t - recent[0]["t"] >= win - 150 and
                         all(max([u or 0 for u in x.get("busy") or x.get("util") or [0]]) < al_cfg["gpu_idle_util"] for x in recent))
-        since = _idle_stretch(hs, idle_gpu, win, t)
+        used = bool(recent) and max([u or 0 for u in recent[-1].get("busy") or recent[-1].get("util") or [0]]) >= al_cfg["gpu_idle_util"]
+        since = _idle_stretch(hs, idle_gpu, used, win, t)
         if idle_gpu:
             # 写明各车道当前在做什么，便于判断是有意让出 GPU 还是卡住了
             why = []
@@ -823,17 +824,21 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
     alerts.extend(_cpu_fit_alerts(fits))
 
 
-def _idle_stretch(hs: dict, idle: bool, gap: float, t: float) -> int | None:
-    """GPU 空转的这一段从何时起（gpu_idle: 的 key 带它，#129）：条件第一次成立时记下（看板状态里这台的 gpu_idle.since）；
-    不成立时记 off，连续满 gap（gpu_idle_min，与起报同一个窗口）才算这一段结束。门槛两侧短暂来回仍是同一段、同一个 key，
-    labmon wait 不重复叫醒；GPU 真用起来过一阵再空转是新的一段，6 小时内也叫醒。返回此刻这一段的起点（不在空转为 None）。"""
+def _idle_stretch(hs: dict, idle: bool, used: bool, gap: float, t: float) -> int | None:
+    """GPU 空转的这一段从何时起（gpu_idle: 的 key 带它，#129）：条件第一次成立时记下（看板状态里这台的 gpu_idle.since）。
+    idle 是整个窗口都低于门槛（_host_alerts 的条件），一个超线样本就让它假上 gpu_idle_min 分钟，不能拿它的否定判结束（Codex 审 #133）；
+    所以只在 GPU 真用起来（used：最新一个采样过了门槛）时记 off，连续满 gap（gpu_idle_min）才算这一段结束，中途又有低于门槛的采样就清掉 off。
+    门槛两侧短暂来回仍是同一段、同一个 key，labmon wait 不重复叫醒；GPU 真用起来过一阵再空转是新的一段，6 小时内也叫醒。
+    返回此刻这一段的起点（不在空转为 None）。"""
     gi = hs.get("gpu_idle") or {}
     if gi.get("off") and t - gi["off"] >= gap:
         gi = {}
     if idle:
         gi = {"since": gi.get("since") or round(t)}
-    elif gi:
+    elif gi and used:
         gi["off"] = gi.get("off") or round(t)
+    elif gi:
+        gi.pop("off", None)
     hs["gpu_idle"] = gi or None
     return gi.get("since") if idle else None
 
