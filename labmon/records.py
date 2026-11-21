@@ -154,7 +154,7 @@ def _tell_file():
 def tell(project: str, what: str, text: str, t: float | None = None, src: str = "看板页面上") -> str:
     """页面上的改动告诉这个项目的实验会话（#121）：记一行到状态目录的 tell.jsonl（保留 TELL_KEEP_S），told 每轮并进全局快照的 wake，
     labmon wait 报一次、labmon check 也列出。what 是改动的种类（move、rm、restore、pause、resume、config…，进 wake 的 key）；
-    text 写做了什么、要接着用怎么办。返回落盘的那句（「<src> MM-DD HH:MM：text」；src 缺省「看板页面上」，看板升级时的迁移另写）。命令行做的不经这里（会话自己做的，或在终端里另有记录）。"""
+    text 写做了什么、要接着用怎么办。返回落盘的那句（「<src> MM-DD HH:MM：text」；src 缺省「看板页面上」，看板升级时的迁移另写）。命令行做的一般不经这里（会话自己做的，或在终端里另有记录）；改借用约定例外（借不借由用户定、会话不知道，borrow._tell_retime 的 src 写命令行，#127）。"""
     from .config import fmt_time                  # config 在顶层 import 本模块（log_events），这里延迟 import 免得成环
     t = time.time() if t is None else t
     msg = f"{src} {fmt_time(t)}：{text}"
