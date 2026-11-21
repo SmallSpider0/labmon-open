@@ -1195,6 +1195,19 @@ class AdmissionUnitTest(UnitBase):
         hist.append(oom("vit_s3", 1000, self.m.estimate(hist, r), oom="ram", ram_peak=30.0))   # 内存 OOM：只抬内存
         self.assertEqual(est(), {"vram": 17.51, "src": "同 tag 近 1 次峰值 ×1.1", "ram": 33.0, "ram_src": "同 tag 上次 OOM：OOM 时峰值 30.0 GiB ×1.1", "util": None})
 
+    def test_estimate_failed_runs_only_raise(self):
+        # #134：跑满 5 分钟后失败（没标 oom）的峰值没跑完、只是下限：不占近 5 次的名额，只能抬高；以前近 5 次全是这种失败时估计掉到它们的小峰值
+        q = dict(root="/r", queue="jobs/q.txt", tag="sm", gpus=["GPU-a"])
+        r = {"project": "p", "name": "vit_s9", "tag": "sm", "ram": 0.0, "vram": 0.0, "root": "/r", "queue": "jobs/q.txt"}
+        hist = [usage_row("vit_s%d" % i, "p", 100 * i, 100 * i + 600, vram_peak=18432.0, ram_peak=4.0, **q) for i in range(3)]
+        fail = [usage_row("vit_f%d" % i, "p", 1000 + 100 * i, 1600 + 100 * i, rc="1", vram_peak=2048.0, ram_peak=1.0, **q) for i in range(5)]
+        e = self.m.estimate(hist + fail, r)
+        self.assertEqual((e["vram"], e["ram"], e["src"]), (19.8, 4.4, "同 tag 近 8 次峰值 ×1.1"))
+        hi = usage_row("vit_f9", "p", 2000, 2600, rc="1", vram_peak=20480.0, ram_peak=1.0, **q)
+        self.assertEqual(self.m.estimate(hist + fail + [hi], r)["vram"], 22.0)          # 失败的峰值更大：照样抬高
+        self.assertEqual(self.m.estimate([hi] + hist, r)["vram"], 19.8)                  # 比近 5 次跑成功的都旧：不算
+        self.assertEqual(self.m.estimate(fail, r)["vram"], 2.2)                          # 一次也没跑成功：照旧取这几条
+
     def test_estimate_cpu_order(self):
         # CPU 估计：清单的 cpus= 优先，其次同类近几次 1 分钟峰值核数 ×1.1（期 1 之前的旧行没有 cores_peak，当没有历史），都没有按 1 核
         r = {"project": "pb", "name": "far", "tag": None, "ram": 2.0, "vram": 0.0}
@@ -4710,9 +4723,9 @@ class DurationTest(unittest.TestCase):
         self.assertAlmostEqual(d["min"], 124.5, delta=0.1)                     # 同类 实际/估时 中位数，不被探针与 vit 拉低
         self.assertIn("同类近 2 次 实际/估时", d["src"])
         self.assertEqual((d["cls"], d["same"]), ("p1_sst2_bert_clean", True))                  # same：同类历史给的（读写拥塞嫌疑只认它）
-        d = self.dur(hist, "p1_cifar_vit_wu_s42", 420)                         # 新类型：借同前缀 p1_ 的比值，取中位数（两个探针不拉低，#113）
+        d = self.dur(hist, "p1_cifar_vit_wu_s42", 420)                         # 新类型：借同前缀 p1_ 的比值，取中位数（#113）；两个探针估时偏了 5 倍以上，不借（#134）
         self.assertFalse(d["same"])
-        self.assertEqual((d["k"], d["src"]), (0.61, "同前缀 p1_ 近 6 个 实际/估时 ×0.61"))
+        self.assertEqual((d["k"], d["src"]), (0.69, "同前缀 p1_ 近 4 个 实际/估时 ×0.69"))
         self.assertEqual(self.m.duration(hist, {"name": "p1_sst2_bert_clean_s44", "project": "a1", "est_min": 30})["src"], "清单估时")   # 别的项目的记录不看
         self.assertIsNone(self.dur(hist, "p1_new"))                            # 没估时、没同类
         hist.append(self.rec("p1_hold_s42", 30.0, 900))
@@ -4740,8 +4753,31 @@ class DurationTest(unittest.TestCase):
         self.assertEqual((round(d["min"], 6), d["src"]), (25 * 1.05, "本项目近 10 个 实际/估时 ×1.05"))
         self.assertIsNone(dur("exp_m4_s1", tag="proj-b", root=R, queue="q1", est_min=None))   # 没写估时：借来的比例不给时长
         self.assertEqual(self.m.duration(hist, {"name": "exp_m4_s1", "project": "a1", "est_min": 25, "tag": "proj-b"})["src"], "清单估时")   # 别的项目的不借
-        lo = [self.rec("p_%d" % i, 1.0, 30, tag="probe") for i in range(3)]   # 比例截到 [1/3, 3]
-        self.assertEqual(self.m.duration(lo, {"name": "q_1", "project": "bp", "est_min": 30, "tag": "probe"})["k"], round(1 / 3, 3))
+        lo = [self.rec("p_%d" % i, 1.0, 30, tag="probe") for i in range(3)]   # #134：实际/估时 不在 [1/3, 3] 的不借（以前截到 1/3 照借）
+        self.assertEqual(self.m.duration(lo, {"name": "q_1", "project": "bp", "est_min": 30, "tag": "probe"})["src"], "清单估时")
+        lo.append(self.rec("p_9", 10.0, 30, tag="probe"))                     # 边界 1/3 本身算可信，只有它一条：不够 2 条
+        self.assertEqual(self.m.duration(lo, {"name": "q_1", "project": "bp", "est_min": 30, "tag": "probe"})["src"], "清单估时")
+        lo.append(self.rec("p_8", 90.0, 30, tag="probe"))                     # 另一端 ×3 也算
+        self.assertEqual(self.m.duration(lo, {"name": "q_1", "project": "bp", "est_min": 30, "tag": "probe"})["k"], round((1 / 3 + 3) / 2, 3))
+
+    def test_wrong_est_does_not_inflate(self):
+        # #134：同类早先误写 est_min=3、实际 28–53 分钟（×11）；之后改成 35 并换了新 tag：以前按 ×11.33 估成 397 分钟（约定归还前一直不放）
+        hist = [self.rec("exp_x_s1", 28.0, 3, tag="old"), self.rec("exp_x_s2", 34.0, 3, tag="old"), self.rec("exp_x_s3", 53.0, 3, tag="old")]
+        d = self.dur(hist, "exp_x_s0", 35)
+        self.assertEqual((d["min"], d["src"], d["k"], d["same"]),
+                         (34.0, "同类近 3 次实际用时（当时估时与实际差 ×11.3，不按比值折算）", round(34 / 35, 3), True))
+        self.assertAlmostEqual(self.dur(hist, "exp_x_s0", 3)["min"], 34.0)           # 估时没改（还是 3）：同估时的比值，照旧 = 实际
+        hist.append(self.rec("exp_x_s4", 42.0, 35, tag="new"))                       # 按新估时跑完一次：以估时相同的为准
+        d = self.dur(hist, "exp_x_s0", 35)
+        self.assertEqual((round(d["min"], 6), d["src"]), (42.0, "同类近 1 次 实际/估时 ×1.20"))
+        # 估时改了、但旧的比值可信（任务确实变大，估时跟着改）：照旧按比值折算改过的估时
+        grow = [self.rec("g_s1", 50.0, 40), self.rec("g_s2", 60.0, 40)]
+        self.assertEqual(self.dur(grow, "g_s3", 80)["src"], "同类近 2 次 实际/估时 ×1.38")
+        # 写错的那几条也不借给同前缀、同 tag 的别的名字（以前同前缀 exp_ ×3.00 → 105 分钟）
+        d = self.dur(hist[:3], "exp_y_s0", 35)
+        self.assertEqual((d["min"], d["src"]), (35, "清单估时"))
+        d = self.m.duration(hist[:3] + [self.rec("exp_z_s1", 20.0, 25), self.rec("exp_z_s2", 30.0, 25)], {"name": "exp_y_s0", "project": "bp", "est_min": 35, "tag": "old"})
+        self.assertEqual(d["src"], "同前缀 exp_ 近 2 个 实际/估时 ×1.00")         # 同 tag 只有写错的：跳到同前缀里可信的
 
     def test_group_regex_matches_board(self):
         # worker 不 import 本包，前缀那一档用自己的一份正则，须与看板自动归组的 config.AUTO_GROUP_RE 同一条
@@ -4763,6 +4799,24 @@ class DurationTest(unittest.TestCase):
             self.assertEqual(w.req_dur({"key": "bp", "kind": "queue", "name": "exp_m4_s1"}), 12.5)    # 截止前的准入取的同一份
             j = {"name": "exp_m4_s1", "project": "bp", "est_min": 25.0, "tag": "proj-b", "q": qs[0], "kind": "queue", "t0": h.now(), "gpus": []}
             self.assertEqual(w.req_dur(j, 1), 12.5)                                                  # 运行中任务（run_end 传 k）：清单从 j["q"] 取
+        finally:
+            h.close()
+
+    def test_wrong_est_across_hosts_and_deadline_why(self):
+        # #134 多主机：写错估时的那几条记在别的主机（29），借来的主机（t）上改对估时的行按同类实际用时估；约定归还前跑不完的原因写明依据
+        h = Hosts(self.d / "hosts")
+        try:
+            qs = h.queues({"bp": ["exp_x_s0|true   # tag=new est_min=35", "exp_y_s0|true   # tag=new est_min=35"]})
+            h.usage("29", [self.rec("exp_x_s1", 28.0, 3, tag="old"), self.rec("exp_x_s2", 34.0, 3, tag="old"), self.rec("exp_x_s3", 53.0, 3, tag="old")])
+            w = h.worker("t")
+            w.queue_durs(qs)
+            self.assertEqual((w.durs["bp"]["exp_x_s0"]["min"], w.durs["bp"]["exp_y_s0"]["src"]), (34.0, "清单估时"))
+            w.ovr = [{"kind": "deadline", "target": "borrow", "at": time.time() + 30 * 60}]
+            r = {"key": "bp", "kind": "queue", "name": "exp_x_s0", "project": "bp"}
+            why = w.override_hit(r)[1]
+            self.assertTrue(why.endswith("前跑不完（估 41 分钟 = 34 × 余量 1.2；同类近 3 次实际用时（当时估时与实际差 ×11.3，不按比值折算））"), why)
+            w.ovr[0]["at"] = time.time() + 50 * 60
+            self.assertIsNone(w.override_hit(r))                                 # 以前估 397 × 1.2 分钟，一直挡着
         finally:
             h.close()
 
