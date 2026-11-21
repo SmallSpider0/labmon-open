@@ -468,7 +468,7 @@ class GangHostsTest(unittest.TestCase):
         self.tick(self.t, qa, True)
         self.assertEqual(self.t.running, {})
         why = self.waiting(self.t)["A"][1]
-        self.assertTrue(why.endswith("前跑不完（估 60 分钟）"), why)
+        self.assertTrue(why.endswith("前跑不完（估 60 分钟 = 50 × 余量 1.2；成组 ddp 里最长的成员）"), why)
         r = {"key": qa[0]["key"], "kind": "queue", "name": "A", "project": "pa", "gang": "ddp"}
         self.assertEqual((self.t.req_dur(r), self.t.req_dur(dict(r, gang=None))), (50.0, 10.0))
 
