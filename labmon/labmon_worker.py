@@ -136,8 +136,9 @@ IDLE_CORES = 0.2         # 不用卡、平均不到这么多核的任务（如�
 VOID_KEEP_S = 86400      # 作废记录在状态里留这么久（看板据此告诉实验会话）
 HIST_N = 5               # 估计值看同类任务最近几次
 RATIO_N = 20             # 借来的 实际/估时 比值（同 tag、同前缀、同一清单、本项目）各看最近这么多个跑成功的任务
-RATIO_OK = (1 / 3, 3.0)  # 实际/估时 在这个范围里才算当时的估时可信：才拿它的比值折算改过的估时、借给别的名字（#134：一次写错的 est_min=3 把比值抬到 ×11）
-DUR_MARGIN = 1.2         # 截止前（续租、约定归还）的准入：预计时长再乘这么多（估时偏一点是常事，跑不完这一格就白跑）
+RATIO_OK = (1 / 3, 3.0)  # 实际/估时 在这个范围里才算当时的估时可信：才拿它的比值折算改过的估时（#134：一次写错的 est_min=3 把比值抬到 ×11）；借给别的名字时不在里面的另看 borrowable（#139）
+DUR_MARGIN = 1.2         # 回填与截止前（续租、约定归还）的准入：预计时长再乘这么多（估时偏一点是常事，跑不完这一格就白跑）；截止另与同类最长的一次取大（with_cut）
+CUT_EST_MARGIN = 1.5     # 截止前的准入：时长只来自清单估时或别的型号的记录时乘这么多（更没把握，#139）
 OVER_FRAC, OVER_MIN_S = 0.2, 600   # 剩余时长说不准时（超了预计；看板那边还有进度刚开始、没估时或已超估时）按已跑的这么多比例估、至少这么多秒（overrun_left）
 UTIL_WIN_S = 600         # 各卡利用率取近这么久的平均（状态的 util10，fit 列出来看；吃满程度 gpu_busy 的 m10 同一个长度）
 BUSY_WIN_S = 3600        # 各卡「吃满程度」（只有保活时按 0）留近这么久的样本：状态 gpu_busy 的 h1（页面主数字，#51）
@@ -2678,15 +2679,17 @@ class Worker:
         """这台的 GPU 型号（时长只认同型号的记录）；看不到卡为 None。"""
         return ((self.info.get("gpus") or [{}])[0]).get("name")
 
-    def req_dur(self, r, k=None, src=False):
+    def req_dur(self, r, k=None, src=False, cut=False):
         """请求或运行中任务的预计时长（分钟，duration；估不出为 None）：清单任务取 queue_durs 算好的（按 k_now），单元现算（k 为 1）；
         给了 k（同卡并行数，运行中任务自己的 k_of）时按它挑同类记录，清单任务经 dur_k（与推演同一个缓存）。
         写了依赖的占位任务从开始（还没开始的按现在）到 dep_end 给的放行时刻，ends 用上一次推演汇的。
         成组的成员（不给 k 时）取组里各成员里最长的（gang_dur）：截止前跑不完、回填都按整组算（#180）。
         截止前的准入与回填（fits_before 再乘 DUR_MARGIN）、“开跑先记一笔”与运行中任务的预计结束（run_end，传 k）用。
-        src=True 时返回 (分钟, 依据)：截止前跑不完的原因写明估时从哪来（override_hit，#134）。"""
+        src=True 时返回 (分钟, 依据)：截止前跑不完的原因写明估时从哪来（override_hit，#134）。
+        cut=True 时给截止前的准入用的时长（duration 的 cut，已含余量，#139），依据是“怎么算的；估时从哪来”。"""
+        f = "cut" if cut else "min"
         if k is None and r.get("gang") and r.get("kind", "queue") == "queue":
-            d = self.gang_dur(r)
+            d = self.gang_dur(r, f)
             return (d, "成组 %s 里最长的成员" % r["gang"]) if src else d
         if r.get("kind", "queue") != "queue":
             d = duration(self.hist, r, self.model(), 1 if k is None else k)
@@ -2694,12 +2697,12 @@ class Worker:
             d = self.durs.get(r["key"], {}).get(r["name"])
         else:
             d = self.dur_k(r)(k)
-        why = d and d.get("src")
-        d = d and d["min"]
+        why = d and ("%s；%s" % (d["cut_src"], d["src"]) if cut else d.get("src"))
+        d = d and d[f]
         if is_hold(r["name"]) and r.get("project") and dep_keys(r):
             t0 = r.get("t0") or time.time()
             e = dep_end(dep_keys(r), t0, self.ends, self.dead)
-            d, why = None if e is None else (e - t0) / 60, "等依赖放行"
+            d, why = None if e is None else (e - t0) / 60 * (DUR_MARGIN if cut else 1), "等依赖放行"
         return (d, why) if src else d
 
     def list_state(self, queues, reqs=()):
@@ -3048,17 +3051,19 @@ class Worker:
             return "wait", "成组 %s：%s；先不留资源" % (g, "；".join(ctx["why"]))
         return None
 
-    def gang_dur(self, r):
+    def gang_dur(self, r, f="min"):
         """成组成员 r 截止前的准入与回填用的时长（分钟）：组里各成员预计时长里最长的（本机的取 queue_durs 算好的，别的主机的取它 gang.json 里的 dur）；
-        有一个不知道为 None（约定归还照放、续租截止不放，同 override_hit）。req_dur 不给 k 时经它；运行中任务的预计结束按自己的（run_end 传 k）。"""
-        own = (self.durs.get(r["key"], {}).get(r["name"]) or {}).get("min")
+        有一个不知道为 None（约定归还照放、续租截止不放，同 override_hit）。req_dur 不给 k 时经它；运行中任务的预计结束按自己的（run_end 传 k）。
+        f="cut"：截止前的准入用的（duration 的 cut，#139），别的主机的取 gang.json 的 cut，没有的（旧 worker 写的）按 dur × DUR_MARGIN。"""
+        own = (self.durs.get(r["key"], {}).get(r["name"]) or {}).get(f)
         ctx = self.gctx.get((r["project"], r["gang"]))
         ds = [own]
         for k, v in sorted((ctx or {}).get("mem", {}).items()):
             if k == (r["project"], r["name"]):
                 continue
             m = self.gang_local.get(k) if v["host"] is None else None
-            ds.append((self.durs.get(m["key"], {}).get(k[1]) or {}).get("min") if m else (v.get("rec") or {}).get("dur"))
+            rec = v.get("rec") or {}
+            ds.append((self.durs.get(m["key"], {}).get(k[1]) or {}).get(f) if m else rec.get("cut", rec.get("dur") and rec["dur"] * DUR_MARGIN) if f == "cut" else rec.get("dur"))
         return None if None in ds else max(ds)
 
     def gang_soon(self, r, now):
@@ -3149,6 +3154,11 @@ class Worker:
             {"project": j.get("project"), "gang": j["gang"], "n": j.get("gn"), "name": j["name"], "state": state, "t0": round(j["t0"]), "t1": round(now),
              "with": j.get("gang_with")}]
 
+    def gang_durs(self, key, name):
+        """gang.json 里一个成员的预计时长 dur 与截止用的 cut（分钟，queue_durs 算好的；同伴的 gang_dur 读，#139）。"""
+        d = self.durs.get(key, {}).get(name) or {}
+        return {"dur": d.get("min"), "cut": d.get("cut")}
+
     def gang_recs(self, now, waiting=()):
         """本机成员此刻怎样（gang.json 的 members；gang_watch 看本机的同伴也用它）：在跑的 run（开跑时刻 t0，一起开跑的同伴 with 即 gang_with）、留好资源的 ready（从何时 t）、
         其余 wait（推演里最早何时放得下 eta，说不出为 None；它在队首被挡着的原因 why），各带 n、自己的预计时长 dur（分钟），再接上结束的（gang_end，留 GANG_KEEP_S）。"""
@@ -3157,12 +3167,12 @@ class Worker:
             if j.get("gang"):
                 seen.add((j.get("project"), j["name"]))
                 out.append({"project": j.get("project"), "gang": j["gang"], "n": j.get("gn"), "name": j["name"], "state": "run", "t0": round(j["t0"]),
-                            "with": j.get("gang_with"), "dur": (self.durs.get(j["key"], {}).get(j["name"]) or {}).get("min")})
+                            "with": j.get("gang_with"), **self.gang_durs(j["key"], j["name"])})
         for k, m in sorted(self.gang_local.items()):
             if k in seen:
                 continue
             h, w = self.gang_hold.get(m["key"]), ws.get(m["key"])
-            e = {"project": k[0], "gang": m["gang"], "n": m["n"], "name": k[1], "dur": (self.durs.get(m["key"], {}).get(k[1]) or {}).get("min")}
+            e = {"project": k[0], "gang": m["gang"], "n": m["n"], "name": k[1], **self.gang_durs(m["key"], k[1])}
             if h and h["name"] == k[1]:
                 e.update(state="ready", t=round(h["t"]))
             else:
@@ -3419,21 +3429,22 @@ class Worker:
         return out
 
     # ---- 推演 ----
-    def job_spec(self, n, h, est, dur, durk=None):
+    def job_spec(self, n, h, est, dur, durk=None, cut=None):
         """一个任务在准入核心 place 眼里的样子（真放行经 as_job，推演里清单上的每个任务都这么拼）：h 资源提示（ngpu、excl、tag），
         est 资源估计（estimate：vram 每张卡 GiB 与来源 src、ram GiB 与来源 ram_src，cpus 核、cpu_src 来源），dur 预计时长（分钟，不知道为 None）。占位任务不独占、不占卡、不记 CPU，
         依赖（deps、deps_any）带着：推演里等它们满足才排，占位任务的结束取 dep_end。
         durk（推演给）：开跑时卡上有 k 条 labmon 任务（含自己）时的预计时长 durk(k)（duration 的结果，Worker.dur_k）；不给时用 dur。
+        cut：截止前的准入用的时长（duration 的 cut，已含余量，#139）；不给时按 dur × DUR_MARGIN。
         成组的带 gang（组名，place 按它留资源）：dur 是组里最长的（截止与回填按整组），durk 是自己的（推演里开跑后何时结束）。"""
         hold = is_hold(n)
         return {"name": n, "ngpu": h["ngpu"], "vram": est["vram"], "src": est["src"], "ram": est["ram"], "ram_src": est["ram_src"], "excl": None if hold else h["excl"],
                 "cpus": 0 if hold else est["cpus"], "cpu_src": est["cpu_src"],
-                "tag": h["tag"], "dur": dur, "durk": durk, "hold": hold, "deps": h["deps"], "deps_any": h["deps_any"], "gang": None if hold else h.get("gang"),
+                "tag": h["tag"], "dur": dur, "durk": durk, "cut": dur and dur * DUR_MARGIN if cut is None else cut, "hold": hold, "deps": h["deps"], "deps_any": h["deps_any"], "gang": None if hold else h.get("gang"),
                 "cards": 0.0 if hold else self.cards(h["ngpu"], est["vram"], h["excl"])}
 
     def as_job(self, r):
         """补全过的请求（prep）→ place 认的任务：job_spec 加 key、project 与能用的卡（清单登记的 --gpus）。"""
-        return dict(self.job_spec(r["name"], r, r["est"], r["dur"]), key=r["key"], project=r["project"],
+        return dict(self.job_spec(r["name"], r, r["est"], r["dur"], cut=r.get("cut")), key=r["key"], project=r["project"],
                     allowed=r["q"]["gpus"] if r["kind"] == "queue" else None)
 
     def cutoff(self):
@@ -3488,8 +3499,8 @@ class Worker:
             if hit and hit[0] != "deadline":
                 pend = []
             jobs = [self.job_spec(n, h, self.qest.get(k, {}).get(n) or estimate(self.hist, dict(h, name=n, project=q["project"])),
-                                  self.req_dur({"key": k, "name": n, "project": q["project"], "gang": None if is_hold(n) else h["gang"]}),
-                                  self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"]))) for n, h in pend]
+                                  self.req_dur(x), self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"])), self.req_dur(x, cut=True))
+                    for n, h in pend for x in [{"key": k, "name": n, "project": q["project"], "gang": None if is_hold(n) else h["gang"]}]]
             qs.append({"key": k, "kind": "queue", "project": q["project"], "allowed": q["gpus"],
                        "since": heads[k]["since"] if k in heads else now, "jobs": jobs})
             info[k] = {"root": q["root"], "queue": q["jobs"], "project": q["project"], "kind": "queue"}
@@ -3895,7 +3906,7 @@ class Worker:
         for c in sorted(cs, key=lambda c: (c["lane"], c["i"])) if local is False else ():
             f = self.dur_k(dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]))   # 与 forecast 拼本机清单行同口径：dur 取此刻的 k，durk 给推演按开跑时同卡的条数取
             jobs.append(self.job_spec(c["name"], c["h"], estimate(self.hist, dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"])),
-                                      (f(self.k_now()) or {}).get("min"), f))
+                                      (f(self.k_now()) or {}).get("min"), f, (f(self.k_now()) or {}).get("cut")))
         jobs = [x for x in jobs if not (x["deps"] or x["deps_any"])] + [x for x in jobs if x["deps"] or x["deps_any"]]
         key, n0 = tgt or "offer:" + p, 0
         for i, q in enumerate(qs):
@@ -3937,15 +3948,15 @@ class Worker:
                 if why:
                     return "guest", why
             if o["kind"] == "deadline" and o.get("at") and not is_hold(r.get("name")):
-                (d, why), lab, at = self.req_dur(r, src=True), deadline_name(o), now_str(o["at"])[5:16]
+                (d, why), lab, at = self.req_dur(r, src=True, cut=True), deadline_name(o), now_str(o["at"])[5:16]
                 if time.time() >= o["at"]:
                     return "deadline", "%s %s 已到，不再放行" % (lab, at)
                 if d is None:
                     if o.get("target") == "borrow":   # 约定归还到点不停正在跑的，没估时的照常放（续租会重启容器，不放）
                         continue
                     return "deadline", "%s %s 前：没有估时，不放行" % (lab, at)
-                if not fits_before(time.time(), d, o["at"]):
-                    return "deadline", "%s %s 前跑不完（估 %.0f 分钟 = %.0f × 余量 %g%s）" % (lab, at, d * DUR_MARGIN, d, DUR_MARGIN, "；" + why if why else "")
+                if not fits_before(time.time(), d, o["at"], 1):
+                    return "deadline", "%s %s 前跑不完（估 %.0f 分钟 = %s）" % (lab, at, d, why)
             if o["kind"] == "pause" and o.get("target") == r["project"]:
                 return "pause", "项目 %s 暂停中（%s）" % (r["project"], ovr_text(o))
         return None
@@ -4752,7 +4763,7 @@ class Worker:
             g["at"] = None                        # 成环：推演里同组的都不排（停在同伴上，同依赖；凑不齐、说不出何时的 gang_sync 已置空）
         elif g and not r["held"] and not r["dep"] and (r["key"], r["name"]) in g["local"]:
             g["local"][(r["key"], r["name"])] = now   # 这一轮在队首、能排队：组里别的成员留资源按它此刻就能算（gang_until）
-        r["dur"] = self.req_dur(r)
+        r["dur"], r["cut"] = self.req_dur(r), self.req_dur(r, cut=True)
         r["stall"] = self.stalled(r, self.snapshot(limits))
         fresh = not old or old[0] != r["name"] or old[2]            # 第一次见、换了任务，或上一轮被挡着
         r["since"] = now if r["held"] or r["dep"] else (r["t"] if r["kind"] == "slot" and not old else now) if fresh else old[1]
@@ -5200,9 +5211,15 @@ def usage(rows, t, hl):
     return out
 
 
-def fits_before(t, dur_min, until):
-    """回填与截止：从 t 起跑、预计 dur_min 分钟（再乘 DUR_MARGIN）能在 until 前跑完。不知道时长或 until 的不算。"""
-    return until is not None and dur_min is not None and t + dur_min * DUR_MARGIN * 60 <= until
+def fits_before(t, dur_min, until, m=DUR_MARGIN):
+    """回填与截止：从 t 起跑、预计 dur_min 分钟（再乘 m）能在 until 前跑完。不知道时长或 until 的不算。
+    回填按预计时长 × DUR_MARGIN；截止前的准入传已含余量的 cut（duration 的 cut，cut_min）、m=1（#139）。"""
+    return until is not None and dur_min is not None and t + dur_min * m * 60 <= until
+
+
+def cut_min(x):
+    """place 认的任务 x 截止前的准入用的时长（分钟，已含余量；job_spec 的 cut）：不知道为 None。"""
+    return x["cut"] if "cut" in x else x["dur"] and x["dur"] * DUR_MARGIN
 
 
 def gang_file(host):
@@ -5563,7 +5580,7 @@ def _place(x, S, t, pre=None):
         x = dict(x, src=x["src"] + "，超过整卡按整卡算")          # 原因里写明
     cut = S["cut"]
     why = (x.get("miss") or nofit(x, S)
-           or (w("cut") if cut and (t >= cut[0] or (x["dur"] is None and not cut[1]) or (x["dur"] is not None and not fits_before(t, x["dur"], cut[0])))
+           or (w("cut") if cut and (t >= cut[0] or (cut_min(x) is None and not cut[1]) or (cut_min(x) is not None and not fits_before(t, cut_min(x), cut[0], 1)))
                else None)
            or tag_full(x, S) or (pre() if pre else None))
     if why:                                   # 缺文件、放不下、截止前跑不完、tag 到上限、在拷本地依赖、内存闸门：走不到留卡这一步，留着的也放掉
@@ -5984,58 +6001,110 @@ def run_tot(running, eta, eta_t):
     return out
 
 
-def duration(hist, r, model=None, k=1, run=None):
-    """任务要跑多久（分钟，中间值）：看板的预计时间与截止前的准入（再乘 DUR_MARGIN）共用这一处。r 是请求（项目、名字、est_min，有的再带 tag、清单 root + queue）。依次看：
-    - 同类（项目 + 去掉种子编号的名字）跑成功过的：这一个与记录都有估时就按同类 实际/估时 的中位数折算（记录里有估时与现在相同的只用这些），
-      否则取同类实际用时的中位数；估时改过、旧记录的比值又不在 RATIO_OK 里（当时的估时写错了）时也取实际用时，不拿错的比值放大改过的估时（#134）；
-    - 同类还没有跑完的、有在跑的：run 给的各个在跑同类按日志进度估的总时长（看板写来的 eta.json）的中位数；
-    - 这一个有估时的，借别的名字的 实际/估时 折算 est_min（#113）：同 tag › 同名字前缀（GROUP_RE，同看板自动归组）› 同一清单 › 本项目，
-      各档取这一档最近 2×RATIO_N 个里按并行数挑的 RATIO_N 个，至少 2 个才用；比值取各条的中位数（不按时长加权：几条要跑几小时的不主导）；
-      比值不在 RATIO_OK 里的记录不借（当时的估时不可信，#134），所以借到的也在这个范围里；
-    - 清单的 est_min。
-    只认跑完的（停下重排的只跑了一段）、同型号 GPU 的记录（没记型号的旧记录都认）。同类与借来的比值的记录都按同卡并行数挑（near）：
-    k 是这个任务预计会遇到的同卡 labmon 任务数（含自己），取并行数与它最接近的那几条——几条任务分时共用一张卡时，有的类几乎不拖慢、有的拖慢好几倍，
-    单跑的记录估不了挤着跑的（#67：27 上的小任务并行 4 条与 6 条都是 20 分钟，sm_vit 并行 4 条要 300 分钟）。
-    占位任务等的是条件、不是算力：就按清单估时，不看同类、不折算，它的时长也不进借来的比值（写了依赖的另由 dep_end 算）。
-    返回 {"min", "src", "k"（实际/估时，不知道为 None）, "cls"（同类名）, "same"（是不是同类历史给的：读写拥塞嫌疑只认它）}；没有估时也没有同类记录为 None。"""
-    cls, proj, e = base_name(r["name"]), r["project"], r.get("est_min")
-    if is_hold(r["name"]):
-        return {"min": e, "src": "清单估时", "k": None, "cls": cls, "same": False} if e else None
-    ok = [h for h in hist if h.get("min") and ran_ok(h)
-          and not h.get("requeued") and hist_key(h, "name")[1] == proj and (not model or not h.get("gpu") or h["gpu"] == model)]
-    same = near([h for h in ok if base_name(h.get("name") or "") == cls][-RATIO_N:], k, HIST_N)
-    if same:
-        cs = [c for c in map(rec_conc, same) if c is not None]
-        par = "（同卡并行约 %g 条）" % round(statistics.median(cs), 1) if cs and max(cs) > 1.05 else ""
-        ks = [(h["est_min"], h["min"] / h["est_min"]) for h in same if h.get("est_min")]
-        off = None
-        if e and ks:
-            cur = [q for x, q in ks if abs(x - e) < 1e-6]     # 估时与现在一样的优先：改过估时后跑过一次就以新的为准
-            q = statistics.median(cur or [q for _, q in ks])
-            if cur or trusted(q):
-                return {"min": e * q, "src": "同类近 %d 次%s 实际/估时 ×%.2f" % (len(cur or ks), par, q), "k": round(q, 3), "cls": cls, "same": True}
-            off = q                                              # 当时的估时与实际差 3 倍以上（写错了）：不拿比值放大改过的估时，按实际用时（#134）
-        m = statistics.median(h["min"] for h in same)
-        return {"min": m, "src": "同类近 %d 次%s实际用时%s" % (len(same), par, "（当时估时与实际差 ×%.1f，不按比值折算）" % off if off else ""),
-                "k": round(m / e, 3) if e else None, "cls": cls, "same": True}
-    if run:
-        m = statistics.median(run)
-        return {"min": m, "src": "同类在跑的 %d 个按进度估" % len(run), "k": round(m / e, 3) if e else None, "cls": cls, "same": False}
-    if not e:
+def with_cut(d, hi=None, why=None, m=DUR_MARGIN):
+    """给 duration 的结果补上截止前的准入用的时长（分钟，已含余量）cut 与说明 cut_src（#139）：中间值 × 余量 m；
+    同类历史给的再与 hi（同类挑出的那几次里最长的，why 是它的说法）取大——同类波动大时中间值 × 1.2 盖不住慢的那几次。返回 d。"""
+    c = d["min"] * m
+    d["cut"], d["cut_src"] = (hi, "%s（中间值 %.0f）" % (why, d["min"])) if hi is not None and hi > c + 1e-9 else (c, "%.0f × 余量 %g" % (d["min"], m))
+    return d
+
+
+def borrowable(pr):
+    """借比值的一档里能借的记录（#139）：实际/估时 在 RATIO_OK 里的照借；不在里面的只在离这一档的中位数不超过 3 倍（同 RATIO_OK 的宽度）、
+    且这样的记录至少来自 2 个同类（base_name）时才借——项目一贯少估（或多估）3 倍以上时各类任务都偏，照借；#134 的一次写错只在一个同类上
+    （它跑了几次都偏 ×11），不借。以前按绝对区间一律不借，一贯偏 ×4 的项目新任务反而按清单估时。"""
+    if not pr:
+        return pr
+    qs = [h["min"] / h["est_min"] for h in pr]
+    m = statistics.median(qs)
+    odd = {base_name(h.get("name") or "") for h, q in zip(pr, qs) if not trusted(q) and trusted(q / m)}
+    return [h for h, q in zip(pr, qs) if trusted(q) or (len(odd) >= 2 and trusted(q / m))]
+
+
+def gpus_of(hs):
+    """记录里的 GPU 型号（duration 借别的型号时写进依据）。"""
+    return "、".join(sorted({h["gpu"] for h in hs if h.get("gpu")}))
+
+
+def same_dur(hs, r, e, k, other=False):
+    """duration 的同类那一支（hs 是可用的记录）：同类近 HIST_N 次（按并行数挑）。这一个与记录都有估时就按 实际/估时 的中位数折算
+    （估时与现在相同的优先），否则取实际用时的中位数；估时改过、旧比值又不在 RATIO_OK 里时也取实际用时（#134）。
+    other：hs 是别的型号的记录（#139）——速度不同，只借比值（要这一个有估时）、不用实际用时，截止余量按 CUT_EST_MARGIN。没有为 None。"""
+    cls = base_name(r["name"])
+    same = near([h for h in hs if base_name(h.get("name") or "") == cls][-RATIO_N:], k, HIST_N)
+    if not same:
         return None
+    cs = [c for c in map(rec_conc, same) if c is not None]
+    par = "（同卡并行约 %g 条）" % round(statistics.median(cs), 1) if cs and max(cs) > 1.05 else ""
+    pfx = "别的型号 %s 上" % gpus_of(same) if other else ""
+    ks = [(h["est_min"], h["min"] / h["est_min"]) for h in same if h.get("est_min")]
+    off = None
+    if e and ks:
+        cur = [q for x, q in ks if abs(x - e) < 1e-6]     # 估时与现在一样的优先：改过估时后跑过一次就以新的为准
+        qs = cur or [q for _, q in ks]
+        q = statistics.median(qs)
+        if cur or trusted(q):
+            return with_cut({"min": e * q, "src": "%s同类近 %d 次%s 实际/估时 ×%.2f" % (pfx, len(qs), par, q), "k": round(q, 3), "cls": cls, "same": not other},
+                            e * max(qs), "%s同类近 %d 次里最长的" % (pfx, len(qs)), CUT_EST_MARGIN if other else DUR_MARGIN)
+        off = q                                              # 当时的估时与实际差 3 倍以上（写错了）：不拿比值放大改过的估时，按实际用时（#134）
+    if other:
+        return None
+    ms = [h["min"] for h in same]
+    m = statistics.median(ms)
+    return with_cut({"min": m, "src": "同类近 %d 次%s实际用时%s" % (len(same), par, "（当时估时与实际差 ×%.1f，不按比值折算）" % off if off else ""),
+                     "k": round(m / e, 3) if e else None, "cls": cls, "same": True}, max(ms), "同类近 %d 次里最长的" % len(same))
+
+
+def ratio_dur(hs, r, e, k, other=False):
+    """duration 借别的名字的 实际/估时 那一支（#113）：同 tag › 同名字前缀（GROUP_RE，同看板自动归组）› 同一清单 › 本项目，
+    各档取这一档最近 2×RATIO_N 个里按并行数挑的 RATIO_N 个（near 至少给 2 个），其中能借的（borrowable）至少 2 个才用；
+    比值取各条的中位数（不按时长加权：几条要跑几小时的不主导）。other：hs 是别的型号的记录（#139），截止余量按 CUT_EST_MARGIN。没有为 None。"""
     pre = lambda n: (GROUP_RE.match(n or "") or [None])[0]   # noqa: E731 — 名字前缀，没有 _ 或 - 的为 None
-    rated = [h for h in ok if h.get("est_min") and not is_hold(h.get("name")) and trusted(h["min"] / h["est_min"])]   # 估时偏 3 倍以上的不借给别人（#134）
+    rated = [h for h in hs if h.get("est_min") and not is_hold(h.get("name"))]
     tiers = ([("同 tag %s " % r["tag"], lambda h: h.get("tag") == r["tag"])] if r.get("tag") else []) \
         + ([("同前缀 %s " % pre(r["name"]), lambda h: pre(h.get("name")) == pre(r["name"]))] if pre(r["name"]) else []) \
         + ([("同一清单", lambda h: (h.get("root"), h.get("queue")) == (r["root"], r["queue"]))] if r.get("root") and r.get("queue") else []) \
         + [("本项目", lambda h: True)]
     for label, f in tiers:
-        pr = near([h for h in rated if f(h)][-2 * RATIO_N:], k, RATIO_N, 2)
+        pr = borrowable(near([h for h in rated if f(h)][-2 * RATIO_N:], k, RATIO_N, 2))
         if len(pr) >= 2:
             q = statistics.median(h["min"] / h["est_min"] for h in pr)
-            return {"min": e * q, "src": "%s近 %d 个 实际/估时 ×%.2f" % (label, len(pr), q),
-                    "k": round(q, 3), "cls": cls, "same": False}
-    return {"min": e, "src": "清单估时", "k": None, "cls": cls, "same": False}
+            return with_cut({"min": e * q, "src": "%s%s近 %d 个 实际/估时 ×%.2f" % ("别的型号 %s 上" % gpus_of(pr) if other else "", label, len(pr), q),
+                             "k": round(q, 3), "cls": base_name(r["name"]), "same": False}, m=CUT_EST_MARGIN if other else DUR_MARGIN)
+    return None
+
+
+def duration(hist, r, model=None, k=1, run=None):
+    """任务要跑多久（分钟，中间值）：看板的预计时间与截止前的准入共用这一处。r 是请求（项目、名字、est_min，有的再带 tag、清单 root + queue）。依次看：
+    - 同型号的同类（项目 + 去掉种子编号的名字）跑成功过的（same_dur）；
+    - 同类还没有跑完的、有在跑的：run 给的各个在跑同类按日志进度估的总时长（看板写来的 eta.json）的中位数；
+    - 这一个有估时的：别的型号上同类的 实际/估时（#139：借来的主机常是别的型号，正是截止准入最要准的时候；速度不同，只借比值）；
+      同型号别的名字的 实际/估时（ratio_dur，#113）；别的型号别的名字的；
+    - 清单的 est_min。
+    只认跑完的（停下重排的只跑了一段）、本项目的记录；没记型号的旧记录算同型号。同类与借来的比值的记录都按同卡并行数挑（near）：
+    k 是这个任务预计会遇到的同卡 labmon 任务数（含自己），取并行数与它最接近的那几条——几条任务分时共用一张卡时，有的类几乎不拖慢、有的拖慢好几倍，
+    单跑的记录估不了挤着跑的（#67：27 上的小任务并行 4 条与 6 条都是 20 分钟，sm_vit 并行 4 条要 300 分钟）。
+    占位任务等的是条件、不是算力：就按清单估时，不看同类、不折算，它的时长也不进借来的比值（写了依赖的另由 dep_end 算）。
+    返回 {"min", "src", "k"（实际/估时，不知道为 None）, "cls"（同类名）, "same"（是不是同型号同类历史给的：读写拥塞嫌疑只认它）,
+    "cut", "cut_src"（截止前的准入用的时长与说明，with_cut：同型号的 × DUR_MARGIN、同类的再与最长的一次取大，别的型号与清单估时 × CUT_EST_MARGIN）}；
+    没有估时也没有同类记录为 None。"""
+    cls, proj, e = base_name(r["name"]), r["project"], r.get("est_min")
+    if is_hold(r["name"]):
+        return with_cut({"min": e, "src": "清单估时", "k": None, "cls": cls, "same": False}) if e else None
+    ok = [h for h in hist if h.get("min") and ran_ok(h) and not h.get("requeued") and hist_key(h, "name")[1] == proj]
+    mine = [h for h in ok if not model or not h.get("gpu") or h["gpu"] == model]
+    other = [h for h in ok if model and h.get("gpu") and h["gpu"] != model]
+    d = same_dur(mine, r, e, k)
+    if d:
+        return d
+    if run:
+        m = statistics.median(run)
+        return with_cut({"min": m, "src": "同类在跑的 %d 个按进度估" % len(run), "k": round(m / e, 3) if e else None, "cls": cls, "same": False},
+                        max(run), "同类在跑的 %d 个里最长的" % len(run))
+    if not e:
+        return None
+    d = same_dur(other, r, e, k, True) or ratio_dur(mine, r, e, k) or ratio_dur(other, r, e, k, True)
+    return d or with_cut({"min": e, "src": "清单估时", "k": None, "cls": cls, "same": False}, m=CUT_EST_MARGIN)
 
 
 def known_lists(p):
@@ -6191,7 +6260,7 @@ class FitHost:
         self.host, self.st, self.hist, self.eta = host, st, hist, eta
         self.w = object.__new__(Worker)
         self.w.host, self.w.info, self.w.ovr = host, st.get("info") or {}, st.get("overrides") or []
-        self.w.req_dur = lambda r, src=False: (r.get("dur"), r.get("dur_src")) if src else r.get("dur")   # override_hit 判截止前跑不跑得完要的时长与依据：fit 拼的请求里已有
+        self.w.req_dur = lambda r, src=False, cut=False: ((r.get("cut"), r.get("cut_src")) if src else r.get("cut")) if cut else r.get("dur")   # override_hit 判截止前跑不跑得完要的时长与依据：fit 拼的请求里已有
         self.S = fit_snapshot(st)
         u10 = st.get("util10") or {}
         self.cards = [dict(c, util=u10.get(c["uuid"])) for c in self.S["cards"]]
@@ -6224,7 +6293,7 @@ class FitHost:
         # 时长同真放行（queue_durs）：按此刻放一个新任务会遇到的同卡并行数（最空的那张卡，同 k_now；这次假设开的也算）与在跑同类的进度挑记录
         kn = min((1 + sum(1 for j in self.S["jobs"] if not j["hold"] and c["uuid"] in j["gpus"]) for c in self.S["cards"]), default=1)
         d = duration(self.hist, r, self.model(), kn, self.runs(r))
-        x = dict(self.w.job_spec(n, r, e, d and d["min"]), key="fit:%s" % n, project=r["project"], dur_src=d and d["src"],
+        x = dict(self.w.job_spec(n, r, e, d and d["min"], cut=d and d["cut"]), key="fit:%s" % n, project=r["project"], cut_src=d and "%s；%s" % (d["cut_src"], d["src"]),
                  allowed=q["gpus"] if q.get("_host") == self.host else None)
         return r, e, x
 
@@ -6383,7 +6452,7 @@ def fit(p, names, project=None):
             r = new_req("queue", None, proj, n)
             e = estimate(hist, r)
             d = duration(hist, r, fh.model())
-            x = dict(fh.w.job_spec(n, r, e, d and d["min"]), key="fit:%s" % n, project=proj, dur_src=d and d["src"], allowed=None)
+            x = dict(fh.w.job_spec(n, r, e, d and d["min"], cut=d and d["cut"]), key="fit:%s" % n, project=proj, cut_src=d and "%s；%s" % (d["cut_src"], d["src"]), allowed=None)
         say, why = fh.open(r, e, x, now, bool(row))
         print("%s：%s%s" % (n, "可以开车道并行：" + say if say else why if "→" in why else why + " → 排在已有车道后面", where))
     return 0

@@ -461,16 +461,20 @@ class GangHostsTest(unittest.TestCase):
         self.assertNotIn("A", {j["name"] for j in self.t.running.values()})   # 重新排队：等 B 恢复后再一起开跑
 
     def test_deadline_by_longest_member(self):
-        # 截止（续租、约定归还）前的准入按组里最长的成员算：A 自己 10 分钟，同组的 B 在 o 上要 50 分钟；截止在 30 分钟后，A 不放（估 60 分钟）
+        # 截止（续租、约定归还）前的准入按组里最长的成员算：A 自己 10 分钟，同组的 B 在 o 上要 50 分钟；截止在 30 分钟后，A 不放
+        # （B 只有清单估时，截止按 50 × 1.5 = 75 分钟，o 写进 gang.json 的 cut，#139）
         qa, qb = self.lists(["A|true   # gpus=0 gang=ddp:2 est_min=10"], ["B|true   # gpus=0 gang=ddp:2 est_min=50"])
         self.tick(self.o, qb, True)
         Path(self.t.p.overrides).write_text(json.dumps([{"kind": "deadline", "at": self.hosts.now() + 1800}]))
         self.tick(self.t, qa, True)
         self.assertEqual(self.t.running, {})
         why = self.waiting(self.t)["A"][1]
-        self.assertTrue(why.endswith("前跑不完（估 60 分钟 = 50 × 余量 1.2；成组 ddp 里最长的成员）"), why)
+        self.assertTrue(why.endswith("前跑不完（估 75 分钟 = 成组 ddp 里最长的成员）"), why)
         r = {"key": qa[0]["key"], "kind": "queue", "name": "A", "project": "pa", "gang": "ddp"}
-        self.assertEqual((self.t.req_dur(r), self.t.req_dur(dict(r, gang=None))), (50.0, 10.0))
+        self.assertEqual((self.t.req_dur(r), self.t.req_dur(dict(r, gang=None)), self.t.req_dur(r, cut=True)), (50.0, 10.0, 75.0))
+        for v in self.t.gctx[("pa", "ddp")]["mem"].values():                  # 旧 worker 写的 gang.json 没有 cut：按 dur × DUR_MARGIN
+            (v.get("rec") or {}).pop("cut", None)
+        self.assertEqual(self.t.req_dur(r, cut=True), 60.0)
 
     def test_count_mismatch_and_cycle(self):
         # 没写人数：马上报；写了 3 个只有 2 个：先当在等，满 DEP_MISS_S 才报找不到；同一条清单里两个成员：后一个排在前一个后面，成环
