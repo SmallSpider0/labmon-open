@@ -146,7 +146,9 @@ CPU_BOUND_FRAC = 0.9     # 在跑任务近 CPU_WARM_S 各 1 分钟窗口核数�
 CPU_SPARE_FRAC, CPU_SPARE_MIN = 0.5, 1.0   # 写了 cpus= 的在跑任务整段 1 分钟峰值不到给的核数的这么多、且少至少这么多核，算给多了（cpu_fit 的 high，#46）
 CPU_SHRINK_N = 3         # 写了 cpus= 的同类至少这么多次跑下来（近 HIST_N 次每次）都按上一行算给多了，没开跑的按实测记账（cpu_shrink，#91）
 UTIL_FULL = 90           # 卡近 UTIL_WIN_S 的利用率不低于这个 % 算吃满：offers 的同机多开车道不往它上面放（Worker.local_cards，#43；同卡 1 条车道常只到六七成，3–4 条才近满）
-CONC_MAX = 12            # 按同卡并行数挑同类记录（duration 的 k）时封顶到这么多（推演里查表、缓存用）
+UNDER_WIN_S = 1800       # offers 的 room：能放的卡近这么久的「吃满程度」平均（样本不满这么久为 None），看板据此判这台吃不满、提示多开车道（#145）
+ROOM_MAX = 32            # offers 的 room：此刻至多数到能再开这么多条车道（Worker.lane_room）
+CONC_MAX = 12           # 按同卡并行数挑同类记录（duration 的 k）时封顶到这么多（推演里查表、缓存用）
 FORECAST_S = 7 * 86400   # 推演（simulate）往后排多远
 FORECAST_EVERY = 120     # 推演的输入没变时多久重算一次（在跑的超了预计，后面的跟着往后挪）
 MOVE_MAX = 20            # 能接别处的任务（offers）：每个项目一次至多挑几行（从排得最晚的清单队尾往前取；挪来的几行比原处剩下的晚跑完就不再往下挑，
@@ -3627,7 +3629,8 @@ class Worker:
         ends {"主机|目录|清单": 别的主机上这个项目各清单预计何时跑完（不知道为 None）}, jobs [{host, root, queue, name, there 原处预计结束,
         rest 挪走它之后原处那条清单何时跑完, end 挪来前几行时它们在这台何时都跑完, own 这时本机这个项目自己的清单何时跑完}], why 再往下挪不了的原因
         （只放原因本身）, stop 挪到这台排不上的那一行（why 是推演的原因；与具体某行无关的为 None）, idle 这台此刻空着（Worker.idle：挑行时跳过
-        挪不动、说不出何时放行的清单，看板没有整批的挪法时按行比，#62）}：原因句由看板拼（rebalance.suggest，#25 B）。"""
+        挪不动、说不出何时放行的清单，看板没有整批的挪法时按行比，#62）, room 这台卡有真余量时此刻还能给这个项目再开几条车道、能放的卡吃得多满
+        （lane_room；不出为 None，看板据此判吃不满，#145）}：原因句由看板拼（rebalance.suggest，#25 B）。"""
         if (self.keep() or {}).get("pool"):
             return []
         mine = {(j["q"]["root"], j["q"]["jobs"]): j["name"] for j in self.running.values() if j.get("q")}
@@ -3660,6 +3663,7 @@ class Worker:
                             else "这台上本项目的清单推演不出何时跑完")
                 continue
             cands, o["why"] = self.move_cands(lns, free, now, waiters, skip=idle)
+            o["room"] = self.lane_room(p, cands, sum(len(ln["pend"]) for ln in lns), cx["base"], now)    # 这台吃不满、还能多开几条（#145）
             # 接在本机这个项目、与挪来的行同一种环境（目录与 .env）的清单里预计最早跑完的那条后面（推演里在排的才算）；没有就当新的一条
             ends = {(ln["root"], ln["queue"]): ln["end"] for ln in mine_p}
             env = cands and self.list_env(cands[0]["root"], cands[0]["queue"])
@@ -3716,7 +3720,7 @@ class Worker:
         - 剪到这台新开的一条车道（#43）。
         挑行（move_cands：从队尾往前、占位、成组、有人 after= 等着、MOVE_LEAD_S 内开跑、缺本地文件的都停）、推演（try_move，同一份 simulate）、
         看板那头的门槛与挑法都同跨主机的。新开车道多两条：卡要有真余量（local_cards：限流、卡都吃满了、利用率低的卡上在跑的被 CPU 卡住都不出），
-        估计只有提示值的 GPU 行不挪（没有实测，同卡并行怕 OOM，同 fit）。每项同 offers 的形状，另带 local: true；lane 为 None 是新开一条，
+        估计只有提示值的 GPU 行不挪（没有实测，同卡并行怕 OOM，同 fit）。每项同 offers 的形状（新开车道的也带 room，#145），另带 local: true；lane 为 None 是新开一条，
         否则是接在后面的那条清单；ends 是别的主机上这个项目各清单的，free 是本机这个项目原推演里何时跑完；jobs 的 rest 是挪完后本机原清单何时跑完
         （新推演里，同卡变慢也算进去）。不出的不列（原因不叫醒、页面上也不写：fit 会说）。"""
         out = []
@@ -3751,6 +3755,7 @@ class Worker:
                 if nd:
                     out.append(dict(o, stop=nd, why=None, nodur=True))
                 continue
+            o["room"] = self.lane_room(p, cands, sum(len(ln["pend"]) for ln in lns), cx["base"], now)    # 这台吃不满、还能多开几条（#145）
             self.local_moves(o, p, cands, None, cx, now, local=cards)
             if o["jobs"] or o["stop"]:
                 out.append(o)
@@ -4498,6 +4503,38 @@ class Worker:
         if sl["bound"]:
             return None, "利用率低的卡上在跑的任务跑满了给它的核：先给它们加核（cpus=），不在这台多开车道"
         return None, "各卡近 10 分钟利用率都不低于 %d%%，不在这台多开车道" % UTIL_FULL
+
+    def lane_room(self, p, cands, rows, base, now):
+        """offers 的 room（#145）：这台此刻还能给项目 p 再开几条车道、能放的卡吃得多满，看板据此判这台吃不满、提示会话多开车道摊行
+        （rebalance.suggest）。卡要有真余量（local_cards，同 fit 的 gpu_slack），候选 cands 的第一行要 GPU（不用卡的车道不看卡）；不出为 None。
+        返回 {busy 能放的卡近 UNDER_WIN_S「吃满程度」的平均（bwin，只有保活的那几轮记 0；窗口没满为 None）,
+        lanes 用第一行的资源形状在此刻的快照 base 上逐条 place、按 acct_job 记进快照再判下一条（同 FitHost.open），至多 min(ROOM_MAX, rows)}。
+        只是此刻的资源：不扣别的项目在等的请求，会话照做前用 fit --list 核对。"""
+        if not cands or not cands[0]["h"]["ngpu"]:
+            return None
+        cards, why = self.local_cards()
+        if why or not cards:
+            return None
+        uu = {g["i"]: g["uuid"] for g in self.info.get("gpus") or []}
+        ms = []
+        for i in cards:
+            b = self.bwin.get(uu.get(i)) or []
+            ms.append(win_mean(b, now, UNDER_WIN_S) if b and now - b[0][0] >= UNDER_WIN_S - 60 else None)
+        busy = None if not ms or None in ms else round(sum(ms) / len(ms), 1)
+        c = cands[0]
+        r = dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"])
+        f = self.dur_k(r)
+        x = dict(self.job_spec(c["name"], c["h"], estimate(self.hist, r), (f(self.k_now()) or {}).get("min"), f), project=p, allowed=cards)
+        S = dict(base, jobs=list(base["jobs"]), holds=dict(base.get("holds") or {}), gholds={})
+        n = 0
+        while n < min(ROOM_MAX, rows):
+            y = dict(x, key="room:%s:%d" % (p, n))
+            cs, _, _ = place(y, S, now)
+            if cs is None:
+                break
+            S["jobs"].append(acct_job(y, cs, now, None, S["cpu_cap"]))
+            n += 1
+        return {"busy": busy, "lanes": n}
 
     def util_window(self, gpus, gp, t):
         """各卡利用率的两个窗口（#51），都按 win_mean 取平均：

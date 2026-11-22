@@ -436,9 +436,13 @@ worker 把各清单每个任务的预计时长写进 `status.json`（队列的 `
   （`local_cards`，与 fit 同一条规则 `gpu_slack`）：容器在限流、各卡近 10 分钟利用率都不低于 `UTIL_FULL`（90%）、利用率低于 50% 的卡上在跑的被 CPU 卡住的都不出，
   新车道只许用余下的卡（不是全部卡时记在 `gpus`，建议的 `worker add` 带 `--gpus`）；估计只有清单提示值的 GPU 行不挪（同卡并行怕 OOM）。同机不出的不写原因（`fit` 会说）。
   原推演里本机这个项目何时跑完推不出时算不了收益，只在要挪的行没有估时那样留一项 `nodur`（`jobs` 为空），看板据此出 `rebalance:<项目>:est`。
+- 这台还能多开几条（#145，`lane_room`）：跨主机的与同机多开车道的每项另带 `room {busy, lanes}`，只在卡有真余量（`local_cards`，同上）、候选第一行要 GPU 时给，否则为 null。
+  `busy` 是能放的那几张卡近 30 分钟（`UNDER_WIN_S`）「吃满程度」的平均（只有保活的那几轮记 0，同状态的 `gpu_busy`；worker 起来不满 30 分钟为 null）；
+  `lanes` 按候选第一行的资源形状在此刻的快照上逐条 `place`、记进快照再判下一条（同 `fit` 假设开车道的做法），至多 32 条（`ROOM_MAX`）、不超过来源还会跑的行数。
+  只看此刻的资源、不扣别的项目在等的请求；看板据此判这台吃不满（[工作台「挪法建议」](workbench.md#挪法建议)），会话照做前用 `fit --list` 核对。
 - 这个项目在这台不能用（drain、只给别的项目用、暂停）或这台在预备续租（续租截止）的只写原因，不接；借来的主机上对方此刻超出预留不算（几小时后接不接得了，推演不模拟它）。
 - 只是提示：算 offers 出错时沿用上一次的（最多 3 分钟，`STATUS_STALE_S`，再错就清空）、worker.log 记一行（同一个错只记一次），放行与推演照常。
-- 字段：`[{project, local, gpus, lane, before, free, ends, jobs: [{host, root, queue, name, there, rest, end, own, dep}], why, stop, nodur, idle}]`（`local`：同机的挪法，`lane` 为 null 是多开一条车道，否则是挪到本机那条清单；`dep`：这一行写了依赖；`idle`：这台空着，同机那两种不带）：`why` 只放原因本身，`stop` 是挪到这台排不上的那一行
+- 字段：`[{project, local, gpus, lane, before, free, ends, jobs: [{host, root, queue, name, there, rest, end, own, dep}], why, stop, nodur, idle, room}]`（`local`：同机的挪法，`lane` 为 null 是多开一条车道，否则是挪到本机那条清单；`dep`：这一行写了依赖；`idle`：这台空着，同机那两种不带）：`why` 只放原因本身，`stop` 是挪到这台排不上的那一行
   （与具体某行无关的为 null），原因句由看板拼；见 [schema.md「工作台的全局快照与接口」](schema.md#工作台的全局快照与接口)。
 
 ## 保活
