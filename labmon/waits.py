@@ -13,6 +13,7 @@ import threading
 import time
 from pathlib import Path
 
+from . import deploy as DP
 from . import projects as PJ
 from .config import ConfigError, fmt_dur, fmt_time, stale_limit
 from .overview import USAGE_KEEP_S
@@ -29,6 +30,7 @@ REWAKE_S = 6 * 3600   # 报过的告警消失后这么久内再出现不再叫�
                       # 同一处的第二件事靠 key 带“这一次”（开跑时刻、PID、归还时刻、借用起点、指令时刻、这一段的起点，#129）分开，不在这里另判
 SAME_KIND = ("idle_regs:",)   # key 末段是代数（条数变了加一）的告警：去掉末段比，代数变了不算新告警（#88）
 EACH_TIME = ("failed:",)      # 每次出现都是新的一次、不受 REWAKE_S 挡：删了 .failed 重跑又失败，会话要再处理
+WAIT_GONE_S = 15 * 60         # 项目还有活、这么久没有 wait 来等：会话的 wait 断了，告诉用户（#141）
 
 
 def _kind(k: str) -> str:
@@ -49,6 +51,24 @@ def _new_alerts(sf: Path, current: dict, t: float | None = None) -> list[str]:
     last.update({_kind(k): t for k in keep})
     save_json(sf, {"reported": sorted(keep), "last": last, "t": t})
     return new
+
+
+def state_file(out: Path) -> Path:
+    """“报过没有”与最后一次来等的时刻（t）记在这里：项目输出目录的 .labmon/wait_state.json，同一项目几个会话共用。"""
+    return out / ".labmon" / "wait_state.json"
+
+
+def gone_since(out: Path, t: float | None = None) -> float | None:
+    """这个项目的 wait 断了（#141）：返回最后一次来等的时刻，没断为 None。
+    wait 挂着时每 POLL_S 秒判一次 wait_check、写一次 wait_state.json 的 t，所以 t 满 WAIT_GONE_S 没动就是没人在等。
+    从没挂过 wait 的项目（没有这个文件）不算；只在看板服务里判（deploy.RUNNING 的 started：labmon collect 命令行没有），
+    看板刚重启时从启动时刻起算，等会话的 wait 连回来。项目有没有活由调用方（collect._wait_gone）看。"""
+    t = time.time() if t is None else t
+    started = DP.RUNNING.get("started")
+    last = load_json(state_file(out), {}).get("t")
+    if not started or not isinstance(last, (int, float)) or t - max(last, started) < WAIT_GONE_S:
+        return None
+    return last
 
 
 def _wakes(pid: str, hosts: set | None, overview: Path | None = None) -> dict:
@@ -328,7 +348,7 @@ def _wait(pid: str, names: list[str], watch: dict | None, hold: float, extra: di
         cfg = PJ.load_cfg(pid)
         registration = PJ.meta(pid)
     out = PJ.out_dir(pid)
-    sf = out / ".labmon" / "wait_state.json"
+    sf = state_file(out)
     w = JobWatch(cfg, out, names, overview).restore(watch) if names else None
     end, sig, last, nap = time.time() + hold, None, 0.0, threading.Event()
     while True:

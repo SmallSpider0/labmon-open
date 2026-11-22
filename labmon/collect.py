@@ -357,6 +357,7 @@ def build(cfg: dict, probes: dict, out_dir: Path, lan: dict | None = None, glob_
     _idle_regs(cfg, snap, state)
     _storage(cfg, snap, glob_snap, t)
     _rebalance(snap)
+    _wait_gone(cfg, snap, out_dir, t)
     snap["thresholds"] = {"stale_s": stale_limit(cfg["interval"], cfg["alerts"]["stale_min"])}      # 页面据此标“数据过期”，与 labmon wait 同一门槛
     save_json(sd / "state.json", state)
     return snap
@@ -1001,6 +1002,18 @@ def _rebalance(snap: dict) -> None:
     told = any(a["key"].startswith("borrow_cut:") and a["key"].endswith(":rebalance") for a in snap["alerts"])
     if r and r.get("key") and not (r.get("cut") and told) and not snap.get("no_work_since"):
         snap["alerts"].append(alert(r["key"], "agent", r["text"]))
+
+
+def _wait_gone(cfg: dict, snap: dict, out_dir: Path, t: float) -> None:
+    """实验会话的 labmon wait 断了（#141，waits.gone_since）、项目还有活（不是暂时没实验）时，出一条只给用户的 wait_gone:<上次来等的时刻>：
+    给会话的告警这时没人收。再来等一次就消失；key 带上次来等的时刻，回来后又断了是新的一件（普通用户的项目照 push_owner 推给主人一次）。"""
+    from . import waits as WT                     # waits 经 overview 在上层 import 本模块，这里只能延迟 import
+    last = WT.gone_since(out_dir, t)
+    if last is None or snap.get("no_work_since"):
+        return
+    snap["alerts"].append(alert(f"wait_gone:{round(last)}", "user",
+                                f"实验会话 {fmt_time(last)} 起没在挂 labmon wait：本项目还有任务没跑完，给会话的告警（失败、依赖卡住、借到卡等）送不到它。"
+                                "回到负责这个项目的会话，让它重挂 labmon wait"))
 
 
 def alert(key: str, to: str, msg: str, page: str | None = None) -> dict:

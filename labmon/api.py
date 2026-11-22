@@ -222,7 +222,7 @@ def check(pid: str, text: str, may=None) -> dict:
     cfg = PJ.check_config(pid, text, {})
     out = PJ.out_dir(pid)
     with PJ._reg_locked():
-        told = waits.check_told(cfg, out / ".labmon" / "wait_state.json", remember=PJ.cfg_file(pid).is_file())
+        told = waits.check_told(cfg, waits.state_file(out), remember=PJ.cfg_file(pid).is_file())
     ign = cfg["ignored"]
     cfg = C.lanes_cfg(cfg, snapshot(), out / ".labmon", time.time(), save=False)
     o, after = Out(), []
