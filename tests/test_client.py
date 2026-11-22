@@ -210,6 +210,27 @@ class CallTest(_Base):
         self.assertEqual(client.urls("p1"), ["http://127.0.0.1:1/p/p1/"])
 
 
+class SessionIdTest(unittest.TestCase):
+    def test_env_then_ancestor_skipping_shells(self):
+        # 会话标识（#142）：环境变量优先；没有就从父进程往上跳过 shell 与包装，取第一个别的祖先；只发哈希、同一祖先一样
+        tree = {10: (9, "zsh", "t10"), 9: (8, "-bash", "t9"), 8: (1, "claude", "t8"), 20: (8, "nohup", "t20")}
+        with mock.patch.dict(os.environ, {"LABMON_SESSION": "", "CLAUDE_CODE_SESSION_ID": ""}), mock.patch.object(client, "_proc", tree.get):
+            with mock.patch.object(client.os, "getppid", return_value=10):
+                a = client.session_id()
+            with mock.patch.object(client.os, "getppid", return_value=20):
+                b = client.session_id()
+            with mock.patch.object(client.os, "getppid", return_value=99):
+                none = client.session_id()
+            os.environ["CLAUDE_CODE_SESSION_ID"] = "abc"
+            c = client.session_id()
+            os.environ["LABMON_SESSION"] = "mine"
+            d = client.session_id()
+        self.assertEqual(a, b)
+        self.assertEqual(len(a), 16)
+        self.assertIsNone(none)
+        self.assertNotIn(c, (a, d))
+
+
 class BoardTest(_Base):
     """经临时看板服务（fixtures.board）。"""
 
@@ -265,6 +286,51 @@ class BoardTest(_Base):
                 raw += b
         self.assertRegex(raw[:20], rb"^HTTP/1\.[01] 200 ")
         self.assertEqual(raw.count(b"HTTP/1."), 1, raw)
+
+    def test_wait_one_session_per_project(self):
+        # 一个项目只让一个会话等（#142）：别的会话来回 409、不领告警（告警留给正在等的那个）；同一会话重连、同时挂的照常；
+        # --take 接手后原来那个正挂着的那次下一轮就被挡；正在等的满 WAIT_GONE_S 没来就让出；不带标识的（旧客户端）不挡也不占
+        board(self)
+        go = lambda sess, **kw: client.call("POST", "/api/wait", {"project": "p1", "hold": 0, "session": sess, **kw}, idem=True)   # noqa: E731
+        self.assertEqual(go("A")["new"], {})
+        self.snap([{"key": "a1", "msg": "一"}])
+        with self.assertRaises(client.Failed) as e:
+            go("B")
+        self.assertEqual(e.exception.code, 409)
+        self.assertIn("已有另一个会话在挂 labmon wait", e.exception.msg)
+        self.assertIn("--take", e.exception.msg)
+        out = PJ.out_dir("p1")
+        self.assertEqual(W.dup_refused(out)["a"], "boss")                        # 给用户的 wait_dup 按它出
+        self.assertEqual(go("A")["new"], {"a1": "一"})                          # 被挡的那次没领走告警
+        self.assertEqual(go(None)["new"], {})                                   # 旧客户端：不挡
+        self.assertEqual(W.load_json(W.state_file(out), {})["holder"]["s"], "A")  # 也不占
+        # --take：B 接手；A 正挂着的那次下一轮被挡，说法是“改由另一个会话等了”
+        res = {}
+        held = threading.Thread(target=lambda: res.update(r=self._catch(lambda: client.call(
+            "POST", "/api/wait", {"project": "p1", "hold": 10, "session": "A"}, timeout=30, idem=True))))
+        with mock.patch.object(W, "POLL_S", 0.5):
+            held.start()
+            time.sleep(0.8)
+            self.assertEqual(go("B", take=True)["new"], {})
+            held.join()
+        self.assertEqual(res["r"].code, 409)
+        self.assertIn("改由另一个会话等了", res["r"].msg)
+        with self.assertRaises(client.Failed) as e:
+            go("A")                                                               # A 再挂：同样挡下，不当成“另有人想等”
+        self.assertIn("改由另一个会话等了", e.exception.msg)
+        # B 满 WAIT_GONE_S 没来：让出，C 直接接上
+        st = W.load_json(W.state_file(out), {})
+        st["holder"]["t"] -= W.WAIT_GONE_S + 1
+        W.save_json(W.state_file(out), st)
+        self.assertIsNone(W.dup_refused(out))                                    # 正在等的不在了：不再说“被拦下”
+        self.assertEqual(go("C")["new"], {})
+
+    @staticmethod
+    def _catch(f):
+        try:
+            return f()
+        except client.Failed as e:
+            return e
 
     def test_wait_busy(self):
         # 同时挂着的满了：503，客户端退避

@@ -1005,9 +1005,15 @@ def _rebalance(snap: dict) -> None:
 
 
 def _wait_gone(cfg: dict, snap: dict, out_dir: Path, t: float) -> None:
-    """实验会话的 labmon wait 断了（#141，waits.gone_since）、项目还有活（不是暂时没实验）时，出一条只给用户的 wait_gone:<上次来等的时刻>：
+    """别的会话想挂 wait 被拦下了（#142，waits.dup_refused）时出一条只给用户的 wait_dup:<项目>（被拦下后 1 小时内、正在等的会话还在时）。
+    实验会话的 labmon wait 断了（#141，waits.gone_since）、项目还有活（不是暂时没实验）时，出一条只给用户的 wait_gone:<上次来等的时刻>：
     给会话的告警这时没人收。再来等一次就消失；key 带上次来等的时刻，回来后又断了是新的一件（普通用户的项目照 push_owner 推给主人一次）。"""
     from . import waits as WT                     # waits 经 overview 在上层 import 本模块，这里只能延迟 import
+    r = WT.dup_refused(out_dir, t)
+    if r:                                         # 一个项目只让一个会话等（#142）：别的会话想挂 wait 被拦下了，告诉用户
+        snap["alerts"].append(alert(f"wait_dup:{cfg['id']}", "user",
+                                    f"另有一个会话（{'账号 ' + r['a'] + '，' if r.get('a') else ''}{fmt_time(r['t'])}）想挂 labmon wait，被拦下了："
+                                    "一个项目只让一个会话等，告警才不会分走。要改由那个会话负责实验，就在那边用 labmon wait --take；不负责实验的会话不用等"))
     last = WT.gone_since(out_dir, t)
     if last is None or snap.get("no_work_since"):
         return

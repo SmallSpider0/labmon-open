@@ -16,6 +16,7 @@
     labmon wait    -c monitor.toml                          等告警：每轮先与看板上的配置同步，再问看板（长轮询），出现新告警（含借到卡等全局消息）或采集停了即退出（退出码 1）
     labmon wait    -c monitor.toml --job 任务 [--job 项目/任务 …]   同时等这些任务跑完（问看板）：都有结果时退出，全成功 0、其余 4；告警照常退出 1；
                                                             连不上看板超过采集停了的门槛以 server_unreachable 告警退出（1）
+                                                            一个项目只让一个会话等：已有别的会话在等时拒绝（退出码 3）；--take 改由本会话等（那边下一轮退出）
     labmon host list | return <id> [--at 时间 | --now] | restore <id>  用户级主机清单：查看、标记已归还（借来的：跑完就还）、恢复在用（借来的：撤销跑完就还）；改的要 admin 令牌
     labmon borrow [<组内服务器> [--until "明天 18:30"] [--for a1,b] [--away]]   借来给自己的项目跑（见 borrow.py；--away 对方说好约定前不用；要 admin 令牌）；不给参数列出在借的
     labmon borrow <自用主机> --until … [--from 名字]             换给自己借来的：记下约定还的时间（--until none 去掉）
@@ -391,13 +392,14 @@ def _wait_outdated(msg: str, commit: str | None, cfg_path: str, jobs: list[str],
     return client.CLIENT_OUTDATED_RC
 
 
-def cmd_wait(cfg_path: str, jobs: list[str] | None = None) -> int:
+def cmd_wait(cfg_path: str, jobs: list[str] | None = None, take: bool = False) -> int:
     """等告警；给了 jobs 时同时等这些任务跑完。判定在看板那边（waits.wait，POST /api/wait 长轮询）：有新告警或等的任务都有了结果就回，
     否则看板那边挂着等（最多 HOLD_MAX 秒）。告警照常唤醒（退出 1，另列各任务此刻的状态；同一轮任务也都有了结果时照样 1），
     任务都有了结果、没有新告警时退出：全部成功 0，否则 JOB_BAD_RC。
     每轮先与看板上的配置同步（_sync：推了、拉了打一行；两边都改了、推不上当告警报一次；看板上没登记的、第一轮配置就不对的退出 3）。
     连不上看板退避重试；连续连不上超过 config.stale_limit（按本地 monitor.toml 的采集间隔与 stale_min，与 collector_stale 同一门槛）以 server_unreachable 告警退出 1。
-    回话丢在半路时带同一个请求号重试（看板回上次那份，已记成报过的告警不会漏）；等的任务的内部状态（watch）每轮带回看板。"""
+    回话丢在半路时带同一个请求号重试（看板回上次那份，已记成报过的告警不会漏）；等的任务的内部状态（watch）每轮带回看板。
+    每轮带会话标识（client.session_id）：一个项目只让一个会话等，别的会话已在等时看板回 409、以 3 退出；take（--take）只在第一轮带上，改由本会话等（#142）。"""
     try:
         b = brief(cfg_path)
     except ConfigError as e:
@@ -415,7 +417,7 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None) -> int:
     else:
         print(f"[labmon] 等告警：每轮先同步一次 {cfg_path}，再问看板 {b['id']} 有没有告警（看板那边最多挂 {HOLD_MAX}s）", flush=True)
     first, synced, watch = not saved, bool(saved), saved.get("watch")
-    rid, down, back = uuid.uuid4().hex, None, 1.0
+    rid, down, back, sess = uuid.uuid4().hex, None, 1.0, client.session_id()
     retry_commit, retry_at, hinted = None, 0.0, False
     while True:
         try:
@@ -435,7 +437,7 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None) -> int:
                 limit = stale_limit(b["interval"], b["stale_min"])
             extra = {r["key"]: r["msg"]} if r.get("key") else {}
             res = client.call("POST", "/api/wait", {"project": b["id"], "jobs": jobs or [], "watch": watch, "hold": 0 if first else HOLD_MAX,
-                                                    "extra": extra, "rid": rid}, timeout=HOLD_MAX + 20, patience=0, idem=True)
+                                                    "extra": extra, "rid": rid, "session": sess, "take": take}, timeout=HOLD_MAX + 20, patience=0, idem=True)
         except client.Failed as e:
             if e.code == client.CLIENT_OUTDATED:
                 return _wait_outdated(e.msg, e.data.get("commit"), cfg_path, jobs, watch)
@@ -452,7 +454,7 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None) -> int:
             time.sleep(back)
             back = min(back * 2, client.BACKOFF_MAX)
             continue
-        down, back, rid = None, 1.0, uuid.uuid4().hex
+        down, back, rid, take = None, 1.0, uuid.uuid4().hex, False
         watch, new, st, done = res.get("watch"), res.get("new") or {}, res.get("jobs") or [], bool(res.get("done"))
         if res.get("client_status") == "unknown" and not hinted:       # 比不出先后（比看板新、分支上跑）：不拦、不换包，提示一次（#17）
             hinted = True
@@ -657,13 +659,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out", help="render 的输出目录（缺省看板上这个项目的输出目录）")
     ap.add_argument("--admin", action="store_true", help="project push：用 labmon login --admin 建的管理员令牌推（改了 [[hosts]]、[[queues]] 时要）")
     ap.add_argument("--job", action="append", help="wait：同时等这个任务跑完（可多次、也可逗号分隔；写法同清单 after=，别的项目的写 项目/任务）")
+    ap.add_argument("--take", action="store_true", help="wait：改由本会话等这个项目（另一个会话正挂着的 wait 下一轮退出，#142）")
     ap.add_argument("--interval", type=int, help="serve / service install 的采集间隔（秒，缺省取配置）")
     ap.add_argument("--port", type=int, help=f"serve 的端口（缺省 {PORT}）")
     ap.add_argument("--public-port", type=int, help="serve / service install：另起公网入口（只绑 127.0.0.1，给隧道接；平台操作不在这里做）；service install 写 0 去掉")
     a = ap.parse_args(argv)
     configs = a.config or ["monitor.toml"]
-    if a.job and a.cmd != "wait":
-        ap.error("--job 只用于 wait")
+    if (a.job or a.take) and a.cmd != "wait":
+        ap.error("--job、--take 只用于 wait")
     if a.out and a.cmd != "render":
         ap.error("--out 只用于 render（collect 由看板采，写看板上这个项目的输出目录）")
     if a.cmd == "host":
@@ -762,7 +765,7 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(C.render(snap, out))
         return 0
-    return cmd_wait(configs[0], jobs=[x.strip() for v in a.job or [] for x in v.split(",") if x.strip()])
+    return cmd_wait(configs[0], jobs=[x.strip() for v in a.job or [] for x in v.split(",") if x.strip()], take=a.take)
 
 
 if __name__ == "__main__":

@@ -270,7 +270,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 
 | 请求 | 回 |
 |---|---|
-| `POST /api/wait {"project", "jobs", "watch", "hold", "extra", "rid"}` | `{"new": {键: 文字}, "jobs": [{"name", "st", "text", "final"}], "watch", "done"}`（`waits.wait`） |
+| `POST /api/wait {"project", "jobs", "watch", "hold", "extra", "rid", "session", "take"}` | `{"new": {键: 文字}, "jobs": [{"name", "st", "text", "final"}], "watch", "done"}`（`waits.wait`） |
 | `POST /api/project/<id>/check {"text"}` | `{"rc", "out"（各主机的探针规格）, "err", "after"（同步状态那行之后的几行）}`；配置不对 400。普通用户看到的 `out` 里，没开给他的主机只有一行“没开给你用”，不列连接信息与探针规格（#16） |
 | `POST /api/project/init {"host", "name"}` | `{"rc", "out", "err"}`（`api.project_init`） |
 | `POST /api/worker/<动作> {"host", "args", "gpus", "project", "stop"}` | `{"rc", "out", "err"}`；`usage` 是参数错（如 `--project` 不是看板上的项目） |
@@ -311,6 +311,10 @@ labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # �
 - 请求号 `rid`：回话丢在半路时命令行带同一个号重试，看板 2 分钟内回上次那份，已记成报过的告警不会漏。同时挂着的最多 32 个，多了回 503、命令行退避；一个普通账号同时最多 8 个（`waits.ACCOUNT_SLOTS`，#18），多了回 429，命令行打出原因、退出 3（先停掉用不着的会话里的 wait），管理员只受 32 个的限。
 - 连不上看板退避重试；连续连不上超过 max(3×采集间隔, `stale_min`) + 1 分钟（`config.stale_limit`，与 `collector_stale` 同一门槛，按本地 monitor.toml）以新告警 `server_unreachable` 退出（退出码 1）。
 - 第一轮推配置就被看板拒（配置不对）照以前“配置错误”退出 3；之后各轮推不上当一条 `sync_error:` 报一次。
+- 一个项目只让一个会话等（#142，`waits._claim`）：命令行每轮带会话标识 `session`（`client.session_id`：`LABMON_SESSION`、`CLAUDE_CODE_SESSION_ID`，都没有时取跳过 shell 与包装后的第一个祖先进程，按主机名、PID、启动时刻算；只发 16 位哈希）。
+  `wait_state.json` 的 `holder` 记着此刻等这个项目的会话；别的会话来回 409（判告警之前挡，不领告警），命令行打出原因、退出 3，并记进 `refused`，项目快照据此给用户一条 `wait_dup:`。
+  同一会话重挂、自动更新后、同时挂的 `wait` 与 `wait --job` 都是同一个标识，不挡。正在等的满 15 分钟（`waits.WAIT_GONE_S`，与 `wait_gone:` 同一门槛）没来就让出。
+  `labmon wait --take` 第一轮带 `take`，改由本会话等；原来那个正挂着的那次下一轮回 409「改由另一个会话等了」。不带 `session` 的（旧客户端）不挡也不占。
 
 ## 第一次用
 

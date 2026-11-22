@@ -359,10 +359,30 @@ class CmdWaitJobTest(_Base):
         self.assertNotIn("新告警", text)                                         # 作废只在任务那段写一次，也不先单独唤醒
         self.assertIn("  - x：作废：", text)
 
+    def test_session_and_take(self):
+        # 每轮带会话标识（#142）；--take 只在第一轮带上；别的会话在等（409）时以 3 退出、打出看板的说法
+        polls = [{"new": {}}, {"new": {"a": "一"}}]
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), mock.patch.object(M.client, "call", side_effect=polls) as http, \
+             mock.patch.object(M.client, "session_id", return_value="s1"), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(M.cmd_wait(str(self.d / "m.toml"), take=True), 1)
+        self.assertEqual([(c.args[2]["session"], c.args[2]["take"]) for c in http.call_args_list], [("s1", True), ("s1", False)])
+        err = io.StringIO()
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+             mock.patch.object(M.client, "call", side_effect=M.client.Failed(409, "项目 p1 已有另一个会话在挂 labmon wait")), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(M.cmd_wait(str(self.d / "m.toml")), 3)
+        self.assertIn("已有另一个会话在挂 labmon wait", err.getvalue())
+        got = []
+        with mock.patch.object(M, "cmd_wait", lambda cfg_path, jobs=None, take=False: got.append(take) or 0):
+            M.main(["wait", "-c", str(self.d / "m.toml"), "--take"])
+        self.assertEqual(got, [True])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            M.main(["check", "-c", str(self.d / "m.toml"), "--take"])
+
     def test_cli(self):
         # --job 可重复、也认逗号分隔（同 after=）；只用于 wait
         got = []
-        with mock.patch.object(M, "cmd_wait", lambda cfg_path, jobs=None: got.append(jobs) or 0):
+        with mock.patch.object(M, "cmd_wait", lambda cfg_path, jobs=None, take=False: got.append(jobs) or 0):
             M.main(["wait", "-c", str(self.d / "m.toml"), "--job", "x, y", "--job", "p9/z"])
         self.assertEqual(got, [["x", "y", "p9/z"]])
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
