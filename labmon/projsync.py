@@ -177,7 +177,7 @@ def pull(cfg_path: str | Path) -> str:
 def sync(cfg_path: str | Path, patience: float = client.PATIENCE) -> dict:
     """labmon wait 每轮的同步：{act, id, msg, key}。act：same 没事、push 推了、pull 拉了、conflict 两边都改了（不动）、error 推不上（code 是看板回的状态码，400 是配置不对）、
     unregistered 看板上没登记、archived 已归档（wait 自己报）。key 是冲突与推不上那条告警的键（同一对版本只报一次）。
-    patience：连不上看板时重试多久（client.call；wait 传 0，由它自己退避、按门槛报 server_unreachable）。"""
+    patience：连不上看板时重试多久（client.call；wait 传 0，由它自己退避、按门槛提示与报 server_back）。"""
     st = status(cfg_path, patience)
     pid, s = st["id"], st["state"]
     out = {"act": s, "id": pid, "msg": None, "key": None}

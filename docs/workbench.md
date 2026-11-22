@@ -23,7 +23,7 @@ labmon wait -c monitor.toml --job 任务 [--job 项目/任务]   # 同时等这�
   页面含服务器路径、进程命令行等信息，公网入口只经隧道的 HTTPS 用。`labmon wait`、`check`、`worker` 等命令也经看板接口（#162），要令牌（`labmon login` 一次），见 [api.md「命令行」](api.md#命令行162)。
 - `service` 在 macOS 上写 `~/Library/LaunchAgents/com.labmon.serve.plist`、日志在 `~/Library/Logs/labmon.log`，在 Linux 上写 `~/.config/systemd/user/labmon.service`、日志在 `<状态根>/labmon.log`（每行经 `service.log`，带时刻）：只记启动、配置重读、平台操作与续租的请求、出错的请求（带回给页面的原因）、采集出错与项目告警的变化、借用与续租给 worker 下指令的回话，超过 1 MB 轮转到 `labmon.log.1`。要看的事件进记录页，不进这里。一台机器一个服务；项目不写在托管配置里，服务按登记加载。
 - 需要被唤醒的会话只跑 `labmon wait`（不自己采集）：问看板（看板那边读快照，`waits.wait`），出现新告警或快照超过 max(3×interval, stale_min) + 1 分钟没更新（`collector_stale`，门槛由 `config.stale_limit` 算，interval 取 monitor.toml 的；项目页顶栏“N 分钟未更新”标红与「项目配置」那一行的说法同一个门槛）即退出（退出码 1）。
-  每种告警（有稳定的 key）只报一次，报过的记在看板上这个项目输出目录的 `.labmon/wait_state.json`。连不上看板超过同一个门槛以 `server_unreachable` 退出（退出码 1）。
+  每种告警（有稳定的 key）只报一次，报过的记在看板上这个项目输出目录的 `.labmon/wait_state.json`。连不上看板过了同一个门槛只提示、不退出，连回来报 `server_back`；连着满 1 小时才以 `server_unreachable` 退出（退出码 1，#154，见 [api.md「labmon wait 的长轮询」](api.md#labmon-wait-的长轮询)）。
   条件消失后，同一个 key 6 小时内再出现不再叫醒（`waits.REWAKE_S`，记着每个报过的 key 最后一次在场的时刻；门槛两侧来回、主机掉线又回来不重复叫醒），过了 6 小时再出现才再报；
   带代数的 `idle_regs:<项目>:<n>` 按去掉代数比，代数变了不算新告警；`failed:<任务>` 例外，每次出现都报（删了 `.failed` 重跑又失败）（#88）。
   只给用户的告警（`ssh_fail:`）不叫醒会话，在 `labmon status` 里照列（#88）。

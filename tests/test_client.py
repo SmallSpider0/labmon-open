@@ -1,6 +1,6 @@
 """命令行走看板接口（#162）：client.call 的几个地址依次试、退避、会改东西的不在半路重试、备用的接着试下一个；
 令牌只在 Authorization 头里；project 令牌做不了借卡、整台主机的操作；labmon wait 的长轮询不漏接连发生的事（含回话丢了按请求号重给）、
-连不上看板超过门槛以 server_unreachable 退出。
+连不上看板不退出、连回来报 server_back，连着满 1 小时才以 server_unreachable 退出（#154）。
 
     python -m unittest tests.test_client -v
 """
@@ -385,15 +385,41 @@ class BoardTest(_Base):
         self.assertIn("令牌无效、已过期或已吊销；环境变量 LABMON_TOKEN 里的令牌看板不认", err.getvalue())
 
     def test_wait_server_unreachable(self):
-        # 连不上看板：退避重试；连续超过门槛（config.stale_limit，测试换成 0.5 秒）以 server_unreachable 告警退出 1
+        # 连不上看板：退避重试；过了门槛（config.stale_limit，测试换成 0.5 秒）只往 stderr 提示一次、不退出（#154）；
+        # 连着满 WAIT_OFFLINE_MAX_S（测试换成 1.5 秒）才以 server_unreachable 告警退出 1，写着马上重挂
         self.servers(f"http://127.0.0.1:{closed_port()}")
-        out, slept = io.StringIO(), []
+        out, err, slept = io.StringIO(), io.StringIO(), []
         real = time.sleep
-        with mock.patch.object(M, "stale_limit", lambda *a: 0.5), mock.patch.object(M.time, "sleep", lambda s: (slept.append(s), real(0.3))), \
-                contextlib.redirect_stdout(out):
+        with mock.patch.object(M, "stale_limit", lambda *a: 0.5), mock.patch.object(M, "WAIT_OFFLINE_MAX_S", 1.5), \
+                mock.patch.object(M.time, "sleep", lambda s: (slept.append(s), real(0.3))), contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
             self.assertEqual(M.cmd_wait(str(self.cfg)), 1)
         self.assertIn("[server_unreachable] 连不上看板服务已", out.getvalue())
+        self.assertIn("马上重挂 labmon wait", out.getvalue())
+        self.assertEqual(err.getvalue().count("接着重试，连回来报 server_back"), 1)
+        self.assertGreater(len(slept), 3)                                       # 过了 0.5 秒的门槛还在重试
         self.assertEqual(slept[:2], [1.0, 2.0])
+
+    def test_wait_server_back(self):
+        # 断网过了门槛又连上（#154）：不退出，连回来那一轮报 server_back（退出 1），请求号接得上（断着时同一个号重试）；短暂闪断不报
+        clock = [1000.0]
+        fake = mock.Mock(wraps=time)
+        fake.time.side_effect = lambda: clock[0]
+        fake.sleep.side_effect = lambda s: clock.__setitem__(0, clock[0] + 60)
+        down = client.Unreachable("连不上")
+        calls = [down, down, down, down, {"new": {}, "watch": None}]
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), mock.patch.object(M.client, "call", side_effect=calls) as http, \
+                mock.patch.object(M, "stale_limit", lambda *a: 120), mock.patch.object(M, "time", fake), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(M.cmd_wait(str(self.cfg)), 1)
+        self.assertIn("[server_back] 看板服务又连上了", out.getvalue())
+        self.assertEqual(len({c.args[2]["rid"] for c in http.call_args_list}), 1)
+        calls = [down, {"new": {}}, {"new": {"a": "一"}}]                         # 闪断（没过门槛）：不报
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), mock.patch.object(M.client, "call", side_effect=calls), \
+                mock.patch.object(M, "stale_limit", lambda *a: 120), mock.patch.object(M, "time", fake), \
+                contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(M.cmd_wait(str(self.cfg)), 1)
+        self.assertNotIn("server_back", out.getvalue())
+        self.assertIn("[a] 一", out.getvalue())
 
 
 if __name__ == "__main__":

@@ -390,7 +390,7 @@ class WaitSyncTest(_Base):
         self.assertTrue(r["key"].startswith("sync_error:"))
 
     def test_unreachable_limit_follows_push(self):
-        # wait 跑着时本地改了采集间隔、推上去了：连不上看板的门槛（server_unreachable）跟着变，同拉回来的
+        # wait 跑着时本地改了采集间隔、推上去了：连不上看板的门槛（提示与 server_back）跟着变，同拉回来的
         PS.push(self.cfg)
         seen, real = [], M.stale_limit
 

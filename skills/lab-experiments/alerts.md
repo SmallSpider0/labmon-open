@@ -95,6 +95,7 @@
 
 - `collector_stale`：看板没在采集。告诉用户（看板服务在看板那台机器上，会话那台跑不了它）；`labmon status` 首行写着快照是几分钟前的。
 - `skill_updated`：wait 换成了看板的新版本，这份 skill 也改了（消息里列出改了的文件与「节」）。先重挂 wait，再重读那几节，照新写法做；会话里记着的旧说法作废。只报一次。
-- `server_unreachable`：`labmon wait` 连不上看板服务太久（网络、TX 隧道或看板那台机器）。告诉用户，过一会儿再挂 wait；别绕开看板直接 ssh 改服务器上的状态。
+- `server_unreachable`：`labmon wait` 连着 1 小时连不上看板服务（网络、TX 隧道或看板那台机器）。告诉用户，然后**马上重挂** wait：它自己退避重试、断网时不会退出，连回来会报 `server_back`；不要停下来等网络。别绕开看板直接 ssh 改服务器上的状态。
+- `server_back`：wait 断网一阵后又连上了（消息里写着断了多久）。重挂 wait，再用 `labmon status`、`labmon check` 看这期间有没有错过的事（任务失败、借到卡、页面上的改动），按需处理。
 - `wait_dup:…`（只给用户）：另一个会话想挂 wait 被拦下了。你是正在等的那个就照常；用户要换会话负责时，由那边 `--take`（[sessions.md](sessions.md)）。
 - `wait_gone:…`（只给用户，你收不到）：项目还有活、却 15 分钟没有会话在挂 `labmon wait`，看板上提醒用户。用户转告时照 [sessions.md](sessions.md) 重挂 wait，再用 `labmon status`、`labmon check` 补看这期间的事（断着期间出现又消失的告警不会再叫醒）。收到告警后先重挂、再处理，别让 wait 断着超过一刻钟。

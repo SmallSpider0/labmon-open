@@ -1141,7 +1141,7 @@ def _proj_id(cfg: dict, base: Path) -> str:
 
 
 def brief(path: str | Path, text: str | None = None) -> dict:
-    """命令行在项目目录里读本地这份 monitor.toml（#162）：只做 TOML 解析，取项目 id、采集间隔、stale_min（wait 连不上看板多久算 server_unreachable，
+    """命令行在项目目录里读本地这份 monitor.toml（#162）：只做 TOML 解析，取项目 id、采集间隔、stale_min（wait 连不上看板多久提示一次、连回来报 server_back，
     与 collector_stale 同一门槛）与 done_when 的文件 {monitor.toml 里写的路径: 本地路径}。不做整套校验：那要用户级主机清单，只在看板服务那边（load）；
     推上去由服务端校验。语法不对抛 ConfigError；类型不对的取缺省、不抛（id 照样 str 一下）。"""
     path = Path(path).expanduser().resolve()

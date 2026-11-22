@@ -27,6 +27,8 @@
 
 项目还有活、15 分钟没有会话来等时，看板上提醒用户（`wait_gone:`，[alerts.md](alerts.md)「看板自己」），所以处理告警前先重挂。
 
+断网时 wait 不退出，自己退避重试，连回来报 `server_back`；连着 1 小时连不上才以 `server_unreachable` 退出，这时告诉用户并马上重挂。
+
 普通查询超时与进程退出不同。`write_stdin` 返回仍在运行就继续等，不重复启动 `labmon wait`。一个项目只让一个会话挂 wait（看板按会话认，别的会话来会被拒），告警才不会被分走；不负责实验的会话（写论文、查资料）不挂 wait，要用 labmon 只查（`labmon status`、`labmon host list`）。
 
 ## 压缩、续接与交接
