@@ -283,6 +283,20 @@ class WaitGoneTest(IdleCheckTest):
         self.waited(5)                                                          # 再来等一次就消失
         self.assertEqual(self.gone(self.snap([])), [])
 
+    def test_dup(self):
+        # 别的会话想挂 wait 被拦下（#142，waits._claim 记的 refused）：1 小时内、正在等的会话还在时给用户一条 wait_dup
+        from labmon import waits as WT
+        sf = WT.state_file(self.d / "out")
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        now = time.time()
+        sf.write_text(json.dumps({"t": now, "wait_t": now, "holder": {"s": "A", "a": "amy", "t0": now - 600, "t": now}, "refused": {"a": "bob", "t": now - 60}}))
+        a = [x for x in self.snap([])["alerts"] if x["key"].startswith("wait_dup:")]
+        self.assertEqual([x["to"] for x in a], ["user"])
+        self.assertIn("账号 bob", a[0]["msg"])
+        self.assertIn("--take", a[0]["msg"])
+        sf.write_text(json.dumps({"t": now, "wait_t": now, "holder": {"s": "A", "t0": now, "t": now}, "refused": {"a": "bob", "t": now - WT.DUP_SHOW_S - 1}}))
+        self.assertFalse([x for x in self.snap([])["alerts"] if x["key"].startswith("wait_dup:")])     # 过了 1 小时
+
     def test_quiet_cases(self):
         from labmon import deploy as DP
         from labmon import waits as WT

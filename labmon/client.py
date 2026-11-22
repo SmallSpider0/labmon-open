@@ -16,6 +16,7 @@ labmon update（update）：从看板取与它同一版本的 wheel 装上（GET
 from __future__ import annotations
 
 import getpass
+import hashlib
 import http.client
 import http.cookiejar
 import json
@@ -45,6 +46,42 @@ HEADER = config.CLIENT_HEADER
 CLIENT_OUTDATED = 426
 CLIENT_OUTDATED_RC = 5
 CLIENT_OUTDATED_REASON = "client_outdated"
+
+
+SHELLS = {"sh", "bash", "zsh", "dash", "fish", "ksh", "mksh", "tcsh", "csh", "login", "env", "nohup", "timeout", "setsid", "sudo", "su", "script", "xargs", "time"}
+SESSION_ENV = ("LABMON_SESSION", "CLAUDE_CODE_SESSION_ID")     # 依次取：自己指定的、Claude Code 给命令的会话号
+
+
+def _proc(pid: int) -> tuple[int, str, str] | None:
+    """(父进程, 命令名, 启动时刻的文字)；读不到为 None。Linux 读 /proc，别处问 ps（macOS 的 comm 是完整路径，取末段）。"""
+    try:
+        st = Path(f"/proc/{pid}/stat").read_text()
+        name, rest = st[st.index("(") + 1:st.rindex(")")], st[st.rindex(")") + 2:].split()
+        return int(rest[1]), name, rest[19]
+    except (OSError, ValueError, IndexError):
+        pass
+    try:
+        out = subprocess.run(["ps", "-o", "ppid=,lstart=,comm=", "-p", str(pid)], capture_output=True, text=True, timeout=5).stdout.split()
+        return int(out[0]), Path(" ".join(out[6:])).name, " ".join(out[1:6])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def session_id() -> str | None:
+    """这条命令属于哪个会话（labmon wait 带给看板，一个项目只让一个会话等，#142）：只发 16 位哈希。
+    依次取 SESSION_ENV；都没有时从父进程往上跳过 shell 与 nohup 之类的包装，取第一个别的祖先（Codex 的进程、用户的终端），
+    按 (主机名, PID, 启动时刻) 算：同一会话每次重挂、自动更新后 exec 都一样，同时挂的 wait 与 wait --job 也一样。取不出为 None（看板不挡也不占）。"""
+    raw = next((f"env:{os.environ[k]}" for k in SESSION_ENV if os.environ.get(k)), None)
+    pid = os.getppid()
+    for _ in range(12) if raw is None else ():
+        p = _proc(pid)
+        if p is None or pid <= 1:
+            break
+        if p[1].lstrip("-") not in SHELLS:
+            raw = f"proc:{socket.gethostname()}:{pid}:{p[2]}"
+            break
+        pid = p[0]
+    return hashlib.sha256(raw.encode()).hexdigest()[:16] if raw else None
 
 
 def login_hint(admin: bool = False) -> str:

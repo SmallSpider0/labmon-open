@@ -300,6 +300,19 @@ class CmdWaitJobTest(_Base):
             self.assertIn("装不上", err.getvalue())
             self.assertIn("[client_outdated]", err.getvalue())
 
+    def test_take_survives_update(self):
+        # #142 审查：--take 还没生效（第一轮就 426）时自动更新，exec 起来的新版本照样带 --take
+        commit = "b" * 40
+        bin_path = self.d / commit / "bin" / "labmon"
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+             mock.patch.object(M.client, "call", side_effect=M.client.Failed(426, "跑 labmon update", {"commit": commit})), \
+             mock.patch.object(M.dist, "installed", return_value=True), \
+             mock.patch.object(M.client, "install_update", return_value=(commit, M.dist.Installed(bin_path, bin_path, None, []))), \
+             mock.patch.object(M.os, "execve", side_effect=RuntimeError("exec")) as execute, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                M.cmd_wait(str(self.d / "m.toml"), ["x"], take=True)
+        self.assertEqual(execute.call_args.args[1][1:], ["wait", "-c", str(self.d / "m.toml"), "--job=x", "--take"])
+
     def test_unknown_version_only_hints_once(self):
         # #17：看板认不出这个客户端的版本（unknown）：不拦、不自动换包，stderr 提示一次
         polls = [{"client_status": "unknown", "commit": "b" * 40, "jobs": [{"name": "x", "text": "运行中"}]}] * 2 + \
@@ -359,10 +372,30 @@ class CmdWaitJobTest(_Base):
         self.assertNotIn("新告警", text)                                         # 作废只在任务那段写一次，也不先单独唤醒
         self.assertIn("  - x：作废：", text)
 
+    def test_session_and_take(self):
+        # 每轮带会话标识（#142）；--take 只在第一轮带上；别的会话在等（409）时以 3 退出、打出看板的说法
+        polls = [{"new": {}}, {"new": {"a": "一"}}]
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), mock.patch.object(M.client, "call", side_effect=polls) as http, \
+             mock.patch.object(M.client, "session_id", return_value="s1"), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(M.cmd_wait(str(self.d / "m.toml"), take=True), 1)
+        self.assertEqual([(c.args[2]["session"], c.args[2]["take"]) for c in http.call_args_list], [("s1", True), ("s1", False)])
+        err = io.StringIO()
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+             mock.patch.object(M.client, "call", side_effect=M.client.Failed(409, "项目 p1 已有另一个会话在挂 labmon wait")), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(err):
+            self.assertEqual(M.cmd_wait(str(self.d / "m.toml")), 3)
+        self.assertIn("已有另一个会话在挂 labmon wait", err.getvalue())
+        got = []
+        with mock.patch.object(M, "cmd_wait", lambda cfg_path, jobs=None, take=False: got.append(take) or 0):
+            M.main(["wait", "-c", str(self.d / "m.toml"), "--take"])
+        self.assertEqual(got, [True])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            M.main(["check", "-c", str(self.d / "m.toml"), "--take"])
+
     def test_cli(self):
         # --job 可重复、也认逗号分隔（同 after=）；只用于 wait
         got = []
-        with mock.patch.object(M, "cmd_wait", lambda cfg_path, jobs=None: got.append(jobs) or 0):
+        with mock.patch.object(M, "cmd_wait", lambda cfg_path, jobs=None, take=False: got.append(jobs) or 0):
             M.main(["wait", "-c", str(self.d / "m.toml"), "--job", "x, y", "--job", "p9/z"])
         self.assertEqual(got, [["x", "y", "p9/z"]])
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):

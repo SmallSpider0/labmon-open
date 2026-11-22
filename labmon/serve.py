@@ -1188,7 +1188,8 @@ class Handler(BaseHTTPRequestHandler):
                 rid = json.dumps([who.key, s("project"), jobs, s("rid")]) if s("rid") else None
                 r = WT.wait(s("project"), jobs, body.get("watch") if isinstance(body.get("watch"), dict) else None,
                             num("hold") or 0, {str(k): str(v) for k, v in (extra or {}).items()}, rid,
-                            account=None if who.role == "admin" else who.name)
+                            account=None if who.role == "admin" else who.name,
+                            session=s("session")[:64] or None, take=body.get("take") is True, who=who.name)
             except WT.AccountBusy as x:
                 return 429, {"error": str(x)}
             except WT.Busy as x:

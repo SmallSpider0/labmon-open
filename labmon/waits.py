@@ -6,6 +6,7 @@
 - wait：长轮询（#157 方案 C）：有新告警、或等的任务都有了结果就回，否则最多挂 HOLD_MAX 秒；挂着时只在相关文件变了、或离上次判过 POLL_S 秒时再判。
   同时挂着的封顶 SLOTS 个（多了抛 Busy，接口回 503、客户端退避），一个普通账号封顶 ACCOUNT_SLOTS 个（多了抛 AccountBusy，回 429，#18）。请求号 rid：同一个号 RID_KEEP_S 秒内再来回上次那份（回话丢在半路时客户端带同一个号重试，
   已记成报过的告警不会漏）。
+- 一个项目只让一个会话等（#142，_claim）：客户端带会话标识，wait_state.json 的 holder 记着此刻等的会话；别的会话来回 409、不领告警，换会话用 --take。
 """
 from __future__ import annotations
 
@@ -30,7 +31,8 @@ REWAKE_S = 6 * 3600   # 报过的告警消失后这么久内再出现不再叫�
                       # 同一处的第二件事靠 key 带“这一次”（开跑时刻、PID、归还时刻、借用起点、指令时刻、这一段的起点，#129）分开，不在这里另判
 SAME_KIND = ("idle_regs:",)   # key 末段是代数（条数变了加一）的告警：去掉末段比，代数变了不算新告警（#88）
 EACH_TIME = ("failed:",)      # 每次出现都是新的一次、不受 REWAKE_S 挡：删了 .failed 重跑又失败，会话要再处理
-WAIT_GONE_S = 15 * 60         # 项目还有活、这么久没有 wait 来等：会话的 wait 断了，告诉用户（#141）
+WAIT_GONE_S = 15 * 60         # 项目还有活、这么久没有 wait 来等：会话的 wait 断了，告诉用户（#141）；等这个项目的会话这么久没来就让出（#142）
+DUP_SHOW_S = 3600             # 别的会话被拦下后，这么久内给用户一条 wait_dup（#142）
 
 
 def _kind(k: str) -> str:
@@ -49,7 +51,7 @@ def _new_alerts(sf: Path, current: dict, t: float | None = None) -> list[str]:
     new = [k for k in current if k not in reported and (_kind(k) not in seen or k.startswith(EACH_TIME))]
     keep = reported | set(current)                    # 此刻在场的都算报过：新报的与 REWAKE_S 内再出现的
     last.update({_kind(k): t for k in keep})
-    save_json(sf, {"reported": sorted(keep), "last": last, "t": t, "wait_t": t})     # wait_t 只在这里写（wait_check 判一次）：gone_since 看它
+    save_json(sf, {**st, "reported": sorted(keep), "last": last, "t": t, "wait_t": t})     # wait_t 只在这里写（wait_check 判一次）：gone_since 看它；holder、refused（_claim）照留
     return new
 
 
@@ -70,6 +72,42 @@ def gone_since(out: Path, t: float | None = None) -> float | None:
     if not started or not isinstance(last, (int, float)) or t - max(last, started) < WAIT_GONE_S:
         return None
     return last
+
+
+def _claim(pid: str, sf: Path, sess: str | None, who: str | None, take: bool, mine: bool, t: float) -> None:
+    """一个项目只让一个会话等（#142）：wait_state.json 的 holder 是此刻等这个项目的会话 {s: 会话标识, a: 账号, t0: 起始, t: 最后一次来等}。
+    take 接手时记下被接手的会话（from），它再来时同样挡下、说法是“改由另一个会话等了”，不记 refused。
+    来的就是 holder、没有 holder、holder 满 WAIT_GONE_S 没来（与 gone_since 同一门槛：会话不在了）或带了 take（labmon wait --take）：它成为或仍是 holder；
+    否则抛 projects.Refused(409)，命令行以 3 退出、不领告警（在 wait_check 之前挡）。mine：这一次请求前几轮已是 holder（被 --take 接手了的说法不同）。
+    被拦下的记进 refused {a, t}，项目快照据此给用户一条 wait_dup（dup_refused）。sess 为空（旧客户端、取不出会话标识）不挡也不占。调用方持着登记锁。"""
+    if not sess:
+        return
+    st = load_json(sf, {})
+    h = st.get("holder") or {}
+    if h.get("s") and h["s"] != sess and t - (h.get("t") or 0) < WAIT_GONE_S and not take:
+        who_s = f"账号 {h['a']}，" if h.get("a") else ""
+        if mine or h.get("from") == sess:
+            raise PJ.Refused(409, f"项目 {pid} 改由另一个会话等了（{who_s}{fmt_time(h['t0'])} 用 labmon wait --take 接手）：本会话别再挂 labmon wait，"
+                                  "要看状态用 labmon status")
+        save_json(sf, {**st, "refused": {"a": who, "t": t}})
+        raise PJ.Refused(409, f"项目 {pid} 已有另一个会话在挂 labmon wait（{who_s}{fmt_time(h['t0'])} 起，最后一次来等 {fmt_time(h['t'])}）。"
+                              "一个项目只让一个会话等，告警才不会被分走：本会话别再挂 wait，要看状态用 labmon status。"
+                              "确认那边已经停了（例如是本会话续接前挂的），或要改由本会话负责这个项目的实验，用 labmon wait --take 接手（那边下一轮就退出）；"
+                              f"那边 {fmt_time(h['t'] + WAIT_GONE_S)} 前没再来等也会自动让出")
+    alive = t - (h.get("t") or 0) < WAIT_GONE_S
+    same = h.get("s") == sess and alive
+    took = {"from": h["s"]} if take and h.get("s") and h["s"] != sess and alive else {}      # 被接手的那个会话再来时说“改由别的会话等了”
+    save_json(sf, {**st, "holder": {"s": sess, "a": who, "t0": h["t0"] if same else t, "t": t, **(took or {k: h[k] for k in ("from",) if same and k in h})}})
+
+
+def dup_refused(out: Path, t: float | None = None) -> dict | None:
+    """别的会话想挂 wait 被拦下了（#142，_claim 记的 refused）：DUP_SHOW_S 内、holder 还在时返回 {a: 被拦的账号, t: 时刻}，否则 None。"""
+    t = time.time() if t is None else t
+    st = load_json(state_file(out), {})
+    r, h = st.get("refused") or {}, st.get("holder") or {}
+    if not r.get("t") or t - r["t"] >= DUP_SHOW_S or t - (h.get("t") or 0) >= WAIT_GONE_S:
+        return None
+    return r
 
 
 def _wakes(pid: str, hosts: set | None, overview: Path | None = None) -> dict:
@@ -309,9 +347,11 @@ def _sig(out: Path, w: JobWatch | None) -> tuple:
 
 
 def wait(pid: str, names: list[str] | None = None, watch: dict | None = None, hold: float = 0, extra: dict | None = None,
-         rid: str | None = None, overview: Path | None = None, account: str | None = None) -> dict:
+         rid: str | None = None, overview: Path | None = None, account: str | None = None,
+         session: str | None = None, take: bool = False, who: str | None = None) -> dict:
     """POST /api/wait（#162）：判一次，有新告警或等的任务都有结果就回，否则挂着（最多 hold 秒，不超过 HOLD_MAX）等相关文件变了再判。
     回 {new: {key: msg}, jobs: [{name, st, text, final}]（按等的顺序）, watch: JobWatch 的状态（客户端下次带回）, done: 等的任务是不是都有了结果}。
+    session：会话标识（client.session_id 的哈希），who：账号名，take：labmon wait --take（_claim：一个项目只让一个会话等，别的会话来抛 Refused(409)）。
     项目没登记抛 projects.Refused(404)；挂着的满了抛 Busy；account（普通账号的名字，管理员不传）同时挂着的已满 ACCOUNT_SLOTS 个抛 AccountBusy。rid 见模块说明。"""
     now = time.time()
     with _RID_LOCK:
@@ -328,7 +368,7 @@ def wait(pid: str, names: list[str] | None = None, watch: dict | None = None, ho
         if not _SLOTS.acquire(blocking=False):
             raise Busy(f"看板上同时挂着的 labmon wait 已有 {SLOTS} 个，稍后再来")
         try:
-            r = _wait(pid, names or [], watch, max(0.0, min(float(hold or 0), HOLD_MAX)), extra or {}, overview)
+            r = _wait(pid, names or [], watch, max(0.0, min(float(hold or 0), HOLD_MAX)), extra or {}, overview, session, take, who)
         finally:
             _SLOTS.release()
     finally:
@@ -343,7 +383,8 @@ def wait(pid: str, names: list[str] | None = None, watch: dict | None = None, ho
     return r
 
 
-def _wait(pid: str, names: list[str], watch: dict | None, hold: float, extra: dict, overview: Path | None) -> dict:
+def _wait(pid: str, names: list[str], watch: dict | None, hold: float, extra: dict, overview: Path | None,
+          session: str | None = None, take: bool = False, who: str | None = None) -> dict:
     with PJ._reg_locked():
         PJ.require(pid)
         cfg = PJ.load_cfg(pid)
@@ -351,7 +392,7 @@ def _wait(pid: str, names: list[str], watch: dict | None, hold: float, extra: di
     out = PJ.out_dir(pid)
     sf = state_file(out)
     w = JobWatch(cfg, out, names, overview).restore(watch) if names else None
-    end, sig, last, nap = time.time() + hold, None, 0.0, threading.Event()
+    end, sig, last, nap, mine = time.time() + hold, None, 0.0, threading.Event(), False
     while True:
         now = time.time()
         s = _sig(out, w)
@@ -362,6 +403,8 @@ def _wait(pid: str, names: list[str], watch: dict | None, hold: float, extra: di
                 PJ.require(pid)
                 if PJ.meta(pid) != registration:
                     raise PJ.Refused(409, f"项目 {pid} 的登记已变化，请重新运行 labmon wait")
+                _claim(pid, sf, session, who, take and not mine, mine, now)    # 别的会话在等就挡下，不领告警（#142）
+                mine = True
                 new = wait_check(cfg, out, sf, overview, {**(w.stale if w else {}), **extra})
             if w:
                 new = {k: m for k, m in new.items() if k not in w.void_keys}     # 等的任务的 void: 只在任务那段写

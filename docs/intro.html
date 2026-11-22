@@ -364,6 +364,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <tr><td><code>bigwrite:</code></td><td>会话</td><td>一个任务跑的期间本项目目录在共享盘上净增 5 GiB 以上（开跑前与跑完那次重扫之差，同期别的任务写的也在内）</td><td>看大头是哪个目录；能重算的改写到 <code>$LABMON_CACHE</code>，共享盘只留数据集、代码与结果</td></tr>
         <tr><td><code>returned_unfinished:</code></td><td>两边</td><td>车道所在的主机已归还，还有任务没跑完</td><td>把清单换到别的主机</td></tr>
         <tr><td><code>wait_gone:</code></td><td>你</td><td>项目还有任务，实验会话却 15 分钟没在挂 <code>labmon wait</code>：给会话的告警没人收</td><td>回到负责这个项目的会话，让它重挂 <code>labmon wait</code>；会话再来等一次就消失</td></tr>
+        <tr><td><code>wait_dup:</code></td><td>你</td><td>另一个会话想挂 <code>labmon wait</code>，被拦下了：一个项目只让一个会话等，告警才不会被分走</td><td>不负责实验的会话不用等；要换会话负责实验，就在那边用 <code>labmon wait --take</code></td></tr>
         <tr><td><code>collector_stale</code></td><td>会话</td><td>看板服务没在采集</td><td>会话告诉你；你在看板那台机器上 <code>labmon service status</code>，必要时 restart</td></tr>
       </tbody>
     </table>

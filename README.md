@@ -88,6 +88,7 @@ labmon project push -c monitor.toml     # 登记到看板上（第一次推就�
 labmon service install                  # 装上常驻的看板服务（macOS launchd、Linux systemd）：缺省 http://127.0.0.1:8765/（dashboard-host 上是 --port 8443，docs/deploy.md），项目页 /p/<id>/；要登录，第一次先 labmon user person <人员名>，再 labmon user add <账号> --person <人员名> --admin
 labmon wait    -c monitor.toml          # 每轮先与看板同步配置，再问看板等告警（长轮询）：出现新告警或采集停了即退出（退出码 1），用来唤醒会话
 labmon wait    -c monitor.toml --job 任务   # 同时等任务跑完（问看板、不连服务器）：都有结果时退出，全成功 0、其余 4
+labmon wait    -c monitor.toml --take   # 一个项目只让一个会话等：别的会话已在等时 wait 以 3 退出；--take 改由本会话等（那边下一轮退出）
 
 labmon worker start 29                 # 服务器端 worker：部署 main 上已提交的版本并拉起（已在跑则无缝替换；start、stop、limit 要 admin 令牌）
 labmon worker add 29 ROOT JOBS --project <id>   # 登记一条队列；之后改清单即可
