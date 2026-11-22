@@ -934,6 +934,24 @@ class ProgressTest(unittest.TestCase):
                         self.assertLess(e, 1.35 * end, (t / 60, e / 60, src))
                         self.assertGreater(e, 0.8 * end, (t / 60, e / 60, src))
 
+    def test_overrun_without_progress_not_now(self):
+        """#138：估 60 分钟、已跑 90 分钟，进度停了（或一直没有进度行）：剩余按 overrun_left（已用的 20%、至少 10 分钟，同 worker 的 run_end），
+        不写 0。以前预计结束就是这一轮的现在，车道对齐后下一条的预计开始也是现在，每轮往后滑。"""
+        t, el = 10000.0, 5400.0
+        ss = [[t - el + 600, 10, 100], [t - el + 900, 20, 100]]                  # 进度最后一次是 75 分钟前：停了
+        self.assertEqual(C._segment_eta([20, 100], ss, None, el, 60.0, False, t), (0.2 * el, "已超估时", None))
+        self.assertEqual(C._segment_eta([20, 100], ss, None, 3000.0, 60.0, False, t)[:2], (600.0, "估时（这段不打进度）"))   # 没超：估时 − 已用
+        work = {"ratios": {}, "susp": {}, "prog": {}, "segs": {}, "multi": set()}
+        al = {"log_silent_min": 0}
+        run = {"id": "a", "lane": "q", "group": None, "status": "running", "hold": False, "est_min": 60, "start_ts": t - el,
+               "dur": {"min": 60.0, "src": "清单估时"}, "plan": {"t0": t - 3600, "t1": t}}
+        nxt = {"id": "b", "lane": "q", "group": None, "status": "queued", "hold": False, "est_min": 30, "dur": None, "plan": {"t0": t, "t1": t + 1800}}
+        for j in (run, nxt):
+            C._job_times(j, "q", "p", al, work, [], t, "q")
+        self.assertEqual((run["eta_source"], run["eta_ts"], round(run["overrun_min"])), ("已超估时", t + 0.2 * el, 30))
+        C._queued_times([run, nxt], {"a": {"t0": t - 3600, "t1": t}, "b": {"t0": t, "t1": t + 1800}}, t, "p")
+        self.assertEqual((nxt["plan_start_ts"], nxt["eta_ts"]), (t + 0.2 * el, t + 0.2 * el + 1800))   # 接着它的那条跟着挪，不是“现在”
+
     def test_progress_stalled_no_estimate(self):
         """Issue #17：第一段“停了一阵”（打了一阵进度后进入不打进度的阶段，如中途评估）、又没有估时，平均速度从第一个步数 > 0 的
         采样算起，不从任务开始算（开头静默不算进去）；只有一个这样的采样时按 overrun_left。

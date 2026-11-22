@@ -639,10 +639,14 @@ def _job_times(j: dict, lane_id: str, pid: str, al_cfg: dict, work: dict, alerts
             if j["eta_source"] == "已超估时":
                 j["overrun_min"] = (el - floor * 60) / 60
         elif j["hold"]:
-            rem = max(0.0, pl["t1"] - t) if pl and pl.get("t1") else max(0.0, (j["est_min"] or 0) * 60 - el)
+            # 没写依赖、超了估时的占位任务同 worker 的 run_end：剩余按 overrun_left，不当“马上结束”
+            e = (j["est_min"] or 0) * 60
+            rem = (max(0.0, pl["t1"] - t) if pl and pl.get("t1") else overrun_left(el) if e and el > e and not j.get("deps")
+                   else max(0.0, e - el))
             j["eta_source"] = j["dur_src"] if j.get("deps") else "暂停（等条件放行，时长按估时猜）"
         elif j["dur_min"] is not None:
-            rem = max(0.0, j["dur_min"] * 60 - el)
+            # 超了估时又看不出进度：剩余按 overrun_left（已用的 20%、至少 10 分钟，与 worker 的 run_end 同一口径），不写 0（#138）
+            rem = j["dur_min"] * 60 - el if j["dur_min"] * 60 >= el else overrun_left(el)
             j["eta_source"] = j["dur_src"] if j["dur_min"] * 60 >= el else "已超估时"
             if j["dur_min"] * 60 < el:
                 j["overrun_min"] = (el - j["dur_min"] * 60) / 60   # 页面据此显示“超估时 +N 分”，而不是停在 100%
@@ -1078,8 +1082,8 @@ def _attempts(snap: dict, pid: str, t: float) -> list[dict]:
 
 
 def overrun_left(el: float) -> float:
-    """剩余时长说不准时的估计（秒）：已用 el 秒的 OVER_FRAC、至少 OVER_MIN_S。第一段只有一个步数 > 0 的采样、又没有估时或已超估时
-    时用它（_segment_eta）。与 worker 的 overrun_left（run_end：运行中任务超了预计）同一口径；worker 在服务器上跑、不 import 本包，
+    """剩余时长说不准时的估计（秒）：已用 el 秒的 OVER_FRAC、至少 OVER_MIN_S。已超估时又看不出进度（没有进度行、进度停了）时，
+    以及第一段只有一个步数 > 0 的采样、又没有估时或已超估时时用它（_job_times、_segment_eta；#138 前前一种写 0）。与 worker 的 overrun_left（run_end：运行中任务超了预计）同一口径；worker 在服务器上跑、不 import 本包，
     各一份，改一处要改另一处。"""
     return max(OVER_MIN_S, OVER_FRAC * el)
 
@@ -1116,7 +1120,8 @@ def _segment_eta(pr, samples: list, seg: dict | None, el: float, floor: float | 
         out = (floor * 60 - el, "估时（多段任务，进度只算当前这段）", out[2])
     if out is None and pr and (stale or is_multi) and not hold:
         if floor:
-            out = (max(0.0, floor * 60 - el), ("估时（这段不打进度）" if stale else "估时（刚换段）") if floor * 60 >= el else "已超估时", None)
+            # 超了估时：剩余按 overrun_left，不写 0（否则预计结束总是“现在”，后面的任务每轮往后滑，#138）
+            out = (floor * 60 - el, "估时（这段不打进度）" if stale else "估时（刚换段）", None) if floor * 60 >= el else (overrun_left(el), "已超估时", None)
         elif d:
             out = (d * (pr[1] - pr[0]) / (pr[0] - a[1]), "进度（停了一阵）", None)
         elif single:
