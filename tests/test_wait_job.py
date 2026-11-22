@@ -300,6 +300,19 @@ class CmdWaitJobTest(_Base):
             self.assertIn("装不上", err.getvalue())
             self.assertIn("[client_outdated]", err.getvalue())
 
+    def test_take_survives_update(self):
+        # #142 审查：--take 还没生效（第一轮就 426）时自动更新，exec 起来的新版本照样带 --take
+        commit = "b" * 40
+        bin_path = self.d / commit / "bin" / "labmon"
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+             mock.patch.object(M.client, "call", side_effect=M.client.Failed(426, "跑 labmon update", {"commit": commit})), \
+             mock.patch.object(M.dist, "installed", return_value=True), \
+             mock.patch.object(M.client, "install_update", return_value=(commit, M.dist.Installed(bin_path, bin_path, None, []))), \
+             mock.patch.object(M.os, "execve", side_effect=RuntimeError("exec")) as execute, contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                M.cmd_wait(str(self.d / "m.toml"), ["x"], take=True)
+        self.assertEqual(execute.call_args.args[1][1:], ["wait", "-c", str(self.d / "m.toml"), "--job=x", "--take"])
+
     def test_unknown_version_only_hints_once(self):
         # #17：看板认不出这个客户端的版本（unknown）：不拦、不自动换包，stderr 提示一次
         polls = [{"client_status": "unknown", "commit": "b" * 40, "jobs": [{"name": "x", "text": "运行中"}]}] * 2 + \
