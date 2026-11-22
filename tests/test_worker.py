@@ -4912,6 +4912,40 @@ class DurationTest(unittest.TestCase):
         self.assertEqual(w.durs["k"]["vit_s44"]["min"], 300)
         self.assertEqual(w.durs["k"]["vit_s42"]["src"], "清单估时")      # 在跑的自己：不拿自己的进度估自己
 
+    def test_concurrency_by_ratio(self):
+        # #138：以前容差是“最接近的差 + 1”，单跑（conc 1）与两条挤一张卡（conc 2）落在一档，k=1、2、4 都给 120；按比例的差 |c − k| / k 分开
+        hist = [self.rec("a_s%d" % i, 60.0, 60, conc=1.0) for i in range(3)] + [self.rec("a_s%d" % (i + 3), 120.0, 60, conc=2.0) for i in range(3)]
+        self.assertEqual([self.dur(hist, "a_s9", 60, k=k)["min"] for k in (1, 2, 4)], [60.0, 120.0, 120.0])
+        self.assertEqual(self.dur(hist + [self.rec("a_s7", 70.0, 60, conc=1.2)], "a_s9", 60)["min"], 60.0)   # 按时间加权的 1.2 仍算单跑那一档
+        # 只有 1 条对得上：同类用它（不被更多挤着跑的淹掉）；借比值的各档至少 2 条，放宽到第 2 近的
+        one = [self.rec("a_s1", 60.0, 60, conc=1.0)] + [self.rec("a_s%d" % i, 120.0, 60, conc=2.0) for i in range(2, 6)]
+        self.assertEqual(self.dur(one, "a_s9", 60)["min"], 60.0)
+        self.assertEqual(self.dur(one, "b_s9", 60)["src"], "本项目近 5 个 实际/估时 ×2.00")
+        self.assertEqual(self.m.near(one, 1, 5, 2), one)
+
+    def test_running_row_by_own_concurrency(self):
+        # #138 多主机：别的主机（29）记了单跑 60 分钟（conc 1）与 4 条挤一张卡 300 分钟（conc 4）；本机卡 0 上 4 条在跑、卡 1 空着（k_now = 1）。
+        # 写进状态给看板的时长：排队的按 k_now（60），运行中那一行按它自己的 k（k_of = 4 → 300），与 run_end 同一个；以前也写 60，看板 60 分钟后报已超估时
+        h = Hosts(self.d / "hosts")
+        try:
+            qs = h.queues({"bp": ["v_s1|true   # est_min=60", "v_s2|true   # est_min=60"]})
+            h.usage("29", [self.rec("v_s%d" % (10 + i), 60.0, 60, conc=1.0) for i in range(3)]
+                    + [self.rec("v_s%d" % (20 + i), 300.0, 60, conc=4.0) for i in range(3)])
+            w = h.worker("t")
+            w.info = {"gpus": [{"i": 0, "uuid": "G0"}, {"i": 1, "uuid": "G1"}]}
+            w.running = {"bp": {"key": "bp", "kind": "queue", "name": "v_s1", "project": "bp", "est_min": 60.0, "tag": None, "q": qs[0],
+                                "t0": h.now() - 600, "gpus": ["G0"], "use": {"conc": 4.0}}}
+            w.running.update({"o%d" % i: {"key": "o%d" % i, "kind": "slot", "name": "o_%d" % i, "project": "x", "t0": h.now(), "gpus": ["G0"]} for i in range(3)})
+            self.assertEqual((w.k_now(), w.k_of(w.running["bp"])), (1, 4.0))
+            w.queue_durs(qs)
+            self.assertEqual((w.durs["bp"]["v_s1"]["min"], w.durs["bp"]["v_s2"]["min"]), (300.0, 60.0))
+            self.assertEqual(w.run_end(w.running["bp"], h.now()), w.running["bp"]["t0"] + 300 * 60)
+            w.running["bp"]["use"]["conc"] = 1.0                                  # k 变了（取整后）：缓存失效、重算
+            w.queue_durs(qs)
+            self.assertEqual(w.durs["bp"]["v_s1"]["min"], 60.0)
+        finally:
+            h.close()
+
     def test_conc_across_hosts(self):
         # #67 多主机：别的主机的用量行带的 conc 一样认。29 上挤着跑（并行 6 条，60 分钟）、借来的主机上单跑（20 分钟）；
         # 本机卡上已有 5 条在跑（k_now = 6）时，排队的按挤着跑的记录估

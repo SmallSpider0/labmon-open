@@ -133,6 +133,9 @@ class OverrunAndSkewTest(Base):
         self.assertEqual(run["eta_source"], "已超估时")
         self.assertAlmostEqual(run["overrun_min"], 6, delta=0.5)   # 已跑 10 分、估时 4 分
         self.assertTrue(snap["lanes"][0]["overrun"])
+        # #138：超了估时又没进度，剩余按 overrun_left（已用的 20%、至少 10 分钟，同 worker 的 run_end），不写 0（以前 eta_ts 就是这一轮的现在）
+        self.assertAlmostEqual(run["remaining_min"], 10, delta=0.01)
+        self.assertAlmostEqual(run["eta_ts"], snap["generated"] + 600, delta=1)
 
     def test_fs_skew_corrected(self):
         st = self.root / "state"

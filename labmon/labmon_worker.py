@@ -148,6 +148,7 @@ CPU_SHRINK_N = 3         # 写了 cpus= 的同类至少这么多次跑下来（�
 UTIL_FULL = 90           # 卡近 UTIL_WIN_S 的利用率不低于这个 % 算吃满：offers 的同机多开车道不往它上面放（Worker.local_cards，#43；同卡 1 条车道常只到六七成，3–4 条才近满）
 UNDER_WIN_S = 1800       # offers 的 room：能放的卡近这么久的「吃满程度」平均（样本不满这么久为 None），看板据此判这台吃不满、提示多开车道（#145）
 ROOM_MAX = 32            # offers 的 room：此刻至多数到能再开这么多条车道（Worker.lane_room）
+NEAR_TOL = 0.25          # 按同卡并行数挑记录（near）：与 k 按比例的差 |c − k| / k 在最接近的那条再多这么多以内算同一档（#138：1 条与 2 条并行分开）
 CONC_MAX = 12           # 按同卡并行数挑同类记录（duration 的 k）时封顶到这么多（推演里查表、缓存用）
 FORECAST_S = 7 * 86400   # 推演（simulate）往后排多远
 FORECAST_EVERY = 120     # 推演的输入没变时多久重算一次（在跑的超了预计，后面的跟着往后挪）
@@ -256,7 +257,7 @@ def flock(path, *, required=False):
 
 def overrun_left(el):
     """剩余时长说不准时的估计（秒）：已跑 el 秒的 OVER_FRAC、至少 OVER_MIN_S，不当“马上结束”（否则后面任务的预计开始永远是“现在”，每轮往后滑）。
-    run_end 用；看板 collect.overrun_left 同一口径（进度刚开始、没估时或已超估时），worker 不 import 本包，各一份，改一处要改另一处。"""
+    run_end 用；看板 collect.overrun_left 同一口径（已超估时又看不出进度；进度刚开始、没估时或已超估时），worker 不 import 本包，各一份，改一处要改另一处。"""
     return max(OVER_MIN_S, OVER_FRAC * el)
 
 
@@ -3218,7 +3219,10 @@ class Worker:
             if h:
                 j["deps"], j["deps_any"] = h["deps"], h["deps_any"]
         kn, runs = self.k_now(), self.run_tot()
-        key = (self.hist_v, self.model(), tuple(sorted((k, c[0]) for k, c in lists.items())), kn, tuple(sorted((k, tuple(v)) for k, v in runs.items())))
+        # 运行中任务那一行按它自己的 k（k_of，同 run_end；dur_k 按取整的 k 缓存）：看板据它算剩余、写回 eta.json，不能按给新任务的 k_now（#138）
+        rk = {k: conc_key(self.k_of(j)) for k, j in self.running.items() if not is_hold(j["name"])}
+        key = (self.hist_v, self.model(), tuple(sorted((k, c[0]) for k, c in lists.items())), kn, tuple(sorted((k, tuple(v)) for k, v in runs.items())),
+               tuple(sorted((k, self.running[k]["name"], c) for k, c in rk.items())))
         if key == self.durs_key:
             return
         self.durs_key = key
@@ -3226,8 +3230,9 @@ class Worker:
         for q in queues:
             out = self.durs[q["key"]] = {}
             est = self.qest[q["key"]] = {}
+            j = self.running.get(q["key"]) if q["key"] in rk else None
             for n, h in lists.get(q["key"], (0, []))[1]:
-                d = self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"]))(kn)
+                d = self.dur_k(j)(rk[q["key"]]) if j and j["name"] == n else self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"]))(kn)
                 if d:
                     out[n] = dict(d, min=round(d["min"], 1))
                 k = (q["key"], h["tag"], base_name(n), h["ram"], h["vram"], h["cpus"])      # 同类任务的估计一样，清单长时省得每个都扫一遍历史
@@ -3267,7 +3272,7 @@ class Worker:
         ck = (x["project"], x["name"], x["est_min"], x["tag"], x["root"], x["queue"])
 
         def f(k):
-            k = min(CONC_MAX, max(1, int(round(k))))
+            k = conc_key(k)
             c = self.durk.get(ck + (k,), 0)
             if c == 0:
                 c = self.durk[ck + (k,)] = duration(self.hist, x, self.model(), k, run)
@@ -5942,14 +5947,24 @@ def rec_conc(h):
     return None if [x for x in h.get("with_gpu") or [] if x != "GPU 保活"] else 1.0
 
 
-def near(hs, k, n):
-    """按同卡并行数挑记录（duration 用）：知道并行数的里，与 k 的差不超过最接近的那条再多 1 的，取最新的 n 条；
+def near(hs, k, n, need=1):
+    """按同卡并行数挑记录（duration 用）：知道并行数的里按比例的差 |c − k| / k 取与 k 最接近的那一档（差不超过最接近的那条再多 NEAR_TOL），
+    这一档不到 need 条时放宽到第 need 近的那条再多 NEAR_TOL；取其中最新的 n 条。同类那一支 need=1（有一条并行数对得上的就用它），
+    借比值的各档 need=2（各档至少要 2 条）。以前按绝对差“最接近的 + 1”，1 条与 2 条并行总落在一起，k=1 也取挤着跑的（#138）。
     都不知道并行数（11-09 前的、挤着跑的旧行）时取最新的 n 条。保持原来的先后。"""
-    known = [(h, rec_conc(h)) for h in hs if rec_conc(h) is not None]
+    known = [(h, abs(c - k) / k) for h in hs for c in [rec_conc(h)] if c is not None]
     if not known:
         return hs[-n:]
-    d = min(abs(c - k) for _, c in known)
-    return [h for h, c in known if abs(c - k) <= d + 1.0][-n:]
+    ds = sorted(d for _, d in known)
+    lim = ds[0] + NEAR_TOL
+    if sum(d <= lim + 1e-9 for d in ds) < need:
+        lim = ds[min(need, len(ds)) - 1] + NEAR_TOL
+    return [h for h, d in known if d <= lim + 1e-9][-n:]
+
+
+def conc_key(k):
+    """同卡并行数取整、封顶到 [1, CONC_MAX]：Worker.dur_k 按它缓存，queue_durs 的缓存键也按它（k_of 是按时间加权的小数，每轮都在变）。"""
+    return min(CONC_MAX, max(1, int(round(k))))
 
 
 def card_conc(j, on, jobs):
@@ -6015,7 +6030,7 @@ def duration(hist, r, model=None, k=1, run=None):
         + ([("同一清单", lambda h: (h.get("root"), h.get("queue")) == (r["root"], r["queue"]))] if r.get("root") and r.get("queue") else []) \
         + [("本项目", lambda h: True)]
     for label, f in tiers:
-        pr = near([h for h in rated if f(h)][-2 * RATIO_N:], k, RATIO_N)
+        pr = near([h for h in rated if f(h)][-2 * RATIO_N:], k, RATIO_N, 2)
         if len(pr) >= 2:
             q = statistics.median(h["min"] / h["est_min"] for h in pr)
             return {"min": e * q, "src": "%s近 %d 个 实际/估时 ×%.2f" % (label, len(pr), q),
