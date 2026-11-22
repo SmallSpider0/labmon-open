@@ -15,7 +15,7 @@
     labmon check   -c monitor.toml                          看板按它校验配置、打出各主机的探针规格；末尾列出与看板上那份的同步状态、wait 还没报过的看板页面上的改动
     labmon wait    -c monitor.toml                          等告警：每轮先与看板上的配置同步，再问看板（长轮询），出现新告警（含借到卡等全局消息）或采集停了即退出（退出码 1）
     labmon wait    -c monitor.toml --job 任务 [--job 项目/任务 …]   同时等这些任务跑完（问看板）：都有结果时退出，全成功 0、其余 4；告警照常退出 1；
-                                                            连不上看板超过采集停了的门槛以 server_unreachable 告警退出（1）
+                                                            连不上看板不退出、连回来报 server_back；连着 1 小时连不上才以 server_unreachable 告警退出（1）
                                                             一个项目只让一个会话等：已有别的会话在等时拒绝（退出码 3）；--take 改由本会话等（那边下一轮退出）
     labmon host list | return <id> [--at 时间 | --now] | restore <id>  用户级主机清单：查看、标记已归还（借来的：跑完就还）、恢复在用（借来的：撤销跑完就还）；改的要 admin 令牌
     labmon borrow [<组内服务器> [--until "明天 18:30"] [--for a1,b] [--away]]   借来给自己的项目跑（见 borrow.py；--away 对方说好约定前不用；要 admin 令牌）；不给参数列出在借的
@@ -335,6 +335,7 @@ def _sync(cfg_path: str) -> dict:
 
 WAIT_RESUME = "_LABMON_WAIT_RESUME"
 WAIT_UPDATE_RETRY_S = 300
+WAIT_OFFLINE_MAX_S = 3600   # wait 连着连不上看板这么久才退出一次（#154）；过了 stale_limit 只提示一次、接着退避重试
 
 
 def _wait_resume(cfg_path: str, jobs: list[str]) -> dict:
@@ -399,7 +400,8 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None, take: bool = False) -
     否则看板那边挂着等（最多 HOLD_MAX 秒）。告警照常唤醒（退出 1，另列各任务此刻的状态；同一轮任务也都有了结果时照样 1），
     任务都有了结果、没有新告警时退出：全部成功 0，否则 JOB_BAD_RC。
     每轮先与看板上的配置同步（_sync：推了、拉了打一行；两边都改了、推不上当告警报一次；看板上没登记的、第一轮配置就不对的退出 3）。
-    连不上看板退避重试；连续连不上超过 config.stale_limit（按本地 monitor.toml 的采集间隔与 stale_min，与 collector_stale 同一门槛）以 server_unreachable 告警退出 1。
+    连不上看板退避重试，不退出（#154）：连续连不上超过 config.stale_limit（按本地 monitor.toml 的采集间隔与 stale_min，与 collector_stale 同一门槛）往 stderr 提示一次，
+    连回来的那一轮多报一条 server_back（退出 1）；连着满 WAIT_OFFLINE_MAX_S 才以 server_unreachable 告警退出 1。
     回话丢在半路时带同一个请求号重试（看板回上次那份，已记成报过的告警不会漏）；等的任务的内部状态（watch）每轮带回看板。
     每轮带会话标识（client.session_id）：一个项目只让一个会话等，别的会话已在等时看板回 409、以 3 退出；take（--take）只在第一轮带上，改由本会话等（#142）。"""
     try:
@@ -419,7 +421,7 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None, take: bool = False) -
     else:
         print(f"[labmon] 等告警：每轮先同步一次 {cfg_path}，再问看板 {b['id']} 有没有告警（看板那边最多挂 {HOLD_MAX}s）", flush=True)
     first, synced, watch = not saved, bool(saved), saved.get("watch")
-    rid, down, back, sess = uuid.uuid4().hex, None, 1.0, client.session_id()
+    rid, down, back, sess, told = uuid.uuid4().hex, None, 1.0, client.session_id(), False
     retry_commit, retry_at, hinted = None, 0.0, False
     while True:
         try:
@@ -448,16 +450,23 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None, take: bool = False) -
         except client.Unreachable as e:
             now = time.time()
             down = down or now
-            if now - down > limit:
+            if now - down > WAIT_OFFLINE_MAX_S:
                 print(f"[labmon] {fmt_time(now)} 新告警 1 条", flush=True)
-                print(f"  - [server_unreachable] 连不上看板服务已 {(now - down) / 60:.0f} 分钟：{e}。先看网络与看板服务（TX 隧道、看板那台机器），"
-                      f"等它回来再挂 labmon wait；别绕开看板去直接操作服务器", flush=True)
+                print(f"  - [server_unreachable] 连不上看板服务已 {(now - down) / 60:.0f} 分钟：{e}。告诉用户先看网络与看板服务（TX 隧道、看板那台机器），"
+                      f"然后马上重挂 labmon wait（它自己退避重试，断网时不会退出，连着 {WAIT_OFFLINE_MAX_S // 60} 分钟连不上才退一次）；别绕开看板去直接操作服务器", flush=True)
                 return 1
+            if now - down > limit and not told:
+                told = True
+                print(f"[labmon] {fmt_time(now)} 连不上看板服务已 {(now - down) / 60:.0f} 分钟：{e}；接着重试，连回来报 server_back", file=sys.stderr, flush=True)
             time.sleep(back)
             back = min(back * 2, client.BACKOFF_MAX)
             continue
-        down, back, rid, take = None, 1.0, uuid.uuid4().hex, False
         watch, new, st, done = res.get("watch"), res.get("new") or {}, res.get("jobs") or [], bool(res.get("done"))
+        if told:                                       # 这段断网过了门槛：连回来的这一轮叫醒会话，回头看有没有错过的事
+            now = time.time()
+            new = {"server_back": f"看板服务又连上了：{fmt_time(down)} 到 {fmt_time(now)} 连不上（{(now - down) / 60:.0f} 分钟）。这期间出现又消失的告警不会再报，"
+                                  "用 labmon status、labmon check 看看有没有错过的事（任务失败、借到卡、页面上的改动）", **new}
+        down, back, rid, take, told = None, 1.0, uuid.uuid4().hex, False, False
         if res.get("client_status") == "unknown" and not hinted:       # 比不出先后（比看板新、分支上跑）：不拦、不换包，提示一次（#17）
             hinted = True
             print(f"[labmon] 看板认不出这个命令行的版本（{dist.short(dist.version())}，看板在跑 {dist.short(res.get('commit'))}）："

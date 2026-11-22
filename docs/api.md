@@ -309,7 +309,7 @@ labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # �
   否则挂着，相关文件（项目快照、全局快照、`projects.json`、被等的别的项目的快照）变了、或离上次判过 30 秒时再判一次，最多挂 25 秒（小于 TX 上 nginx 的 60 秒超时）。
 - “报过没有”照旧记在看板上这个项目输出目录的 `.labmon/wait_state.json`（同一项目几个会话共用）；`--job` 的确认状态（见过它在跑、确认了几份快照……）在 `watch` 里，命令行每轮带回，看板不记会话、重启不丢。
 - 请求号 `rid`：回话丢在半路时命令行带同一个号重试，看板 2 分钟内回上次那份，已记成报过的告警不会漏。同时挂着的最多 32 个，多了回 503、命令行退避；一个普通账号同时最多 8 个（`waits.ACCOUNT_SLOTS`，#18），多了回 429，命令行打出原因、退出 3（先停掉用不着的会话里的 wait），管理员只受 32 个的限。
-- 连不上看板退避重试；连续连不上超过 max(3×采集间隔, `stale_min`) + 1 分钟（`config.stale_limit`，与 `collector_stale` 同一门槛，按本地 monitor.toml）以新告警 `server_unreachable` 退出（退出码 1）。
+- 连不上看板退避重试、不退出（#154）：连续连不上超过 max(3×采集间隔, `stale_min`) + 1 分钟（`config.stale_limit`，与 `collector_stale` 同一门槛，按本地 monitor.toml）往 stderr 提示一次，接着按 `client.BACKOFF_MAX` 退避；请求号与 `watch` 照旧带着。连回来的那一轮多报一条 `server_back`（只给会话，写断了多久，提醒看 `labmon status`、`labmon check`；没过门槛的闪断不报），退出 1。连着满 1 小时（`__main__.WAIT_OFFLINE_MAX_S`）才以 `server_unreachable` 退出 1，消息写着马上重挂。
 - 第一轮推配置就被看板拒（配置不对）照以前“配置错误”退出 3；之后各轮推不上当一条 `sync_error:` 报一次。
 - 一个项目只让一个会话等（#142，`waits._claim`）：命令行每轮带会话标识 `session`（`client.session_id`：`LABMON_SESSION`、`CLAUDE_CODE_SESSION_ID`，都没有时取跳过 shell 与包装后的第一个祖先进程，按主机名、PID、启动时刻算；只发 16 位哈希）。
   `wait_state.json` 的 `holder` 记着此刻等这个项目的会话；别的会话来回 409（判告警之前挡，不领告警），命令行打出原因、退出 3，并记进 `refused`，项目快照据此给用户一条 `wait_dup:`。
