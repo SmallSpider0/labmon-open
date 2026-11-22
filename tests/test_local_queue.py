@@ -1018,6 +1018,14 @@ class ProgressTest(unittest.TestCase):
                 self.assertEqual(r[1], "进度")
                 self.assertAlmostEqual(t + r[0], end, delta=1)
 
+    def test_speed_eta_passed_not_zero(self):
+        """#140 与 #138 同一口径：外推的结束已过、任务还在跑（没到停了一阵）时剩余不写 0，剩下的步数按这个速度从现在起算。"""
+        ss = [[60.0 * k, 10 * k, 100] for k in range(1, 10)]           # 每分钟 10 步，最后一次 90/100 在 540 秒
+        seg = {"t0": 60.0, "i0": 10, "k": 1}
+        r = C._segment_eta([90, 100], ss, seg, 1000.0, None, False, 1000.0)   # 外推 600 秒跑完，此刻 1000 秒仍在跑
+        self.assertEqual(r[1], "近期速度")
+        self.assertAlmostEqual(r[0], 60.0, delta=1)
+
     def test_speed_eta_skips_suspended_after_sample(self):
         """#140 审查：最后一个采样之后挂起了 5 分钟，这段不算在跑，预计结束跟着往后挪 5 分钟（剩余不因挂起变少）。"""
         ss = [[600.0 * k, 10 * k, 100] for k in range(1, 3)]            # 每 10 分钟 10 步，此刻 20/100
