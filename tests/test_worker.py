@@ -2836,6 +2836,16 @@ class PoolListTest(UnitBase):
         self.assertEqual((h["head"], h["n"], h["dep"]), (None, 0, None))
 
 
+    def test_pool_heads_par_window(self):
+        # Codex 审 #159 第四轮：池里的并行清单（par=2）A after=B 在前、B 独立：队首取窗口里依赖满足的 B，不把 A 判成 B 排在它后面的环、挡住整条
+        Path(self.q["jobs_path"]).write_text("# labmon: par=2\nA|true   # gpus=1 after=B\nB|true   # gpus=1\n")
+        rc, out = self.add()
+        self.assertEqual(rc, 0, out)
+        self.w.tick([], True)
+        k = "%s|jobs/q.txt" % os.path.normpath(self.q["root"])
+        h = json.loads(Path(self.w.p.status).read_text())["pool_heads"][k]
+        self.assertEqual((h["head"], h["n"], h["dep"]), ("B", 2, None))
+
 class SelfPoolTest(UnitBase):
     """入池的自用主机（#79）：看板把池清单放到这台时 worker add --pool，登记里记 pool；它与主人自己的清单在同一台按人的份额排（不另设优先），
     状态的 queues、todo 带 pool，offers 不叫会话挪它（落点由看板定）。"""
@@ -3558,6 +3568,20 @@ class ParallelListTest(UnitBase):
         self.assertEqual(round(plan["g0"]["t1"] - now), 600, plan)
         t0s = sorted(round(plan[n]["t0"] - now) for n in ("g1", "g2", "g3"))
         self.assertEqual(t0s, [600, 600 + 1800, 600 + 3600], plan)
+
+    def test_stage_one_copy_per_target(self):
+        # Codex 审 #159 第四轮：并行清单两行 needs= 同一个本地文件：另一行正在拷它时这一行不另起一份拷贝（同写一个 .part），等它拷完
+        gate = threading.Event()
+        th = threading.Thread(target=gate.wait, daemon=True)
+        th.start()
+        dst = os.path.join(self.hosts.d, "local", "f.bin")
+        self.w.stagers[("k|a", "a")] = {"th": th, "t0": time.time(), "n": 1, "out": {}, "dst": {dst}}
+        try:
+            why = self.w.stage_bg({"key": "k|b", "name": "b"}, [(os.path.join(self.hosts.d, "src.bin"), dst)])
+            self.assertIn("正在拷同一个本地依赖", why)
+            self.assertNotIn(("k|b", "b"), self.w.stagers)
+        finally:
+            gate.set()
 
     def test_move_rest_keeps_running_end(self):
         # Codex 审 #159 第二轮：并行清单里先开跑的长任务比后面的行晚跑完：挪走队尾后原处剩下的仍要等它（rest 取在跑与剩下的行里最晚的）

@@ -2828,18 +2828,29 @@ class Worker:
         idx.update((k, "pending") for k in where)
         self.dep_idx, self.dead, self.dep_where, self.dep_lanes = idx, {k for k, v in idx.items() if v == "failed"}, where, lanes
         want = ({(p, x) for ln in self.todo for ds in ln["deps"].values() for p, x in ds} | {k[:2] for r in reqs for k in dep_keys(r)}
-                | {k[:2] for r in self.pool_heads for k in dep_keys(r)})
+                | {k[:2] for r in self.pool_heads for x in [r] + [dict(h, project=r["project"]) for _, h in r.get("win") or ()] for k in dep_keys(x)})
         self.dep_miss = {k: t for k, t in self.dep_miss.items() if k in want and k not in idx}
 
     def pool_view(self, now):
-        """算力池里待放的各清单还要跑的（#25）：{"目录|清单": {head 队首, n 还要跑几行, dep 队首的依赖没满足时 [状态, 原因]（dep_block），held 清单暂停,
+        """算力池里待放的各清单还要跑的（#25）：{"目录|清单": {head 队首（并行清单取窗口里第一行依赖满足的，#147）, n 还要跑几行, dep 队首的依赖没满足时 [状态, 原因]（dep_block），held 清单暂停,
         elsewhere 交给池之前在别的主机放行、还没收尾的那一格 [主机, 任务]（不算在 head、n 里，#80）}}；
         池里登记着的每条都列（#86）：都跑完了的 head 为 null、n 为 0；这台读不到清单文件的另带 err（一句原因，head 为 null）。
         池目录没有 worker：同一 worker_home 下各台的 worker 都按自己的 dep_state 算一份写进状态的 pool_heads，看板（pool._heads）逐条取最新的那份
         （读得到的优先）：哪一份里都没有的是还没有 worker 读到，不当成跑完了；有行要跑、依赖满足、没暂停、没有 elsewhere 的才放、才为它借。"""
-        return {"%s|%s" % (os.path.normpath(r["root"]), r["queue"]): dict({"head": r["name"], "n": r["n"], "held": r["held"], "elsewhere": r["elsewhere"],
-                                                                           "dep": list(self.dep_block(r, now) or ()) or None if r["name"] else None},
-                                                                          **({"err": r["err"]} if r.get("err") else {})) for r in self.pool_heads}
+        def head(r):                              # 并行清单（#147）取窗口里第一行依赖满足的；都没满足报第一行的
+            blk = None
+            for n, h in r.get("win") or [(r["name"], r)]:
+                b = self.dep_block(dict(r, name=n, deps=h.get("deps"), deps_any=h.get("deps_any")), now)
+                if not b:
+                    return n, None
+                blk = blk or b
+            return r["name"], list(blk)
+        out = {}
+        for r in self.pool_heads:
+            n, dep = head(r) if r["name"] else (None, None)
+            out["%s|%s" % (os.path.normpath(r["root"]), r["queue"])] = dict({"head": n, "n": r["n"], "held": r["held"], "elsewhere": r["elsewhere"], "dep": dep},
+                                                                            **({"err": r["err"]} if r.get("err") else {}))
+        return out
 
     def dep_block(self, r, now):
         """请求写的依赖（dep_keys）还没都满足：返回 (状态, 原因)，状态 wait（等的还在排、在跑）、failed（after= 等的跑失败了）、
@@ -3469,14 +3480,15 @@ class Worker:
             cur, other = away[0] if away else (None, None)
             ms, left = rows_left(q["state"], rows, {c[0] for c, _ in away})
             n, h = left[0] if left else (None, {})          # 队首：看板放之前看它还有没有、依赖满足没有（pool_view）；都跑完了的也列（n 为 0）
+            par = list_par(read(q["jobs_path"], "") or "")  # 并行清单（#147）：窗口里前 par 行哪一行依赖满足都能放
             self.pool_heads.append({"project": q["project"], "root": q["root"], "queue": q["jobs"], "name": n, "n": len(left),
                                     "deps": h.get("deps"), "deps_any": h.get("deps_any"), "held": "paused" if ms and "paused" in ms else None,
-                                    "elsewhere": [other, cur[0]] if other else None})
+                                    "elsewhere": [other, cur[0]] if other else None, "win": left[:par] if par > 1 else None})
             if not left:
                 continue
             ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [n for n, _ in left], "gang": {},
                   "deps": {n: [[p, x] for p, x, _ in d] for n, h in left for d in [dep_keys(dict(h, project=q["project"]))] if d},
-                  "held": "paused" if ms and "paused" in ms else None}
+                  "held": "paused" if ms and "paused" in ms else None, **({"par": par} if par > 1 else {})}
             out.append((POOL, 0.0, now, ln))
         return out
 
@@ -4880,10 +4892,15 @@ class Worker:
 
     def stage_bg(self, r, cp):
         """本地缺、共享盘有主副本的依赖在后台线程里拷（大文件要很久，不拖住这一轮 tick）：没在拷就起线程（共享盘慢时先推迟，io_yield）；
-        拷完收结果（记事件，失败返回原因、下一轮重拷）。返回这一轮的等待原因，拷好了为 None。"""
+        拷完收结果（记事件，失败返回原因、下一轮重拷）。别的请求正在拷同一个目标文件时不另起（同写一个 .part），等它拷完下一轮再看。
+        返回这一轮的等待原因，拷好了为 None。"""
         key, out = (r["key"], r["name"]), {}
         s = self.stagers.get(key)
         if s is None:
+            dst = {b for _, b in cp}
+            busy = sorted(b for k2, o in self.stagers.items() if k2 != key and o["th"].is_alive() for b in o.get("dst") or () if b in dst)
+            if busy:                              # 别的任务（并行清单的另一行、别的清单）正在拷同一个文件：同写一个 .part，等它拷完（#147）
+                return "另一个任务正在拷同一个本地依赖（%s），等它拷完" % "、".join(os.path.basename(b) for b in busy[:3])
             slow = self.io_yield(key, time.time())
             if slow:
                 return "%s，推迟拷 %d 个本地依赖（最多推迟 %d 分钟）" % (slow, len(cp), IO_YIELD_MAX_S / 60)
@@ -4894,7 +4911,7 @@ class Worker:
                 except OSError as x:
                     out["err"] = str(x)
             th = threading.Thread(target=run, daemon=True)
-            s = self.stagers[key] = {"th": th, "t0": time.time(), "n": len(cp), "out": out}
+            s = self.stagers[key] = {"th": th, "t0": time.time(), "n": len(cp), "out": out, "dst": dst}
             th.start()
         if s["th"].is_alive():
             return "正在从共享盘拷 %d 个本地依赖（已 %.0f 秒）" % (s["n"], time.time() - s["t0"])

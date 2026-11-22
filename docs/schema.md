@@ -195,7 +195,7 @@
   算力池借来的（#25）：`borrow.pool` 为真（`holder` 照写持有人，`by` 是「算力池」）；换了容器的那一轮另带 `gone: true`（`pool._returns` 标，工作台不重新拉起 worker）。
   自用主机（不是借来、换来的）另带 `lend`（#79，`pool.tick` 写的 `pool.lend_view`：`{on, hours, open, lent, returning, rest, say, mine: true, placed 此刻这台上池放的清单数, bar 不能入池的原因, holder}`；组内页 `fleet.mine[]` 的 `lend` 是同一份）。
   借来的主机的 `status.guest` 另有 `owner`（算力池用：对方超出预留的几项里去掉只因 `ka.sh` 停不了的保活超出的卡，算力池借的再加上有了对方 GPU 进程的卡；非空算主人回来了），各台状态另有 `pool_heads`：
-  `{"目录|清单": {head 队首, n 还要跑几行, held 清单暂停（"paused" 或 null）, dep 队首的依赖没满足时 [状态, 原因]（worker 的 dep_block）, elsewhere 交给池之前在别的主机放行、还没收尾的那一格 [主机, 任务]（不算在 head、n 里；没有为 null，#80）, err 这台读不到清单文件时的一句（没有不带，head 为 null）}}`，
+  `{"目录|清单": {head 队首（并行清单取窗口里第一行依赖满足的，#147）, n 还要跑几行, held 清单暂停（"paused" 或 null）, dep 队首的依赖没满足时 [状态, 原因]（worker 的 dep_block）, elsewhere 交给池之前在别的主机放行、还没收尾的那一格 [主机, 任务]（不算在 head、n 里；没有为 null，#80）, err 这台读不到清单文件时的一句（没有不带，head 为 null）}}`，
   算力池里登记着的每条清单（都跑完了的 head 为 null、n 为 0，#86）；`pool_t` 是这份 pool_heads 读池目录的时刻（epoch 秒，worker 每 60 秒读一次）。
   看板逐条合并池那个 worker_home 下各台的（`pool._heads`：没有 err 的优先，再取 `pool_t` 最晚的），哪一份里都没有的算还没有 worker 读到。
   `offers_kept` 只在这一轮读这台失败（`error`、`status_error`，没 `worker stop`）、沿用它上一轮的 offers 时出现：`{t 那份状态写下的时刻（本机时钟 epoch 秒）, offers}`，按 `STALE_S` 过期（`rebalance.keep_offers`）。
