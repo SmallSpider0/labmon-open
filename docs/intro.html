@@ -193,7 +193,7 @@ html { scroll-behavior: smooth; }
     <a href="#bounds">不做的事</a>
     <a href="#docs">文档</a>
     <div class="sub"><span>算法：</span>
-      <a href="#a-place">准入</a><a href="#a-order">放行顺序</a><a href="#a-sim">推演</a><a href="#a-dep">依赖与占位</a><a href="#a-gang">成组起跑</a><a href="#a-est">估计与时长</a><a href="#a-eta">按进度估结束</a><a href="#a-io">CPU 与读写</a><a href="#a-borrow">借用</a><a href="#a-rebal">负载均衡提示</a><a href="#a-ka">保活</a><a href="#a-renew">续租</a><a href="#a-down">掉线判定</a>
+      <a href="#a-place">准入</a><a href="#a-order">放行顺序</a><a href="#a-sim">推演</a><a href="#a-dep">依赖与占位</a><a href="#a-gang">成组起跑</a><a href="#a-par">并行清单</a><a href="#a-est">估计与时长</a><a href="#a-eta">按进度估结束</a><a href="#a-io">CPU 与读写</a><a href="#a-borrow">借用</a><a href="#a-rebal">负载均衡提示</a><a href="#a-ka">保活</a><a href="#a-renew">续租</a><a href="#a-down">掉线判定</a>
     </div>
   </nav>
 </header>
@@ -654,6 +654,34 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
     </div></details>
   </div>
 
+  <!-- 并行清单 -->
+  <div class="algo" id="a-par">
+    <h3>并行清单：一条清单同时跑几行<span class="tag"># labmon: par=N</span></h3>
+    <p class="prose">一批互不依赖的行要在一台上多条同时跑时，不用拆成几条清单：在清单里写一行 <code># labmon: par=N</code>，worker 按清单顺序取前几行同时跑，至多 N 行，跑完一行补一行。每行仍是一个普通请求，照常排队、算份额、回填。卡吃满了、容器在限流时不再加行，同一条清单两次加行至少隔 1 分钟，好让利用率反映刚加的那行。</p>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 760 200" role="img" aria-label="par=3 的清单：前三行同时在跑；第一行跑完后第四行补上；卡都吃满时第五行等着，原因写不再给这条清单加行">
+          <rect class="region" x="20" y="18" width="720" height="166" rx="8"/><text class="m" x="34" y="38">主机 29 · 清单 sweep.txt（par=3）</text>
+          <rect class="node-r" x="40" y="50" width="200" height="34" rx="6"/><text class="t" x="52" y="72">s1 在跑</text>
+          <rect class="node-r" x="40" y="92" width="300" height="34" rx="6"/><text class="t" x="52" y="114">s2 在跑</text>
+          <rect class="node-r" x="40" y="134" width="260" height="34" rx="6"/><text class="t" x="52" y="156">s3 在跑</text>
+          <rect class="node" x="250" y="50" width="220" height="34" rx="6"/><text class="t" x="262" y="66">s4 补上</text><text class="s" x="262" y="79">s1 跑完，窗口空出一格</text>
+          <rect class="node" x="490" y="92" width="230" height="34" rx="6"/><text class="t" x="502" y="108">s5 等着</text><text class="s" x="502" y="121">卡都吃满：不再给这条清单加行</text>
+        </svg>
+      </div>
+      <figcaption>par 只管登记的那一台，“一条清单只归一台”不变；要别的主机分担，照挪法建议或 <code>fit --list</code> 为那台另建清单。项目页车道名后写「并行 k/N」，同时在跑的格子分道画。</figcaption>
+    </figure>
+    <details><summary>细节：窗口、门槛、接管与推演</summary><div class="in">
+      <ul>
+        <li><b>窗口</b>：取“没标完、也没在跑”的前 N − 在跑行数行。等依赖的行照样占一格（N=1 时就是以前的“队首等依赖挡住整条清单”），所以写了 <code>after=</code> 的行排到后面；要先建一次缓存的，开头放一行建缓存、其余 <code>after=</code> 它。</li>
+        <li><b>加行门槛</b>：与 <code>fit</code>、同机多开车道同一条规则：容器在限流不加；只放到近 10 分钟利用率低于 90%、上面没有被 CPU 卡住的任务的卡上。不用卡的行只看准入。挡住时等待原因写明，不告警。</li>
+        <li><b>接管</b>：状态目录的 <code>current</code> 一行一个在跑的，worker 重启后几行都接管；进程没了又没有退出码的那一行记中断、重排。清单搬到别的主机时原主机把手上几行跑完，新主机等它们都结束。</li>
+        <li><b>推演</b>：每条清单同时排至多 N 行；加行门槛是此刻的信号，推演里当常量（门槛关着时按此刻在跑的行数排）。</li>
+      </ul>
+      <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/worker.md#并行清单">worker.md「并行清单」</a></p>
+    </div></details>
+  </div>
+
   <!-- 估计与时长 -->
   <div class="algo" id="a-est">
     <h3>资源估计与预计时长<span class="tag">estimate · duration</span></h3>
@@ -704,7 +732,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
     </figure>
     <details><summary>细节：同类怎么认、哪些记录算数</summary><div class="in">
       <ul>
-        <li><b>资源的同类</b>：同 tag，否则去掉种子编号后同名（<code>p1_sst2_bert_clean_s44</code> → <code>p1_sst2_bert_clean</code>）；都没有时显存、内存逐项用清单提示值，没写的那一项再看同一条队列（同一份清单里可以是完全不同的任务：新 tag 的大任务追加进跑过小任务的清单，以前按小任务的峰值估，一张卡同时放行几个、OOM，#61）。CPU 的同类仍是 同 tag › 同名 › 同队列。同时算出这类任务单跑时的平均 GPU 利用率，<code>fit</code> 只列出来、不据此劝阻（利用率到 100% 不等于算满，#67）；反过来，卡利用率低于 50% 而上面在跑的任务近 10 分钟跑满了给它的核，或容器在被限流，<code>fit</code> 说先加核、先减线程，不开新车道（#37）。<code>fit --list</code> 一次看整份清单，在共用 worker 目录的几台上按同一份准入逐行试，回答能再开几条车道。</li>
+        <li><b>资源的同类</b>：同 tag，否则去掉种子编号后同名（<code>p1_sst2_bert_clean_s44</code> → <code>p1_sst2_bert_clean</code>）；都没有时显存、内存逐项用清单提示值，没写的那一项再看同一条队列（同一份清单里可以是完全不同的任务：新 tag 的大任务追加进跑过小任务的清单，以前按小任务的峰值估，一张卡同时放行几个、OOM，#61）。CPU 的同类仍是 同 tag › 同名 › 同队列。同时算出这类任务单跑时的平均 GPU 利用率，<code>fit</code> 只列出来、不据此劝阻（利用率到 100% 不等于算满，#67）；反过来，卡利用率低于 50% 而上面在跑的任务近 10 分钟跑满了给它的核，或容器在被限流，<code>fit</code> 说先加核、先减线程，不开新车道（#37）。<code>fit --list</code> 一次看整份清单，在共用 worker 目录的几台上按同一份准入逐行试，回答能再开几条车道；登记的那台上的写进清单的 <code>par</code>（<a href="#a-par">并行清单</a>），别的主机上的另建清单。</li>
         <li><b>OOM 之后</b>（#62）：清单任务失败时 worker 认一下是不是 OOM（日志末尾是 CUDA OOM，或容器内存撞上限被杀），记进用量行。OOM 那次的峰值是被当时可用的量截住的，不当历史；同 tag、同名里最近一次跑成功之后的 OOM 给那一项下限 max(那次放行时的估计 ×2, OOM 时峰值 ×1.1)，几条取大，提示值写小了的同样抬高。峰值 10 秒一采，几十秒就 OOM 的常常采不全，所以两头都取。例：同队列估 7.1 GiB 的 ViT 一 OOM，下一次按 14.2 GiB 估，再 OOM 按 28.4，再往上按整卡；有一次跑成功（实测 15.9 GiB）就按 17.5 估，一张 47.5 GiB 的卡放两条。借来的主机上被对方挤掉的不算我们的 OOM。不自动重排：OOM 也可能是程序错误，照旧留 <code>.failed</code> 给实验会话看日志。</li>
         <li><b>CPU 封顶</b>：核数四舍五入、至少 1。清单写的 <code>cpus=</code> 不封顶，超过配额的写“放不下”，要改小；封顶只针对按历史估的（见下一条）与开跑导出的 <code>LABMON_CPUS</code>（封顶到配额向下取整）。</li>
         <li><b>CPU</b>：开跑时没设的 <code>OMP_NUM_THREADS</code>、<code>MKL_NUM_THREADS</code>、<code>OPENBLAS_NUM_THREADS</code> 缺省同 <code>LABMON_CPUS</code>（清单行或 <code>.env</code> 里写了的不盖），不再按宿主机核数起线程。按 <code>LABMON_CPUS</code> 设并行数的任务（含靠这个缺省的），历史峰值只会照着给它的核数长（给 1 核就只开 1 个），所以第一次要写 <code>cpus=</code>。按历史估的超过全停时能给的，按那整份算，原因里写估计与封顶后的核数。</li>
@@ -946,7 +974,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <li><b>接在哪</b>：任务在清单的目录下跑、读这条清单的 <code>.env</code>，所以只接到接收方这个项目里目录与 <code>.env</code> 都一样（<code>QUEUE_STATE</code>、<code>QUEUE_LOGS</code> 两行各写各的，不算）、预计最早跑完的那条清单后面，那条清单里有写了 <code>after=</code> 的行就插在它前面（清单顺序也算依赖，接在它后面会被堵住），挪来的几行里写了依赖的排在最后；没有就新建一条，那句话里写出整句 <code>labmon worker add &lt;主机&gt; &lt;原清单的目录&gt; 新清单 --project &lt;项目&gt;</code>，<code>.env</code> 照抄，但 <code>QUEUE_STATE</code> 与 <code>QUEUE_LOGS</code> 写这条自己的（原清单没有 <code>.env</code> 时也新建一个，只写这两行）；清单写全路径（同项目几个目录下常有同名清单），句尾写按几点的推演。</li>
         <li><b>谁接、谁能挪</b>：接收方 drain、只给别的项目用、项目暂停或在预备续租的不接（借来的主机上对方此刻超出预留不算）。原处推演里排不上、被约定归还、续租截止挡住或 drain 着、在原处跑不了的照样能挪，挪完推得出整批何时跑完就建议。借来的主机上对方此刻超出预留的清单照常推演，队首快开跑时同样不挪；推演里没有又说不出为什么、推演停在依赖上（等的任务跑不成或那台说不出何时跑完：挪走的行带着同样的 <code>after=</code>，不算原处跑不了）、或那台 worker 不在（续租、重启）的，原处何时放行不知道，整批推不出，不建议；已归还（含平台上关了机）的自用主机不算在内。</li>
         <li><b>同机挪到另一条早跑完的清单</b>（#110）：同一台上排得最晚的清单，队尾几行接到这台目录与 <code>.env</code> 都一样、预计最早跑完的另一条清单后面（有写了 <code>after=</code> 的行就插在它前面）。同卡只放得下两条、三条清单轮着跑时，最后一条常常排在别的后面、独自占着卡跑很久，卡空着一半，多半出这一种。车道数与同时跑的条数都不变，所以卡吃满了也算，只有提示值的行也挪；挑法、推演与门槛同跨主机的。建议句写“挪到同一台上另一条早跑完的清单（接在 X 后面）”。</li>
-        <li><b>同机多开一条车道</b>（#43）：同一台上排得最晚的清单，队尾几行剪到这台新开的一条车道也算一种挪法，同样的挑法、推演与门槛。只在卡有真余量时算：容器在限流、各卡近 10 分钟利用率都不低于 90%、利用率低的卡上在跑的被 CPU 卡住的都不出；只有清单提示值的 GPU 行不挪。挪来的那一行没有估时、算不出能提前多少时，另给会话一条 <code>rebalance:&lt;项目&gt;:est</code>，让它写 <code>est_min=</code> 或 <code>fit --list</code>。</li>
+        <li><b>同机多开一条车道</b>（#43）：同一台上排得最晚的清单，队尾几行剪到这台新开的一条车道也算一种挪法，同样的挑法、推演与门槛。只在卡有真余量时算：容器在限流、各卡近 10 分钟利用率都不低于 90%、利用率低的卡上在跑的被 CPU 卡住的都不出；只有清单提示值的 GPU 行不挪；这个项目有窗口没满的并行清单时不出（worker 自己会给它加行）。挪来的那一行没有估时、算不出能提前多少时，另给会话一条 <code>rebalance:&lt;项目&gt;:est</code>，让它写 <code>est_min=</code> 或 <code>fit --list</code>。</li>
         <li><b>门槛</b>：整批至少提前 max(15 分钟, min(1 小时, 剩余时间的 30%), 剩余时间的 10%)：剩 2 小时的批早 36 分钟就报，剩 10 小时以上的仍是 1 小时与 10%。报过建议的项目降到门槛一半以下才收；几台一样空时，上一轮建议的那台仍够门槛、跑完的时刻比最优的晚不到 15 分钟就沿用它。告警 key 带挪法（目标与最先挪的那一行，#109）：同一挪法一直在、多挪少挪一行都只叫醒一次，换了目标、换了清单、照做剪掉队尾后又建议接着挪才再叫醒；某台一轮读失败、<code>offers</code> 偶尔出错时沿用上一次的，不会消失一轮再出现、又叫醒一次。会话照做前看最新那句。</li>
         <li><b>接收方空着</b>（#62）：整批没有够门槛的挪法（被一个挪不动的长任务撑着，或整批何时跑完推不出），而有一台此刻没有 labmon 任务在跑、10 分钟内也没有要开跑的（只有保活），改按行比：挪过去的几行在这台都跑完的时刻比它们在原处最早跑完的那行早 15 分钟以上就报，挪得尽量多。这时挑行跳过说不出何时放行的清单（停在依赖上、那台 worker 不在）和队尾挪不动的清单，接着看别的清单。key 同样带挪法，句子写“X 上现在没有 labmon 任务在跑，这几行在原处最早几点才跑完，挪过来几点前都跑完”。</li>
         <li><b>吃不满</b>（#145）：GPU 半满或只剩保活、本项目还有排队行时，整批提前量常不到门槛（剩的行多、排程大致均匀），以前不报。现在一台卡有真余量、此刻还能多开车道（worker 按第一行的资源形状逐条试放，数出能再开几条），能放的卡近 30 分钟吃满程度低于 80%（报过的到 90% 才收），就算吃不满：它给的挪法整批早 15 分钟就报，早得更少的不报（只早几分钟的建议反复叫醒，会话会连大的一起忽略）。句首写“这几台吃不满，此刻合计还能多开 N 条车道，本项目还有约 M 行在排队：先 <code>fit --list</code> 看各台能开几条，照它把行摊开”，后面那批挪法只是例子。只因吃不满才报的 key 是 <code>rebalance:&lt;项目&gt;:room:&lt;主机&gt;</code>、不带第一行：照做剪了队尾不再叫醒，新空出一台才再叫醒。</li>

@@ -211,7 +211,7 @@ def queue_gpu_queue(q):
 
     - 清单 `<root>/<jobs>`：每行 `名称|命令`，# 开头为注释；行内 `est_min=N` 为估时（分钟）；
     - 清单旁同名 .env 里的 QUEUE_STATE / QUEUE_LOGS 给出状态目录与日志目录（相对 root）；
-    - 状态目录：lock（队列进程 PID）、current（`名称 子进程PID 开始日期 开始时刻 [放行的主机]`：放行的主机不是这台（q 的 me）时不查 PID、按在跑算）、<名称>.done / .failed、queue.log；
+    - 状态目录：lock（队列进程 PID）、current（一行一个在跑的任务，`名称 子进程PID 开始日期 开始时刻 [放行的主机]`：放行的主机不是这台（q 的 me）时不查 PID、按在跑算；并行清单有几行，#147）、<名称>.done / .failed、queue.log；
       paused（可选，内容为原因）：有意停掉队列时由人建，labmon 据此显示“已暂停”、不报队列进程不在；
       lock 只在 worker 跑这条队列的任务时才有：空着等资源的队列由 worker_view 认出（q 里带 worker），也不报；
     - 日志目录：<名称>.log，进度行形如 `PROGRESS i/N`。
@@ -251,9 +251,11 @@ def queue_gpu_queue(q):
         out["marks"] = {}
         out["skipped"] = True                    # 自动发现的清单久无活动：只报活动时间，省掉清单与日志
         return out
-    cur = read(os.path.join(state, "current"))
-    if cur:
-        p = cur.split()
+    out["current"] = []
+    for cl in (read(os.path.join(state, "current"), "") or "").splitlines():   # 一行一个在跑的任务（并行清单有几行，#147）
+        p = cl.split()
+        if not p:
+            continue
         c = {"name": p[0], "pid": int(p[1]) if len(p) > 1 and p[1].isdigit() else None,
              "t0": time.mktime(time.strptime(" ".join(p[2:4]), "%Y-%m-%d %H:%M:%S")) if len(p) >= 4 else None}   # 服务器本地时刻 → epoch
         who = p[4] if len(p) > 4 else None       # 放行的主机（worker 11-10 起写，#88）
@@ -278,7 +280,7 @@ def queue_gpu_queue(q):
         last = (body or lines or [None])[-1]
         c["last_line"] = last[-300:] if last else None
         c["log_mtime"] = mtime(lf) if os.path.exists(lf) else None
-        out["current"] = c
+        out["current"].append(c)
     est_re = re.compile(q.get("est_re", r"est_min=(\d+(?:\.\d+)?)"))
     for line in (read(os.path.join(root, q["jobs"]), "") or "").splitlines():
         if not line.strip() or line.lstrip().startswith("#") or "|" not in line:
@@ -326,7 +328,8 @@ def worker_view(path, stale):
     {清单路径: {"wait": 等待原因或 None, "held": 挡住它的临时指令种类或 None, "held_t": 那种指令最晚下的时刻（overrides 的 t）或 None,
     "dep": 依赖没满足（wait、failed、missing、cycle）或 None, "head": 队首等待项的任务名或 None,
     "cpu": 一直因 CPU 被挡满 10 分钟后已挡的秒数（worker 的 cpu_wait）或 None,
-    "dur": {任务: 预计时长}, "plan": {任务: {t0, t1, gpus, after, deps}}, "stuck": 推演里排不上的原因或 None}}，即它在管的队列；不在跑返回 {}。
+    "dur": {任务: 预计时长}, "plan": {任务: {t0, t1, gpus, after, deps}}, "stuck": 推演里排不上的原因或 None,
+    "par": 清单声明的并行数（#147，没写为 1）}}，即它在管的队列；不在跑返回 {}。等待原因等只取这条清单的第一条等待项（并行清单窗口里有几条，免得重复报）。
     队列的锁只在 worker 跑这条队列的任务时才有，空着等资源的队列靠这个认。预计时长是 worker 的 duration 算的；
     plan 是 worker 推演（forecast）出的预计开始与结束（同机各项目一起排），看板按它排预计时间。"""
     try:
@@ -339,7 +342,7 @@ def worker_view(path, stale):
     def key(root, jobs):
         return os.path.normpath(os.path.join(root or "", jobs or ""))
     out = {key(q.get("root"), q.get("jobs")): {"wait": None, "held": None, "held_t": None, "dep": None, "head": None, "cpu": None,
-                                               "dur": q.get("dur") or {}, "plan": {}, "stuck": None}
+                                               "dur": q.get("dur") or {}, "plan": {}, "stuck": None, "par": q.get("par") or 1}
            for q in st.get("queues", [])}
     ovt = {}                                    # 各种临时指令最晚下的时刻：告警 key 带它（drain:，#129），同种同目标再下一次就是新的
     for o in st.get("overrides") or []:

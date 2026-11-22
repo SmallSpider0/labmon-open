@@ -38,7 +38,7 @@
     "checks": [{"id": "keepalive", "label": "GPU 保活在跑", "state": "ok|fail|na", "out": "…", "detail": ["…"]}]
   }],                                           // 有交给算力池的清单时另有一项 {"id": "pool", "label": "算力池", "pool": true, "ok", "error"}（#24）：ok 是代读它的在用主机这轮读到了，其余字段都没有
 
-  "lanes": [{                                   // 一条车道 = 一条串行流水线
+  "lanes": [{                                   // 一条车道 = 一条清单（一次一行；写了 `# labmon: par=N` 的同时至多 N 行，#147）
     "id": "r9_a6000", "label": "车道 2", "host": "29", "type": "gpu_queue",   // 自动发现的车道 id 为 <队列 id>:<清单名>；只在 worker 登记里有的为 <目录末级名>/<清单>（#94）
                                                  // label：同机照配置顺序编号的车道名，配置里写了 label（用途）的接在后面
     "alive": true, "pid": 6341, "missing": false, "stale": false, "started": true,   // started=false：从没启动过，不报 lock_dead
@@ -50,6 +50,7 @@
     "head": null,                                // 队首等待项的任务名（worker 等待项的 name，探针取）：dep: 告警的 key 带它（#129）
     "stuck": null,                               // worker 推演里排不上的原因（放不下、截止前跑不完等）：此时 eta_ts 为 null
     "cpu_wait": null,                            // 队首一直因 CPU 被挡满 10 分钟后已挡的秒数（worker 的 cpu_wait，阈值只在 worker）：出 cpu: 告警
+    "par": 1, "running_n": 1,                    // 清单声明的并行数（worker 状态 queues[] 的 par，不归 worker 管的为 1）与此刻在跑几行（#147）；waiting、held、dep、head、cpu_wait 都取这条清单的第一条等待项
     "holding": false, "has_hold": false,         // 正在跑暂停任务 / 未完成任务里有暂停任务
     "state_dir": "/root/…/results/_queue",
     "logs_dir": "/root/…/results/_logs",         // 日志目录（探针按清单 .env 的 QUEUE_LOGS 解析，任务日志是 <logs_dir>/<任务>.log）；labmon wait --job 写结果位置用，#135 前的快照没有
@@ -154,6 +155,7 @@
 
 - `hosts[]` 每台在用主机一条：`error` 只表示连不上（进掉线判定）；`status_error` 是连得上但 `status.json` 读不出（半行、坏文件），页面另标，不算掉线，也不触发自动拉起 worker。
   `status` 是 worker 的 `status.json` 原样：`running[]` 的开始时刻是 `t0`（epoch 秒），等待项的 `start` 是推演的预计开始（epoch 秒），
+  `queues[]` 的 `par` 是清单声明的并行数（`# labmon: par=N`，没写为 1，#147）：并行清单在 `running[]`、等待项与 `plan.lanes[].jobs` 里同一条清单可有几项（车道仍按 `root`、`queue` 认），状态目录的 `current` 一行一个在跑的；
   等待项的 `miss` 为真表示缺本地文件又补不了（看板的提醒与主机页按它认，不按 `why` 的文字）；`dep` 是依赖没满足（`wait`，以及出提醒的 `failed`、`missing`、`cycle`，见 [worker.md「依赖」](worker.md#依赖)）；
   `dep_miss` 是依赖等的、哪里都找不到的任务与起算时刻 `[[项目, 任务, epoch 秒]]`（满 2 分钟才报找不到，worker 接管时从上一份状态找回，见 [worker.md「依赖」](worker.md#依赖)）；
   `todo` 是这台还会跑的任务（每条清单一项 `{project, root, queue, jobs 在跑的在前、其余按清单顺序, deps {任务: [[项目, 任务]]}, gang {任务: [组名, 人数（没写为 null）]}（成组的行，#180）, held paused|pause|drain|null}`，在跑、在等的单元各一项，root、queue 为 null；别的主机的依赖按它认，offers 按它取别的主机各清单还没跑的行）；`local[]` 的 `how` 是 `copy`（有主副本可拷）、`redo`（命令会自己重算）、`mixed` 或 null（补不了），

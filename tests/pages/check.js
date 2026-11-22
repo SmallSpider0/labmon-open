@@ -1612,6 +1612,28 @@ t("project", "时间线按主机分组：主机一行表头（利用率、事件
   run(A, 'TL.v = null; LS.set("tl", "week"); drawTimeline()');
   ok((el(A, "tlbox").innerHTML.match(/r="2.5"/g) || []).length === 3, "7 天里 srv-a 车道 1 跑了 probe、alpha，借 OWNER 车道 1 跑了 eval");
 });
+t("project", "#147 并行清单：车道名后标「并行 k/N」，同时在跑与排队的重叠格分道画（一行变高），串行车道照旧一道", () => {
+  const N = JSON.parse(JSON.stringify(PJ)), ld = "sw/jobs/sweep.txt", base = N.lanes[0];
+  N.lanes.push({...base, id: ld, label: "车道 3", root: "/data/me/proj-a/sw", queue: "jobs/sweep.txt", alive: true, paused: null, held: null, waiting: null, stuck: null,
+    par: 3, running_n: 2, total: 4, done: 0, failed: 0, unfinished: 4, eta_ts: NOW + 600});
+  const job = (i, st, kw) => ({id: `sweep_s${i}`, est_min: 8, status: st, lane: ld, hold: false, group: null, dur_min: 8, dur_src: "清单估时", ...kw});
+  N.jobs.push(job(1, "running", {start_ts: NOW - 360, elapsed_min: 6, speed: [], eta_source: "清单估时", remaining_min: 2, eta_ts: NOW + 120}),
+              job(2, "running", {start_ts: NOW - 180, elapsed_min: 3, speed: [], eta_source: "清单估时", remaining_min: 5, eta_ts: NOW + 300}),
+              job(3, "queued", {plan_start_ts: NOW + 120, eta_ts: NOW + 600}), job(4, "queued", {plan_start_ts: NOW + 300, eta_ts: NOW + 780}));
+  const A = pjCtx(N, EVN); run(A, `TL.v = {a: ${-1 * H}, b: ${1 * H}}; drawTimeline()`);
+  const tl = el(A, "tlbox").innerHTML; clean(tl, "时间线");
+  const labs = [...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
+  ok(labs.includes("车道 3 · sweep"), JSON.stringify(labs));                     // 分了两道：「并行 2/3」写在车道名下面一行
+  has(tl, ">并行 2/3</text>", "车道名下面的并行 k/N");
+  N.jobs = N.jobs.filter(j => j.id !== "sweep_s2" && j.id !== "sweep_s4"); N.lanes[N.lanes.length - 1].running_n = 1;
+  const B = pjCtx(N, EVN); run(B, `TL.v = {a: ${-1 * H}, b: ${1 * H}}; drawTimeline()`);
+  const lb = [...el(B, "tlbox").innerHTML.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
+  ok(lb.includes("车道 3 · sweep（并行 1/3）"), "只有一道时接在车道名后面：" + JSON.stringify(lb));
+  has(tips(tl), "并行清单：同时最多 3 行，此刻在跑 2 行", "行名的悬停");
+  const P2 = run(A, `(() => { const l = D.lanes.find(x => x.id === ${JSON.stringify(ld)}); const p = parPack(l, rowJobs(l, l.host)); return [p.n, ...["sweep_s1", "sweep_s2", "sweep_s3", "sweep_s4"].map(i => p.k.get(i))]; })()`);
+  ok(JSON.stringify(P2) === JSON.stringify([2, 0, 1, 0, 1]), "两格同时在跑分两道、后面的接在先空出的那道：" + JSON.stringify(P2));
+  ok(run(A, `parPack(D.lanes[0], rowJobs(D.lanes[0], D.lanes[0].host)).n`) === 1, "串行车道该只有一道");
+});
 t("project", "#100 清单搬走后原主机在跑完的那一格：画在原主机下另起一行（只画那一格），登记所在主机那行不画它；运行中与明细标「在 X 上跑完」", () => {
   const A = pjCtx(J("project_moved.json"), EVN); run(A, `TL.v = {a: ${-3 * H}, b: ${12 * H}}; drawTimeline()`);
   const tl = el(A, "tlbox").innerHTML, labs = [...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);

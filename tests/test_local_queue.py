@@ -1016,8 +1016,8 @@ class ParseGpuQueueTest(unittest.TestCase):
         t = self.T
         r = {"jobs": [{"name": n, "est_min": e} for n, e in (("d", 10), ("f", 5), ("k", 5), ("r", 30), ("q", 20), ("n", None))],
              "marks": {"d.done": t - 100, "f.failed": t - 50, "k.failed": t - 40}, "state_dir": "/s", "worker": None, "lock_alive": True, "lock_pid": 7,
-             "paused": "有意暂停", "current": {"name": "r", "pid": 8, "t0": parse_time("2027-01-01 10:00:00"), "alive": True, "stopped": False,
-                                              "progress_line": "PROGRESS 3/12", "last_line": "step 3", "log_mtime": t - 5},
+             "paused": "有意暂停", "current": [{"name": "r", "pid": 8, "t0": parse_time("2027-01-01 10:00:00"), "alive": True, "stopped": False,
+                                               "progress_line": "PROGRESS 3/12", "last_line": "step 3", "log_mtime": t - 5}],
              "log_tail": ["2027-01-01 09:00:00 开始 d", "2027-01-01 09:10:00 完成 d（耗时 10 分）", "2027-01-01 09:20:00 开始 f",
                           "2027-01-01 09:21:00 失败 f（退出码 1）", "2027-01-01 09:30:00 开始 k", "2027-01-01 09:31:00 失败 k（退出码 143）",
                           "2027-01-01 10:00:00 开始 r"]}
@@ -1035,21 +1035,48 @@ class ParseGpuQueueTest(unittest.TestCase):
                          (parse_time("2027-01-01 10:00:00"), [3, 12], "step 3", t - 5))
         self.assertNotIn("suspended", j["r"])
         self.assertEqual((j["q"]["est_min"], j["q"]["dur"], j["q"]["plan"], j["n"]["est_min"]), (20, None, None, None))
-        self.assertEqual(lane, {"alive": True, "pid": 7, "state_dir": "/s", "logs_dir": None, "paused": None, "managed": False, "waiting": None, "held": None, "held_t": None, "dep": None, "head": None, "stuck": None, "cpu_wait": None})
+        self.assertEqual(lane, {"alive": True, "pid": 7, "state_dir": "/s", "logs_dir": None, "paused": None, "managed": False, "waiting": None, "held": None, "held_t": None, "dep": None, "head": None, "stuck": None, "cpu_wait": None,
+                                "par": 1, "running_n": 1})
+
+    def test_parallel_running(self):
+        # 并行清单（#147）：current 有几行就有几个在跑；声明的并行数从 worker 状态来，车道带上在跑几行；别的主机放的那一行记 where
+        t = self.T
+        cur = self.raw()["current"][0]
+        two = [cur, dict(cur, name="q", pid=9, host="o"), dict(cur, name="n", alive=False)]
+        lane, jobs = C.parse_gpu_queue(self.raw(current=two, worker={"par": 4}), t)
+        j = {x["id"]: x for x in jobs}
+        self.assertEqual((j["r"]["status"], j["q"]["status"], j["n"]["status"]), ("running", "running", "queued"))
+        self.assertEqual((j["q"]["where"], j["r"]["where"]), ("o", None))
+        self.assertEqual((lane["par"], lane["running_n"]), (4, 2))
+
+    def test_queued_times_parallel(self):
+        # 并行清单（#147）：排队的不按串行接龙对齐（几行本来同时跑），只跟着推演里挡住它的那一个挪、都不早于现在；串行照旧接在前一个后面
+        t = self.T
+        run = [{"id": "a", "status": "running", "eta_ts": t + 100}, {"id": "b", "status": "running", "eta_ts": t + 400}]
+        plans = {"a": {"t1": t + 160}, "b": {"t1": t + 460}, "c": {"t0": t + 160, "t1": t + 760}, "d": {"t0": t, "t1": t + 600}}
+        mk = lambda: [dict(j) for j in run] + [{"id": n, "status": "queued", "hold": False} for n in ("c", "d")]   # noqa: E731
+        js = {j["id"]: j for j in mk()}
+        C._queued_times(list(js.values()), plans, t, "p", par=3)
+        self.assertEqual((js["c"]["plan_start_ts"], js["d"]["plan_start_ts"]), (t + 100, t))        # c 等 a（a 提前 60 秒），d 本来就能同时开
+        self.assertEqual(js["c"]["eta_ts"], t + 700)
+        js = {j["id"]: j for j in mk()}
+        C._queued_times(list(js.values()), plans, t, "p")
+        self.assertEqual(js["d"]["plan_start_ts"], t + 400)                                         # 串行：不和前一个重叠，接在 b 后面
+        self.assertEqual(js["c"]["plan_start_ts"], js["d"]["eta_ts"])
 
     def test_worker_and_edge_cases(self):
         t = self.T
         wk = {"wait": "没有可用显存", "held": "drain", "dur": {"q": {"min": 12.0, "src": "同类"}}, "plan": {"q": {"t0": t + 60, "t1": t + 800, "gpus": [0]}}, "stuck": None}
         cur = {"name": "r", "pid": 8, "t0": None, "alive": True, "stopped": True, "progress_line": "PROGRESS 0/0", "last_line": None, "log_mtime": None}
-        lane, jobs = C.parse_gpu_queue(self.raw(worker=wk, lock_alive=False, current=cur, log_tail=[], marks={"d.done": t - 100}), t)
+        lane, jobs = C.parse_gpu_queue(self.raw(worker=wk, lock_alive=False, current=[cur], log_tail=[], marks={"d.done": t - 100}), t)
         j = {x["id"]: x for x in jobs}
         self.assertEqual((lane["alive"], lane["paused"], lane["managed"], lane["waiting"], lane["held"]), (False, "有意暂停", True, "没有可用显存", "drain"))
         self.assertEqual((j["d"]["status"], j["d"]["end_ts"], j["d"]["start_ts"]), ("done", t - 100, None))     # 日志里没有：按标记文件的时间
         self.assertEqual((j["r"]["status"], j["r"]["start_ts"], j["r"]["suspended"], j["r"].get("progress")), ("running", t, True, None))   # 0/0 不算进度
         self.assertEqual((j["q"]["dur"], j["q"]["plan"]), ({"min": 12.0, "src": "同类"}, {"t0": t + 60, "t1": t + 800, "gpus": [0]}))
-        _, jobs = C.parse_gpu_queue(self.raw(current=dict(cur, t0=t - 300), log_tail=[]), t)
+        _, jobs = C.parse_gpu_queue(self.raw(current=[dict(cur, t0=t - 300)], log_tail=[]), t)
         self.assertEqual({x["id"]: x for x in jobs}["r"]["start_ts"], t - 300)                              # 日志里没有：取探针从 current 换好的 epoch
-        _, jobs = C.parse_gpu_queue(self.raw(current=dict(cur, alive=False)), t)
+        _, jobs = C.parse_gpu_queue(self.raw(current=[dict(cur, alive=False)]), t)
         self.assertEqual({x["id"]: x["status"] for x in jobs}["r"], "queued")                                 # 进程不在：当前任务只算排队
 
 

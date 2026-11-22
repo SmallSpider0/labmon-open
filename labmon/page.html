@@ -514,7 +514,7 @@ function drawTimeline() {
     const ev = hb.iv.some(x => win(x.t0, x.t1)) || hb.ticks.some(x => x.t >= t0 && x.t <= t1);     // 看的这段有事件：表头底边加一条色带
     rows.push({h: ev ? 32 : 22, sep: true, draw: (y, hh, c) => hostRow(h, hb, ev, y, hh, c)});
     if (oc.length) rows.push({h: Math.min(44, 8 + 10 * tlPack(oc)), draw: (y, hh, c) => othersRow(h, oc, y, hh, c)});
-    vis.forEach(l => rows.push({h: 24, draw: (y, hh, c) => laneRow(l, hb, multi ? gsOf(l) : [], y, hh, c, used)}));
+    vis.forEach(l => rows.push({h: 24 + 14 * (parPack(l, rowJobs(l, l.away || l.host)).n - 1), draw: (y, hh, c) => laneRow(l, hb, multi ? gsOf(l) : [], y, hh, c, used)}));
   }
   // 池里待放的（#89）：一条清单一行，写原因与已等多久
   const left = l => jobsOf(l.id).filter(j => inPool(j) && (j.status === "queued" || j.status === "running")).length;     // 跑过、在跑的已画在那台下（#99）
@@ -522,14 +522,14 @@ function drawTimeline() {
   const more = pool + (hidden || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? "收起这段时间没有任务的车道" : `另有 ${hidden} 条车道这段时间没有任务，显示`}</span></div>` : "");
   // 左栏要多宽（#108）：主机短名、车道名（从 x=18 起，右边留计划项圆点）都写得下；tlSvg 再按上限截
   const lw = Math.max(...shown.flatMap(([h, vis]) => [textW(hostShort(h)) + 8,
-    ...vis.map(l => 26 + 7 * Math.min(4, multi ? gsOf(l).length : 0) + textW(laneLabel(l) + laneTail(l)))]));
+    ...vis.map(l => 26 + 7 * Math.min(4, multi ? gsOf(l).length : 0) + textW(laneLabel(l) + laneTail(l, parPack(l, rowJobs(l, l.away || l.host)).n > 1)))]));
   tlShow(box, rows, {markers: D.markers, more, under: depLines, lw, items: () => tlItems(gcolor([...used][0]))});
   const lg = document.getElementById("tllegend");
   if (lg) lg.innerHTML = D.groups.filter(g => used.has(g.id)).map(g => `<span class="nw"><span class="dot" style="background:${g.color}"></span> ${esc(g.label)}</span>`).join(" &nbsp;");   // 只列这段时间图上有的
 }
 // 依赖连线（#111）：任务写了 after= / afterany=（worker 推演的 deps）、等的是本项目图上画出来的任务时连线；等别的项目的、等的不在图上的只写在悬停里，
 // 早于依赖结束就开始的不连（改成依赖之前起的占位任务，自己在等）。条的位置、行号 r 与行的上下沿 yt、yb 是 laneRow 记进 c.pos 的。
-// 平时只画关键的（类 k）：同一行的不画（车道是串行队列，清单顺序已说明先后），能经别的依赖或车道顺序推出来的（传递边）不画；
+// 平时只画关键的（类 k）：同一行的不画（车道里清单顺序已说明先后；并行清单等依赖的行同样占窗口里的一格），能经别的依赖或车道顺序推出来的（传递边）不画；
 // 悬停一格（触屏点一下，depHover）时它的整条上下游（depChain）上的条与线高亮（类 on，#tlbox 加 dh），链上在依赖里也是传递边的（类 t）仍不画。
 // 线压在条下面（tlSvg 的 under），直角折线：从结束处往右一点竖到等它的那格靠这边的行缝，沿行缝横走，从那格开头的上沿（或下沿）进去；
 // 同一格的几条依赖共用最后那根竖干、自然成束
@@ -635,21 +635,32 @@ function othersRow(host, oc, y, h, c) {
       + (x.after ? `\n等 ${afterText(x.after, D.id)} 跑完才轮到` : "")});
 }
 // 一条车道：任务条、空档（标原因）、失败的尝试。gs 是车道名右边画圆点的计划项 id（图上只有一个计划项时为空）
-const laneTail = l => l.away ? "（在这台跑完）" : l.returned ? "（已归还）" : "";
+// 并行清单（#147）的「并行 k/N」：行分了几道时写在车道名下面一行（窄屏车道名截短也看得见），只有一道时接在车道名后面
+const parTag = l => l.par > 1 && !l.away ? `并行 ${l.running_n || 0}/${l.par}` : "";
+const laneTail = (l, two) => (parTag(l) && !two ? `（${parTag(l)}）` : "") + (l.away ? "（在这台跑完）" : l.returned ? "（已归还）" : "");
+// 并行清单（#147）的车道一行里同时有几格：重叠的条分道（tlPack），n 是几道（至多 4，再多的叠在最后一道），k 是各任务在第几道；串行车道一道
+function parPack(l, js) {
+  const k = new Map();
+  if (!(l.par > 1)) return {n: 1, k};
+  const xs = js.map(j => ({id: j.id, t0: jobT0(j), t1: jobT1(j)})).filter(x => x.t0 != null && x.t1 != null);
+  const n = Math.min(4, tlPack(xs));
+  xs.forEach(x => k.set(x.id, Math.min(n - 1, x.k)));
+  return {n, k};
+}
 function laneRow(l, hb, gs, y, h, c, used) {
   let s = "";
   const r = c.nrow = (c.nrow || 0) + 1;     // 行号：依赖连线认同一行（depLines）
-  const js = rowJobs(l, l.away || l.host);
+  const js = rowJobs(l, l.away || l.host), pk = parPack(l, js), th = (h - 6) / pk.n;
   const lt = l.away ? `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n` + (l.pool ? `清单已交回算力池，之后的任务等看板放到某台；这一行是它在 ${hostOf(l.away).label || l.away} 跑过、在跑的任务`
-    : `清单已登记到 ${hostOf(l.host).label || l.host}，之后的任务在那台跑；这一格是登记搬走前 ${hostOf(l.away).label || l.away} 放行的，在这台跑完`) : `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n计划项：${laneGroups(js).map(g => GROUPS[g]?.label || g).join("、") || "—"}\n完成 ${l.done}/${l.total} · 排队 ${js.filter(j => j.status === "queued").length}${l.failed ? " · 失败 " + l.failed : ""}\n${laneState(l)}${l.eta_ts ? "\n本车道完成 " + ts(l.eta_ts) + (l.has_hold ? holdGuess(js) ? "（含暂停，时长是猜的）" : "（含暂停，按它等的任务算）" : "") + (l.overrun ? "（当前任务已超估时，会更晚）" : "") : ""}${l.fs_skew ? `\n共享盘时钟${l.fs_skew > 0 ? "快" : "慢"} ${f1(Math.abs(l.fs_skew) / 60)} 分（已校正）` : ""}`;
+    : `清单已登记到 ${hostOf(l.host).label || l.host}，之后的任务在那台跑；这一格是登记搬走前 ${hostOf(l.away).label || l.away} 放行的，在这台跑完`) : `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n计划项：${laneGroups(js).map(g => GROUPS[g]?.label || g).join("、") || "—"}\n完成 ${l.done}/${l.total} · 排队 ${js.filter(j => j.status === "queued").length}${l.failed ? " · 失败 " + l.failed : ""}\n${l.par > 1 ? `并行清单：同时最多 ${l.par} 行，此刻在跑 ${l.running_n || 0} 行（卡吃满、在限流时 worker 不再加行）\n` : ""}${laneState(l)}${l.eta_ts ? "\n本车道完成 " + ts(l.eta_ts) + (l.has_hold ? holdGuess(js) ? "（含暂停，时长是猜的）" : "（含暂停，按它等的任务算）" : "") + (l.overrun ? "（当前任务已超估时，会更晚）" : "") : ""}${l.fs_skew ? `\n共享盘时钟${l.fs_skew > 0 ? "快" : "慢"} ${f1(Math.abs(l.fs_skew) / 60)} 分（已校正）` : ""}`;
   const dc = l.away ? "var(--ok)" : l.returned ? "var(--faint)" : l.paused || l.holding || l.waiting ? "var(--warn)" : l.alive || l.managed && l.unfinished ? "var(--ok)" : l.unfinished && l.started !== false ? "var(--bad)" : "var(--faint)";
   // 车道名缩进挂在主机表头下面，一行；跑的计划项是标签栏右端的小圆点（各车道对齐，最多 4 个），名字见悬停。
   // 车道名放不下时圆点收成一个点加个数，车道名按 laneFit 截（留住「车道 N · 」与清单名的头尾，#108）
-  const ly = y + h / 2 + 4, tail = laneTail(l), full = laneLabel(l) + tail;
+  const two = pk.n > 1 && !!parTag(l), ly = y + 12 + 4, tail = laneTail(l, two), full = laneLabel(l) + tail;
   const fold = gs.length > 1 && textW(full) > c.L - 24 - 7 * Math.min(4, gs.length), ds = fold ? gs.slice(0, 1) : gs.slice(0, 4);
   const room = c.L - 24 - (fold ? 7 + 6.6 * String(gs.length).length : 7 * ds.length);
   s += `<g ${tip(lt)}><circle cx="10" cy="${ly - 4}" r="3.5" fill="${dc}"/>
-    <text class="lab" x="18" y="${ly}">${esc(laneFit(l, room, tail))}</text>
+    <text class="lab" x="18" y="${ly}">${esc(laneFit(l, room, tail))}</text>${two ? `<text x="18" y="${ly + 14}" style="font-size:10px;fill:var(--muted)">${esc(parTag(l))}</text>` : ""}
     ${fold ? `<circle cx="${room + 25}" cy="${ly - 4}" r="2.5" fill="${gcolor(gs[0])}"/><text x="${room + 29}" y="${ly}" style="font-size:9.5px;fill:var(--muted)">${gs.length}</text>`
       : ds.map((g, k) => `<circle cx="${c.L - 8 - 7 * (ds.length - 1 - k)}" cy="${ly - 4}" r="2.5" fill="${gcolor(g)}"/>`).join("")}</g>`;
   // 空档：中线虚线＋原因（最可能的一条），悬停列出全部
@@ -680,7 +691,7 @@ function laneRow(l, hb, gs, y, h, c, used) {
       + (j.dur_min ? `\n预计 ${dur(j.dur_min * 60)}` : "") + (j.overrun_min ? ` · 已超 ${dur(j.overrun_min * 60)}` : "") + (j.actual_min != null ? ` · 实际 ${dur(j.actual_min * 60)}` : "")
       + (j.status === "running" && !j.hold && j.eta_source ? `\n预计结束依据：${j.eta_source}` : "") + (j.host ? `\n${awayText(j)}（${l.pool ? "清单已交回算力池" : "清单已搬到 " + hostShort(hostOf(l.host))}）` : "")
       + (j.last_line ? "\n" + j.last_line.slice(0, 90) : "");
-    const yy = y + 3, hh = h - 6;
+    const yy = y + 3 + th * (pk.k.get(j.id) || 0), hh = th - (pk.n > 1 ? 1.5 : 0);
     (c.pos ||= {})[j.id] = {x0: c.X(a0), x1: c.X(e0), y: yy + hh / 2, yt: y, yb: y + h, r};     // 依赖连线（depLines）从这里取
     c.seen.add(j.hold ? "hold" : j.status === "failed" ? (j.killed ? "killed" : "failed") : j.status);
     // 运行中的填色到“现在”：条从开始画到预计结束，条上的百分比也是现在线在条上的位置（runFrac）；按步数比例会因启动、加载那段没有步数、多段任务只报当前这段而对不上（Issue #33），步数进度写在悬停里
