@@ -3559,11 +3559,15 @@ class Worker:
             jobs = [self.job_spec(n, h, self.qest.get(k, {}).get(n) or estimate(self.hist, dict(h, name=n, project=q["project"])),
                                   self.req_dur(x), self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"])), self.req_dur(x, cut=True))
                     for n, h in pend for x in [{"key": k, "name": n, "project": q["project"], "gang": None if is_hold(n) else h["gang"]}]]
-            par, allowed = q.get("par") or 1, q["gpus"]
-            if par > 1 and cur and not shut and cards is not None:      # 已有行在跑：再加的行只放在门槛给的卡上（同真放行 place 里的 par_gate）
-                allowed = [i for i in cards if allowed is None or i in allowed]
-            qs.append({"key": k, "kind": "queue", "project": q["project"], "allowed": allowed,
-                       "par": max(1, len(cur)) if par > 1 and (shut or allowed == []) else par,   # 门槛关着：按此刻在跑的行数排（真放行此刻也不加）
+            par, allowed, gpar = q.get("par") or 1, q["gpus"], None
+            if par > 1 and cur:                   # 已有行在跑：再加的行要过门槛（同真放行 place 里的 par_gate）
+                if shut and self.throttle(now):   # 容器在限流：不用卡的行也不加，按此刻在跑的行数排
+                    par = max(1, len(cur))
+                elif shut or (cards is not None and not [i for i in cards if allowed is None or i in allowed]):
+                    gpar = max(1, len(cur))       # 卡吃满：要卡的行只在这条清单在跑的少于此刻时才排（真放行此刻不加），不用卡的照窗口排
+                elif cards is not None:           # 要卡的行只放在门槛给的卡上
+                    allowed = [i for i in cards if allowed is None or i in allowed]
+            qs.append({"key": k, "kind": "queue", "project": q["project"], "allowed": allowed, "par": par, "gpar": gpar,
                        "since": heads[k]["since"] if k in heads else now, "jobs": jobs})
             info[k] = {"root": q["root"], "queue": q["jobs"], "project": q["project"], "kind": "queue"}
         for r in wait:
@@ -3886,7 +3890,7 @@ class Worker:
     def move_cands(self, lns, free, now, waiters, skip=False):
         """offers 的候选：别的主机上这个项目的清单 lns 里（同机挪时是本机的清单），按“取此刻排得最晚的那条清单的队尾”挑出的几行（至多 MOVE_MAX），
         与挑不下去的原因。各候选带 host、root、queue、name、there（原处预计结束，跑不了为 None）、
-        rest（挪走它后那条清单何时跑完）、h（资源提示）、i（在原清单里排第几）、lane（第几条清单）：前 k 行加进推演时按 (lane, i) 排，
+        rest（挪走它后那条清单何时跑完：剩下的行与在跑的预计结束里最晚的）、h（资源提示）、i（在原清单里排第几）、lane（第几条清单）：前 k 行加进推演时按 (lane, i) 排，
         同一条清单里的照原先后。排得最晚的已不晚于本机这个项目何时跑完（free；挪到本机另一条清单时是那条清单何时跑完）的不再挑：挪过来只会更晚。
         挑出的前几行挪过来以后已比原处剩下的晚跑完时，调用方不再往下试（moved_past）。
         waiters：{(项目, 任务): {写了 after= 等它的 (项目, 任务)}}（本机与别的主机的 todo）；有不在这批里的等着它就不挪：挪走后等它的何时开始会变。
@@ -3918,7 +3922,8 @@ class Worker:
                 why, left[i] = why or stop, []
                 continue
             left[i].pop()
-            end[i] = left[i][-1][3] if left[i] else ln["run"]
+            ts = [ln["run"]] + [x[3] for x in left[i]]   # 剩下的与在跑的里最晚的（并行清单先开跑的长任务可能比后面的行晚跑完，#147）
+            end[i] = None if None in ts else max(ts)
             out.append({"host": ln["host"], "root": ln["root"], "queue": ln["queue"], "name": n, "there": t1 and round(t1),
                         "rest": end[i] and round(end[i]), "h": h, "i": len(left[i]), "lane": i})
         return out, why
@@ -5849,7 +5854,7 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
     只模拟显存（各卡按估计值记账；借来的主机上有停不了的保活的卡不放，同真放行）、内存、CPU（按估计核数记账）、独占（留卡与回填）、tag 上限、截止前的准入与公平份额；
     缺本地文件、拷本地依赖（含共享盘慢时推迟）、内存闸门、对方超出预留这类此刻才有的原因不模拟。
     - snap：资源快照（Worker.snapshot；sim_snapshot 换成推演口径）；
-    - queues：[{key, kind, project, allowed（能用的卡序号，None 不限）, since（队首开始等的时刻）, jobs [job_spec…], par（同时最多几行，缺省 1）}]，jobs 不含正在跑的；
+    - queues：[{key, kind, project, allowed（能用的卡序号，None 不限）, since（队首开始等的时刻）, jobs [job_spec…], par（同时最多几行，缺省 1）, gpar（要卡的行只在这条在跑的少于它时排：并行清单的门槛此刻不给加，forecast 给；None 不限）}]，jobs 不含正在跑的；
       每条队列按清单顺序取窗口（同 next_jobs：还没排上的前 par − 在跑数 行），各行的请求 key 按 run_key（并行清单逐行一个，#147），车道按队列 key（快照 jobs 的 lane）；
     - cut：(截止时刻, 没估时的放不放)：续租截止、约定归还前跑不完的不放（同 override_hit 的 deadline）；
     - pol：调度设置（缺省 POLICY）；use：开始时各项目的 GPU 用量（卡·时，不含在跑的），往后按半衰期衰减，再加上推演里跑的；
@@ -5919,6 +5924,8 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
             if win:
                 blocked.pop(k, None)
             for i in win:
+                if q.get("gpar") and q["jobs"][i]["ngpu"] > 0 and busy.get(k, 0) >= q["gpar"]:
+                    continue                      # 并行清单的门槛此刻不给加要卡的行（forecast 的 gpar）：它占着窗口这一格，不用卡的照排
                 r = dict(q["jobs"][i], key=run_key(q, q["jobs"][i]["name"]), lane=k, _i=i, kind=q["kind"], project=q["project"], since=since[k], allowed=q["allowed"])
                 r["charge"] = r["cards"] * (r["dur"] or 0.0) / 60
                 d = dep_end(dep_keys(r), t, ends, dead) if dep_keys(r) else None

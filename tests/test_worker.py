@@ -3506,6 +3506,38 @@ class ParallelListTest(UnitBase):
         plan = {j["name"]: j for ln in self.w.plan["lanes"] for j in ln["jobs"]}
         self.assertEqual(plan["g2"]["gpus"], [1])
 
+    def test_forecast_gate_spares_cpu_rows(self):
+        # Codex 审 #159 第二轮：卡都吃满、门槛不给要卡的行加：窗口里不用卡的行照真放行（par_gate 只看限流）此刻就排，不跟着缩窗口
+        self.cards(40000.0)
+        self.setup_list(["# labmon: par=3", "g1|x   # vram=1 est_min=600", "g2|x   # vram=1 est_min=30", "c1|x   # gpus=0 est_min=30"])
+        qs = self.w.registry()
+        self.m.list_jobs(qs[0])
+        now = time.time()
+        self.w.running["s|g1"] = {"key": qs[0]["key"] + "|g1", "kind": "queue", "name": "g1", "project": "pa", "t0": now - 60, "deps": [], "deps_any": [],
+                                  "gpus": ["GPU-a"], "use": {}, "est": None, "excl": None, "tag": None, "q": qs[0], "pid": 1}
+        self.w.uwin = {"GPU-a": [(now - i, 95) for i in range(5)]}
+        _, reqs = self.w.requests(qs, False)
+        self.w.queue_durs(qs)
+        reqs = [r for r in reqs if r["name"] != "g1"]
+        for r in reqs:
+            self.w.prep(r, now, {})
+        self.assertEqual(self.w.par_gate([r for r in reqs if r["name"] == "c1"][0], now), (None, None))
+        self.w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        plan = {j["name"]: j for ln in self.w.plan["lanes"] for j in ln["jobs"]}
+        self.assertIn("c1", plan, self.w.plan["lanes"])
+        self.assertLess(plan["c1"]["t0"] - now, 120)
+        self.assertTrue("g2" not in plan or plan["g2"]["t0"] - now > 120, plan)   # 要卡的行等在跑的那行腾出（门槛此刻不给加）
+
+    def test_move_rest_keeps_running_end(self):
+        # Codex 审 #159 第二轮：并行清单里先开跑的长任务比后面的行晚跑完：挪走队尾后原处剩下的仍要等它（rest 取在跑与剩下的行里最晚的）
+        now, H = time.time(), 3600
+        h = {"ngpu": 1, "gang": None, "needs": []}
+        ln = {"host": "o", "root": "/r", "queue": "q.txt", "project": "pa", "run": now + 10 * H, "end": now + 10 * H, "state": "ok", "unread": False,
+              "pend": [("B", h, now + H, now + 2 * H), ("C", h, now + 2 * H, now + 3 * H)]}
+        out, _ = self.w.move_cands([ln], now, now, {})
+        self.assertEqual(out[0]["name"], "C")
+        self.assertEqual(out[0]["rest"], round(now + 10 * H))
+
     def test_gate_for_gpu_rows(self):
         # 要卡的行：已有行在跑时，刚加过一行就等 PAR_STEP_S；过了间隔看卡吃满没有（local_cards），吃满了不加
         self.cards(30000.0)
