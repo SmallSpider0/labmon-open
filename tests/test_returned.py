@@ -247,6 +247,57 @@ when_idle = "保活不在"
         self.assertIsNone(json.loads(st.read_text())["hosts"]["h"]["idle_since"])
 
 
+class WaitGoneTest(IdleCheckTest):
+    """实验会话的 labmon wait 断了（#141）：项目还有活、wait_state.json 的 t 满 WAIT_GONE_S 没动，出一条只给用户的 wait_gone:。"""
+
+    def setUp(self):
+        super().setUp()
+        from labmon import deploy as DP
+        self.running = dict(DP.RUNNING)
+        DP.RUNNING["started"] = round(time.time()) - 86400        # 看板服务一天前起来的
+        self.addCleanup(lambda: DP.RUNNING.update(self.running))
+
+    def waited(self, ago: float):
+        from labmon import waits as WT
+        sf = WT.state_file(self.d / "out")
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        sf.write_text(json.dumps({"reported": [], "last": {}, "t": time.time() - ago, "wait_t": time.time() - ago}))
+        return time.time() - ago
+
+    def gone(self, snap):
+        return [a for a in snap["alerts"] if a["key"].startswith("wait_gone:")]
+
+    def test_threshold(self):
+        from labmon import waits as WT
+        self.worker_status(waiting=[waiting_job("u", "out")])                       # 本项目还有任务在等
+        self.waited(WT.WAIT_GONE_S - 60)
+        self.assertEqual(self.gone(self.snap([])), [])                          # 门槛前不报
+        last = self.waited(WT.WAIT_GONE_S + 60)
+        a = self.gone(self.snap([]))
+        self.assertEqual([(x["key"], x["to"]) for x in a], [(f"wait_gone:{round(last)}", "user")])
+        self.assertIn("labmon wait", a[0]["msg"])
+        self.assertEqual(C.user_alerts(a), [a[0]["msg"]])                       # 页面上显眼列
+        self.waited(5)                                                          # 再来等一次就消失
+        self.assertEqual(self.gone(self.snap([])), [])
+
+    def test_quiet_cases(self):
+        from labmon import deploy as DP
+        from labmon import waits as WT
+        self.waited(WT.WAIT_GONE_S + 60)
+        self.assertEqual(self.gone(self.snap([])), [])                          # 暂时没实验：不报
+        self.worker_status(waiting=[waiting_job("u", "out")])
+        DP.RUNNING["started"] = round(time.time()) - 60                         # 看板刚重启：从启动时刻起算
+        self.assertEqual(self.gone(self.snap([])), [])
+        DP.RUNNING["started"] = None                                            # 不在看板服务里（labmon collect 命令行）：不判
+        self.assertEqual(self.gone(self.snap([])), [])
+        DP.RUNNING["started"] = round(time.time()) - 86400
+        WT.state_file(self.d / "out").unlink()                                  # 从没挂过 wait 的项目：不报
+        self.assertEqual(self.gone(self.snap([])), [])
+        sf = WT.state_file(self.d / "out")
+        sf.write_text(json.dumps({"reported": ["page:x"], "last": {}, "t": time.time() - WT.WAIT_GONE_S - 60}))
+        self.assertEqual(self.gone(self.snap([])), [])                          # 只跑过 labmon check（记账的 t，不是 wait 来过）：不报
+
+
 class ProbeDownTest(Base):
     """项目页的掉线判定与工作台同一处（health.link_step）：探针连不上要连续至少 2 次、持续 DOWN_S 秒才报 ssh_fail；
     本机不在内网那轮不计；连上了就清掉。"""

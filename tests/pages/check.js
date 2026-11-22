@@ -1464,6 +1464,14 @@ t("project", "正常快照渲染不报错、不漏 NaN/undefined，各块都在"
   ok((h.match(/⇄/g) || []).length === 1, "图标只一个");
   has(tips(h), run(P, "esc(\"可以挪：\" + D.rebalance.text)"), "悬停写那句");
 });
+t("project", "会话的 wait 断了（#141）：wait_gone 只给用户，进红框、算告警数", () => {
+  const msg = "实验会话 11-10 09:00 起没在挂 labmon wait：本项目还有任务没跑完，给会话的告警（失败、依赖卡住、借到卡等）送不到它。回到负责这个项目的会话，让它重挂 labmon wait";
+  const Q = pjCtx({...PJ, alerts: [...PJ.alerts, {key: "wait_gone:1793600000", to: "user", msg}]}, EVN), h = app(Q); clean(h, "项目页");
+  const box = h.slice(h.indexOf('<div class="alerts">'), h.indexOf("</div></div>", h.indexOf('<div class="alerts">')));
+  has(box, "起没在挂 labmon wait"); has(h, "⚠ 2 条告警");
+  const ag = h.slice(h.indexOf('<details class="agal'), h.indexOf("</details>", h.indexOf('<details class="agal')));
+  ok(!ag.includes("没在挂 labmon wait"), "只给用户的不该进给会话的折叠");
+});
 t("project", "GPU 利用率（#51）：大字是近 1 小时的吃满程度（保活按 0），小字是各卡与本项目近 24 小时；没有 worker 数据的卡退回探针此刻值", () => {
   const h = app(P), i0 = h.lastIndexOf('<div class="kpi"', h.indexOf("GPU 利用率 · ")), kpi = h.slice(i0, h.indexOf('<div class="kpi"', i0 + 1));
   has(kpi, "GPU 利用率 · 4 卡 · 整机"); has(kpi, '62<small>% 近 1 小时 平均');                 // (72.3 + 4.2 + 90 + 80) / 4：srv-b 没有 busy，按探针此刻值逐卡补进平均（#54 审查）
