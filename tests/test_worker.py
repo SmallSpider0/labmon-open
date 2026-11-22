@@ -3419,6 +3419,24 @@ class OffersTest(UnitBase):
         o = self.offer([q], [r]).get("pa")
         self.assertTrue(o is None or not o["jobs"], o)
 
+    def test_local_lane_room(self):
+        # #145：同机多开的 offer 带 room：一张 46 GiB 的卡、每行估 20 GiB（另留 1 GiB）此刻还能再开 2 条；能放的卡近 30 分钟吃满程度 40%。
+        # 吃满程度的窗口不满 30 分钟时 busy 为 None（看板不算吃不满）
+        self.hosts.usage("t", [usage_row("b_old", "pa", self.now - 9000, self.now - 1800, tag="bt", ram_peak=1.0, vram_peak=19000.0, gpus=["GPU-a"])])
+        self.w.reload_hist()
+        q, r = self.local_lane(["b%d|true   # est_min=120 vram=20 tag=bt" % i for i in range(6)])
+        o = self.offer([q], [r])["pa"]
+        self.assertEqual(o["room"], {"busy": None, "lanes": 2})
+        self.w.bwin = {"GPU-a": [(self.now - 60 * i, 40) for i in range(30, -1, -1)]}
+        self.assertEqual(self.offer([q], [r])["pa"]["room"], {"busy": 40.0, "lanes": 2})
+        self.w.bwin = {"GPU-a": [(self.now - 60 * i, 40) for i in range(9, -1, -1)]}      # 只有 10 分钟的样本
+        self.assertIsNone(self.offer([q], [r])["pa"]["room"]["busy"])
+
+    def test_cross_host_room(self):
+        # #145：跨主机的 offer 同样带 room：t 一张 46 GiB 的空卡，o 上 pa 的行各 20 GiB：此刻 t 能开 2 条
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
+        self.assertEqual(self.offer()["pa"]["room"]["lanes"], 2)
+
     def test_gain_threshold_short_batch(self):
         # #43：门槛 max(15 分钟, min(1 小时, 剩余 30%), 剩余 10%)：剩 2 小时要早 36 分钟（旧门槛要 1 小时），剩 20 小时要 2 小时
         t = self.now
@@ -7255,6 +7273,55 @@ class LocalDepsTest(WorkerBase):
         self.assertEqual((m / "w1.pt").read_text(), "v\n")
         self.assertFalse(list(m.glob("*.part")))
         self.assertIn("stage", kinds())
+
+
+class RoomSuggestTest(unittest.TestCase):
+    """吃不满的主机（#145）：offer 带 room（worker 的 lane_room）、能放的卡近 30 分钟吃满程度低于 80% 时，整批早 15 分钟就建议，
+    句首写合计还能开几条、还有多少行排队、先 fit --list；只因吃不满才收下的 key 不带第一行。offers 是手写的（数从 worker 来的部分见 OffersTest）。"""
+
+    H = 3600
+
+    def setUp(self):
+        self.now = 1_800_000_000
+
+    def host(self, hid, gain_min, busy=40.0, lanes=3, todo=8, room=True):
+        """hid 上 pa 的一条同机多开 offer：原推演 10 小时后跑完，剪 b5 过去后整批早 gain_min 分钟；todo 是这台状态里还会跑的行数。"""
+        t, f = self.now, self.now + 10 * self.H
+        new = f - gain_min * 60
+        o = {"project": "pa", "local": True, "lane": None, "free": f, "ends": {}, "why": None, "stop": None, "gpus": None, "idle": False,
+             "jobs": [{"host": hid, "root": "/r", "queue": "jobs/L.txt", "name": "b5", "there": f, "rest": new, "end": t + 5 * self.H, "own": new, "dep": False}]}
+        if room:
+            o["room"] = {"busy": busy, "lanes": lanes}
+        st = {"offers": [o], "running": [], "todo": [{"project": "pa", "root": "/r", "queue": "jobs/L.txt", "jobs": ["b%d" % i for i in range(todo)]}]}
+        return {"id": hid, "label": hid.upper(), "worker_up": True, "status": st}
+
+    def test_underused_relaxes_gain(self):
+        # 早 20 分钟（剩 10 小时的门槛是 1 小时）：旧代码不建议；吃不满的这台照报，key 按吃不满的主机、不带第一行
+        self.assertEqual(RB.suggest([self.host("t", 20, room=False)], None, self.now), {})
+        s = RB.suggest([self.host("t", 20)], None, self.now)["pa"]
+        self.assertEqual(s["key"], "rebalance:pa:room:t")
+        self.assertEqual(s["room"], {"hosts": {"t": 3}, "busy": {"t": 40.0}, "lanes": 3, "rows": 8})
+        self.assertIn("T 吃不满（近 30 分钟 GPU 吃满程度 T 40%），此刻合计还能多开 3 条车道，本项目还有约 8 行在排队", s["text"])
+        self.assertIn("labmon worker fit t /r jobs/L.txt --list --project pa", s["text"])
+        self.assertIn("在 T 上多开一条车道", s["text"])
+        # 早不到 15 分钟的不报：收益小的不叫醒
+        self.assertEqual(RB.suggest([self.host("t", 10)], None, self.now), {})
+        # 吃满程度 85%：不算吃不满；报过的沿用到 90%（滞回）
+        self.assertEqual(RB.suggest([self.host("t", 20, busy=85)], None, self.now), {})
+        self.assertEqual(RB.suggest([self.host("t", 20, busy=85)], {"pa": s}, self.now)["pa"]["key"], "rebalance:pa:room:t")
+        self.assertEqual(RB.suggest([self.host("t", 20, busy=92)], {"pa": s}, self.now), {})
+        # 窗口不满 30 分钟（busy None）、此刻一条也开不了的不算
+        self.assertEqual(RB.suggest([self.host("t", 20, busy=None)], None, self.now), {})
+        self.assertEqual(RB.suggest([self.host("t", 20, lanes=0)], None, self.now), {})
+
+    def test_underused_hosts_summed(self):
+        # 两台都吃不满：句首写合计与各台几条，key 带两台；整批够门槛（早 2 小时）的仍按挪法 key，句首照样写合计
+        s = RB.suggest([self.host("t", 20, lanes=3), self.host("u", 25, busy=0.0, lanes=8)], None, self.now)["pa"]
+        self.assertEqual(s["key"], "rebalance:pa:room:t,u")
+        self.assertIn("T、U 吃不满（近 30 分钟 GPU 吃满程度 T 40%、U 0%），此刻合计还能多开 11 条车道（T 3、U 8），本项目还有约 16 行在排队", s["text"])
+        s = RB.suggest([self.host("t", 120)], None, self.now)["pa"]
+        self.assertEqual(s["key"], "rebalance:pa:t:t/jobs/L.txt/b5")
+        self.assertIn("此刻合计还能多开 3 条车道", s["text"])
 
 
 if __name__ == "__main__":

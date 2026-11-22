@@ -6,6 +6,9 @@
 #43 按推荐放宽短批：剩 2 小时的批早 36 分钟就报）；报过建议的项目降到阈值一半以下才收、目标主机沿用上一轮的（滞回，免得在阈值附近或几台之间来回叫醒）。挪不了的写原因（只在页面上，不叫醒）。
 整批没有够门槛的挪法（整批被挪不动的行撑着，或何时跑完推不出），而接收方此刻没有 labmon 任务在跑（offer 的 idle）时，改按行比：
 挪来的每一行都比在原处早 GAIN_MIN_S 以上跑完就建议（_idle_gain，#62）。
+有主机吃不满（offer 的 room：卡有真余量、此刻还能多开车道，能放的卡近 30 分钟「吃满程度」低于 UNDER_BUSY，报过的到 UNDER_KEEP 才收）时（#145），
+那台给的挪法整批早 GAIN_MIN_S 就建议，不要求到 _need；句首写这几台合计还能开几条、本项目还有多少行排队，让会话先 fit --list 再摊开（_room_text）；
+只因吃不满才收下的（或按行比的）key 是 rebalance:<项目>:room:<这几台>，不带第一行：照做剪了队尾不再叫醒，吃不满的主机变了才再叫醒。
 labmon 不改任何清单、不改放行规则：建议由实验会话照做（剪行、追加到目标主机的清单，见 SKILL「跑和盯」的 rebalance:）。
 
 看板这头每轮再核对一遍（#25）：offers 里的行这一轮已在原处开跑、已不在原处的 todo（剪过、跑完了）就截掉（各 worker 读别的主机的状态最多晚几分钟）；
@@ -26,6 +29,8 @@ GAIN_SHORT_FRAC = 0.3
 GAIN_FRAC = 0.1        # 且至少占剩余时间的这么多
 TAIL = "；按 %s 的推演"   # 建议句尾：按几点的推演（log_text 判变没变时去掉它）
 TAIL_RE = re.compile(r"；按 \d\d:\d\d 的推演$")
+UNDER_BUSY = 80       # 一台能放的卡近 30 分钟「吃满程度」低于这个 %、此刻还能多开车道（offer 的 room），算吃不满：门槛放宽到 GAIN_MIN_S、句首写合计能开几条（#145）
+UNDER_KEEP = 90       # 报过的吃不满降到这以上才收（滞回；同 worker 的 UTIL_FULL：再满 worker 就不给这张卡了）
 STICK_S = 900          # 上一轮建议的那台跑完的时刻比最优的晚不到这么多时沿用它（几台一样空时谁领先每轮都可能换）
 
 
@@ -156,6 +161,8 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
     建议 {key 告警 key, target 挪到哪台, lane 接在它哪条清单后面, before 插在那条清单里哪一行前面（它写了依赖；None 接在末尾）,
     jobs [{host, root, queue, name, there, rest, end, own, dep 这一行写了 after=}], from 原来整批何时跑完
     （推不出为 None）, to 挪后（推不出为 None）, cut 其中被借用约定挡住的清单 ["主机|目录|清单"], local 是不是同机的挪法（lane 为 None 是多开一条车道，否则挪到同一台的那条清单）, text}；
+    有吃不满的主机（_under，#145）时那台的挪法门槛放宽到 GAIN_MIN_S，建议另带 room {hosts {主机: 还能开几条}, busy {主机: 吃满程度 %}, lanes 合计, rows 本项目还有几行排队}、
+    句首加 _room_text，不是按整批门槛收下的 key 换成 rebalance:<项目>:room:<主机,…>（带 loose: True 的是放宽门槛收下的）；
     整批没有够门槛的挪法、而有一台空着（offer 的 idle）时按行比（_idle_gain，#62）：建议另带 idle: True、there 这几行在原处最早何时跑完（说不出为 None）、
     done 挪过去后何时都跑完；挪不了的 {why [每台一句], from}；
     没有可挪的、却有一台有空（这个项目早就没活，或同机能多开车道）只因挪来的那一行没有估时推演算不出（offer 的 nodur）时，
@@ -178,6 +185,7 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
         was = prev.get(proj) or {}
         opts, why, est, idles = [], [], [], []
         half = 0.5 if was.get("key") else 1
+        under = _under(xs, set(((was.get("room") or {}).get("hosts")) or ()))
         for hid, o in xs:
             f = _top(list(o["ends"].values()) + [o["free"]])
             most = None                    # 这台空着时按行比成立的最多几行（#62）
@@ -188,8 +196,13 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
                 there = _idle_gain(o["jobs"][:k], GAIN_MIN_S * half) if o.get("idle") and not o.get("local") else False
                 if there is not False:
                     most = dict(opt, idle=True, there=there, done=o["jobs"][k - 1]["end"])
-                if new is None or (f is not None and f - new < _need(f, t) * half):
+                if new is None:
                     continue
+                if f is not None and f - new < _need(f, t) * half:
+                    # 这台吃不满（#145）：整批早 GAIN_MIN_S 就建议（报过的减半），不要求到 _need；早得更少的不报，免得只早几分钟也叫醒
+                    if hid not in under or f - new < GAIN_MIN_S * half:
+                        continue
+                    opt["loose"] = True
                 opts.append(opt)
             if most:
                 idles.append(most)
@@ -211,12 +224,55 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
             best["key"] = move_key(proj, best)
             best["cut"] = sorted({_lane(j) for j in best["jobs"]} & late)
             best["text"] = _text(best, proj, label, t)
+            if under:                  # 有吃不满的主机（#145）：句首写合计还能开几条、还有多少行排队；不是按整批门槛收下的，key 按吃不满的那几台
+                best["room"] = {"hosts": {h: r["lanes"] for h, r in sorted(under.items())}, "busy": {h: r["busy"] for h, r in sorted(under.items())},
+                                "lanes": sum(r["lanes"] for r in under.values()), "rows": _queued(hosts, proj)}
+                best["text"] = _room_text(best, proj, label) + best["text"]
+                if best.get("loose") or best.get("idle"):
+                    best["key"] = f"rebalance:{proj}:room:{','.join(sorted(under))}"
             out[proj] = best
         elif why or est:
             out[proj] = {"why": why, "from": _top([_top(list(o["ends"].values()) + [o["free"]]) for _, o in xs])}
             if est:
                 out[proj].update(key=f"rebalance:{proj}:est", est=True, text=_est_text(est, proj, label))
     return out
+
+
+def _under(xs: list, was: set) -> dict:
+    """吃不满的主机 {主机: room}（#145）：这台对本项目的 offer 带 room（worker 的 lane_room：卡有真余量、此刻还能多开车道），能放的卡近 30 分钟
+    「吃满程度」低于 UNDER_BUSY（上一轮报过的这台放宽到 UNDER_KEEP，滞回）。窗口没满（busy 为 None）、推演里一行也接不了（jobs 为空）的不算。
+    一台几个 offer 取能开得多的。"""
+    out: dict = {}
+    for hid, o in xs:
+        r = o.get("room")
+        if r and o.get("jobs") and r.get("lanes") and r.get("busy") is not None and r["busy"] < (UNDER_KEEP if hid in was else UNDER_BUSY):
+            if r["lanes"] > (out.get(hid) or {}).get("lanes", 0):
+                out[hid] = r
+    return out
+
+
+def _queued(hosts: list[dict], proj: str) -> int:
+    """本项目各台还会跑、没在跑的行数（这一轮读到的各台状态 todo 减在跑的）：汇总句里的“还有约 M 行排队”（#145）。"""
+    n = 0
+    for e in hosts:
+        st = e.get("status") or {}
+        run = {(j.get("root"), j.get("queue"), j.get("name")) for j in st.get("running") or []}
+        n += sum(1 for ln in st.get("todo") or [] if ln.get("project") == proj
+                 for x in ln.get("jobs") or [] if (ln.get("root"), ln.get("queue"), x) not in run)
+    return n
+
+
+def _room_text(p: dict, proj: str, label: dict) -> str:
+    """有吃不满的主机时建议句前面的一句（#145）：哪几台吃不满、合计此刻还能多开几条车道、本项目还有多少行排队，先 fit --list 再把行摊开；
+    后面接的挪法只是其中一批（一次至多 MOVE_MAX 行、一个目标）。"""
+    rm, j = p["room"], p["jobs"][0]
+    hs = list(rm["hosts"])
+    busy = "、".join(f"{label.get(h, h)} {rm['busy'][h]:.0f}%" for h in hs)
+    each = f"（{'、'.join(f'{label.get(h, h)} {n}' for h, n in rm['hosts'].items())}）" if len(hs) > 1 else ""
+    rows = f"，本项目还有约 {rm['rows']} 行在排队" if rm["rows"] else ""
+    return (f"{'、'.join(label.get(h, h) for h in hs)} 吃不满（近 30 分钟 GPU 吃满程度 {busy}），此刻合计还能多开 {rm['lanes']} 条车道{each}{rows}："
+            f"先 labmon worker fit {hs[0]} {j['root']} {j['queue']} --list --project {proj} 看各台此刻能开几条（共用 worker 目录的在用主机一起算），"
+            f"照它把排队的行摊到这几台，不限于下面这一批；其中一种挪法：")
 
 
 def move_key(proj: str, p: dict) -> str:
