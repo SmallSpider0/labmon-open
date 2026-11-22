@@ -625,13 +625,13 @@ def _job_times(j: dict, lane_id: str, pid: str, al_cfg: dict, work: dict, alerts
         el = max(1.0, t - j["start_ts"] - sr["s"])             # 已用时间不含挂起
         j["elapsed_min"] = el / 60
         pr = j.get("progress")
-        samples, seg = _progress_samples(work["prog"], work["segs"], j, t)
+        samples, seg = _progress_samples(work["prog"], work["segs"], j, t, sr["s"])
         j["speed"] = _speeds(samples)
         if seg and seg["k"] > 1:
             work["multi"] |= {j["id"]} | ({j["group"]} if j["group"] else set())
         is_multi = j["id"] in work["multi"] or (j["group"] in work["multi"] if j["group"] else False) or bool(pr and pr[0] >= pr[1])
         floor = j["dur_min"]                   # 整个任务的时长兜底
-        est = _segment_eta(pr, samples, seg, el, floor, is_multi, t, hold=j["hold"])
+        est = _segment_eta(pr, samples, seg, el, floor, is_multi, t, hold=j["hold"], paused=sr["s"] - (seg or {}).get("sus0", sr["s"]))
         if est:
             rem, j["eta_source"], rate = est
             if rate is not None:
@@ -1095,7 +1095,7 @@ def overrun_left(el: float) -> float:
 
 
 def _segment_eta(pr, samples: list, seg: dict | None, el: float, floor: float | None, is_multi: bool, t: float,
-                 hold: bool = False) -> tuple[float, str, float | None] | None:
+                 hold: bool = False, paused: float = 0.0) -> tuple[float, str, float | None] | None:
     """运行中任务的剩余秒数：返回 (剩余, 来源, 速度 步/分钟) 或 None（交给估时、无估时等后备）。
 
     PROGRESS 只当作当前这一段的进度：有近期速度用近期速度，否则按这一段里第一个采样到最新采样的平均速度外推。
@@ -1104,7 +1104,7 @@ def _segment_eta(pr, samples: list, seg: dict | None, el: float, floor: float | 
     第一段只有一个步数 > 0 的采样时按 估时 − 已用；没有估时或已超估时按 overrun_left（已用的 20%、至少 10 分钟，与 worker 的
     run_end 同一口径），不按已用时间外推（Issue #17：开头静默比估时还长时同样出尖峰）。下一轮有了第二个采样就换成平均速度。
     返回的剩余都从 t 起算：按速度外推的（近期速度、进度）剩余步数是最后一个采样时的，从那个采样的时刻起算再扣掉到 t 的这段，
-    日志隔一阵才打一行时预计结束不随采集轮次往后漂、新进度来了再跳回（#140）。
+    日志隔一阵才打一行时预计结束不随采集轮次往后漂、新进度来了再跳回（#140）；paused 是最后一个采样之后被挂起的秒数，不算在扣掉的这段里。
     多段任务（见过分段、同组任务分过段，或进度已到头仍在跑）剩余至少是 整个任务估时 − 已用，后面还没打进度的段不会被漏掉；
     刚换段还没有速度时也用它。进度停了（不打进度的段，如核对、审计）不再按比例外推，改用估时；没有估时才按平均速度（起点同上）。"""
     first = not seg or (seg["k"] == 1 and seg["i0"] == 0)
@@ -1117,7 +1117,8 @@ def _segment_eta(pr, samples: list, seg: dict | None, el: float, floor: float | 
     single = first and bool(pr) and pr[0] > 0 and d is None and bool(samples)
     over = (overrun_left(el), f"剩余按已用的 {OVER_FRAC:.0%}（进度刚开始）", None)   # 它又没有估时或已超估时
     out = None
-    since = t - samples[-1][0] if samples else 0.0   # 剩余步数是最后一个采样时的：按速度外推的从那时起算，换成从现在起的剩余（#140：不随轮次往后漂）
+    # 剩余步数是最后一个采样时的：按速度外推的从那时起算，换成从现在起的剩余（#140：不随轮次往后漂）；其间挂起的不算在跑
+    since = max(0.0, t - samples[-1][0] - paused) if samples else 0.0
     if pr and recent:
         out = (max(0.0, (pr[1] - pr[0]) / recent - since), "近期速度", recent * 60)
     elif pr and not stale:
@@ -1138,11 +1139,12 @@ def _segment_eta(pr, samples: list, seg: dict | None, el: float, floor: float | 
     return out
 
 
-def _progress_samples(prog: dict, segs: dict, j: dict, t: float) -> tuple[list, dict | None]:
+def _progress_samples(prog: dict, segs: dict, j: dict, t: float, sus: float = 0.0) -> tuple[list, dict | None]:
     """记下运行中任务这一次的进度（时刻取日志最后修改时间），返回 (这一段的全部采样 [[t, i, n], ...], 这一段的起点)。
 
     一个任务可以分几段各打各的 PROGRESS（如先训练一组、核对，再训练另一组）。进度回退或总步数变了就算换了一段：
-    采样清空，段起点记为新段第一次看到的 (时刻, 步数)，第几段记在 k。这一次运行里见过进度行就记 seen（noprogress 告警看它）。"""
+    采样清空，段起点记为新段第一次看到的 (时刻, 步数)，第几段记在 k。这一次运行里见过进度行就记 seen（noprogress 告警看它）。
+    sus 是这一次运行到此刻累计挂起的秒数（_suspend_track）：记下新采样时的那份 sus0，_segment_eta 据此扣掉最后一个采样之后挂起的时长。"""
     key = f"{j['lane']}/{j['id']}"
     ss = prog.setdefault(key, [])
     seg = segs.get(key)
@@ -1162,6 +1164,7 @@ def _progress_samples(prog: dict, segs: dict, j: dict, t: float) -> tuple[list, 
             seg.update(t0=ts, i0=pr[0], k=seg["k"] + 1)
         if not ss or (ss[-1][1] != pr[0] and ts > ss[-1][0]):
             ss.append([ts, pr[0], pr[1]])
+            seg["sus0"] = sus
     ss[:] = [x for x in ss if t - x[0] <= PROG_KEEP][-300:]
     return ss, seg
 

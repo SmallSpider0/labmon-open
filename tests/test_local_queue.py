@@ -1018,6 +1018,22 @@ class ProgressTest(unittest.TestCase):
                 self.assertEqual(r[1], "进度")
                 self.assertAlmostEqual(t + r[0], end, delta=1)
 
+    def test_speed_eta_skips_suspended_after_sample(self):
+        """#140 审查：最后一个采样之后挂起了 5 分钟，这段不算在跑，预计结束跟着往后挪 5 分钟（剩余不因挂起变少）。"""
+        ss = [[600.0 * k, 10 * k, 100] for k in range(1, 3)]            # 每 10 分钟 10 步，此刻 20/100
+        seg = {"t0": 600.0, "i0": 10, "k": 1}
+        r0 = C._segment_eta([20, 100], ss, seg, 1200.0, None, False, 1200.0)
+        r = C._segment_eta([20, 100], ss, seg, 1500.0, None, False, 1500.0, paused=300.0)
+        self.assertAlmostEqual(r0[0], 80 * 60, delta=1)
+        self.assertAlmostEqual(r[0], 80 * 60, delta=1)
+        # 经 _progress_samples 记下的 sus0：新采样那一轮的累计挂起，之后又挂起的才扣
+        prog, segs, j = {}, {}, {"lane": "q", "id": "x", "start_ts": 0.0, "log_mtime": 600.0, "progress": [10, 100]}
+        C._progress_samples(prog, segs, j, 600.0, 30.0)
+        _, sg = C._progress_samples(prog, segs, dict(j, log_mtime=1200.0, progress=[20, 100]), 1200.0, 30.0)
+        self.assertEqual(sg["sus0"], 30.0)
+        _, sg = C._progress_samples(prog, segs, dict(j, log_mtime=1200.0, progress=[20, 100]), 1500.0, 330.0)
+        self.assertEqual(sg["sus0"], 30.0)
+
     def test_single_segment_keeps_progress(self):
         # 单段任务按进度估得比估时早：仍用进度
         ss = [[100.0 * k, k, 100] for k in range(1, 41)]
