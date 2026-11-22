@@ -261,7 +261,7 @@ class WaitGoneTest(IdleCheckTest):
         from labmon import waits as WT
         sf = WT.state_file(self.d / "out")
         sf.parent.mkdir(parents=True, exist_ok=True)
-        sf.write_text(json.dumps({"reported": [], "last": {}, "t": time.time() - ago}))
+        sf.write_text(json.dumps({"reported": [], "last": {}, "t": time.time() - ago, "wait_t": time.time() - ago}))
         return time.time() - ago
 
     def gone(self, snap):
@@ -293,6 +293,9 @@ class WaitGoneTest(IdleCheckTest):
         DP.RUNNING["started"] = round(time.time()) - 86400
         WT.state_file(self.d / "out").unlink()                                  # 从没挂过 wait 的项目：不报
         self.assertEqual(self.gone(self.snap([])), [])
+        sf = WT.state_file(self.d / "out")
+        sf.write_text(json.dumps({"reported": ["page:x"], "last": {}, "t": time.time() - WT.WAIT_GONE_S - 60}))
+        self.assertEqual(self.gone(self.snap([])), [])                          # 只跑过 labmon check（记账的 t，不是 wait 来过）：不报
 
 
 class ProbeDownTest(Base):

@@ -49,23 +49,24 @@ def _new_alerts(sf: Path, current: dict, t: float | None = None) -> list[str]:
     new = [k for k in current if k not in reported and (_kind(k) not in seen or k.startswith(EACH_TIME))]
     keep = reported | set(current)                    # 此刻在场的都算报过：新报的与 REWAKE_S 内再出现的
     last.update({_kind(k): t for k in keep})
-    save_json(sf, {"reported": sorted(keep), "last": last, "t": t})
+    save_json(sf, {"reported": sorted(keep), "last": last, "t": t, "wait_t": t})     # wait_t 只在这里写（wait_check 判一次）：gone_since 看它
     return new
 
 
 def state_file(out: Path) -> Path:
-    """“报过没有”与最后一次来等的时刻（t）记在这里：项目输出目录的 .labmon/wait_state.json，同一项目几个会话共用。"""
+    """“报过没有”与最后一次来等的时刻（wait_t；t 是记账的时刻，labmon check 也会改）记在这里：项目输出目录的 .labmon/wait_state.json，同一项目几个会话共用。"""
     return out / ".labmon" / "wait_state.json"
 
 
 def gone_since(out: Path, t: float | None = None) -> float | None:
     """这个项目的 wait 断了（#141）：返回最后一次来等的时刻，没断为 None。
-    wait 挂着时每 POLL_S 秒判一次 wait_check、写一次 wait_state.json 的 t，所以 t 满 WAIT_GONE_S 没动就是没人在等。
+    wait 挂着时每 POLL_S 秒判一次 wait_check、写一次 wait_state.json 的 wait_t，所以它满 WAIT_GONE_S 没动就是没人在等。
+    只认 wait_t：t 是记账的时刻，labmon check 列出页面改动时也会改（check_told），不是 wait 来过的证据。
     从没挂过 wait 的项目（没有这个文件）不算；只在看板服务里判（deploy.RUNNING 的 started：labmon collect 命令行没有），
     看板刚重启时从启动时刻起算，等会话的 wait 连回来。项目有没有活由调用方（collect._wait_gone）看。"""
     t = time.time() if t is None else t
     started = DP.RUNNING.get("started")
-    last = load_json(state_file(out), {}).get("t")
+    last = load_json(state_file(out), {}).get("wait_t")
     if not started or not isinstance(last, (int, float)) or t - max(last, started) < WAIT_GONE_S:
         return None
     return last
