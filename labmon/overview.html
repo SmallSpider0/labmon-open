@@ -1976,11 +1976,14 @@ const OPEN = new Set(ST.get("open", []));           // 展开了详情的任务
 const jobKey = j => [j.h?.id, j.root, j.queue, j.name].join("|");
 
 function etaOf(j) {
-  // 先用项目看板按日志算的进度；没有就用 worker 推演里这条在跑的（plan 的 run 条）；最后才按清单估时
+  // 先用项目看板按日志算的进度；没有就用 worker 推演里这条在跑的（plan 的 run 条）；再按 worker 给这条清单行的预计时长（状态 queues[].dur，
+  // 同类历史、实际/估时比值，#140）；都没有才按清单估时
   const p = j.prog || {}, t0 = j.t0, at = (ts, src) => ({ts, rem: ts - D.generated, src});
   if (p.eta_ts) return at(p.eta_ts, p.eta_source || "项目看板");
   const r = planLanes(j.h || {}).flatMap(l => l.jobs).find(x => x.run && x.name === j.name);
   if (r?.t1) return at(r.t1, "worker 推演");
+  const d = ((j.h?.status?.queues || []).find(q => q.root === j.root && q.jobs === j.queue)?.dur || {})[j.name];
+  if (d?.min && t0) return at(t0 + d.min * 60, d.src || "worker 预计时长");
   if (j.est_min && t0) return at(t0 + j.est_min * 60, "清单估时");
   return null;
 }
