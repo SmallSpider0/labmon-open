@@ -685,7 +685,8 @@ def _queued_times(jobs: list[dict], plans: dict, t: float, pid: str, par: int = 
     推演用的在跑任务结束是看板上一轮写的 eta.json（整分钟取整），又是几分钟前算的；运行中的条却是这一轮按进度算的（_job_times），
     原样拼在一起，同一车道上前后两条就重叠或留缝。所以按推演顺序（在跑的在前）走一遍：
     推演里接着前面某一个开始的（t0 等于它推演的 t1：被它挡着）跟着它挪，可前可后；不是接着的（等资源、等依赖）不提前；
-    串行车道（par=1，一次只跑一个）另外只在会和前一个重叠时往后挪；并行清单（par>1，#147）几行本来就同时跑，不按接龙对齐，只跟着挡住它的那一个挪。
+    串行车道（par=1，一次只跑一个）另外只在会和前一个重叠时往后挪；并行清单（par>1，#147）几行本来就同时跑，不按接龙对齐，只跟着挡住它的那一个挪：推演里同一时刻腾出的几格各交给一行，
+    这一轮先腾出的给先排的（一格不接两行）。
     都不早于现在（推演之后该开始还没开始的从现在算）。结束跟着开始挪，
     写了依赖的占位任务结束跟着它等的任务，不随它自己开始晚了往后挪：等的都是这条车道上还没跑完的（pid 是本项目、这一轮定下了结束）时，
     取它们这一轮的结束与它自己的开始里最晚的，往前拉时不留推演的旧结束（#86）；等别的车道、别的项目的，或等的在这条车道上已跑完
@@ -697,9 +698,16 @@ def _queued_times(jobs: list[dict], plans: dict, t: float, pid: str, par: int = 
     for j in run:
         prev.append(((plans.get(j["id"]) or {}).get("t1"), j.get("eta_ts")))
         ends[j["id"]] = j.get("eta_ts")
+    used = set()                   # 并行清单：已被接上的前一个（一格只交给一行）
     for j in queued:
         pl = plans[j["id"]]
-        pt1, end = prev[-1] if par <= 1 and prev else next(((a, b) for a, b in reversed(prev) if a is not None and abs(pl["t0"] - a) <= 1), (None, None))
+        if par <= 1:
+            pt1, end = prev[-1] if prev else (None, None)
+        else:
+            c = [i for i, (a, _) in enumerate(prev) if i not in used and a is not None and abs(pl["t0"] - a) <= 1]
+            i = min(c, key=lambda i: float("inf") if prev[i][1] is None else prev[i][1]) if c else None
+            pt1, end = prev[i] if i is not None else (None, None)
+            used.add(i)
         s = pl["t0"] + (end - pt1 if pt1 is not None and end is not None and abs(pl["t0"] - pt1) <= 1 else 0)
         s = max(s, t, (end or t) if par <= 1 else t)
         j["plan_start_ts"] = s

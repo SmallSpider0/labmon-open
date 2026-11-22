@@ -1076,6 +1076,16 @@ class ParseGpuQueueTest(unittest.TestCase):
         self.assertEqual(js["d"]["plan_start_ts"], t + 400)                                         # 串行：不和前一个重叠，接在 b 后面
         self.assertEqual(js["c"]["plan_start_ts"], js["d"]["eta_ts"])
 
+    def test_queued_times_parallel_one_slot_each(self):
+        # Codex 审 #159 第三轮：并行清单里 A、B 推演里同时结束、这一轮分别晚了与早了：接在它们后面的 C、D 各占一格（先腾出的给先排的），不挤进同一格
+        t = self.T
+        jobs = [{"id": "a", "status": "running", "eta_ts": t + 200}, {"id": "b", "status": "running", "eta_ts": t + 50},
+                {"id": "c", "status": "queued", "hold": False}, {"id": "d", "status": "queued", "hold": False}]
+        plans = {"a": {"t1": t + 100}, "b": {"t1": t + 100}, "c": {"t0": t + 100, "t1": t + 300}, "d": {"t0": t + 100, "t1": t + 300}}
+        js = {j["id"]: j for j in jobs}
+        C._queued_times(jobs, plans, t, "p", par=2)
+        self.assertEqual(sorted((js[n]["plan_start_ts"], js[n]["eta_ts"]) for n in "cd"), [(t + 50, t + 250), (t + 200, t + 400)])
+
     def test_worker_and_edge_cases(self):
         t = self.T
         wk = {"wait": "没有可用显存", "held": "drain", "dur": {"q": {"min": 12.0, "src": "同类"}}, "plan": {"q": {"t0": t + 60, "t1": t + 800, "gpus": [0]}}, "stuck": None}

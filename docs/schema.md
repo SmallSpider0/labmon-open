@@ -158,7 +158,7 @@
   `queues[]` 的 `par` 是清单声明的并行数（`# labmon: par=N`，没写为 1，#147）：并行清单在 `running[]`、等待项与 `plan.lanes[].jobs` 里同一条清单可有几项（车道仍按 `root`、`queue` 认），状态目录的 `current` 一行一个在跑的；
   等待项的 `miss` 为真表示缺本地文件又补不了（看板的提醒与主机页按它认，不按 `why` 的文字）；`dep` 是依赖没满足（`wait`，以及出提醒的 `failed`、`missing`、`cycle`，见 [worker.md「依赖」](worker.md#依赖)）；
   `dep_miss` 是依赖等的、哪里都找不到的任务与起算时刻 `[[项目, 任务, epoch 秒]]`（满 2 分钟才报找不到，worker 接管时从上一份状态找回，见 [worker.md「依赖」](worker.md#依赖)）；
-  `todo` 是这台还会跑的任务（每条清单一项 `{project, root, queue, jobs 在跑的在前、其余按清单顺序, deps {任务: [[项目, 任务]]}, gang {任务: [组名, 人数（没写为 null）]}（成组的行，#180）, held paused|pause|drain|null}`，在跑、在等的单元各一项，root、queue 为 null；别的主机的依赖按它认，offers 按它取别的主机各清单还没跑的行）；`local[]` 的 `how` 是 `copy`（有主副本可拷）、`redo`（命令会自己重算）、`mixed` 或 null（补不了），
+  `todo` 是这台还会跑的任务（每条清单一项 `{project, root, queue, jobs 在跑的在前、其余按清单顺序, deps {任务: [[项目, 任务]]}, gang {任务: [组名, 人数（没写为 null）]}（成组的行，#180）, held paused|pause|drain|null, par（并行清单才有，#147：依赖成环的判断里窗口内的行不算互相排队）}`，在跑、在等的单元各一项，root、queue 为 null；别的主机的依赖按它认，offers 按它取别的主机各清单还没跑的行）；`local[]` 的 `how` 是 `copy`（有主副本可拷）、`redo`（命令会自己重算）、`mixed` 或 null（补不了），
   `external[]`（旧 `gpu_queue.sh` 正在跑的）的开始时刻同样是 `t0`（worker 读状态目录的 `current` 时就换算，`read_current`；探针 `probe.py` 读 `current` 时同样给 `t0`）；
   `done[]` 是这台 `usage.jsonl` 的尾巴（最近 60 行），起止是 `t0` / `t1`（epoch 秒，整数）。
   `info.press` 是主机的 CPU 与读写压力（[worker.md「CPU 与读写」](worker.md#cpu-与读写)）：`{thr 被限流的周期 %, psi {cpu, io, memory} 或 null,

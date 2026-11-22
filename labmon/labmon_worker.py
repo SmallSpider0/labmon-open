@@ -2757,7 +2757,7 @@ class Worker:
         """本机各清单此刻的状态（依赖按它认，也写进状态的 todo 给别的主机）：标完的 self.marks {(项目, 任务): done|failed}
         （几条清单说法不一的记 "?"，dep_state 看用量记录的最后一次）；还会跑的 self.todo，每条清单一项
         {project, root, queue, jobs [在跑的在前、其余按清单顺序], deps {任务: [[项目, 任务]…]}（只列写了依赖的）, gang {任务: [组名, 人数]}（只列成组的，
-        在跑的也列）, held}，在跑、在等的单元与登记已撤的在跑任务各一项（root、queue 为 null）。别的主机按它认谁还会跑（dep_state）、组里有谁（gang_sync），
+        在跑的也列）, held, par（并行清单才有，#147：依赖图里窗口内的行不算互相排队）}，在跑、在等的单元与登记已撤的在跑任务各一项（root、queue 为 null）。别的主机按它认谁还会跑（dep_state）、组里有谁（gang_sync），
         offers 按它取别的主机上各清单还没跑的行。本机的成组成员另记进 self.gang_local（gang_sync、gang_publish 用）。
         暂停、drain 的清单照样列（任务还会跑），held 写 paused（状态目录有 paused）、pause 或 drain（项目暂停优先于主机 drain：用户有意停的，
         offers 不当成可挪的活，#25），等它的任务的等待原因据此写清。"""
@@ -2772,6 +2772,7 @@ class Worker:
             ms, left = rows_left(q["state"], c[1], cur)
             ms = ms or set()
             ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": list(cur), "deps": {}, "gang": {}, **({"pool": 1} if q.get("pool") else {}),
+                  **({"par": q["par"]} if (q.get("par") or 1) > 1 else {}),
                   "held": "paused" if "paused" in ms else (self.override_hit({"project": q["project"]}, ("pause",))
                                                            or self.override_hit({"project": q["project"]}, ("drain",)) or [None])[0]}
             for n, _ in c[1]:
@@ -2877,7 +2878,8 @@ class Worker:
         return "%s %s" % (dep_names([k + (False,)], project), "，".join(why)) if why else None
 
     def dep_next(self):
-        """依赖图里一个任务 (项目, 任务) 在等谁：返回 nxt(k) → [(等的任务, "等" 写的依赖里还会跑的 | "排" 同一条清单里排在它前面的 | "组" 与它成组的)]。
+        """依赖图里一个任务 (项目, 任务) 在等谁：返回 nxt(k) → [(等的任务, "等" 写的依赖里还会跑的 | "排" 同一条清单里排在它前面的（并行清单不算：
+        前面哪一行跑完都腾出一格，不是等某一行，#147） | "组" 与它成组的)]。
         清单项取 dep_lanes（本机的与别的主机 todo 里的）。dep_cycle（成环）与 dep_reaches（offers 插行防成环）共用。"""
         pos, grp = {}, {}
         for i, (_, _, _, ln) in enumerate(self.dep_lanes):
@@ -2891,7 +2893,8 @@ class Worker:
             for i, j in pos.get(k, []):
                 ln = self.dep_lanes[i][3]
                 yield from (((p, x), "等") for p, x in (ln.get("deps") or {}).get(k[1], []) if (p, x) in self.dep_where)
-                yield from (((ln["project"], x), "排") for x in ln["jobs"][:j])
+                if (ln.get("par") or 1) <= 1:     # 并行清单（#147）：窗口里的几行不互相排队，前面的哪一行跑完都腾出一格，不算排在谁后面
+                    yield from (((ln["project"], x), "排") for x in ln["jobs"][:j])
             yield from ((x, "组") for x in sorted(mate.get(k, ())) if x != k)
         return nxt
 
@@ -5904,6 +5907,8 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
         put[r["lane"]].add(r["_i"])
 
     def place_(r):
+        if r.get("gpar") and r["ngpu"] > 0 and sum(1 for y in S["jobs"] if (y.get("lane") or y["key"]) == r["lane"]) >= r["gpar"]:
+            return "并行清单的门槛此刻不给加要卡的行（卡吃满）", False   # forecast 的 gpar：逐行放行时按已排上的核，同一轮放了一行就到顶；不用卡的照排
         cs, why, res = place(r, S, t)
         r["code"] = S["code"]                     # admit 按它认成组留下的（同 Worker.place）
         gstuck.pop(r["lane"], None)
@@ -5924,9 +5929,8 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
             if win:
                 blocked.pop(k, None)
             for i in win:
-                if q.get("gpar") and q["jobs"][i]["ngpu"] > 0 and busy.get(k, 0) >= q["gpar"]:
-                    continue                      # 并行清单的门槛此刻不给加要卡的行（forecast 的 gpar）：它占着窗口这一格，不用卡的照排
-                r = dict(q["jobs"][i], key=run_key(q, q["jobs"][i]["name"]), lane=k, _i=i, kind=q["kind"], project=q["project"], since=since[k], allowed=q["allowed"])
+                r = dict(q["jobs"][i], key=run_key(q, q["jobs"][i]["name"]), lane=k, _i=i, kind=q["kind"], project=q["project"], since=since[k], allowed=q["allowed"],
+                         gpar=q.get("gpar"))
                 r["charge"] = r["cards"] * (r["dur"] or 0.0) / 60
                 d = dep_end(dep_keys(r), t, ends, dead) if dep_keys(r) else None
                 if dep_keys(r) and d is None:     # 依赖满足不了或不知道何时满足：它占着窗口的这一格（串行清单就是停在它这里）

@@ -2523,6 +2523,15 @@ class DepsTest(UnitBase):
         self.assertEqual({k: v for k, v in st["todo"][0].items() if k not in ("root", "queue")}, {"project": "pa", "jobs": ["B", "A"], "deps": {"B": [["pa", "A"]]}, "gang": {}, "held": None})
 
 
+    def test_dep_cycle_par_window(self):
+        # Codex 审 #159 第三轮：并行清单（par=2）里 a after=y 在前、b 与另一条清单的 y 成组：b 与 a 同在窗口里，不排在 a 后面，不算成环
+        qs = self.hosts.queues({"s": ["# labmon: par=2", "a|true   # gpus=0 after=y", "b|true   # gpus=0 gang=g:2"],
+                                "u": ["y|true   # gpus=0 gang=g:2"]}, "pa")
+        blk = self.blocked(qs)
+        self.assertNotEqual((blk.get("a") or [None])[0], "cycle", blk)
+        self.assertNotEqual((blk.get("y") or [None])[0], "cycle", blk)
+        self.assertEqual(self.w.todo[0].get("par"), 2)                  # 写进状态的 todo：别的主机认依赖图时同样按窗口
+
 class CrossHostTest(UnitBase):
     """两台 worker 共享一个 HOME（fixtures.Hosts）：一台 tick 写出的状态与用量记录，另一台按共享盘上的真实路径读；推进时钟看过期。"""
 
@@ -3527,6 +3536,28 @@ class ParallelListTest(UnitBase):
         self.assertIn("c1", plan, self.w.plan["lanes"])
         self.assertLess(plan["c1"]["t0"] - now, 120)
         self.assertTrue("g2" not in plan or plan["g2"]["t0"] - now > 120, plan)   # 要卡的行等在跑的那行腾出（门槛此刻不给加）
+
+    def test_forecast_gate_counts_rows_placed_same_round(self):
+        # Codex 审 #159 第三轮：卡吃满、在跑的一行 10 分钟后结束：腾出的那一格只补一行要卡的，同一轮不一起补上三行（gpar 逐行放行时核）
+        self.cards(40000.0)
+        self.setup_list(["# labmon: par=3", "g0|x   # vram=1", "g1|x   # vram=1 est_min=30", "g2|x   # vram=1 est_min=30", "g3|x   # vram=1 est_min=30"])
+        qs = self.w.registry()
+        self.m.list_jobs(qs[0])
+        now = time.time()
+        self.w.running["s|g0"] = {"key": qs[0]["key"] + "|g0", "kind": "queue", "name": "g0", "project": "pa", "t0": now - 60, "deps": [], "deps_any": [],
+                                  "gpus": ["GPU-a"], "use": {}, "est": None, "excl": None, "tag": None, "q": qs[0], "pid": 1}
+        Path(self.w.p.eta).write_text(json.dumps({"t": now, "jobs": {"pa|g0": now + 600}}))
+        self.w.uwin = {"GPU-a": [(now - i, 95) for i in range(5)]}
+        _, reqs = self.w.requests(qs, False)
+        self.w.queue_durs(qs)
+        reqs = [r for r in reqs if r["name"] != "g0"]
+        for r in reqs:
+            self.w.prep(r, now, {})
+        self.w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        plan = {j["name"]: j for ln in self.w.plan["lanes"] for j in ln["jobs"]}
+        self.assertEqual(round(plan["g0"]["t1"] - now), 600, plan)
+        t0s = sorted(round(plan[n]["t0"] - now) for n in ("g1", "g2", "g3"))
+        self.assertEqual(t0s, [600, 600 + 1800, 600 + 3600], plan)
 
     def test_move_rest_keeps_running_end(self):
         # Codex 审 #159 第二轮：并行清单里先开跑的长任务比后面的行晚跑完：挪走队尾后原处剩下的仍要等它（rest 取在跑与剩下的行里最晚的）
