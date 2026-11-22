@@ -1103,6 +1103,8 @@ def _segment_eta(pr, samples: list, seg: dict | None, el: float, floor: float | 
     按任务开始外推把预计结束推到 31～88 小时后），一行进度报出的步数也分不清是开头没做活还是做了没打。
     第一段只有一个步数 > 0 的采样时按 估时 − 已用；没有估时或已超估时按 overrun_left（已用的 20%、至少 10 分钟，与 worker 的
     run_end 同一口径），不按已用时间外推（Issue #17：开头静默比估时还长时同样出尖峰）。下一轮有了第二个采样就换成平均速度。
+    返回的剩余都从 t 起算：按速度外推的（近期速度、进度）剩余步数是最后一个采样时的，从那个采样的时刻起算再扣掉到 t 的这段，
+    日志隔一阵才打一行时预计结束不随采集轮次往后漂、新进度来了再跳回（#140）。
     多段任务（见过分段、同组任务分过段，或进度已到头仍在跑）剩余至少是 整个任务估时 − 已用，后面还没打进度的段不会被漏掉；
     刚换段还没有速度时也用它。进度停了（不打进度的段，如核对、审计）不再按比例外推，改用估时；没有估时才按平均速度（起点同上）。"""
     first = not seg or (seg["k"] == 1 and seg["i0"] == 0)
@@ -1115,11 +1117,12 @@ def _segment_eta(pr, samples: list, seg: dict | None, el: float, floor: float | 
     single = first and bool(pr) and pr[0] > 0 and d is None and bool(samples)
     over = (overrun_left(el), f"剩余按已用的 {OVER_FRAC:.0%}（进度刚开始）", None)   # 它又没有估时或已超估时
     out = None
+    since = t - samples[-1][0] if samples else 0.0   # 剩余步数是最后一个采样时的：按速度外推的从那时起算，换成从现在起的剩余（#140：不随轮次往后漂）
     if pr and recent:
-        out = ((pr[1] - pr[0]) / recent, "近期速度", recent * 60)
+        out = (max(0.0, (pr[1] - pr[0]) / recent - since), "近期速度", recent * 60)
     elif pr and not stale:
         if d:
-            out = (d * (pr[1] - pr[0]) / (pr[0] - a[1]), "进度", (pr[0] - a[1]) / d * 60)
+            out = (max(0.0, d * (pr[1] - pr[0]) / (pr[0] - a[1]) - since), "进度", (pr[0] - a[1]) / d * 60)
         elif single:
             out = (floor * 60 - el, "估时（进度刚开始）", None) if floor and floor * 60 > el else over
     if out and is_multi and floor and floor * 60 - el > out[0]:
