@@ -89,6 +89,7 @@ import sys
 import threading
 import time
 import traceback
+import types
 from pathlib import PurePosixPath
 
 HOME = os.environ.get("LABMON_HOME") or os.path.dirname(os.path.abspath(__file__))
@@ -2840,6 +2841,17 @@ class Worker:
             yield from ((x, "组") for x in sorted(mate.get(k, ())) if x != k)
         return nxt
 
+    def dep_waiters(self):
+        """谁写了 after= / afterany= 等着谁：{(项目, 任务): {等它的 (项目, 任务)}}，取本机与别的主机还会跑的（todo、peer_todo：peer_st 的，
+        另有 worker 不在、已归还的与池里待放的：接收方空着时跳过说不出何时放行的清单，那边的行可能正等着这里的候选，#62）。
+        有人等着的行不挪、不分到新车道：挪走后等它的何时开始会变（offers 的 cant_move、fit --list 共用，#144）。"""
+        out = {}
+        for ln in self.todo + [x[3] for x in self.peer_todo]:
+            for n, ds in (ln.get("deps") or {}).items():
+                for k in ds:
+                    out.setdefault(tuple(k[:2]), set()).add((ln.get("project"), n))
+        return out
+
     def dep_reaches(self, starts, goal):
         """从 starts 里的任务沿“等”“排”“组”走（dep_next），能不能走到 goal 里的任务：offers 把挪来的行插在 goal 那几行前面之前问它，
         走得到就是挪来的行（间接）在等它们，插在前面会成环（#43，Codex 审 #63）。"""
@@ -3620,13 +3632,7 @@ class Worker:
             return []
         mine = {(j["q"]["root"], j["q"]["jobs"]): j["name"] for j in self.running.values() if j.get("q")}
         own = self.proj_lanes(self.host, self.todo, self.plan, mine, held)
-        others, waiters = [], {}
-        # 谁写了 after= 等着谁：本机与别的主机还会跑的（peer_todo 含 peer_st 的，另有 worker 不在、已归还的与池里待放的：接收方空着时
-        # 跳过说不出何时放行的清单，那边的行可能正等着这里的候选，#62）
-        for ln in self.todo + [x[3] for x in self.peer_todo]:
-            for n, ds in (ln.get("deps") or {}).items():
-                for k in ds:
-                    waiters.setdefault(tuple(k[:2]), set()).add((ln.get("project"), n))
+        others, waiters = [], self.dep_waiters()
         for h, st in sorted(self.peer_st.items()):
             run = {(j.get("root"), j.get("queue")): j["name"] for j in st.get("running") or []}
             hd = {(w.get("root"), w.get("queue")) for w in st.get("waiting") or [] if w.get("held")}
@@ -6261,6 +6267,18 @@ class FitHost:
         return say, None
 
 
+def fit_deps(p, q, rows, hist, now):
+    """fit --list 判清单 q（行 rows：list_jobs）里写了依赖的行用的 Worker：与真放行同一份 dep_state（本机这条清单的标记、各主机状态的 todo、
+    算力池、用量记录），之后 dep_block 判前置满没满足、dep_waiters 看谁在等哪一行（#144）。只填这几处要的字段，不另写一套依赖判断；
+    状态文件都按别的主机读（这台自己的 status.json 也读：它的 todo 里有别的清单还会跑的行）。"""
+    w = object.__new__(Worker)
+    w.host, w.p, w.info, w.ovr, w.running, w.hist = p.host, types.SimpleNamespace(status=None, returned=p.returned), {}, [], {}, hist
+    w.qlists, w.olists, w.pool_heads, w.dep_miss, w.peer_t = {q["key"]: (None, [(n, hints(c)) for n, c in rows])}, {}, [], {}, -math.inf
+    w.dep_state([q], now)
+    w.ends = dict(w.peer_end)                 # 别的主机推演里的预计结束：等待原因写“预计几点”
+    return w
+
+
 def fit_status(p, host, now):
     """fit 读一台的 status.json：(状态, 原因)；读不到或超过 STATUS_STALE_S 没更新的状态为 None、原因写明。"""
     try:
@@ -6321,7 +6339,8 @@ def fit(p, names, project=None):
 
 def fit_list(p, root, jobs, project, hosts, as_json=False):
     """一条清单里还会跑、互不依赖的行此刻能在几台主机上再开几条车道（labmon worker fit 主机 ROOT JOBS --list --project P，#35 B）：
-    行取清单文件里没标完（.done、.failed）、不在哪台跑着的（rows_left）；写了 after=/afterany=、gang=、占位任务的单列、不分。
+    行取清单文件里没标完（.done、.failed）、不在哪台跑着的（rows_left）；单列、不分的：前置还没满足的（after= 没跑成功、afterany= 没跑完、等不来、成环，
+    同真放行的 dep_block，fit_deps）、有别的行写了依赖等着它的（同 offers 的 cant_move：挪走后等它的何时开始会变，dep_waiters）、gang=、占位任务（#144）。
     主机是 hosts（看板按共用 worker 目录的在用主机给，config.home_peers；不给只看这台），在这台上读它们的 status.json（共享 HOME，不多连 ssh），
     状态过期的写明没算。按清单顺序逐行，每行先在这次分到车道最少的那台上试（一样少的按 hosts 的顺序），判断同单行的 fit（FitHost.open）；
     哪台都放不下的到此为止，其余排在后面。只回答此刻放得下多少：怎么拆清单、开不开由实验会话定。
@@ -6379,14 +6398,19 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
         return 0
     skip = list(skip.values())
     apart, todo = [], []
+    dw = fit_deps(p, q, rows, hist, now)
+    waiters = dw.dep_waiters()
     for n, c in pend:
         h = job_of(n, c)
-        what = "占位" if is_hold(n) else "成组 gang=%s" % h["gang"] if h["gang"] else "after=" if h["deps"] or h["deps_any"] else None
+        dep = dw.dep_block(dict(h, project=q["project"], name=n), now)    # 前置都满足了（after= 跑成功、afterany= 跑完）的照常分，同真放行
+        ws = sorted(x if p_ == q["project"] else "%s/%s" % (p_, x) for p_, x in waiters.get((q["project"], n), ()))
+        what = ("占位" if is_hold(n) else "成组 gang=%s" % h["gang"] if h["gang"] else dep[1] if dep
+                else "%s 写了 after= 等着它" % "、".join(ws)[:200] if ws else None)
         (apart if what else todo).append((n, c, what))
     print("清单 %s（%s，项目 %s）：还会跑 %d 行%s" % (path, "登记在 %s 上" % reg[0] if reg else "还没登记", q["project"], len(pend),
                                              "，在跑 %s" % "、".join(sorted(running)) if running else ""))
     if apart:
-        print("不分的 %d 行（要等别的任务或成组开跑，留在原处）：%s" % (len(apart), "、".join("%s（%s）" % (n, w) for n, _, w in apart)))
+        print("不分的 %d 行（留在原处）：%s" % (len(apart), "、".join("%s（%s）" % (n, w) for n, _, w in apart)))
     if skip:
         print("没算：" + "；".join(skip))
     if not fhs:
