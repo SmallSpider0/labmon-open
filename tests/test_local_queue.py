@@ -1095,6 +1095,15 @@ class ParseGpuQueueTest(unittest.TestCase):
         C._queued_times(jobs, plans, t, "p", par=2)
         self.assertEqual((jobs[2]["plan_start_ts"], jobs[2]["eta_ts"]), (t + 300, t + 400))
 
+    def test_queued_times_parallel_keeps_deps(self):
+        # Codex 审 #159 第五轮：并行清单里 C after=A，A、B 推演里同时结束、这一轮 A 晚了 B 早了：C 占先腾出的那一格，但不早于 A 这一轮的结束
+        t = self.T
+        jobs = [{"id": "a", "status": "running", "eta_ts": t + 200}, {"id": "b", "status": "running", "eta_ts": t + 50},
+                {"id": "c", "status": "queued", "hold": False, "deps": [["p", "a"]]}]
+        plans = {"a": {"t1": t + 100}, "b": {"t1": t + 100}, "c": {"t0": t + 100, "t1": t + 300}}
+        C._queued_times(jobs, plans, t, "p", par=2)
+        self.assertEqual((jobs[2]["plan_start_ts"], jobs[2]["eta_ts"]), (t + 200, t + 400))
+
     def test_worker_and_edge_cases(self):
         t = self.T
         wk = {"wait": "没有可用显存", "held": "drain", "dur": {"q": {"min": 12.0, "src": "同类"}}, "plan": {"q": {"t0": t + 60, "t1": t + 800, "gpus": [0]}}, "stuck": None}
