@@ -1038,7 +1038,7 @@ class AdmissionUnitTest(UnitBase):
         now = self.hosts.now()
         self.hosts.usage("t", [usage_row("j_s0", "bp", now - 3600, now - 1800, ram_peak=1.0, vram_peak=20000.0, cores_peak=1.0)])
         q, = self.hosts.queues({"L": ["j_s1|true", "j_s2|true", "j_s3|true", "j_s4|true", "j_s5|true", "j_s6|true",
-                                      "dep|true   # after=j_s1", "grp|true   # gang=g:2", "hold_x|true   # gpus=0"]}, project="bp")
+                                      "dep|true   # after=j_s2", "grp|true   # gang=g:2", "hold_x|true   # gpus=0"]}, project="bp")
         os.makedirs(q["state"])
         Path(q["state"], "j_s1.done").write_text("")
         self.hosts.register("t", "L", "bp")
@@ -1049,7 +1049,7 @@ class AdmissionUnitTest(UnitBase):
         rc, out = self.fit_list_out(self.d / "L", hosts=("t", "u", "old"))
         self.assertEqual(rc, 0, out)
         self.assertIn("还会跑 7 行，在跑 j_s2", out)
-        self.assertIn("不分的 3 行（要等别的任务或成组开跑，留在原处）：dep（after=）、grp（成组 gang=g）、hold_x（占位）", out)
+        self.assertIn("不分的 3 行（留在原处）：dep（等 j_s2 跑完）、grp（成组 gang=g）、hold_x（占位）", out)
         self.assertIn("没算：old 的 worker 没在跑（状态 10 分钟没更新）", out)
         # 一行要 22.5 GiB：t 卡 0 只剩 21.5、卡 1 43.9，u 两张 43.9；先给分到少的：j_s3→t 卡 1、j_s4→u、j_s5 t 放不下→u、j_s6 哪台都放不下，到此为止
         self.assertIn("== t ==\n  卡 0：可用 21.5 GiB，近 10 分钟利用率 —（样本不够）（在跑 j_s2）", out)      # 卡的样子是开车道之前的
@@ -1062,6 +1062,37 @@ class AdmissionUnitTest(UnitBase):
         rc, out = self.fit_list_out(self.d / "nope", project=None)
         self.assertEqual(rc, 2)
         self.assertIn("还没登记：写 --project", out)
+
+    def test_fit_list_deps_by_state(self):
+        # #144：写了 after= 的行按前置此刻的状态（同真放行的 dep_block）分：前置已跑成功的、afterany= 等的已跑完（失败也算）的照常分；
+        # 前置还会跑的、跑失败的留在原处并写是哪一个；有别的行写 after= 等着的那一行也留在原处（同 offers 的 cant_move）。
+        # 旧代码见 after= 就整行不分。另有 #147 参考里的场景：别的主机另一条清单上的缓存行跑完了（用量记录），等它的行照常分
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("j_s0", "bp", now - 3600, now - 1800, ram_peak=1.0, vram_peak=2000.0, cores_peak=1.0)])
+        self.hosts.usage("u", [usage_row("cache_u", "bp", now - 900, now - 600, queue="jobs/c.txt")])
+        q, = self.hosts.queues({"L": ["smoke|true", "bad|true", "base|true",
+                                      "t1|true   # after=smoke", "t2|true   # after=bad", "t3|true   # afterany=bad",
+                                      "t4|true   # after=base", "t5|true   # after=cache_u", "t6|true   # after=pc/far"]}, project="bp")
+        os.makedirs(q["state"])
+        Path(q["state"], "smoke.done").write_text("")
+        Path(q["state"], "bad.failed").write_text("")
+        self.hosts.register("t", "L", "bp")
+        # pc/far 还在 u 的清单里排着（u 状态的 todo）
+        self.fit_two_cards(running=[], todo=[{"project": "pc", "root": "/x", "queue": "jobs/q.txt", "jobs": ["far"], "deps": {}, "gang": {}, "held": None}])
+        rc, out = self.fit_list_out(self.d / "L", hosts=("t",))
+        self.assertEqual(rc, 0, out)
+        self.assertIn("还会跑 7 行", out)
+        line = next(x for x in out.splitlines() if x.startswith("不分的"))
+        self.assertIn("不分的 4 行（留在原处）：", line)
+        self.assertIn("base（t4 写了 after= 等着它）", line)
+        self.assertIn("t2（等的 bad 跑失败了", line)
+        self.assertIn("t4（等 base 跑完", line)
+        self.assertIn("t6（等 pc/far 跑完", line)
+        for n in ("t1", "t3", "t5"):
+            self.assertNotIn(n + "（", line)
+        self.assertIn("  t1 ← 卡 0", out)
+        self.assertIn("  t3 ← 卡 1", out)
+        self.assertIn("不再开：t5：", out)                 # 参与分了，只是两张卡都分出去了（只有提示值的行只放空卡）
 
     def test_fit_list_json_head(self):
         # #25：算力池往哪台放（pool.fit_head）问 fit --list --json：只看队首（跑完的、在跑的跳过），打一行 JSON：要多少（没有能算的主机也给）、
