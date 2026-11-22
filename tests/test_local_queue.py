@@ -1035,7 +1035,7 @@ class ParseGpuQueueTest(unittest.TestCase):
                          (parse_time("2027-01-01 10:00:00"), [3, 12], "step 3", t - 5))
         self.assertNotIn("suspended", j["r"])
         self.assertEqual((j["q"]["est_min"], j["q"]["dur"], j["q"]["plan"], j["n"]["est_min"]), (20, None, None, None))
-        self.assertEqual(lane, {"alive": True, "pid": 7, "state_dir": "/s", "logs_dir": None, "paused": None, "managed": False, "waiting": None, "held": None, "held_t": None, "dep": None, "head": None, "stuck": None, "cpu_wait": None,
+        self.assertEqual(lane, {"alive": True, "pid": 7, "state_dir": "/s", "logs_dir": None, "paused": None, "managed": False, "waiting": None, "held": None, "held_t": None, "dep": None, "head": None, "bad": {}, "stuck": None, "cpu_wait": None,
                                 "par": 1, "running_n": 1})
 
     def test_parallel_running(self):
@@ -1062,47 +1062,23 @@ class ParseGpuQueueTest(unittest.TestCase):
             self.assertIsNone(C._last_probe(Path(d) / "none.json"))
 
     def test_queued_times_parallel(self):
-        # 并行清单（#147）：排队的不按串行接龙对齐（几行本来同时跑），只跟着推演里挡住它的那一个挪、都不早于现在；串行照旧接在前一个后面
+        # 并行清单（#147）不对齐：几格怎么接、谁等谁只有 worker 的推演算得对（Codex 在 #159 上连着几轮指出看板自己重排的漏洞），
+        # 照搬推演的时刻，只把该开始还没开始的从现在算；串行照旧接在前一个后面
         t = self.T
-        run = [{"id": "a", "status": "running", "eta_ts": t + 100}, {"id": "b", "status": "running", "eta_ts": t + 400}]
-        plans = {"a": {"t1": t + 160}, "b": {"t1": t + 460}, "c": {"t0": t + 160, "t1": t + 760}, "d": {"t0": t, "t1": t + 600}}
-        mk = lambda: [dict(j) for j in run] + [{"id": n, "status": "queued", "hold": False} for n in ("c", "d")]   # noqa: E731
-        js = {j["id"]: j for j in mk()}
-        C._queued_times(list(js.values()), plans, t, "p", par=3)
-        self.assertEqual((js["c"]["plan_start_ts"], js["d"]["plan_start_ts"]), (t + 100, t))        # c 等 a（a 提前 60 秒），d 本来就能同时开
-        self.assertEqual(js["c"]["eta_ts"], t + 700)
-        js = {j["id"]: j for j in mk()}
+        run = [{"id": "a", "status": "running", "eta_ts": t + 500}, {"id": "b", "status": "running", "eta_ts": t + 50}]
+        plans = {"a": {"t1": t + 100}, "b": {"t1": t + 100}, "c": {"t0": t + 100, "t1": t + 300}, "d": {"t0": t - 60, "t1": t + 600},
+                 "h": {"t0": t + 100, "t1": t + 100, "after": [["p", "a"]]}}
+        mk = lambda: [dict(j) for j in run] + [{"id": n, "status": "queued", "hold": n == "h", **({"deps": [["p", "a"]]} if n == "h" else {})}   # noqa: E731
+                                               for n in ("c", "d", "h")]
+        for par in (2, 1):                   # par=1：运行中调小了 par、在跑的还有两行，同样照搬推演（推演知道要等降到上限以下）
+            js = {j["id"]: j for j in mk()}
+            C._queued_times(list(js.values()), plans, t, "p", par=par)
+            self.assertEqual((js["c"]["plan_start_ts"], js["c"]["eta_ts"]), (t + 100, t + 300))
+            self.assertEqual((js["d"]["plan_start_ts"], js["d"]["eta_ts"]), (t, t + 660))          # 推演之后该开始还没开始：从现在算
+            self.assertEqual((js["h"]["eta_ts"], js["h"]["after"]), (t + 100, [["p", "a"]]))
+        js = {j["id"]: j for j in mk()[1:]}
         C._queued_times(list(js.values()), plans, t, "p")
-        self.assertEqual(js["d"]["plan_start_ts"], t + 400)                                         # 串行：不和前一个重叠，接在 b 后面
-        self.assertEqual(js["c"]["plan_start_ts"], js["d"]["eta_ts"])
-
-    def test_queued_times_parallel_one_slot_each(self):
-        # Codex 审 #159 第三轮：并行清单里 A、B 推演里同时结束、这一轮分别晚了与早了：接在它们后面的 C、D 各占一格（先腾出的给先排的），不挤进同一格
-        t = self.T
-        jobs = [{"id": "a", "status": "running", "eta_ts": t + 200}, {"id": "b", "status": "running", "eta_ts": t + 50},
-                {"id": "c", "status": "queued", "hold": False}, {"id": "d", "status": "queued", "hold": False}]
-        plans = {"a": {"t1": t + 100}, "b": {"t1": t + 100}, "c": {"t0": t + 100, "t1": t + 300}, "d": {"t0": t + 100, "t1": t + 300}}
-        js = {j["id"]: j for j in jobs}
-        C._queued_times(jobs, plans, t, "p", par=2)
-        self.assertEqual(sorted((js[n]["plan_start_ts"], js[n]["eta_ts"]) for n in "cd"), [(t + 50, t + 250), (t + 200, t + 400)])
-
-    def test_queued_times_parallel_capacity(self):
-        # Codex 审 #159 第四轮：并行清单两格都被在跑的占着（这一轮都晚了）：推演里不接着谁开始的 C 也不早于先腾出的那一格
-        t = self.T
-        jobs = [{"id": "a", "status": "running", "eta_ts": t + 300}, {"id": "b", "status": "running", "eta_ts": t + 400},
-                {"id": "c", "status": "queued", "hold": False}]
-        plans = {"a": {"t1": t + 100}, "b": {"t1": t + 200}, "c": {"t0": t + 150, "t1": t + 250}}
-        C._queued_times(jobs, plans, t, "p", par=2)
-        self.assertEqual((jobs[2]["plan_start_ts"], jobs[2]["eta_ts"]), (t + 300, t + 400))
-
-    def test_queued_times_parallel_keeps_deps(self):
-        # Codex 审 #159 第五轮：并行清单里 C after=A，A、B 推演里同时结束、这一轮 A 晚了 B 早了：C 占先腾出的那一格，但不早于 A 这一轮的结束
-        t = self.T
-        jobs = [{"id": "a", "status": "running", "eta_ts": t + 200}, {"id": "b", "status": "running", "eta_ts": t + 50},
-                {"id": "c", "status": "queued", "hold": False, "deps": [["p", "a"]]}]
-        plans = {"a": {"t1": t + 100}, "b": {"t1": t + 100}, "c": {"t0": t + 100, "t1": t + 300}}
-        C._queued_times(jobs, plans, t, "p", par=2)
-        self.assertEqual((jobs[2]["plan_start_ts"], jobs[2]["eta_ts"]), (t + 200, t + 400))
+        self.assertEqual(js["d"]["plan_start_ts"], t + 50)                                          # 串行：不和前一个重叠，接在 b 后面
 
     def test_worker_and_edge_cases(self):
         t = self.T

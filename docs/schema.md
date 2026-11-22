@@ -50,7 +50,8 @@
     "head": null,                                // 队首等待项的任务名（worker 等待项的 name，探针取）：dep: 告警的 key 带它（#129）
     "stuck": null,                               // worker 推演里排不上的原因（放不下、截止前跑不完等）：此时 eta_ts 为 null
     "cpu_wait": null,                            // 队首一直因 CPU 被挡满 10 分钟后已挡的秒数（worker 的 cpu_wait，阈值只在 worker）：出 cpu: 告警
-    "par": 1, "running_n": 1,                    // 清单声明的并行数（worker 状态 queues[] 的 par，不归 worker 管的为 1）与此刻在跑几行（#147）；waiting、held、dep、head、cpu_wait 都取这条清单的第一条等待项
+    "par": 1, "running_n": 1,                    // 清单声明的并行数（worker 状态 queues[] 的 par，不归 worker 管的为 1）与此刻在跑几行（#147）；waiting、held、dep、head 取这条清单的第一条等待项，窗口里有依赖等不来的取它，cpu_wait 取最久的；
+    "bad": {},                                   // 依赖等不来的行 {任务: 原因}（并行清单 wait --job 只把这一行判成不会再跑）；并行车道排队任务的预计时刻照搬 worker 推演，不另对齐
     "holding": false, "has_hold": false,         // 正在跑暂停任务 / 未完成任务里有暂停任务
     "state_dir": "/root/…/results/_queue",
     "logs_dir": "/root/…/results/_logs",         // 日志目录（探针按清单 .env 的 QUEUE_LOGS 解析，任务日志是 <logs_dir>/<任务>.log）；labmon wait --job 写结果位置用，#135 前的快照没有

@@ -2936,7 +2936,7 @@ class Worker:
         return False
 
     def dep_cycle(self, r, pend, mates=()):
-        """依赖成环（清单顺序也算依赖：一行要等它前面的都跑完）：从 r 等的还会跑的任务 pend（与 r 成组的 mates）出发，沿“等谁”（写的依赖）、
+        """依赖成环（清单顺序也算依赖：串行清单一行要等它前面的都跑完；并行清单窗口里的行不算，#147）：从 r 等的还会跑的任务 pend（与 r 成组的 mates）出发，沿“等谁”（写的依赖）、
         “排在谁后面”与“和谁成组”（gang=：要一起开跑，等于等同伴能开跑）找回 r 自己，返回最短的一圈的文字（“B 等 A，A 排在 B 后面”），没有为 None。
         只由“成组”连起来的一圈不算（几个成员本来就互相等着一起开跑）：圈里至少要有一条“等”或“排”（等谁跑完）。
         清单项取 dep_lanes（本机的与别的主机 todo 里的；在跑的排最前、不等谁）。dep_block 与 gang_block 共用。"""
@@ -6666,7 +6666,11 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
     pend = first_rows(pend)
     pend = [(n, c) for n, c in pend.items() if n not in running]
     if as_json:
-        print(json.dumps(fit_head(q, pend[0] if pend else None, fhs, skip, hist, now), ensure_ascii=False))
+        head = pend[0] if pend else None
+        if (q.get("par") or 1) > 1 and pend:   # 并行清单（#147）：同 pool_view 取窗口里第一行依赖满足的
+            dw = fit_deps(p, q, rows, hist, now)
+            head = next((x for x in pend[:q["par"]] if not dw.dep_block(dict(job_of(*x), project=q["project"]), now)), head)
+        print(json.dumps(fit_head(q, head, fhs, skip, hist, now), ensure_ascii=False))
         return 0
     skip = list(skip.values())
     apart, todo = [], []

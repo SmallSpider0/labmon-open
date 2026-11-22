@@ -534,14 +534,17 @@ def _stuck(e: dict, regs: dict, t: float, out: list, move, snap: dict, *, only_p
         if not (q.get("pool") if only_pool else _ours(q)):
             continue
         it = _item(e["id"], q, t)
-        w = next((w for w in ws.get("waiting") or [] if w.get("queue") and key(w.get("root"), w["queue"]) == it["key"]), None)
-        if w and w.get("elsewhere"):
+        wq = [w for w in ws.get("waiting") or [] if w.get("queue") and key(w.get("root"), w["queue"]) == it["key"]]   # 并行清单窗口里可能有几行（#147）
+        w = next((w for w in wq if w.get("elsewhere")), None)
+        busy = any(key(j.get("root"), j.get("queue")) == it["key"] for j in ws.get("running") or [])   # 并行清单有行在跑：另一格等着不算放不出去
+        long = [w for w in wq if not busy and not w.get("held") and not w.get("dep") and t - (w.get("since") or t) >= POOL_WAIT_S]
+        if w:
             _move(dict(it, reason=_elsewhere(w["elsewhere"])), POOL, move, t, snap)
         elif back is not None:
             if only_pool or not ws or _todo(ws, q["root"], q["jobs"]):
                 out.append(dict(it, back=True, reason=back))
-        elif w and not w.get("held") and not w.get("dep") and t - (w.get("since") or t) >= POOL_WAIT_S:
-            out.append(dict(it, reason=f"在 {e['id']} 上等了 {fmt_dur(t - w['since'])}还没放行"))
+        elif long:
+            out.append(dict(it, reason=f"在 {e['id']} 上等了 {fmt_dur(t - min(w['since'] for w in long))}还没放行"))
 
 
 def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fit=None, start=None, ret=None, fin=None) -> dict:

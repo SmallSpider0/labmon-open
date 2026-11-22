@@ -210,7 +210,7 @@ def parse_gpu_queue(raw: dict, t: float) -> tuple[dict, list[dict]]:
         jobs.append(row)
     lane = {"alive": bool(raw.get("lock_alive")), "pid": raw.get("lock_pid"), "state_dir": raw.get("state_dir"), "logs_dir": raw.get("logs_dir"),
             "paused": raw.get("paused") if not raw.get("lock_alive") else None,
-            "managed": raw.get("worker") is not None, "waiting": wk.get("wait"), "held": wk.get("held"), "held_t": wk.get("held_t"), "dep": wk.get("dep"), "head": wk.get("head"), "stuck": wk.get("stuck"),
+            "managed": raw.get("worker") is not None, "waiting": wk.get("wait"), "held": wk.get("held"), "held_t": wk.get("held_t"), "dep": wk.get("dep"), "head": wk.get("head"), "bad": wk.get("bad") or {}, "stuck": wk.get("stuck"),
             "cpu_wait": wk.get("cpu"),      # 队首一直因 CPU 被挡满 10 分钟（worker 定）后已挡的秒数
             "par": wk.get("par") or 1, "running_n": sum(j["status"] == "running" for j in jobs)}   # 清单声明的并行数与此刻在跑几行（#147）
     return lane, jobs
@@ -683,44 +683,33 @@ def _job_times(j: dict, lane_id: str, pid: str, al_cfg: dict, work: dict, alerts
 def _queued_times(jobs: list[dict], plans: dict, t: float, pid: str, par: int = 1) -> None:
     """一条车道上排队任务的预计开始与结束：取 worker 推演的（同机各项目一起排），再与这一轮对齐（#64）。
     推演用的在跑任务结束是看板上一轮写的 eta.json（整分钟取整），又是几分钟前算的；运行中的条却是这一轮按进度算的（_job_times），
-    原样拼在一起，同一车道上前后两条就重叠或留缝。所以按推演顺序（在跑的在前）走一遍：
-    推演里接着前面某一个开始的（t0 等于它推演的 t1：被它挡着）跟着它挪，可前可后；不是接着的（等资源、等依赖）不提前；
-    串行车道（par=1，一次只跑一个）另外只在会和前一个重叠时往后挪；并行清单（par>1，#147）几行本来就同时跑，不按接龙对齐，只跟着挡住它的那一个挪：推演里同一时刻腾出的几格各交给一行，
-    这一轮先腾出的给先排的（一格不接两行；写了依赖的先接它等的那一个），写了依赖、等这条车道上没跑完的不早于它们这一轮的结束；不接着谁的也要等有一格腾出（各格这一轮何时腾出按在跑的与排在前面的结束）。
-    都不早于现在（推演之后该开始还没开始的从现在算）。结束跟着开始挪，
+    原样拼在一起，同一车道上前后两条就重叠或留缝。串行车道一次只跑一个，所以按推演顺序（在跑的在前）走一遍：
+    推演里接着前一个开始的（t0 等于前一个推演的 t1：被它挡着）跟着前一个挪，可前可后；不是接着的（等资源、等依赖）不提前，
+    只在会和前一个重叠时往后挪；都不早于现在（推演之后该开始还没开始的从现在算）。结束跟着开始挪，
     写了依赖的占位任务结束跟着它等的任务，不随它自己开始晚了往后挪：等的都是这条车道上还没跑完的（pid 是本项目、这一轮定下了结束）时，
     取它们这一轮的结束与它自己的开始里最晚的，往前拉时不留推演的旧结束（#86）；等别的车道、别的项目的，或等的在这条车道上已跑完
-    （同名的可能在别处重跑，还会跑的盖过以前的结果，见 Worker.dep_state），这里不知道那边这一轮的结束，仍取 max(推演的结束, 开始)。不归 worker 管的队列没有推演，排队的不写预计时间。"""
+    （同名的可能在别处重跑，还会跑的盖过以前的结果，见 Worker.dep_state），这里不知道那边这一轮的结束，仍取 max(推演的结束, 开始)。不归 worker 管的队列没有推演，排队的不写预计时间。
+    并行清单（par>1，或运行中调小了 par、在跑的还不止一行，#147）不对齐：几格怎么接、谁等谁只有 worker 的推演（simulate 的窗口）算得对，
+    看板照搬推演的时刻，只把该开始还没开始的从现在算（结束跟着挪）。推演按看板每轮写的 eta.json 重算，落后的至多一轮采集。"""
     run = [j for j in jobs if j["status"] == "running"]
     queued = sorted((j for j in jobs if j["status"] == "queued" and plans.get(j["id"])), key=lambda j: plans[j["id"]]["t0"])
-    prev, ids = [], []             # 前面的：(推演里的结束, 这一轮定下的结束)，与它们的 id
+    if par > 1 or len(run) > 1:
+        for j in queued:
+            pl = plans[j["id"]]
+            j["plan_start_ts"] = s = max(pl["t0"], t)
+            j["eta_ts"] = pl["t1"] and (max(pl["t1"], s) if j["hold"] and j.get("deps") else pl["t1"] + s - pl["t0"])
+            if pl.get("after"):
+                j["after"] = pl["after"]
+        return
+    pt1, end = None, None          # 前一个：推演里的结束、这一轮定下的结束
     ends = {}                      # 这条车道上没跑完的：这一轮定下的结束
     for j in run:
-        prev.append(((plans.get(j["id"]) or {}).get("t1"), j.get("eta_ts")))
-        ids.append(j["id"])
-        ends[j["id"]] = j.get("eta_ts")
-    used = set()                   # 并行清单：已被接上的前一个（一格只交给一行）
-    slots = sorted(j.get("eta_ts") or float("inf") for j in run)[:par] if par > 1 else []   # 并行清单各格这一轮何时腾出（空着的格是现在）
-    slots += [t] * max(0, par - len(slots)) if par > 1 else []
+        pt1, end = (plans.get(j["id"]) or {}).get("t1"), j.get("eta_ts")
+        ends[j["id"]] = end
     for j in queued:
         pl = plans[j["id"]]
-        if par <= 1:
-            pt1, end = prev[-1] if prev else (None, None)
-        else:
-            c = [i for i, (a, _) in enumerate(prev) if i not in used and a is not None and abs(pl["t0"] - a) <= 1]
-            dep = {d[1] for d in j.get("deps") or () if d[0] == pid}    # 写了依赖的先接它等的那一个的格
-            i = min(c, key=lambda i: (ids[i] not in dep, float("inf") if prev[i][1] is None else prev[i][1])) if c else None
-            pt1, end = prev[i] if i is not None else (None, None)
-            used.add(i)
         s = pl["t0"] + (end - pt1 if pt1 is not None and end is not None and abs(pl["t0"] - pt1) <= 1 else 0)
-        s = max(s, t, (end or t) if par <= 1 else t)
-        if par > 1:                # 写了依赖、等的是这条车道上没跑完的：不早于它们这一轮的结束；再占一格：接着谁的占它那一格，否则占最先腾出的（腾出时刻不知道的不挡）
-            s = max([s] + [ends[d[1]] for d in j.get("deps") or () if d[0] == pid and ends.get(d[1])])
-            slots.sort()
-            g = slots.index(end) if end in slots else 0
-            if slots[g] != float("inf"):
-                s = max(s, slots[g])
-            del slots[g]
+        s = max(s, t, end or t)
         j["plan_start_ts"] = s
         if pl["t1"] and j["hold"] and j.get("deps"):
             same = all(d[0] == pid and ends.get(d[1]) for d in j["deps"])
@@ -728,13 +717,9 @@ def _queued_times(jobs: list[dict], plans: dict, t: float, pid: str, par: int = 
         else:
             j["eta_ts"] = pl["t1"] and pl["t1"] + s - pl["t0"]
         ends[j["id"]] = j["eta_ts"]
-        if par > 1:
-            slots.append(j["eta_ts"] or float("inf"))
         if pl.get("after"):
             j["after"] = pl["after"]          # 等到谁跑完才轮到它（[[项目, 任务]]），时间线在空档上写
-        prev.append((pl["t1"], j["eta_ts"]))
-        ids.append(j["id"])
-
+        pt1, end = pl["t1"], j["eta_ts"]
 
 def _groups(cfg: dict, snap: dict, state: dict, ratios: dict) -> None:
     """计划项：配置的在前，自动归组的按首次出现排在后面（颜色记在状态里不随顺序变）；各项的状态、任务计数、实际/估时、预计完成。"""

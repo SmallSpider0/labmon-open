@@ -1136,6 +1136,17 @@ class AdmissionUnitTest(UnitBase):
         Path(self.m.Paths("t").returned).write_text(json.dumps({"hosts": ["gone"]}))
         self.assertEqual(ask(("t",))["head"], "j_s3")
 
+    def test_fit_list_json_head_par(self):
+        # 并行清单（#147）：池问 fit --list --json 时队首同 pool_view，取窗口里第一行依赖满足的（A after=B 在前、B 独立：问的是 B）
+        q, = self.hosts.queues({"L": ["# labmon: par=2", "A|true   # after=B", "B|true"]}, project="bp")
+        os.makedirs(q["state"])
+        self.hosts.register(self.m.POOL, "L", "bp")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.m.fit_list(self.m.Paths(self.m.POOL), str(self.d / "L"), "jobs/q.txt", "bp", [], True)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(json.loads(out.getvalue().strip().splitlines()[-1])["head"], "B")
+
     def test_job_cmd_first_row(self):
         # 按名字找清单里的一行只有一处（job_cmd）：取第一条、跳过注释行，找不到为 None
         q, = self.hosts.queues({"q": ["# x|old", "x|echo 1   # tag=a", "x|echo 2"]})
@@ -3072,6 +3083,17 @@ jobs = "jobs/q.txt"
         self.assertTrue(P.queue_gpu_queue(dict(q, me="t"))["current"][0]["alive"])
         self.assertFalse(P.queue_gpu_queue(dict(q, me="o"))["current"][0]["alive"])
         self.assertFalse(P.queue_gpu_queue(dict(q, me="t", readonly=True))["current"][0]["alive"])
+
+    def test_worker_view_par_bad_dep(self):
+        # 并行清单（#147）：窗口里第一行照常等资源、第二行的依赖等不来：车道报那一行（dep: 告警），按行记进 bad；cpu 取最久的
+        root = self.q["root"]
+        st = {"t": time.time(), "queues": [{"root": root, "jobs": "jobs/q.txt", "par": 2}],
+              "waiting": [{"root": root, "queue": "jobs/q.txt", "name": "a", "why": "没有可用显存", "dep": None, "cpu_wait": 700},
+                          {"root": root, "queue": "jobs/q.txt", "name": "b", "why": "等的 x 跑失败了", "dep": "failed"}]}
+        f = Path(self.hosts.d, "st.json")
+        f.write_text(json.dumps(st))
+        v = P.worker_view(str(f), 180)[os.path.normpath(os.path.join(root, "jobs/q.txt"))]
+        self.assertEqual((v["head"], v["dep"], v["wait"], v["bad"], v["cpu"]), ("b", "failed", "等的 x 跑失败了", {"b": "等的 x 跑失败了"}, 700))
 
     def test_probe_reads_each_current_line(self):
         # 并行清单（#147）：current 一行一个在跑的，探针逐行读出、各自判 PID 与进度

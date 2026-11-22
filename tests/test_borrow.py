@@ -442,11 +442,17 @@ class BorrowTest(Base):
             e["status"].update(
                 waiting=[{"kind": "queue", "queue": "jobs/p1f.txt", "root": "/r", "project": "a1", "name": "s1", "why": why, "held": "deadline"},
                          {"kind": "queue", "queue": "jobs/other.txt", "root": "/r", "project": "a1", "name": "o1", "why": "没有可用显存", "held": None}],
-                todo=[{"project": "a1", "jobs": ["x1", "x2"], "deps": {}, "held": None},
-                      {"project": "a1", "jobs": ["s1", "s2", "s3", "s4"], "deps": {}, "held": None}])
+                todo=[{"project": "a1", "root": "/r", "queue": "jobs/other.txt", "jobs": ["x1", "x2"], "deps": {}, "held": None},
+                      {"project": "a1", "root": "/r", "queue": "jobs/p1f.txt", "jobs": ["s1", "s2", "s3", "s4"], "deps": {}, "held": None}])
             return e
         late = B.late_jobs(entry(ov)["status"])
         self.assertEqual([(x["queue"], x["name"], x["n"]) for x in late], [("jobs/p1f.txt", "s1", 4)])
+        # 并行清单（#147）：同一条清单有一行在跑、窗口里两行被截止挡住：一条清单一项，n 是还没开跑的行数
+        e = entry(ov)
+        e["status"]["waiting"].insert(1, dict(e["status"]["waiting"][0], name="s2"))
+        e["status"]["running"] = [{"project": "a1", "root": "/r", "queue": "jobs/p1f.txt", "name": "s0"}]
+        e["status"]["todo"][1]["jobs"] = ["s0", "s1", "s2", "s3", "s4"]
+        self.assertEqual([(x["queue"], x["name"], x["n"]) for x in B.late_jobs(e["status"])], [("jobs/p1f.txt", "s1", 4)])
         self.assertEqual(B.late_jobs(entry(ov + [{"kind": "deadline", "target": None, "at": cut - 600}])["status"]), [])   # 续租截止更早
         self.assertEqual(B.late_jobs(entry([ov[0]])["status"]), [])                                                       # 没有约定归还
         e = entry(ov)

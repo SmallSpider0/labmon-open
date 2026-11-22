@@ -329,7 +329,8 @@ def worker_view(path, stale):
     "dep": 依赖没满足（wait、failed、missing、cycle）或 None, "head": 队首等待项的任务名或 None,
     "cpu": 一直因 CPU 被挡满 10 分钟后已挡的秒数（worker 的 cpu_wait）或 None,
     "dur": {任务: 预计时长}, "plan": {任务: {t0, t1, gpus, after, deps}}, "stuck": 推演里排不上的原因或 None,
-    "par": 清单声明的并行数（#147，没写为 1）}}，即它在管的队列；不在跑返回 {}。等待原因等只取这条清单的第一条等待项（并行清单窗口里有几条，免得重复报）。
+    "par": 清单声明的并行数（#147，没写为 1）, "bad": {任务: 原因}（依赖等不来的行，没有不带）}}，即它在管的队列；不在跑返回 {}。
+    等待原因等只取这条清单的一条等待项（并行清单窗口里有几条，免得重复报）：第一条，窗口里有依赖等不来的取它；cpu 取各条里最久的。
     队列的锁只在 worker 跑这条队列的任务时才有，空着等资源的队列靠这个认。预计时长是 worker 的 duration 算的；
     plan 是 worker 推演（forecast）出的预计开始与结束（同机各项目一起排），看板按它排预计时间。"""
     try:
@@ -354,8 +355,15 @@ def worker_view(path, stale):
             out[k].update(plan={j["name"]: j for j in ln["jobs"]}, stuck=ln.get("stuck"))
     for w in st.get("waiting", []):
         k = key(w.get("root"), w.get("queue"))
-        if w.get("root") and k in out and out[k]["wait"] is None:
-            out[k].update(wait=w.get("why"), held=w.get("held"), held_t=ovt.get(w.get("held")), dep=w.get("dep"), head=w.get("name"), cpu=w.get("cpu_wait"))
+        if not (w.get("root") and k in out):
+            continue
+        o, bad = out[k], w.get("dep") not in (None, "wait")
+        if bad:                                 # 依赖等不来的行：并行清单窗口里别的行照跑，按行记（看板 wait --job 只把这一行判成不会再跑，#147）
+            o.setdefault("bad", {})[w.get("name")] = w.get("why")
+        if o["wait"] is None or bad and o["dep"] in (None, "wait"):   # 窗口里有等不来的就报它（dep: 告警），不被前面一行盖住
+            o.update(wait=w.get("why"), held=w.get("held"), held_t=ovt.get(w.get("held")), dep=w.get("dep"), head=w.get("name"), cpu=w.get("cpu_wait") or o["cpu"])
+        elif w.get("cpu_wait"):
+            o["cpu"] = max(o["cpu"] or 0, w["cpu_wait"])
     return out
 
 

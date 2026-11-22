@@ -516,14 +516,24 @@ def _jobs(run: list[dict]) -> str:
 def late_jobs(ws: dict) -> list[dict]:
     """借用约定挡住、这台不会再放的清单（看板的 borrow_cut 告警、borrow_due 提醒里跑不完的任务都取它）：worker 状态里队首被截止挡住
     （等待项 held 为 deadline）的队列，前提是约定归还（目标 borrow 的 deadline 指令）是最早的截止，不然挡住它的可能是续租截止。
-    ws：worker 状态。返回 [{project, root, queue, name 队首, why, n 这条清单还没跑的任务数（todo 里这条的，找不到算 1）}]。只读，不改放行规则。"""
+    ws：worker 状态。返回 [{project, root, queue, name 队首（并行清单取第一条被挡的）, why, n 这条清单还没开跑的任务数（todo 里这条的减去在跑的，找不到算 1）}]。只读，不改放行规则。"""
     ds = [o for o in ws.get("overrides") or [] if o.get("kind") == "deadline" and o.get("at")]
     cut = min((o["at"] for o in ds if o.get("target") == "borrow"), default=None)
     if cut is None or any(o["at"] < cut for o in ds if o.get("target") != "borrow"):
         return []
-    todo = {(ln.get("project"), ln["jobs"][0]): len(ln["jobs"]) for ln in ws.get("todo") or [] if ln.get("jobs")}
-    return [{"project": w.get("project"), "root": w.get("root"), "queue": w["queue"], "name": w["name"], "why": w.get("why"),
-             "n": todo.get((w.get("project"), w["name"]), 1)} for w in ws.get("waiting") or [] if w.get("held") == "deadline" and w.get("queue")]
+    # 按清单认（并行清单窗口里可能有几行被挡，#147：一条清单一项，取第一行）；n 是这条清单还没开跑的行数（todo 里的减去在跑的）
+    lk = lambda x: (x.get("project"), x.get("root"), x.get("queue"))   # noqa: E731
+    run = {}
+    for j in ws.get("running") or []:
+        run[lk(j)] = run.get(lk(j), 0) + 1
+    todo = {lk(ln): len(ln["jobs"]) - run.get(lk(ln), 0) for ln in ws.get("todo") or [] if ln.get("jobs")}
+    todo.update(((ln.get("project"), ln["jobs"][0]), len(ln["jobs"])) for ln in ws.get("todo") or [] if ln.get("jobs") and not ln.get("queue"))
+    out = {}
+    for w in ws.get("waiting") or []:
+        if w.get("held") == "deadline" and w.get("queue") and lk(w) not in out:
+            out[lk(w)] = {"project": w.get("project"), "root": w.get("root"), "queue": w["queue"], "name": w["name"], "why": w.get("why"),
+                          "n": max(1, todo.get(lk(w)) or todo.get((w.get("project"), w["name"])) or 1)}
+    return list(out.values())
 
 
 def late_do(why: str | None, user: bool = False) -> str:
