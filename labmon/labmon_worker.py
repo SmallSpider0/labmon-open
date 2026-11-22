@@ -21,7 +21,7 @@
 - 状态目录：lock（worker PID）、current、<名称>.done / .failed、queue.log；paused 存在时不启动新任务。
 
 与 gpu_queue.sh 的不同：
-- 一台主机上的多条队列由同一个 worker 调度，各队列内部仍一次一个任务；不同队列在 GPU 空闲显存够时并行。
+- 一台主机上的多条队列由同一个 worker 调度，各队列内部一次一个任务（清单写了 `# labmon: par=N` 的同时至多 N 个，#147）；不同队列在 GPU 空闲显存够时并行。
 - 放行顺序（admit）与准入（place：能不能放、选哪几张卡、独占留卡与回填、给对方的预留）只有一份，真放行按实时采样拼的资源快照（snapshot）调它，
   推演（simulate）在模拟的时间轴上维护同样的快照调它。顺序（fair_key）：先比人，同一人的几个项目的衰减 GPU 用量（卡·时，各主机一起算，
   在跑的按预计时长先记一笔）合起来算一份，小的先；同一人的项目之间 focus 的先，再比用量 ÷ 权重，小的先；项目内先来先跑（#23）。
@@ -176,6 +176,9 @@ CPU_CODES = ("cpu", "cpu_est", "cpu_other", "nofit_cpu")   # 算“因 CPU 被�
 CPU_ALERT_CODES = ("cpu_est", "cpu_other", "nofit_cpu")   # 其中要告警的（cpu_wait）：核真被我们自己的任务用着的（cpu）是正常排队，不报（#65 维护者定）
 CPU_WARM_S = 600         # 运行中任务开跑（接管后从开始量起）满这么久，CPU 记账从估计改按近这么久的 1 分钟峰值（回收开头加载阶段之后没用上的核，#65）
 MIB = 2 ** 20
+PAR_RE = re.compile(r"^[ \t]*#[ \t]*labmon:.*?(?<![\w-])par=(\d+)", re.M)   # 清单声明的并行数 `# labmon: par=N`（list_par，#147）
+PAR_MAX = 32             # 一条清单在一台上最多同时跑这么多行
+PAR_STEP_S = 60          # 并行清单已有行在跑时，两次加行至少隔这么久：让卡的利用率来得及反映新加的那行（加行门槛 Worker.par_gate）
 
 
 def now_str(t=None):
@@ -455,15 +458,15 @@ def hints(cmd):
             "gang": gg.group(1) if gg else None, "gn": int(gg.group(2)) if gg and gg.group(2) else None}
 
 
-def rows_left(state, rows, cur):
+def rows_left(state, rows, cur=()):
     """清单里还会跑的行（list_state 写 todo、forecast 推演共用）：返回 (状态目录里的标记，读不了为 None,
-    [(任务, 资源提示)] 去掉标了 .done、.failed 的与在跑的 cur)。还没跑过的清单没有状态目录：标记为 None，行都算还会跑。"""
+    [(任务, 资源提示)] 去掉标了 .done、.failed 的与在跑的 cur（任务名的集合：并行清单几行在跑，#147）)。还没跑过的清单没有状态目录：标记为 None，行都算还会跑。"""
     try:
         ms = set(os.listdir(state))
     except OSError:
         ms = None
-    m = ms or ()
-    return ms, [(n, h) for n, h in rows if n != cur and n + ".done" not in m and n + ".failed" not in m]
+    m, cur = ms or (), set(cur or ())
+    return ms, [(n, h) for n, h in rows if n not in cur and n + ".done" not in m and n + ".failed" not in m]
 
 
 def first_rows(rows):
@@ -476,8 +479,23 @@ def first_rows(rows):
 
 
 def list_jobs(q):
-    """清单里的任务 [(名称, 命令)]：跳过空行、# 注释与没有 | 的行。"""
-    return parse_jobs(read(q["jobs_path"], "") or "")
+    """清单里的任务 [(名称, 命令)]：跳过空行、# 注释与没有 | 的行。顺带把清单声明的并行数记进 q["par"]（list_par；读不到清单为 1）。"""
+    text = read(q["jobs_path"], "") or ""
+    q["par"] = list_par(text)
+    return parse_jobs(text)
+
+
+def list_par(text):
+    """清单声明的并行数（#147）：清单里一行 `# labmon: par=N`（位置不限，取第一处），这条清单在这台上最多同时跑 N 行；没写、写错为 1（串行，同以前）。
+    封顶 PAR_MAX。写在清单里，清单搬到哪台（worker add、页面换主机、算力池）都跟着走；旧 worker 当注释，照旧串行。"""
+    m = PAR_RE.search(text or "")
+    return min(PAR_MAX, max(1, int(m.group(1)))) if m else 1
+
+
+def run_key(q, name):
+    """清单任务的请求 key 与运行中任务的 key（#147）：串行清单（par=1）就是队列 key（同以前，状态、接管都不变），并行清单是 `队列 key|任务名`，
+    按 key 记的（等了多久 wsince、独占留卡、成组留的资源、等待原因、推演里的 starts）因此逐行独立。车道身份一律按队列 key（运行中的 j["q"]["key"]、请求的 r["q"]["key"]）认。"""
+    return q["key"] if (q.get("par") or 1) <= 1 else q["key"] + "|" + name
 
 
 def parse_jobs(text):
@@ -497,13 +515,25 @@ def job_of(name, cmd):
     return dict(h, name=name, cmd=cmd.strip())
 
 
-def next_job(q):
-    """清单里第一个没有 .done / .failed 的任务。"""
-    for name, cmd in list_jobs(q):
-        if os.path.exists(os.path.join(q["state"], name + ".done")) or os.path.exists(os.path.join(q["state"], name + ".failed")):
+def next_jobs(q, busy=(), rows=None):
+    """清单的窗口（#147）：按清单顺序取没有 .done / .failed、也不在跑（busy：这条清单此刻在跑的任务名）的前 par − 在跑数 行，[任务（job_of）]。
+    同名的只认第一条（first_rows 同一口径：同名的后一条不会和它同时跑）。par=1 时就是以前的队首（不在跑时一行，在跑时没有）。
+    窗口里等依赖的行照样占一格（同以前队首等依赖就挡住整条清单）。rows 是已经读好的 list_jobs(q)（q["par"] 已记下），不给就现读。"""
+    try:
+        ms = set(os.listdir(q["state"]))
+    except OSError:
+        ms = set()
+    rows = list_jobs(q) if rows is None else rows
+    out, seen, n = [], set(busy), q["par"] - len(set(busy))
+    for name, cmd in rows:
+        if len(out) >= n:
+            break
+        if name in seen or name + ".done" in ms or name + ".failed" in ms:
+            seen.add(name)
             continue
-        return job_of(name, cmd)
-    return None
+        seen.add(name)
+        out.append(job_of(name, cmd))
+    return out
 
 
 def new_req(kind, key, project, name, **kw):
@@ -517,23 +547,40 @@ def new_req(kind, key, project, name, **kw):
 
 
 def queue_req(q, job):
-    """清单队列 q 里的任务 job（job_of）→ 请求：真放行（Worker.requests）与 fit 共用。"""
-    return new_req("queue", q["key"], q["project"], q=q, root=q["root"], queue=q["jobs"], **job)
+    """清单队列 q 里的任务 job（job_of）→ 请求：真放行（Worker.requests）与 fit 共用。key 按 run_key（并行清单逐行一个，#147）。"""
+    return new_req("queue", run_key(q, job["name"]), q["project"], q=q, root=q["root"], queue=q["jobs"], **job)
 
 
 def read_current(state):
-    """状态目录的 current（`名称 PID 开始日期 开始时刻 [放行的主机]`；看板探针 probe.py 另读，放行的主机它也认，#95）：(名称, PID, 开始的 epoch 秒, 放行的主机)；没有为 None。
+    """状态目录的 current：一行一个在跑的任务（`名称 PID 开始日期 开始时刻 [放行的主机]`；并行清单有几行，#147；看板探针 probe.py 另读，放行的主机它也认，#95），
+    返回 [(名称, PID, 开始的 epoch 秒, 放行的主机)]，没有为 []。旧读法（整个文件 split）读到的正是第一行。
     放行的主机 11-10 起 worker 写（#88），旧 gpu_queue.sh 与之前的 worker 不写，为 None。PID 写坏了为 0；没写时刻的（很旧的文件）算现在。
     接管（adopt）、别的主机在不在管它（run_elsewhere）与旁观旧 gpu_queue.sh 的任务（ext_jobs）共用。"""
-    cur = read(os.path.join(state, "current"))
-    if not cur:
-        return None
-    p = cur.split()
-    try:
-        t0 = time.mktime(time.strptime(" ".join(p[2:4]), "%Y-%m-%d %H:%M:%S"))
-    except ValueError:
-        t0 = time.time()
-    return p[0], int(p[1]) if len(p) > 1 and p[1].isdigit() else 0, t0, p[4] if len(p) > 4 else None
+    out = []
+    for line in (read(os.path.join(state, "current")) or "").splitlines():
+        p = line.split()
+        if not p:
+            continue
+        try:
+            t0 = time.mktime(time.strptime(" ".join(p[2:4]), "%Y-%m-%d %H:%M:%S"))
+        except ValueError:
+            t0 = time.time()
+        out.append((p[0], int(p[1]) if len(p) > 1 and p[1].isdigit() else 0, t0, p[4] if len(p) > 4 else None))
+    return out
+
+
+def drop_current(state, name, pid=None):
+    """从 current 里删掉一个任务那一行（收尾、记中断；pid 给了只删 PID 对得上的），删空了删文件。只有放行它的那台写这条清单的 current
+    （别的主机见到它不是自己的行就整条清单等，run_elsewhere），所以读改写不用另加锁。"""
+    f = os.path.join(state, "current")
+    lines = [l for l in (read(f) or "").splitlines() if l.split()]
+    keep = [l for l in lines if not (l.split()[0] == name and (pid is None or (l.split() + [""])[1] == str(pid)))]
+    if keep == lines:
+        return
+    if keep:
+        write(f, "\n".join(keep) + "\n")
+    elif os.path.exists(f):
+        os.remove(f)
 
 
 def run_elsewhere(host, q, cur, gone):
@@ -2028,7 +2075,8 @@ class Worker:
         self.p = Paths(host)
         self.disk = Disk(shared, host) if shared else None   # 共享盘用量（只有拿着租约的那台在扫）
         self.ldisk = LocalDisk(host)          # 容器根盘开机以来的新写入与 labmon 目录的用量（每台扫自己的，#149）
-        self.running = {}     # 请求 key（队列 key 或 slot:<id>）→ 运行中的任务或单元
+        self.running = {}     # 请求 key（run_key：串行清单是队列 key、并行清单是 队列 key|任务名；单元是 slot:<id>）→ 运行中的任务或单元
+        self.par_t = {}       # 队列 key → 这条清单上次开跑的时刻（并行清单两次加行至少隔 PAR_STEP_S，par_gate）
         self.active = set()   # 本次已写 lock、记过“队列启动”的队列
         self.noted = {}       # 请求 key → 上次写进 worker.log 的等待原因（只在变化时记）
         self.ext = {}         # 旧 gpu_queue.sh 正在跑的任务（只统计用量，不管）
@@ -2472,7 +2520,7 @@ class Worker:
             a, vb = self.acct(j), (j.get("use") or {}).get("vram_by") or {}
             for g in j["gpus"]:
                 seen[g] = seen.get(g, 0.0) + vb.get(g, 0.0)
-            jobs.append({"key": j["key"], "project": j.get("project"), "name": j["name"], "t0": j["t0"], "t1": self.run_end(j, now),
+            jobs.append({"key": j["key"], "lane": lane_key(j), "project": j.get("project"), "name": j["name"], "t0": j["t0"], "t1": self.run_end(j, now),
                          "gpus": j["gpus"], "vram": a["vram"], "ram": a["ram"], "cpu": a["cpu"], "excl": j.get("excl"), "tag": j.get("tag"),
                          "hold": is_hold(j["name"]), "ngpu": j.get("ngpu", 1), "use": j.get("use") or {}, "cards": self.job_cards(j), "gang": j.get("gang")})
         stuck = {}                            # worker 停不了的保活（ka_stuck，#102）：推演当它一直占着（卡的 other 只有推演用；真放行的空闲是 nvidia-smi 实测、已扣）
@@ -2694,7 +2742,7 @@ class Worker:
         if r.get("kind", "queue") != "queue":
             d = duration(self.hist, r, self.model(), 1 if k is None else k)
         elif k is None:
-            d = self.durs.get(r["key"], {}).get(r["name"])
+            d = self.durs.get(lane_key(r), {}).get(r["name"])
         else:
             d = self.dur_k(r)(k)
         why = d and ("%s；%s" % (d["cut_src"], d["src"]) if cut else d.get("src"))
@@ -2709,7 +2757,7 @@ class Worker:
         """本机各清单此刻的状态（依赖按它认，也写进状态的 todo 给别的主机）：标完的 self.marks {(项目, 任务): done|failed}
         （几条清单说法不一的记 "?"，dep_state 看用量记录的最后一次）；还会跑的 self.todo，每条清单一项
         {project, root, queue, jobs [在跑的在前、其余按清单顺序], deps {任务: [[项目, 任务]…]}（只列写了依赖的）, gang {任务: [组名, 人数]}（只列成组的，
-        在跑的也列）, held}，在跑、在等的单元与登记已撤的在跑任务各一项（root、queue 为 null）。别的主机按它认谁还会跑（dep_state）、组里有谁（gang_sync），
+        在跑的也列）, held, par（并行清单才有，#147：依赖图里窗口内的行不算互相排队）}，在跑、在等的单元与登记已撤的在跑任务各一项（root、queue 为 null）。别的主机按它认谁还会跑（dep_state）、组里有谁（gang_sync），
         offers 按它取别的主机上各清单还没跑的行。本机的成组成员另记进 self.gang_local（gang_sync、gang_publish 用）。
         暂停、drain 的清单照样列（任务还会跑），held 写 paused（状态目录有 paused）、pause 或 drain（项目暂停优先于主机 drain：用户有意停的，
         offers 不当成可挪的活，#25），等它的任务的等待原因据此写清。"""
@@ -2719,29 +2767,30 @@ class Worker:
             if not c:
                 continue
             seen.add(q["key"])
-            j = self.running.get(q["key"]) or {}
-            cur = j.get("name")
+            run = self.lane(q["key"])             # 在跑的（并行清单有几行，#147）
+            cur = [j["name"] for j in run]
             ms, left = rows_left(q["state"], c[1], cur)
             ms = ms or set()
-            ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [cur] if cur else [], "deps": {}, "gang": {}, **({"pool": 1} if q.get("pool") else {}),
+            ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": list(cur), "deps": {}, "gang": {}, **({"pool": 1} if q.get("pool") else {}),
+                  **({"par": q["par"]} if (q.get("par") or 1) > 1 else {}),
                   "held": "paused" if "paused" in ms else (self.override_hit({"project": q["project"]}, ("pause",))
                                                            or self.override_hit({"project": q["project"]}, ("drain",)) or [None])[0]}
             for n, _ in c[1]:
                 v = "done" if n + ".done" in ms else "failed" if n + ".failed" in ms else None
                 if v:
                     marks[(q["project"], n)] = v if marks.get((q["project"], n), v) == v else "?"
-            for n, h in ([(cur, j)] if cur else []) + left:
-                if n != cur:
+            for n, h in [(j["name"], j) for j in run] + left:
+                if n not in cur:
                     ln["jobs"].append(n)
                     d = dep_keys(dict(h, project=q["project"]))
                     if d:
                         ln["deps"][n] = [[p, x] for p, x, _ in d]
                 if h.get("gang") and not is_hold(n):
                     ln["gang"][n] = [h["gang"], h.get("gn")]
-                    gl.setdefault((q["project"], n), {"key": q["key"], "gang": h["gang"], "n": h.get("gn"), "root": q["root"], "queue": q["jobs"]})
+                    gl.setdefault((q["project"], n), {"key": run_key(q, n), "lane": q["key"], "gang": h["gang"], "n": h.get("gn"), "root": q["root"], "queue": q["jobs"]})
             if ln["jobs"]:
                 todo.append(ln)
-        extra = [j for j in self.running.values() if j["key"] not in seen] + [r for r in reqs if r["kind"] == "slot" and r["key"] not in self.running]
+        extra = [j for j in self.running.values() if lane_key(j) not in seen] + [r for r in reqs if r["kind"] == "slot" and r["key"] not in self.running]
         todo += [{"project": j.get("project"), "root": None, "queue": None, "jobs": [j["name"]], "deps": {},
                   "gang": {j["name"]: [j["gang"], j.get("gn")]} if j.get("gang") else {}, "held": None} for j in extra]
         self.marks, self.todo, self.gang_local = marks, todo, gl
@@ -2779,18 +2828,29 @@ class Worker:
         idx.update((k, "pending") for k in where)
         self.dep_idx, self.dead, self.dep_where, self.dep_lanes = idx, {k for k, v in idx.items() if v == "failed"}, where, lanes
         want = ({(p, x) for ln in self.todo for ds in ln["deps"].values() for p, x in ds} | {k[:2] for r in reqs for k in dep_keys(r)}
-                | {k[:2] for r in self.pool_heads for k in dep_keys(r)})
+                | {k[:2] for r in self.pool_heads for x in [r] + [dict(h, project=r["project"]) for _, h in r.get("win") or ()] for k in dep_keys(x)})
         self.dep_miss = {k: t for k, t in self.dep_miss.items() if k in want and k not in idx}
 
     def pool_view(self, now):
-        """算力池里待放的各清单还要跑的（#25）：{"目录|清单": {head 队首, n 还要跑几行, dep 队首的依赖没满足时 [状态, 原因]（dep_block），held 清单暂停,
+        """算力池里待放的各清单还要跑的（#25）：{"目录|清单": {head 队首（并行清单取窗口里第一行依赖满足的，#147）, n 还要跑几行, dep 队首的依赖没满足时 [状态, 原因]（dep_block），held 清单暂停,
         elsewhere 交给池之前在别的主机放行、还没收尾的那一格 [主机, 任务]（不算在 head、n 里，#80）}}；
         池里登记着的每条都列（#86）：都跑完了的 head 为 null、n 为 0；这台读不到清单文件的另带 err（一句原因，head 为 null）。
         池目录没有 worker：同一 worker_home 下各台的 worker 都按自己的 dep_state 算一份写进状态的 pool_heads，看板（pool._heads）逐条取最新的那份
         （读得到的优先）：哪一份里都没有的是还没有 worker 读到，不当成跑完了；有行要跑、依赖满足、没暂停、没有 elsewhere 的才放、才为它借。"""
-        return {"%s|%s" % (os.path.normpath(r["root"]), r["queue"]): dict({"head": r["name"], "n": r["n"], "held": r["held"], "elsewhere": r["elsewhere"],
-                                                                           "dep": list(self.dep_block(r, now) or ()) or None if r["name"] else None},
-                                                                          **({"err": r["err"]} if r.get("err") else {})) for r in self.pool_heads}
+        def head(r):                              # 并行清单（#147）取窗口里第一行依赖满足的；都没满足报第一行的
+            blk = None
+            for n, h in r.get("win") or [(r["name"], r)]:
+                b = self.dep_block(dict(r, name=n, deps=h.get("deps"), deps_any=h.get("deps_any")), now)
+                if not b:
+                    return n, None
+                blk = blk or b
+            return r["name"], list(blk)
+        out = {}
+        for r in self.pool_heads:
+            n, dep = head(r) if r["name"] else (None, None)
+            out["%s|%s" % (os.path.normpath(r["root"]), r["queue"])] = dict({"head": n, "n": r["n"], "held": r["held"], "elsewhere": r["elsewhere"], "dep": dep},
+                                                                            **({"err": r["err"]} if r.get("err") else {}))
+        return out
 
     def dep_block(self, r, now):
         """请求写的依赖（dep_keys）还没都满足：返回 (状态, 原因)，状态 wait（等的还在排、在跑）、failed（after= 等的跑失败了）、
@@ -2829,7 +2889,8 @@ class Worker:
         return "%s %s" % (dep_names([k + (False,)], project), "，".join(why)) if why else None
 
     def dep_next(self):
-        """依赖图里一个任务 (项目, 任务) 在等谁：返回 nxt(k) → [(等的任务, "等" 写的依赖里还会跑的 | "排" 同一条清单里排在它前面的 | "组" 与它成组的)]。
+        """依赖图里一个任务 (项目, 任务) 在等谁：返回 nxt(k) → [(等的任务, "等" 写的依赖里还会跑的 | "排" 同一条清单里排在它前面的（并行清单不算：
+        前面哪一行跑完都腾出一格，不是等某一行，#147） | "组" 与它成组的)]。
         清单项取 dep_lanes（本机的与别的主机 todo 里的）。dep_cycle（成环）与 dep_reaches（offers 插行防成环）共用。"""
         pos, grp = {}, {}
         for i, (_, _, _, ln) in enumerate(self.dep_lanes):
@@ -2843,7 +2904,8 @@ class Worker:
             for i, j in pos.get(k, []):
                 ln = self.dep_lanes[i][3]
                 yield from (((p, x), "等") for p, x in (ln.get("deps") or {}).get(k[1], []) if (p, x) in self.dep_where)
-                yield from (((ln["project"], x), "排") for x in ln["jobs"][:j])
+                if (ln.get("par") or 1) <= 1:     # 并行清单（#147）：窗口里的几行不互相排队，前面的哪一行跑完都腾出一格，不算排在谁后面
+                    yield from (((ln["project"], x), "排") for x in ln["jobs"][:j])
             yield from ((x, "组") for x in sorted(mate.get(k, ())) if x != k)
         return nxt
 
@@ -2874,7 +2936,7 @@ class Worker:
         return False
 
     def dep_cycle(self, r, pend, mates=()):
-        """依赖成环（清单顺序也算依赖：一行要等它前面的都跑完）：从 r 等的还会跑的任务 pend（与 r 成组的 mates）出发，沿“等谁”（写的依赖）、
+        """依赖成环（清单顺序也算依赖：串行清单一行要等它前面的都跑完；并行清单窗口里的行不算，#147）：从 r 等的还会跑的任务 pend（与 r 成组的 mates）出发，沿“等谁”（写的依赖）、
         “排在谁后面”与“和谁成组”（gang=：要一起开跑，等于等同伴能开跑）找回 r 自己，返回最短的一圈的文字（“B 等 A，A 排在 B 后面”），没有为 None。
         只由“成组”连起来的一圈不算（几个成员本来就互相等着一起开跑）：圈里至少要有一条“等”或“排”（等谁跑完）。
         清单项取 dep_lanes（本机的与别的主机 todo 里的；在跑的排最前、不等谁）。dep_block 与 gang_block 共用。"""
@@ -3055,7 +3117,7 @@ class Worker:
         """成组成员 r 截止前的准入与回填用的时长（分钟）：组里各成员预计时长里最长的（本机的取 queue_durs 算好的，别的主机的取它 gang.json 里的 dur）；
         有一个不知道为 None（约定归还照放、续租截止不放，同 override_hit）。req_dur 不给 k 时经它；运行中任务的预计结束按自己的（run_end 传 k）。
         f="cut"：截止前的准入用的（duration 的 cut，#139），别的主机的取 gang.json 的 cut，没有的（旧 worker 写的）按 dur × DUR_MARGIN。"""
-        own = (self.durs.get(r["key"], {}).get(r["name"]) or {}).get(f)
+        own = (self.durs.get(lane_key(r), {}).get(r["name"]) or {}).get(f)
         ctx = self.gctx.get((r["project"], r["gang"]))
         ds = [own]
         for k, v in sorted((ctx or {}).get("mem", {}).items()):
@@ -3063,7 +3125,7 @@ class Worker:
                 continue
             m = self.gang_local.get(k) if v["host"] is None else None
             rec = v.get("rec") or {}
-            ds.append((self.durs.get(m["key"], {}).get(k[1]) or {}).get(f) if m else rec.get("cut", rec.get("dur") and rec["dur"] * DUR_MARGIN) if f == "cut" else rec.get("dur"))
+            ds.append((self.durs.get(m["lane"], {}).get(k[1]) or {}).get(f) if m else rec.get("cut", rec.get("dur") and rec["dur"] * DUR_MARGIN) if f == "cut" else rec.get("dur"))
         return None if None in ds else max(ds)
 
     def gang_soon(self, r, now):
@@ -3167,12 +3229,12 @@ class Worker:
             if j.get("gang"):
                 seen.add((j.get("project"), j["name"]))
                 out.append({"project": j.get("project"), "gang": j["gang"], "n": j.get("gn"), "name": j["name"], "state": "run", "t0": round(j["t0"]),
-                            "with": j.get("gang_with"), **self.gang_durs(j["key"], j["name"])})
+                            "with": j.get("gang_with"), **self.gang_durs(lane_key(j), j["name"])})
         for k, m in sorted(self.gang_local.items()):
             if k in seen:
                 continue
             h, w = self.gang_hold.get(m["key"]), ws.get(m["key"])
-            e = {"project": k[0], "gang": m["gang"], "n": m["n"], "name": k[1], **self.gang_durs(m["key"], k[1])}
+            e = {"project": k[0], "gang": m["gang"], "n": m["n"], "name": k[1], **self.gang_durs(m["lane"], k[1])}
             if h and h["name"] == k[1]:
                 e.update(state="ready", t=round(h["t"]))
             else:
@@ -3224,7 +3286,8 @@ class Worker:
             c = self.qlists.get(q["key"])
             lists[q["key"]] = c if c and c[0] == m else (m, [(n, hints(cmd)) for n, cmd in list_jobs(q)])
         self.qlists = lists
-        for k, j in self.running.items():
+        for j in self.running.values():
+            k = lane_key(j)
             h = first_rows(lists[k][1]).get(j["name"]) if k in lists else None
             if h:
                 j["deps"], j["deps_any"] = h["deps"], h["deps_any"]
@@ -3240,9 +3303,9 @@ class Worker:
         for q in queues:
             out = self.durs[q["key"]] = {}
             est = self.qest[q["key"]] = {}
-            j = self.running.get(q["key"]) if q["key"] in rk else None
+            mine = {j["name"]: (j, rk[k]) for k, j in self.running.items() if k in rk and lane_key(j) == q["key"]}   # 这条清单在跑的（并行清单有几行，#147）
             for n, h in lists.get(q["key"], (0, []))[1]:
-                d = self.dur_k(j)(rk[q["key"]]) if j and j["name"] == n else self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"]))(kn)
+                d = self.dur_k(mine[n][0])(mine[n][1]) if n in mine else self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"]))(kn)
                 if d:
                     out[n] = dict(d, min=round(d["min"], 1))
                 k = (q["key"], h["tag"], base_name(n), h["ram"], h["vram"], h["cpus"])      # 同类任务的估计一样，清单长时省得每个都扫一遍历史
@@ -3413,18 +3476,19 @@ class Worker:
                 self.pool_heads.append({"project": q["project"], "root": q["root"], "queue": q["jobs"], "name": None, "n": 0, "held": None,
                                         "elsewhere": None, "err": "%s 上读不到清单 %s" % (self.host, q["jobs_path"])})
                 continue
-            cur = read_current(q["state"])
-            other = cur and run_elsewhere(POOL, q, cur, self.gone)
-            ms, left = rows_left(q["state"], rows, cur[0] if other else None)
+            away = [(c, h) for c in read_current(q["state"]) for h in [run_elsewhere(POOL, q, c, self.gone)] if h]   # 并行清单可能有几行（#147）
+            cur, other = away[0] if away else (None, None)
+            ms, left = rows_left(q["state"], rows, {c[0] for c, _ in away})
             n, h = left[0] if left else (None, {})          # 队首：看板放之前看它还有没有、依赖满足没有（pool_view）；都跑完了的也列（n 为 0）
+            par = list_par(read(q["jobs_path"], "") or "")  # 并行清单（#147）：窗口里前 par 行哪一行依赖满足都能放
             self.pool_heads.append({"project": q["project"], "root": q["root"], "queue": q["jobs"], "name": n, "n": len(left),
                                     "deps": h.get("deps"), "deps_any": h.get("deps_any"), "held": "paused" if ms and "paused" in ms else None,
-                                    "elsewhere": [other, cur[0]] if other else None})
+                                    "elsewhere": [other, cur[0]] if other else None, "win": left[:par] if par > 1 else None})
             if not left:
                 continue
             ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [n for n, _ in left], "gang": {},
                   "deps": {n: [[p, x] for p, x, _ in d] for n, h in left for d in [dep_keys(dict(h, project=q["project"]))] if d},
-                  "held": "paused" if ms and "paused" in ms else None}
+                  "held": "paused" if ms and "paused" in ms else None, **({"par": par} if par > 1 else {})}
             out.append((POOL, 0.0, now, ln))
         return out
 
@@ -3478,19 +3542,28 @@ class Worker:
                # 成组：别的主机上的成员预计何时能一起开跑（此刻就能的记 0，不随时钟变）、本机成员在不在队首
                tuple((gk, g["at"] and (0 if g["at"] <= now else round(g["at"] / 60)), tuple(sorted((k, n, e and e <= now) for (k, n), e in g["local"].items())))
                      for gk, g in sorted(self.gsim.items())))
+        cards, shut = self.local_cards()         # 并行清单加行的门槛（par_gate）：推演里按此刻的结论当常量（#147）
+        key += (bool(shut), tuple(cards or ()))
         if key == self.plan_key and now - self.plan["t"] < FORECAST_EVERY:
             return
         self.plan_key = key
         # 只排除被持久的挡法挡住的队列：对方此刻超出预留（guest_block）真放行挡、推演不模拟，照常排（#25）
-        held, base = {r["key"] for r in wait if r["held"] and self.override_hit(r, lasting=True)}, self.snapshot(limits)
+        # 并行清单（#147）窗口里只是某一行截止前跑不完的不排除整条：截止由推演逐行判（simulate 的 cutoff），别的行照排
+        held = {lane_key(r) for r in wait if r["held"] for h in [self.override_hit(r, lasting=True)]
+                if h and not (h[0] == "deadline" and ((r.get("q") or {}).get("par") or 1) > 1)}
+        base = self.snapshot(limits)
         qs, info = [], {}
-        heads = {r["key"]: r for r in wait}
+        heads, lanes = {}, {}                     # 各车道等着的行里开始等得最早的（并行清单窗口里有几行，#147）、在跑的行
+        for r in sorted(wait, key=lambda r: -r["since"]):
+            heads[lane_key(r)] = r
+        for j in self.running.values():
+            lanes.setdefault(lane_key(j), []).append(j["name"])
         ends = {k: 0 for k, v in self.dep_idx.items() if v == "done"}
         for q in queues:
             k = q["key"]
-            if k in held or (k not in self.running and k not in heads) or k not in self.qlists:
+            if k in held or (k not in lanes and k not in heads) or k not in self.qlists:
                 continue
-            cur = (self.running.get(k) or {}).get("name")
+            cur = lanes.get(k, [])
             marks, pend = rows_left(q["state"], self.qlists[k][1], cur)
             if marks is None:
                 continue
@@ -3501,20 +3574,28 @@ class Worker:
             jobs = [self.job_spec(n, h, self.qest.get(k, {}).get(n) or estimate(self.hist, dict(h, name=n, project=q["project"])),
                                   self.req_dur(x), self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"])), self.req_dur(x, cut=True))
                     for n, h in pend for x in [{"key": k, "name": n, "project": q["project"], "gang": None if is_hold(n) else h["gang"]}]]
-            qs.append({"key": k, "kind": "queue", "project": q["project"], "allowed": q["gpus"],
+            par, allowed, gpar = q.get("par") or 1, q["gpus"], None
+            if par > 1 and cur:                   # 已有行在跑：再加的行要过门槛（同真放行 place 里的 par_gate）
+                if shut and self.throttle(now):   # 容器在限流：不用卡的行也不加，按此刻在跑的行数排
+                    par = max(1, len(cur))
+                elif shut or (cards is not None and not [i for i in cards if allowed is None or i in allowed]):
+                    gpar = max(1, len(cur))       # 卡吃满：要卡的行只在这条清单在跑的少于此刻时才排（真放行此刻不加），不用卡的照窗口排
+                elif cards is not None:           # 要卡的行只放在门槛给的卡上
+                    allowed = [i for i in cards if allowed is None or i in allowed]
+            qs.append({"key": k, "kind": "queue", "project": q["project"], "allowed": allowed, "par": par, "gpar": gpar,
                        "since": heads[k]["since"] if k in heads else now, "jobs": jobs})
             info[k] = {"root": q["root"], "queue": q["jobs"], "project": q["project"], "kind": "queue"}
         for r in wait:
-            if r["kind"] == "slot" and r["key"] not in held:
+            if r["kind"] == "slot" and lane_key(r) not in held:
                 qs.append({"key": r["key"], "kind": "slot", "project": r["project"], "allowed": None, "since": r["since"],
                            "jobs": [self.as_job(r)]})
         for j in self.running.values():
-            info.setdefault(j["key"], {"root": None, "queue": None, "project": j.get("project"), "kind": j.get("kind", "queue")})
+            info.setdefault(lane_key(j), {"root": None, "queue": None, "project": j.get("project"), "kind": j.get("kind", "queue")})
         for r in wait:
             info.setdefault(r["key"], {"root": None, "queue": None, "project": r["project"], "kind": r["kind"]})
         focus = {o.get("target") for o in self.ovr if o["kind"] == "focus"}
         use = usage(self.hrows + self.peer, now, pol["hl"])
-        waits = {(q["key"], x["name"]): dep_keys(dict(x, project=q["project"])) for q in qs for x in q["jobs"]}     # 写了依赖的任务
+        waits = {(run_key(q, x["name"]), x["name"]): dep_keys(dict(x, project=q["project"])) for q in qs for x in q["jobs"]}     # 写了依赖的任务
         waits.update({(k, j["name"]): dep_keys(j) for k, j in self.running.items()})
         waits = {k: v for k, v in waits.items() if v}
         ends.update((k, v) for k, v in self.peer_end.items() if self.dep_idx.get(k) == "pending")   # 那台写推演之后已跑完的不再取它的预计
@@ -3552,7 +3633,7 @@ class Worker:
         idx = {g["uuid"]: g["i"] for g in self.info.get("gpus") or []}
         lanes = {}
         for e in [dict(x, run=True) for x in run] + out:
-            ln = lanes.setdefault(e["key"], dict(info[e["key"]], jobs=[], stuck=None, stuck_dep=None))
+            ln = lanes.setdefault(e.get("lane") or e["key"], dict(info[e.get("lane") or e["key"]], jobs=[], stuck=None, stuck_dep=None))
             x = {"name": e["name"], "t0": round(e["t0"]), "t1": e["t1"] and round(e["t1"]), "gpus": [idx.get(u) for u in e["gpus"]],
                  **({"run": True} if e.get("run") else {"after": e["after"]} if e.get("after") else {}),
                  **({"gang": e["gang"]} if e.get("gang") else {})}     # 成组的组名：同组的在各台的推演里一起开跑
@@ -3604,21 +3685,22 @@ class Worker:
           整批推不出（#25）。对方此刻超出预留的清单照常推演（forecast），不在这两种里；
         - 资源提示为 None：清单文件里没有这一行（刚剪过）或读不到清单（unread），不挪。同名的行取第一条（first_rows）。
         清单暂停（paused）、项目在那台暂停（pause）的不列：用户有意停的，不当成要均衡的活，也不算进整批何时跑完（同项目看板的全部完成）。
-        running：(目录, 清单) → 在跑的任务名；held：等待项被临时指令挡住的 (目录, 清单)（那台状态的 waiting[].held；本机取 forecast 的等待请求）。"""
+        running：(目录, 清单) → 在跑的任务名的集合（并行清单有几个，#147）；held：等待项被临时指令挡住的 (目录, 清单)（那台状态的 waiting[].held；本机取 forecast 的等待请求）。"""
         pl = {(ln.get("root"), ln.get("queue")): ln for ln in plan.get("lanes") or [] if ln.get("kind") == "queue"}
         out = []
         for ln in todo:
             if not ln.get("queue") or ln.get("held") in ("paused", "pause") or ln.get("pool"):   # 算力池放的（#79）：落点由看板定，不给挪法建议
                 continue
             key = (ln["root"], ln["queue"])
-            cur = running.get(key)
+            cur = running.get(key) or set()
             rows = self.list_of(os.path.join(ln["root"], ln["queue"]))
             hs = first_rows(rows or [])
             times = {j["name"]: j for j in (pl.get(key) or {}).get("jobs") or []}
-            pend = [(n, hs.get(n), (times.get(n) or {}).get("t0"), (times.get(n) or {}).get("t1")) for n in ln["jobs"] if n != cur]
+            pend = [(n, hs.get(n), (times.get(n) or {}).get("t0"), (times.get(n) or {}).get("t1")) for n in ln["jobs"] if n not in cur]
             if not pend and not cur:
                 continue
-            run = (times.get(cur) or {}).get("t1") if cur else 0
+            ce = [(times.get(n) or {}).get("t1") for n in cur]   # 在跑的（并行清单有几行，#147）预计结束里最晚的；有一个不知道为 None
+            run = (None if None in ce else max(ce)) if cur else 0
             ts, lp, ok = [run] + [x[3] for x in pend], pl.get(key) or {}, all(x[0] in times for x in pend)
             dep = not ok and lp.get("stuck_dep")
             state = ("ok" if ok else "unknown" if dep else
@@ -3649,11 +3731,16 @@ class Worker:
         （lane_room；不出为 None，看板据此判吃不满，#145）}：原因句由看板拼（rebalance.suggest，#25 B）。"""
         if (self.keep() or {}).get("pool"):
             return []
-        mine = {(j["q"]["root"], j["q"]["jobs"]): j["name"] for j in self.running.values() if j.get("q")}
+        mine = {}
+        for j in self.running.values():
+            if j.get("q"):
+                mine.setdefault((j["q"]["root"], j["q"]["jobs"]), set()).add(j["name"])
         own = self.proj_lanes(self.host, self.todo, self.plan, mine, held)
         others, waiters = [], self.dep_waiters()
         for h, st in sorted(self.peer_st.items()):
-            run = {(j.get("root"), j.get("queue")): j["name"] for j in st.get("running") or []}
+            run = {}
+            for j in st.get("running") or []:
+                run.setdefault((j.get("root"), j.get("queue")), set()).add(j["name"])
             hd = {(w.get("root"), w.get("queue")) for w in st.get("waiting") or [] if w.get("held")}
             others += self.proj_lanes(h, st.get("todo") or [], st.get("plan") or {}, run, hd)
         for h, age, _, ln in self.peer_todo:      # 那台 worker 不在（续租、重启）：它的清单还会跑、看不到何时跑完，整批推不出（#25 第 8 条）
@@ -3753,8 +3840,8 @@ class Worker:
             if lo:
                 out.append(lo)
             cards, why = self.local_cards()
-            if why:
-                continue
+            if why or any(q.get("project") == p and (q.get("par") or 1) > max(1, len(self.lane(q["key"]))) for q in cx["qs"]):
+                continue                             # 这个项目有窗口没满的并行清单（#147）：卡有余量时 worker 自己会给它加行，不另建议新开车道
             # 原推演何时跑完推不出（free 为 None）时算不了收益，只看是不是因为行没有估时（那样的清单推演里排不上，state 是 trapped，也一起看）
             cands, why = self.move_cands(lns if free is not None else mine_p, now, now, waiters)
             for i, c in enumerate(cands):           # 只有提示值的 GPU 行不挪：没有实测，同卡并行怕 OOM（同 fit）
@@ -3818,7 +3905,7 @@ class Worker:
     def move_cands(self, lns, free, now, waiters, skip=False):
         """offers 的候选：别的主机上这个项目的清单 lns 里（同机挪时是本机的清单），按“取此刻排得最晚的那条清单的队尾”挑出的几行（至多 MOVE_MAX），
         与挑不下去的原因。各候选带 host、root、queue、name、there（原处预计结束，跑不了为 None）、
-        rest（挪走它后那条清单何时跑完）、h（资源提示）、i（在原清单里排第几）、lane（第几条清单）：前 k 行加进推演时按 (lane, i) 排，
+        rest（挪走它后那条清单何时跑完：剩下的行与在跑的预计结束里最晚的）、h（资源提示）、i（在原清单里排第几）、lane（第几条清单）：前 k 行加进推演时按 (lane, i) 排，
         同一条清单里的照原先后。排得最晚的已不晚于本机这个项目何时跑完（free；挪到本机另一条清单时是那条清单何时跑完）的不再挑：挪过来只会更晚。
         挑出的前几行挪过来以后已比原处剩下的晚跑完时，调用方不再往下试（moved_past）。
         waiters：{(项目, 任务): {写了 after= 等它的 (项目, 任务)}}（本机与别的主机的 todo）；有不在这批里的等着它就不挪：挪走后等它的何时开始会变。
@@ -3850,7 +3937,8 @@ class Worker:
                 why, left[i] = why or stop, []
                 continue
             left[i].pop()
-            end[i] = left[i][-1][3] if left[i] else ln["run"]
+            ts = [ln["run"]] + [x[3] for x in left[i]]   # 剩下的与在跑的里最晚的（并行清单先开跑的长任务可能比后面的行晚跑完，#147）
+            end[i] = None if None in ts else max(ts)
             out.append({"host": ln["host"], "root": ln["root"], "queue": ln["queue"], "name": n, "there": t1 and round(t1),
                         "rest": end[i] and round(end[i]), "h": h, "i": len(left[i]), "lane": i})
         return out, why
@@ -3916,12 +4004,12 @@ class Worker:
         if not tgt:
             qs.append({"key": key, "kind": "queue", "project": p, "allowed": None if local is False else local, "since": cx["now"], "jobs": jobs})
         out, stuck = simulate(cx["now"], cx["base"], qs, cx["focus"], self.cutoff(), pol=cx["pol"], use=cx["use"], ends=self.ends, dead=self.dead, gangs=self.gsim)
-        moved = [e for e in out if e["key"] == key][n0:n0 + len(jobs)]
+        moved = sorted((e for e in out if e["lane"] == key and n0 <= e["_i"] < n0 + len(jobs)), key=lambda e: e["_i"])   # 按在车道里的位置（并行车道可能不按顺序开跑，#147）
         bad = next((i for i, e in enumerate(moved) if e["t1"] is None), len(moved) if len(moved) < len(jobs) else None)
         if bad is not None:
             return {"stop": jobs[bad]["name"], "why": stuck.get(key) or "挪来后不知道何时跑完", "nodur": jobs[bad]["dur"] is None}
         ids = {id(e) for e in moved}
-        lanes = self.plan_lanes(cx["base"]["jobs"], [e for e in out if e["key"] in cx["info"] and id(e) not in ids], {}, cx["info"], {})
+        lanes = self.plan_lanes(cx["base"]["jobs"], [e for e in out if e["lane"] in cx["info"] and id(e) not in ids], {}, cx["info"], {})
         gone = {(cx["info"][k]["root"], cx["info"][k]["queue"]): set(ns) for k, ns in cut.items()}
         todo = [dict(ln, jobs=[n for n in ln["jobs"] if n not in gone.get((ln["root"], ln["queue"]), ())]) for ln in self.todo if ln["project"] == p]
         own = self.proj_lanes(self.host, todo, {"lanes": lanes}, cx["mine"], cx["held"])
@@ -4029,8 +4117,9 @@ class Worker:
         with reg_lock():                          # 核归属到写下 current 一气做完：搬登记（worker add）插不进来（Codex 审查 #120）
             if q.get("file") and not os.path.exists(q["file"]):
                 return "这条清单的登记刚搬到别的主机或被移除，这次不放", False
-            if os.path.exists(os.path.join(st, "current")):   # 收请求之后别的主机已放了这条清单（两台都登记着，#88）：这次不放
-                return "这条清单的状态目录里已有 current（别的主机刚放行），这次不放", False
+            mine = {(j["name"], j.get("pid")) for j in self.lane(q["key"])}
+            if any(c[:2] not in mine for c in read_current(st)):   # 收请求之后别的主机已放了这条清单（两台都登记着，#88）：这次不放
+                return "这条清单的状态目录里已有别的主机放行的 current，这次不放", False
             if q["key"] not in self.active:
                 write(os.path.join(st, "lock"), str(os.getpid()))
                 self.qlog(q, "队列启动 PID=%d 清单=%s（labmon worker）" % (os.getpid(), q["jobs"]))
@@ -4056,10 +4145,14 @@ class Worker:
                                       cwd=q["root"], env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                       start_new_session=True)
             t0 = time.time()
-            write(os.path.join(st, "current"), "%s %d %s %s" % (job["name"], pr.pid, now_str(t0), self.host))   # 放行的主机：别的主机据此不动它（run_elsewhere）
+            # 一行一个在跑的任务（并行清单有几行，#147）；放行的主机：别的主机据此不动它（run_elsewhere）
+            cf = os.path.join(st, "current")
+            write(cf, "".join(l + "\n" for l in (read(cf) or "").splitlines() if l.split()) + "%s %d %s %s\n" % (job["name"], pr.pid, now_str(t0), self.host))
+            self.par_t[q["key"]] = t0                 # 加行门槛的间隔从这次开跑算（par_gate）
         gtxt = "，".join("GPU %d %s" % (c["i"], c["uuid"]) for c in gpus)
         self.qlog(q, "开始 %s" % job["name"] + ("（%s）" % gtxt if gtxt else ""))
-        self.running[q["key"]] = dict(job, kind="queue", key=q["key"], pid=pr.pid, t0=t0, q=q, gpus=[c["uuid"] for c in gpus], use={},
+        k = run_key(q, job["name"])
+        self.running[k] = dict(job, kind="queue", key=k, pid=pr.pid, t0=t0, q=q, gpus=[c["uuid"] for c in gpus], use={},
                                       project=q["project"], stop=q["stop"], oom0=oom_kills(), fc0=num(cg("memory/memory.failcnt")))
         self.event("start", "开始 %s%s%s" % (job["name"], "（%s）" % gtxt if gtxt else "",
                                            "，独占%s" % {"gpu": "卡", "host": "整机"}[job["excl"]] if job.get("excl") else ""),
@@ -4076,6 +4169,24 @@ class Worker:
         self.running[r["key"]] = dict(r, t0=time.time(), gpus=[c["uuid"] for c in gpus], use={}, pstart=pstart(r["pid"]))
         self.event("grant", "放行 %s 的单元 %s（%s）" % (r["project"], r["name"], "，".join("GPU %d" % c["i"] for c in gpus) or "不用 GPU"),
                    name=r["name"], project=r["project"])
+
+    def lane(self, k):
+        """这条清单（队列 key）此刻在跑的任务（并行清单有几个，#147），按开跑先后。"""
+        return sorted((j for j in self.running.values() if lane_key(j) == k), key=lambda j: j["t0"])
+
+    def par_gate(self, r, now):
+        """并行清单加行的门槛（#147）：这条清单已有行在跑时，再加一行要过它（第一行不过，同以前）。返回 (能放的卡号或 None 不限, 不加的原因或 None)。
+        与 fit、offers 同机多开车道同一条规则（local_cards：容器在限流不加；近 10 分钟利用率不低于 UTIL_FULL 的卡、利用率低而上面在跑的被 CPU 卡住的卡不放），
+        不用卡的行只看限流；要卡的另外同一条清单两次开跑至少隔 PAR_STEP_S（利用率窗口来得及反映新加的那行）。真放行在 place 的 pre 里调；推演按此刻的结论当常量（forecast）。"""
+        if r["kind"] != "queue" or not self.lane(r["q"]["key"]):
+            return None, None
+        cards, why = self.local_cards()
+        if r["ngpu"] <= 0:                        # 不用卡的行：只看限流（CPU 记账另由 place 管），不等利用率
+            return None, why if why and self.throttle(now) else None
+        left = PAR_STEP_S - (now - self.par_t.get(r["q"]["key"], 0))
+        if left > 0:
+            return None, "这条清单刚加过一行，%d 秒后看卡的利用率再决定加不加（并行 par=%d）" % (math.ceil(left), r["q"].get("par") or 1)
+        return cards, why and why.replace("不在这台多开车道", "不再给这条清单加行")
 
     def alive_job(self, j):
         if j.get("kind") == "slot":
@@ -4149,9 +4260,9 @@ class Worker:
                 self.event("failed", "失败 %s（%s）" % (name, why), name=name, project=j["project"])
             if j.get("gang"):                     # 同伴按它跟着停或接着跑
                 self.gang_end(j, "stop" if requeue else "fail" if failed else "done")
-            for f in (rcf, os.path.join(q["state"], "current")):
-                if os.path.exists(f):
-                    os.remove(f)
+            if os.path.exists(rcf):
+                os.remove(rcf)
+            drop_current(q["state"], name, j["pid"])
         # 记失败而进程退出码为 0 的（成组的跟着同伴停下、被作废）记 null：各处只认 "0" 为跑成功（#180）；被对方挤掉的不算 OOM
         with flock(self.p.usage):
             append_jsonl(self.p.usage, self.usage_rec(j, None if failed and rc == "0" else rc, None if sq else oom, requeue))   # 下一轮 reload_hist 读回来（各主机的记录都在共享盘上）
@@ -4215,11 +4326,9 @@ class Worker:
         self.gang_known = {((p, gn), (p, n)): (h, t) for p, gn, n, h, t in (k for k in g.get("known") or [] if isinstance(k, list) and len(k) == 5)
                            if time.time() - (t or 0) <= GANG_LATE_S}
 
-    def adopt(self, q):
-        """接管上一个 worker 留下的任务（别的主机放行的不接管，requests 先过 run_elsewhere）：还在跑的继续盯；跑完了的按 .rc 记账；进程没了又没有 .rc 的（服务器重启）重跑。"""
-        cur = read_current(q["state"])
-        if not cur:
-            return
+    def adopt(self, q, cur):
+        """接管上一个 worker 留下的一个任务（current 的一行 cur，read_current；并行清单逐行调，#147；别的主机放行的不接管，requests 先过 run_elsewhere）：
+        还在跑的继续盯；跑完了的按 .rc 记账；进程没了又没有 .rc 的（服务器重启）重跑。"""
         name, pid, t0, who = cur
         local = not who or who == self.host       # 别的主机放的（那台已归还，run_elsewhere 才放过来）：PID 是另一个容器的，这里同号的进程不是它
         old = self.prev.get((q["root"], q["jobs"], name, pid), {})
@@ -4228,40 +4337,50 @@ class Worker:
         if gpus is None:                          # 上一份状态里没有它（旧 worker 没写过状态）：从进程的 CUDA_VISIBLE_DEVICES 找回，只认此刻看得到的卡
             known = {g["uuid"] for g in gpu_table()}
             gpus = [u for u in (proc_env(pid, "CUDA_VISIBLE_DEVICES") or "").split(",") if u in known] if local else []
-        job = dict(hints(cmd), name=name, cmd=cmd, kind="queue", key=q["key"], pid=pid, t0=t0, q=q, project=q["project"], stop=q["stop"],
+        job = dict(hints(cmd), name=name, cmd=cmd, kind="queue", pid=pid, t0=t0, q=q, project=q["project"], stop=q["stop"],
                    gpus=gpus, use=old.get("use") or {}, oom0=old.get("oom0"), fc0=old.get("fc0"), owner_gpu=old.get("owner_gpu"), io_sus=old.get("io_sus"),
                    cpu_fit=old.get("cpu_fit"), gang_with=old.get("gang_with"), gang_stop=old.get("gang_stop"))
         job["excl"] = old.get("excl", job["excl"])
         if job["gang_stop"] and job["gang_stop"].get("sent"):   # 停止请求已发：收尾照原重排规则记
             job["stopping"] = True
         job["est"] = old.get("est") or estimate(self.hist, dict(job, root=q["root"], queue=q["jobs"]))
+        k = job["key"] = self.free_key(q, name)
         if local and alive(pid, ("labmon-job:" + name,)):
-            self.running[q["key"]] = job
+            self.running[k] = job
             self.active.add(q["key"])
             write(os.path.join(q["state"], "lock"), str(os.getpid()))   # lock 改指本进程，看板才认得队列还在
             self.wlog("接管运行中的 %s（PID %d）" % (name, pid))
         elif os.path.exists(os.path.join(q["state"], name + ".rc")):
-            self.running[q["key"]] = job
-            self.finish(q["key"])
+            self.running[k] = job
+            self.finish(k)
         elif local and alive(pid, ("gpu_queue",)) or alive(read_pid(os.path.join(q["state"], "lock")), ("gpu_queue",)):
             pass                                  # 旧 gpu_queue.sh 还在管这条队列
         else:
-            os.remove(os.path.join(q["state"], "current"))
+            drop_current(q["state"], name, pid)
             if job.get("gang"):                   # 同伴按它停下重排
                 self.gang_end(job, "stop")
             self.qlog(q, "中断 %s（进程已不在，未留退出码：多半是服务器重启），重新排队" % name)
             self.event("interrupt", "中断 %s（进程已不在，多半是服务器重启），重新排队" % name, name=name, project=q["project"])
 
+    def free_key(self, q, name):
+        """接管、改记名下时给在跑的 name 用的 key：照 run_key；那个 key 已被这条清单另一个在跑的占着（运行中把 par 调小、删掉了声明，
+        几行还在跑，#147）时用逐行的 `队列 key|任务名`，几行各自跟到收尾，不互相盖掉。"""
+        k = run_key(q, name)
+        return k if k not in self.running or self.running[k]["name"] == name else q["key"] + "|" + name
+
     def rekey(self, q):
         """这条清单换了登记文件名、手上在跑的还记在旧名下时（11-06 前不带目录哈希的登记搬走再搬回来，搬回来的用 qslug，#95）：
         沿用那一项、改记到新名下，不再按新名接管一次（同一个任务盯两份，收尾时一份成功一份失败）。状态目录一条清单一个，按它认。"""
         st = os.path.normpath(q["state"])
-        old = next((k for k, j in self.running.items() if k != q["key"] and j.get("q") and os.path.normpath(j["q"]["state"]) == st), None)
-        if old and q["key"] not in self.running:
-            self.running[q["key"]] = dict(self.running.pop(old), key=q["key"], q=q)
-            if old in self.active:
-                self.active.discard(old)
-                self.active.add(q["key"])
+        for k, j in list(self.running.items()):
+            if j.get("q") and j["q"]["key"] != q["key"] and os.path.normpath(j["q"]["state"]) == st:
+                old = j["q"]["key"]
+                nk = self.free_key(q, j["name"])
+                if nk not in self.running:
+                    self.running[nk] = dict(self.running.pop(k), key=nk, q=q)
+                if old in self.active:
+                    self.active.discard(old)
+                    self.active.add(q["key"])
 
     def adopt_left(self, queues):
         """登记已搬走（worker add 到别的主机，#95）、上一个 worker 手上还在跑的任务：照样接管、盯到跑完收尾（.done、用量记录），
@@ -4273,9 +4392,10 @@ class Worker:
             if j.get("kind") != "queue" or not root or not jobs or not j.get("project") or (os.path.normpath(root), jobs) in mine:
                 continue
             q = load_queue({"_slug": qslug(root, jobs), "root": root, "jobs": jobs, "project": j["project"], "stop": j.get("stop")})
-            cur = read_current(q["state"])
-            if cur and cur[:2] == (j["name"], j["pid"]) and cur[3] in (None, self.host):
-                self.adopt(q)
+            list_jobs(q)                          # 并行数（q["par"]）：key 照它定
+            for cur in read_current(q["state"]):
+                if cur[:2] == (j["name"], j["pid"]) and cur[3] in (None, self.host):
+                    self.adopt(q, cur)
 
     # ---- 单元申请 ----
     def slot_reqs(self):
@@ -4492,7 +4612,7 @@ class Worker:
         """旧 gpu_queue.sh 正在跑的任务（状态目录的 current 指着、lock 是 gpu_queue 的）：只统计用量，不管；沿用上一轮的记录（用量累计在里面）。"""
         ext = {}
         for q in queues:
-            cur = None if q["key"] in self.running else read_current(q["state"])
+            cur = None if self.lane(q["key"]) else (read_current(q["state"]) or [None])[0]   # 旧 gpu_queue.sh 一次只跑一个
             if not cur or not cur[1] or not alive(read_pid(os.path.join(q["state"], "lock")), ("gpu_queue",)):
                 continue
             k = q["key"] + ":" + cur[0]
@@ -4772,10 +4892,15 @@ class Worker:
 
     def stage_bg(self, r, cp):
         """本地缺、共享盘有主副本的依赖在后台线程里拷（大文件要很久，不拖住这一轮 tick）：没在拷就起线程（共享盘慢时先推迟，io_yield）；
-        拷完收结果（记事件，失败返回原因、下一轮重拷）。返回这一轮的等待原因，拷好了为 None。"""
+        拷完收结果（记事件，失败返回原因、下一轮重拷）。别的请求正在拷同一个目标文件时不另起（同写一个 .part），等它拷完下一轮再看。
+        返回这一轮的等待原因，拷好了为 None。"""
         key, out = (r["key"], r["name"]), {}
         s = self.stagers.get(key)
         if s is None:
+            dst = {b for _, b in cp}
+            busy = sorted(b for k2, o in self.stagers.items() if k2 != key and o["th"].is_alive() for b in o.get("dst") or () if b in dst)
+            if busy:                              # 别的任务（并行清单的另一行、别的清单）正在拷同一个文件：同写一个 .part，等它拷完（#147）
+                return "另一个任务正在拷同一个本地依赖（%s），等它拷完" % "、".join(os.path.basename(b) for b in busy[:3])
             slow = self.io_yield(key, time.time())
             if slow:
                 return "%s，推迟拷 %d 个本地依赖（最多推迟 %d 分钟）" % (slow, len(cp), IO_YIELD_MAX_S / 60)
@@ -4786,7 +4911,7 @@ class Worker:
                 except OSError as x:
                     out["err"] = str(x)
             th = threading.Thread(target=run, daemon=True)
-            s = self.stagers[key] = {"th": th, "t0": time.time(), "n": len(cp), "out": out}
+            s = self.stagers[key] = {"th": th, "t0": time.time(), "n": len(cp), "out": out, "dst": dst}
             th.start()
         if s["th"].is_alive():
             return "正在从共享盘拷 %d 个本地依赖（已 %.0f 秒）" % (s["n"], time.time() - s["t0"])
@@ -4800,12 +4925,17 @@ class Worker:
 
     def place(self, r, S, launch=None):
         """真放行：按快照 S 调准入核心 place；能放就放（launch）并返回 None，否则返回 (等待原因, 是否卡在资源上)。
-        核心之外只有真放行要做的：缺本地文件（miss）、在看资源前拷本地依赖与内存闸门（pre）。原因代码（快照的 code）记进 r["code"]，
+        核心之外只有真放行要做的：缺本地文件（miss）、在看资源前拷本地依赖与内存闸门（pre），以及并行清单加行的门槛（par_gate，#147：只缩小能用的卡、不加就写原因）。原因代码（快照的 code）记进 r["code"]，
         note_waits 据此算一直因 CPU 被挡了多久。"""
         x = dict(self.as_job(r), miss=self.missing(r))
         r["miss"] = x["miss"] is not None            # 缺本地文件又补不了：等待项带着它（状态里的 miss），看板按字段认，不按文字
+        ok, gate = self.par_gate(r, time.time())      # 并行清单加行（已有行在跑）：只放在没吃满的卡上，限流、刚加过时不加（#147）
+        if ok is not None:
+            x["allowed"] = [i for i in ok if x["allowed"] is None or i in x["allowed"]]
 
         def pre():
+            if gate:
+                return gate
             if r["kind"] == "queue" and r.get("needs"):
                 cp = [m for c in check_needs(r, self.qenv(r["q"])) for m in c["copy"]]
                 why = (cp or (r["key"], r["name"]) in self.stagers) and self.stage_bg(r, cp)   # 拷完的那一轮 cp 已空，也要收结果
@@ -4862,8 +4992,8 @@ class Worker:
                 self.finish(k)
         self.reload_hist()                        # 本机刚跑完的与别的主机新记的
         stops = {q["key"]: q["stop"] for q in queues}
-        for k, j in self.running.items():        # 停法以现在的登记为准：重新登记 --stop 对正在跑的也生效（以前沿用放行时的，pause --now 停不下）
-            j["stop"] = stops.get(k, j.get("stop"))
+        for j in self.running.values():          # 停法以现在的登记为准：重新登记 --stop 对正在跑的也生效（以前沿用放行时的，pause --now 停不下）
+            j["stop"] = stops.get(lane_key(j), j.get("stop"))
         self.ovr = self.load_overrides()
         try:
             limits = json.loads(read(self.p.limits, "{}") or "{}")
@@ -4886,9 +5016,11 @@ class Worker:
                 continue
             os.makedirs(q["state"], exist_ok=True)
             os.makedirs(q["logs"], exist_ok=True)
+            rows = list_jobs(q)                   # 清单（每轮重读）与并行数 q["par"]：换名、接管来的任务 key 照它定（run_key）
             self.rekey(q)
-            cur = None if q["key"] in self.running else read_current(q["state"])
-            other = cur and run_elsewhere(self.host, q, cur, self.gone)
+            mine = {(j["name"], j.get("pid")) for j in self.lane(q["key"])}
+            curs = [c for c in read_current(q["state"]) if c[:2] not in mine]   # 不是本机在盯的行
+            cur, other = next(((c, h) for c in curs for h in [run_elsewhere(self.host, q, c, self.gone)] if h), (None, None))
             if other:
                 elsewhere[q["key"]] = (other, cur[0])
                 if self.elsewhere.get(q["key"]) != (other, cur[0]):
@@ -4897,19 +5029,24 @@ class Worker:
                 waiting.append({"key": q["key"], "q": q, "name": None, "elsewhere": [other, cur[0]],
                                 "why": "主机 %s 放行的 %s 还没收尾（这条清单也登记在那台），等那台跑完；那台已不在、任务确定没了，删掉状态目录里的 current 这台就接着跑" % (other, cur[0])})
                 continue
-            if cur:
-                self.adopt(q)
-            if q["key"] in self.running:
-                continue
-            lock = read_pid(os.path.join(q["state"], "lock"))
-            if alive(lock, ("gpu_queue",)):
-                waiting.append({"key": q["key"], "q": q, "name": None, "why": "旧 gpu_queue.sh（PID %d）还在跑这条队列" % lock})
-                continue
+            if curs:
+                for c in curs:
+                    self.adopt(q, c)
+            run = self.lane(q["key"])
+            if not run:
+                lock = read_pid(os.path.join(q["state"], "lock"))
+                if alive(lock, ("gpu_queue",)):
+                    waiting.append({"key": q["key"], "q": q, "name": None, "why": "旧 gpu_queue.sh（PID %d）还在跑这条队列" % lock})
+                    continue
             if os.path.exists(os.path.join(q["state"], "paused")):
-                waiting.append({"key": q["key"], "q": q, "name": None, "why": "已暂停（状态目录有 paused）"})
+                if not run:
+                    waiting.append({"key": q["key"], "q": q, "name": None, "why": "已暂停（状态目录有 paused）"})
                 continue
-            job = next_job(q)
-            if job is None:
+            jobs = next_jobs(q, {j["name"] for j in run}, rows)   # 窗口：串行清单在跑时为空，同以前
+            if run:
+                reqs += [queue_req(q, job) for job in jobs]
+                continue
+            if not jobs:
                 q["empty"] = True                 # 空着：清单里没有待办（项目暂时没实验），状态里标出来，别的项目不当它在抢卡
                 if q["key"] in self.active:
                     self.qlog(q, "队列结束（清单中已无待办任务）")
@@ -4918,7 +5055,7 @@ class Worker:
                     if read(os.path.join(q["state"], "lock")) == str(os.getpid()):
                         os.remove(os.path.join(q["state"], "lock"))
                 continue
-            reqs.append(queue_req(q, job))
+            reqs += [queue_req(q, job) for job in jobs]
         self.elsewhere = elsewhere
         return waiting, reqs + self.slot_reqs()
 
@@ -5070,7 +5207,8 @@ class Worker:
                      "keep": {c["uuid"]: round(c["keep"]) for c in S["cards"] if c["keep"]},   # 各卡给对方留着的 MB（keep_left）：fit 的整卡封顶 card_need 照它
                      "owner": sorted(S["owner"])},        # 不放的卡（对方超出预留或刚回落、有停不了的保活）：fit 的快照照它（fit_snapshot）
             "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"], **({"pool": True} if q.get("pool") else {}),
-                        "empty": q.get("empty", False), "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {})} for q in queues],
+                        "empty": q.get("empty", False), "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {}),
+                        "par": q.get("par") or 1} for q in queues],   # 清单声明的并行数（list_par，#147）：看板车道写“并行 k/N”
             "plan": self.plan,                    # 推演（forecast）：各队列与单元每个任务的预计开始、结束、用哪几张卡
             "todo": self.todo,                    # 还会跑的任务（list_state）：别的主机的依赖按它认谁还会跑、排在谁后面
             "pool_heads": self.pool_view(now),    # 算力池里待放的各清单还要跑什么、队首依赖满足没有（#25）：看板据此放、借
@@ -5189,6 +5327,11 @@ class Worker:
         return bool(new)
 
 
+def lane_key(j):
+    """运行中任务或请求属于哪条车道：清单任务是它的队列 key（并行清单几行同一个，#147），单元是它自己的 key。"""
+    return j["q"]["key"] if j.get("q") else j["key"]
+
+
 def card_share(ngpu, vram, excl, card, ncards):
     """一个任务占几张卡（公平份额按它记 GPU 用量）：独占卡算整卡，独占整机算这台全部的卡，同卡并行的按显存估计值（GiB）
     占卡总显存（card，GiB；不知道时算整卡）的比例；不用卡的为 0。"""
@@ -5282,7 +5425,7 @@ def gang_until(S, x, t):
 def acct_job(x, cs, t, t1, cap):
     """开跑的（推演里）或留着资源的（成组成员，place）任务在快照 jobs 里的记账：显存按估计值记在选中的卡 cs 上（MB）、内存（GiB）、核数（cpu_give 封顶到 cap）。
     t、t1 是开始与预计结束（不知道为 None）。simulate 的 launch 与 place 的成组留资源共用。"""
-    return {"key": x["key"], "name": x["name"], "project": x["project"], "t0": t, "t1": t1, "gpus": [c["uuid"] for c in cs],
+    return {"key": x["key"], "lane": x.get("lane") or x["key"], "name": x["name"], "project": x["project"], "t0": t, "t1": t1, "gpus": [c["uuid"] for c in cs],
             "vram": {c["uuid"]: x["vram"] * 1024 for c in cs}, "ram": x["ram"], "cpu": float(cpu_give(x["cpus"], cap)),
             "excl": x["excl"], "tag": x["tag"], "hold": x["hold"], "ngpu": x["ngpu"], "use": {}, "cards": x["cards"]}
 
@@ -5731,7 +5874,8 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
     只模拟显存（各卡按估计值记账；借来的主机上有停不了的保活的卡不放，同真放行）、内存、CPU（按估计核数记账）、独占（留卡与回填）、tag 上限、截止前的准入与公平份额；
     缺本地文件、拷本地依赖（含共享盘慢时推迟）、内存闸门、对方超出预留这类此刻才有的原因不模拟。
     - snap：资源快照（Worker.snapshot；sim_snapshot 换成推演口径）；
-    - queues：[{key, kind, project, allowed（能用的卡序号，None 不限）, since（队首开始等的时刻）, jobs [job_spec…]}]，jobs 不含正在跑的；
+    - queues：[{key, kind, project, allowed（能用的卡序号，None 不限）, since（队首开始等的时刻）, jobs [job_spec…], par（同时最多几行，缺省 1）, gpar（要卡的行只在这条在跑的少于它时排：并行清单的门槛此刻不给加，forecast 给；None 不限）}]，jobs 不含正在跑的；
+      每条队列按清单顺序取窗口（同 next_jobs：还没排上的前 par − 在跑数 行），各行的请求 key 按 run_key（并行清单逐行一个，#147），车道按队列 key（快照 jobs 的 lane）；
     - cut：(截止时刻, 没估时的放不放)：续租截止、约定归还前跑不完的不放（同 override_hit 的 deadline）；
     - pol：调度设置（缺省 POLICY）；use：开始时各项目的 GPU 用量（卡·时，不含在跑的），往后按半衰期衰减，再加上推演里跑的；
     - ends、dead：依赖查的各任务预计结束 {(项目, 任务): 时刻} 与跑失败了的（dep_end；forecast 汇的）。写了依赖的任务等依赖都满足才排，
@@ -5743,13 +5887,13 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
     - on_dep（forecast 给，dict）：排不上的队列里停在依赖上的记进去 {队列 key: 那一行的任务名}：写了依赖的行依赖满足不了或不知道何时满足，
       或前面的占位任务不知道何时放行（它的结束就是依赖何时满足），或成组的行同组还排不上（凑不齐、成环、别的主机上的成员说不出何时能放行：
       等的是同伴，挪走的行带着同样的 gang=，同 after=）。offers 据此不把这条清单当“原处跑不了”（#183、#180）。
-    返回 (排上的 [{key, name, project, t0, t1, gpus, after（等到谁跑完才轮到它 [[项目, 任务]]）, gang（成组的组名）}], 排不上的 {队列 key: 原因})。"""
+    返回 (排上的 [{key, lane（队列 key）, name, project, t0, t1, gpus, after（等到谁跑完才轮到它 [[项目, 任务]]）, gang（成组的组名）}], 排不上的 {队列 key: 原因})。"""
     horizon, pol, use0, ends, gangs = FORECAST_S if horizon is None else horizon, pol or POLICY, use or {}, dict(ends or {}), gangs or {}
     S = sim_snapshot(snap, cut, gangs, first)
     out, freed, last, blocked = [], [], {}, {}
     gstuck = {}             # 队列 key → 停在它这里的成组的行（同组还排不上，place 的 gang_unk）：同依赖，记进 on_dep
     stuck_res = {}          # 队列 key → 最后一次是不是卡在资源上（等时长不明的任务腾资源时据此解释）
-    ptr, since = {q["key"]: 0 for q in queues}, {q["key"]: q["since"] for q in queues}
+    put, since = {q["key"]: set() for q in queues}, {q["key"]: q["since"] for q in queues}   # 各队列已排上的行（下标）、开始等的时刻
     rows = [(y["project"], y["cards"], y["t0"], y["t1"]) for y in S["jobs"]]     # 推演里跑过的（含开始时在跑的）：算用量
     t = now
 
@@ -5761,7 +5905,7 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
         return u
 
     def shadow(r):          # 屏障最早何时放行：从此刻的在跑的起，只排它一个（成组的按它自己最早何时放得下算）
-        q = {"key": r["key"], "kind": r["kind"], "project": r["project"], "allowed": r["allowed"], "since": r["since"], "jobs": [dict(r, gang=None)]}
+        q = {"key": r["key"], "kind": r["kind"], "project": r["project"], "allowed": r["allowed"], "since": r["since"], "jobs": [dict(r, gang=None, lane=None)]}
         o, _ = simulate(t, S, [q], focus, cut, now + horizon - t, pol, ends=ends, dead=dead)
         return o[0]["t0"] if o else None
 
@@ -5770,44 +5914,51 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
         if r.get("durk") and cs and not r["hold"]:    # 按开跑时那几张卡上的 labmon 任务数（含自己）取时长（#67）
             k = sum(1 + sum(1 for y in S["jobs"] if not y["hold"] and c["uuid"] in y["gpus"]) for c in cs) / len(cs)
             d = (r["durk"](k) or {}).get("min")
-        e = {"key": r["key"], "name": r["name"], "project": r["project"], "t0": t, "gpus": [c["uuid"] for c in cs],
+        e = {"key": r["key"], "lane": r["lane"], "_i": r["_i"], "name": r["name"], "project": r["project"], "t0": t, "gpus": [c["uuid"] for c in cs],
              "t1": dep_end(dep_keys(r), t, ends, dead) if r["hold"] and dep_keys(r) else t + d * 60 if d is not None else None,
              "after": [f for f in freed][:3] if t > r["since"] else [], **({"gang": r["gang"]} if r.get("gang") else {})}
         ends[(r["project"], r["name"])] = e["t1"]       # 同一遍里排在它后面、等它的任务就能看到
         S["jobs"].append(dict(e, **acct_job(r, cs, t, e["t1"], S["cpu_cap"])))
         rows.append((r["project"], r["cards"], t, e["t1"]))
         out.append(e)
-        ptr[r["key"]] += 1
+        put[r["lane"]].add(r["_i"])
 
     def place_(r):
+        if r.get("gpar") and r["ngpu"] > 0 and sum(1 for y in S["jobs"] if (y.get("lane") or y["key"]) == r["lane"]) >= r["gpar"]:
+            return "并行清单的门槛此刻不给加要卡的行（卡吃满）", False   # forecast 的 gpar：逐行放行时按已排上的核，同一轮放了一行就到顶；不用卡的照排
         cs, why, res = place(r, S, t)
         r["code"] = S["code"]                     # admit 按它认成组留下的（同 Worker.place）
-        gstuck.pop(r["key"], None)
+        gstuck.pop(r["lane"], None)
         if cs is not None:
             return launch(r, cs)
-        stuck_res[r["key"]] = res
+        stuck_res[r["lane"]] = res
         if S["code"] == "gang_unk":
-            gstuck[r["key"]] = r
+            gstuck[r["lane"]] = r
         return why, res
 
     while True:
-        busy, wake, reqs = {y["key"] for y in S["jobs"]}, [], []
+        busy, wake, reqs = {}, [], []
+        for y in S["jobs"]:
+            busy[y.get("lane") or y["key"]] = busy.get(y.get("lane") or y["key"], 0) + 1
         for q in queues:
-            if q["key"] in busy or ptr[q["key"]] >= len(q["jobs"]):
-                continue
-            r = dict(q["jobs"][ptr[q["key"]]], key=q["key"], kind=q["kind"], project=q["project"], since=since[q["key"]], allowed=q["allowed"])
-            r["charge"] = r["cards"] * (r["dur"] or 0.0) / 60
-            d = dep_end(dep_keys(r), t, ends, dead) if dep_keys(r) else None
-            blocked.pop(q["key"], None)
-            if dep_keys(r) and d is None:         # 依赖满足不了或不知道何时满足：这条队列停在它这里
-                blocked[q["key"]] = r
-            elif d and d > t:                     # 依赖还没满足：不参加这一轮，到时再看
-                wake.append(d)
-            else:
-                if d:                             # 等依赖的时间不算排队（同真放行：依赖满足后才开始等）
-                    since[q["key"]] = r["since"] = max(r["since"], d)
-                reqs.append(r)
-        last.update({r["key"]: why for r, why, _ in admit(reqs, focus, pol, used(), t, place_, shadow)})
+            k = q["key"]
+            win = [i for i in range(len(q["jobs"])) if i not in put[k]][:max(0, (q.get("par") or 1) - busy.get(k, 0))]   # 窗口（同 next_jobs）
+            if win:
+                blocked.pop(k, None)
+            for i in win:
+                r = dict(q["jobs"][i], key=run_key(q, q["jobs"][i]["name"]), lane=k, _i=i, kind=q["kind"], project=q["project"], since=since[k], allowed=q["allowed"],
+                         gpar=q.get("gpar"))
+                r["charge"] = r["cards"] * (r["dur"] or 0.0) / 60
+                d = dep_end(dep_keys(r), t, ends, dead) if dep_keys(r) else None
+                if dep_keys(r) and d is None:     # 依赖满足不了或不知道何时满足：它占着窗口的这一格（串行清单就是停在它这里）
+                    blocked.setdefault(k, r)
+                elif d and d > t:                 # 依赖还没满足：不参加这一轮，到时再看
+                    wake.append(d)
+                else:
+                    if d:                         # 等依赖的时间不算排队（同真放行：依赖满足后才开始等）
+                        since[k] = r["since"] = max(r["since"], d)
+                    reqs.append(r)
+        last.update({r["lane"]: why for r, why, _ in admit(reqs, focus, pol, used(), t, place_, shadow)})
         # 成组：这一轮没重新留的（让位给屏障）放掉；本机的成员都留好了、别的主机上的预计都到点（at）了就一起开跑，没到点的到点再看（同 Worker.gang_commit）
         S["gholds"] = {k: h for k, h in S["gholds"].items() if h["seen"] >= t}
         for gk, g in sorted(gangs.items()):
@@ -5829,13 +5980,13 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
         S["jobs"] = [y for y in S["jobs"] if not (y["t1"] is not None and y["t1"] <= t)]
         freed = [[y["project"], y["name"]] for y in done if not y["hold"]]
         for y in done:
-            if y["key"] in since:
-                since[y["key"]] = t
-    never = {y["key"]: y for y in S["jobs"] if y["t1"] is None}       # 排上了但不知道何时结束的：它那条队列的后面排不上
+            if (y.get("lane") or y["key"]) in since:
+                since[y.get("lane") or y["key"]] = t
+    never = {y.get("lane") or y["key"]: y for y in S["jobs"] if y["t1"] is None}       # 排上了但不知道何时结束的：它那条队列的后面排不上
     unknown = "、".join(y["name"] for y in never.values() if not y["hold"])
     stuck = {}
     for q in queues:
-        if ptr[q["key"]] >= len(q["jobs"]):
+        if len(put[q["key"]]) >= len(q["jobs"]):
             continue
         y, b, g = never.get(q["key"]), blocked.get(q["key"]), gstuck.get(q["key"])
         if on_dep is not None and (y["hold"] if y else b or g):
@@ -6508,14 +6659,18 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
             gone |= set(json.loads(read(Paths(h).returned, "{}") or "{}").get("hosts") or [])
         except (ValueError, AttributeError, TypeError):
             pass
-    cur = read_current(q["state"])                # 状态目录里在跑的：放它的主机状态过期了（worker 停了、崩了）任务照样可能在跑，不能再分
-    if cur and not (cur[3] and cur[3] in gone):   # 放它的主机已归还的不算（算力池借的主机换了容器、清单回池里，#25；同 run_elsewhere）
-        running.add(cur[0])
+    for cur in read_current(q["state"]):          # 状态目录里在跑的（并行清单有几行，#147）：放它的主机状态过期了（worker 停了、崩了）任务照样可能在跑，不能再分
+        if not (cur[3] and cur[3] in gone):       # 放它的主机已归还的不算（算力池借的主机换了容器、清单回池里，#25；同 run_elsewhere）
+            running.add(cur[0])
     _, pend = rows_left(q["state"], rows, None)
     pend = first_rows(pend)
     pend = [(n, c) for n, c in pend.items() if n not in running]
     if as_json:
-        print(json.dumps(fit_head(q, pend[0] if pend else None, fhs, skip, hist, now), ensure_ascii=False))
+        head = pend[0] if pend else None
+        if (q.get("par") or 1) > 1 and pend:   # 并行清单（#147）：同 pool_view 取窗口里第一行依赖满足的
+            dw = fit_deps(p, q, rows, hist, now)
+            head = next((x for x in pend[:q["par"]] if not dw.dep_block(dict(job_of(*x), project=q["project"]), now)), head)
+        print(json.dumps(fit_head(q, head, fhs, skip, hist, now), ensure_ascii=False))
         return 0
     skip = list(skip.values())
     apart, todo = [], []
@@ -6530,6 +6685,8 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
         (apart if what else todo).append((n, c, what))
     print("清单 %s（%s，项目 %s）：还会跑 %d 行%s" % (path, "登记在 %s 上" % reg[0] if reg else "还没登记", q["project"], len(pend),
                                              "，在跑 %s" % "、".join(sorted(running)) if running else ""))
+    if (q.get("par") or 1) > 1:
+        print("这条清单写了 par=%d：登记的那台上同时最多跑 %d 行，卡有余量时 worker 自己补，不用为这台拆清单（下面算的是还能再开几条车道）" % (q["par"], q["par"]))
     if apart:
         print("不分的 %d 行（留在原处）：%s" % (len(apart), "、".join("%s（%s）" % (n, w) for n, _, w in apart)))
     if skip:
@@ -6566,7 +6723,7 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
             print("  %s不再开：%s" % ("" if fh.lanes else "一条也", fh.why))
     got = sum(len(fh.lanes) for fh in fhs)
     if got:
-        print("合计可再开 %d 条车道。照这个在各台新建清单、把分到的行剪过去再 labmon worker add（lists.md「开并行车道」）；%s" % (
+        print("合计可再开 %d 条车道。登记的那台上的，在清单里写或调大 `# labmon: par=N`，worker 自己加行；分到别的主机的，新建清单、把分到的行剪过去再 labmon worker add（lists.md「开并行车道」）；%s" % (
             got, "其余 %d 行（%s…）此刻哪台都放不下：留在原清单，或接在新清单后面，让各条车道的行数相近" % (len(left), left[0][0]) if left else "没有剩下的行"))
     else:
         print("此刻哪台都不再开车道：%s" % ("这些行排在已有车道后面" if todo else "没有能分的行"))
@@ -6865,8 +7022,8 @@ def main(argv=None):
                 gone = set(json.loads(read(p.returned, "{}") or "{}").get("hosts") or [])
             except (ValueError, AttributeError, TypeError):
                 gone = set()
-            cur = read_current(st)
-            busy = cur and run_elsewhere(a.host, {"state": st, "root": root, "jobs": a.args[1]}, cur, gone)
+            away = [(c[0], h) for c in read_current(st) for h in [run_elsewhere(a.host, {"state": st, "root": root, "jobs": a.args[1]}, c, gone)] if h]
+            busy = away[0][1] if away else None
             for h in moved:
                 for x in moving[h]:
                     with contextlib.suppress(FileNotFoundError):
@@ -6881,7 +7038,7 @@ def main(argv=None):
                     append_jsonl(p.events, {"t": round(time.time()), "kind": "worker", "msg": "登记从主机 %s 搬来：%s/%s" % ("、".join(moved), root, a.args[1]),
                                             "project": a.project, "root": root, "queue": a.args[1]})
         print("已登记 %s/%s → 主机 %s" % (root, a.args[1], a.host)
-              + ("（从主机 %s 搬过来，那边不再跑它%s）" % ("、".join(moved), "；主机 %s 上正在跑的 %s 跑完后这台接着跑" % (busy, cur[0]) if busy else "") if moved else ""))
+              + ("（从主机 %s 搬过来，那边不再跑它%s）" % ("、".join(moved), "；主机 %s 上正在跑的 %s 跑完后这台接着跑" % (busy, "、".join(n for n, _ in away)) if busy else "") if moved else ""))
         return 0
     os.makedirs(p.dir, exist_ok=True)
     if a.cmd == "thaw":                           # 还卡时（borrow.finish）恢复暂停的看门狗

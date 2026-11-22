@@ -427,6 +427,19 @@ class PoolPlaceTest(TickBase):
         self.tick(self.snap([a, b], [], regs=regs))
         self.assertEqual(self.moves, [])
 
+    def test_waited_too_long_parallel(self):
+        # 并行清单（#147）：窗口里第一行等依赖、第二行等满了：照样挪；有行在 a 上跑着时另一格等着不算放不出去
+        q = self.pool_list()
+        wa = {"kind": "queue", "root": q["root"], "queue": q["jobs"], "project": "pa", "name": "x", "since": NOW - P.POOL_WAIT_S - 5}
+        (self.d / "hosts.toml").write_text(HOSTS.format(extra="lend = true\n") + "lend = true\n")
+        regs = [{"host": "a", "state": "active", "queues": [dict(q)]}]
+        a = self.lent("a", {"waiting": [dict(wa, name="y")], "running": [{"root": q["root"], "queue": q["jobs"], "project": "pa", "name": "x"}]})
+        self.tick(self.snap([a, self.lent("b")], [], regs=regs))
+        self.assertEqual(self.moves, [])
+        a = self.lent("a", {"waiting": [dict(wa, dep="wait"), dict(wa, name="y")]})
+        self.tick(self.snap([a, self.lent("b")], [], regs=regs))
+        self.assertEqual(self.moves[0][0], "b")
+
     def test_own_list_waiting_on_lent_host_stays(self):
         # #130：借给池之前就登记在 a 上的会话自己的清单（停法没写或 boundary，pool._ours 不认），队首等满 POOL_WAIT_S 也不挪：
         # 池不收、不问 fit（旧代码当池清单挪到 b，reg_move 带 --pool，会话的清单悄悄成了池清单）

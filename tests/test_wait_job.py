@@ -82,6 +82,13 @@ class JobStateTest(unittest.TestCase):
         self.assertEqual(js(psnap([], lanes), "v", [])["st"], "missing")
         self.assertEqual(js(None, "v", [])["st"], "missing")
 
+    def test_parallel_lane_blocks_only_own_row(self):
+        # 并行清单（#147）：窗口里一行的依赖等不来，别的行照跑：只有那一行判成不会再跑
+        js = W.job_state
+        lanes = [lane("p", "29", par=2, dep="failed", waiting="等的 x 跑失败了", bad={"y": "等的 x 跑失败了"})]
+        self.assertEqual(js(psnap([job("y", "p", "queued"), job("z", "p", "queued")], lanes), "y", [])["st"], "blocked")
+        self.assertEqual(js(psnap([job("y", "p", "queued"), job("z", "p", "queued")], lanes), "z", [])["st"], "queued")
+
     def test_job_key(self):
         self.assertEqual(W.job_key("x", "p1"), ("p1", "x"))
         self.assertEqual(W.job_key("p2/x", "p1"), ("p2", "x"))

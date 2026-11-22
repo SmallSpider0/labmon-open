@@ -169,7 +169,7 @@ def job_state(snap: dict | None, name: str, rows: list[tuple[str, dict]]) -> dic
     """一个任务此刻的状态（labmon wait --job）：snap 是它所在项目的快照（None 为没有），rows 是工作台存的用量记录里
     这个项目这个任务的行 [(主机, 行)]（state.usage_file，30 天；车道收起后快照里没有它时才看）。返回 {st, text}：
     - running / queued：快照 jobs[] 里还会跑的（几条车道都有同名的：在跑的优先，再取排队里不卡住的；与 worker 的依赖判定“还会跑的盖过以前的结果”一致）；
-    - blocked：排着、但不会再跑：所在车道队首的依赖等不来（车道的 dep 是 failed / missing / cycle，原因取 worker 的 waiting），或所在主机已归还、清单没搬走；
+    - blocked：排着、但不会再跑：所在车道队首的依赖等不来（车道的 dep 是 failed / missing / cycle，原因取 worker 的 waiting；并行清单只看这一行自己的，车道的 bad），或所在主机已归还、清单没搬走；
     - done / failed：快照里同名的取最晚结束的那条，带日志位置（车道的 logs_dir，探针给的）；快照里没有的取用量记录里最后一次（停下重排的不算）；
     - missing：都没有。
     作废（重新排队）不在这里认：看全局快照 wake 的 void:（JobWatch）。"""
@@ -181,7 +181,10 @@ def job_state(snap: dict | None, name: str, rows: list[tuple[str, dict]]) -> dic
 
     def stuck(j):
         ln = lanes.get(j["lane"], {})
-        if ln.get("dep") in ("failed", "missing", "cycle"):
+        if (ln.get("par") or 1) > 1:         # 并行清单（#147）：只有这一行自己等不来才不会再跑，窗口里别的行照跑
+            if name in (ln.get("bad") or {}):
+                return f"不会再跑：{where(ln)} 卡在依赖上：{ln['bad'][name]}"
+        elif ln.get("dep") in ("failed", "missing", "cycle"):
             return f"不会再跑：{where(ln)} 卡在依赖上：{ln.get('waiting')}"
         if ln.get("returned"):
             return f"不会再跑：{where(ln)} 所在主机已归还，清单没搬走（换到在用主机：labmon worker add）"

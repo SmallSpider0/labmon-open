@@ -1136,6 +1136,17 @@ class AdmissionUnitTest(UnitBase):
         Path(self.m.Paths("t").returned).write_text(json.dumps({"hosts": ["gone"]}))
         self.assertEqual(ask(("t",))["head"], "j_s3")
 
+    def test_fit_list_json_head_par(self):
+        # 并行清单（#147）：池问 fit --list --json 时队首同 pool_view，取窗口里第一行依赖满足的（A after=B 在前、B 独立：问的是 B）
+        q, = self.hosts.queues({"L": ["# labmon: par=2", "A|true   # after=B", "B|true"]}, project="bp")
+        os.makedirs(q["state"])
+        self.hosts.register(self.m.POOL, "L", "bp")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rc = self.m.fit_list(self.m.Paths(self.m.POOL), str(self.d / "L"), "jobs/q.txt", "bp", [], True)
+        self.assertEqual(rc, 0, out.getvalue())
+        self.assertEqual(json.loads(out.getvalue().strip().splitlines()[-1])["head"], "B")
+
     def test_job_cmd_first_row(self):
         # 按名字找清单里的一行只有一处（job_cmd）：取第一条、跳过注释行，找不到为 None
         q, = self.hosts.queues({"q": ["# x|old", "x|echo 1   # tag=a", "x|echo 2"]})
@@ -1613,7 +1624,7 @@ class AdmissionUnitTest(UnitBase):
         # 占位任务漏写 gpus=0：也不要卡、不独占（否则它“占着”一张卡几小时，保活被停，平台可能按 GPU 空闲关机）
         q, = self.hosts.queues({"h": ["hold_x|sleep 30   # exclusive=gpu"]}, "p")
         os.makedirs(q["state"])
-        job = self.m.next_job(q)
+        job = self.m.next_jobs(q)[0]
         self.assertEqual((job["ngpu"], job["excl"]), (0, None))
 
     def test_hold_names(self):
@@ -1758,7 +1769,9 @@ class AdmissionUnitTest(UnitBase):
         os.environ["LABMON_GPUS"] = "GPU-aaa:40000"
         try:
             w = m.Worker("t")
-            w.adopt(q)
+            m.list_jobs(q)
+            for c in m.read_current(q["state"]):
+                w.adopt(q, c)
         finally:
             os.environ.pop("LABMON_GPUS")
             job.kill()
@@ -1777,7 +1790,7 @@ class AdmissionUnitTest(UnitBase):
             t0 = time.time() - 600
             Path(q["state"], "lock").write_text(str(lock.pid))
             Path(q["state"], "current").write_text("x1 %d %s" % (lock.pid, self.m.now_str(t0)))
-            self.assertEqual(self.m.read_current(q["state"]), ("x1", lock.pid, float(int(t0)), None))
+            self.assertEqual(self.m.read_current(q["state"]), [("x1", lock.pid, float(int(t0)), None)])
             os.environ["LABMON_GPUS"] = ""
             try:
                 self.w.sample([q])
@@ -1793,7 +1806,7 @@ class AdmissionUnitTest(UnitBase):
             lock.kill()
             lock.wait()
         Path(q["state"], "current").write_text("x1 abc")                   # PID 写坏、没写时刻：PID 算 0，时刻算现在
-        name, pid, t0, _ = self.m.read_current(q["state"])
+        name, pid, t0, _ = self.m.read_current(q["state"])[0]
         self.assertEqual((name, pid), ("x1", 0))
         self.assertAlmostEqual(t0, time.time(), delta=2)
 
@@ -2521,6 +2534,15 @@ class DepsTest(UnitBase):
         self.assertEqual({k: v for k, v in st["todo"][0].items() if k not in ("root", "queue")}, {"project": "pa", "jobs": ["B", "A"], "deps": {"B": [["pa", "A"]]}, "gang": {}, "held": None})
 
 
+    def test_dep_cycle_par_window(self):
+        # Codex 审 #159 第三轮：并行清单（par=2）里 a after=y 在前、b 与另一条清单的 y 成组：b 与 a 同在窗口里，不排在 a 后面，不算成环
+        qs = self.hosts.queues({"s": ["# labmon: par=2", "a|true   # gpus=0 after=y", "b|true   # gpus=0 gang=g:2"],
+                                "u": ["y|true   # gpus=0 gang=g:2"]}, "pa")
+        blk = self.blocked(qs)
+        self.assertNotEqual((blk.get("a") or [None])[0], "cycle", blk)
+        self.assertNotEqual((blk.get("y") or [None])[0], "cycle", blk)
+        self.assertEqual(self.w.todo[0].get("par"), 2)                  # 写进状态的 todo：别的主机认依赖图时同样按窗口
+
 class CrossHostTest(UnitBase):
     """两台 worker 共享一个 HOME（fixtures.Hosts）：一台 tick 写出的状态与用量记录，另一台按共享盘上的真实路径读；推进时钟看过期。"""
 
@@ -2825,6 +2847,16 @@ class PoolListTest(UnitBase):
         self.assertEqual((h["head"], h["n"], h["dep"]), (None, 0, None))
 
 
+    def test_pool_heads_par_window(self):
+        # Codex 审 #159 第四轮：池里的并行清单（par=2）A after=B 在前、B 独立：队首取窗口里依赖满足的 B，不把 A 判成 B 排在它后面的环、挡住整条
+        Path(self.q["jobs_path"]).write_text("# labmon: par=2\nA|true   # gpus=1 after=B\nB|true   # gpus=1\n")
+        rc, out = self.add()
+        self.assertEqual(rc, 0, out)
+        self.w.tick([], True)
+        k = "%s|jobs/q.txt" % os.path.normpath(self.q["root"])
+        h = json.loads(Path(self.w.p.status).read_text())["pool_heads"][k]
+        self.assertEqual((h["head"], h["n"], h["dep"]), ("B", 2, None))
+
 class SelfPoolTest(UnitBase):
     """入池的自用主机（#79）：看板把池清单放到这台时 worker add --pool，登记里记 pool；它与主人自己的清单在同一台按人的份额排（不另设优先），
     状态的 queues、todo 带 pool，offers 不叫会话挪它（落点由看板定）。"""
@@ -2928,7 +2960,7 @@ root = "{self.q["root"]}"
 jobs = "jobs/q.txt"
 ''')
         raw = P.queue_gpu_queue({"root": self.q["root"], "jobs": "jobs/q.txt", "me": "t"})
-        self.assertEqual(raw["current"]["host"], "o")
+        self.assertEqual(raw["current"][0]["host"], "o")
         now = time.time()
         with mock.patch.dict(os.environ, {"LABMON_HOSTS": str(self.d / "none.toml"), "LABMON_STATE": str(self.d / "state")}):
             snap = C.build(load(mt), {"t": ({"t": now, "queues": {"s": raw}}, None), "o": ({"t": now}, None)}, out)
@@ -3036,7 +3068,7 @@ jobs = "jobs/q.txt"
             runs = {"t": [j["name"] for j in self.w.running.values()], "o": [j["name"] for j in o.running.values()]}
             self.assertEqual(rc, [0])
             self.assertEqual(runs, {"t": ["j1"], "o": []})
-            self.assertEqual(self.m.read_current(self.q["state"])[3], "t")
+            self.assertEqual(self.m.read_current(self.q["state"])[0][3], "t")
         finally:
             for j in o.running.values():
                 os.killpg(j["pid"], 9)
@@ -3048,9 +3080,33 @@ jobs = "jobs/q.txt"
         start = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.hosts.now() - 60))
         Path(self.q["state"], "current").write_text(f"j1 {pid} {start} o")
         q = {"root": self.q["root"], "jobs": "jobs/q.txt"}
-        self.assertTrue(P.queue_gpu_queue(dict(q, me="t"))["current"]["alive"])
-        self.assertFalse(P.queue_gpu_queue(dict(q, me="o"))["current"]["alive"])
-        self.assertFalse(P.queue_gpu_queue(dict(q, me="t", readonly=True))["current"]["alive"])
+        self.assertTrue(P.queue_gpu_queue(dict(q, me="t"))["current"][0]["alive"])
+        self.assertFalse(P.queue_gpu_queue(dict(q, me="o"))["current"][0]["alive"])
+        self.assertFalse(P.queue_gpu_queue(dict(q, me="t", readonly=True))["current"][0]["alive"])
+
+    def test_worker_view_par_bad_dep(self):
+        # 并行清单（#147）：窗口里第一行照常等资源、第二行的依赖等不来：车道报那一行（dep: 告警），按行记进 bad；cpu 取最久的
+        root = self.q["root"]
+        st = {"t": time.time(), "queues": [{"root": root, "jobs": "jobs/q.txt", "par": 2}],
+              "waiting": [{"root": root, "queue": "jobs/q.txt", "name": "a", "why": "没有可用显存", "dep": None, "cpu_wait": 700},
+                          {"root": root, "queue": "jobs/q.txt", "name": "b", "why": "等的 x 跑失败了", "dep": "failed"}]}
+        f = Path(self.hosts.d, "st.json")
+        f.write_text(json.dumps(st))
+        v = P.worker_view(str(f), 180)[os.path.normpath(os.path.join(root, "jobs/q.txt"))]
+        self.assertEqual((v["head"], v["dep"], v["wait"], v["bad"], v["cpu"]), ("b", "failed", "等的 x 跑失败了", {"b": "等的 x 跑失败了"}, 700))
+
+    def test_probe_reads_each_current_line(self):
+        # 并行清单（#147）：current 一行一个在跑的，探针逐行读出、各自判 PID 与进度
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        try:
+            start = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.hosts.now() - 60))
+            Path(self.q["state"], "current").write_text(f"j1 {p.pid} {start} t\nj2 {dead_pid()} {start} t\n\n")
+            os.makedirs(Path(self.q["root"], "logs"), exist_ok=True)
+            cur = P.queue_gpu_queue({"root": self.q["root"], "jobs": "jobs/q.txt", "logs": "logs", "me": "t"})["current"]
+            self.assertEqual([(c["name"], c["alive"]) for c in cur], [("j1", True), ("j2", False)])
+        finally:
+            p.kill()
+            p.wait()
 
     def test_add_refuses_state_dir_used_on_other_host(self):
         # 别的主机上另一条清单用着同一个状态目录：同样不让登记（共享盘上 current、完成标记会互相覆盖）
@@ -3101,7 +3157,7 @@ jobs = "jobs/q.txt"
             w2 = self.hosts.worker("t")
             w2.tick(w2.registry(), True)
             self.assertEqual([j["name"] for j in w2.running.values()], ["j1"])
-            self.assertEqual(self.m.run_elsewhere("o", self.q, self.m.read_current(self.q["state"]), set()), "t")
+            self.assertEqual(self.m.run_elsewhere("o", self.q, self.m.read_current(self.q["state"])[0], set()), "t")
             Path(self.q["state"], "j1.rc").write_text("0\n")
             p.kill()
             p.wait()
@@ -3241,7 +3297,7 @@ jobs = "jobs/q.txt"
         self.w.tick(self.w.registry(), False)
         self.assertTrue(Path(self.q["state"], "j1.done").exists())
         self.assertEqual([j["name"] for j in self.w.running.values()], ["j2"])
-        self.assertEqual(self.m.read_current(self.q["state"])[3], "t")      # 现在的 current 写明放行的主机
+        self.assertEqual(self.m.read_current(self.q["state"])[0][3], "t")      # 现在的 current 写明放行的主机
 
     def test_leftover_current_from_returned_host_is_interrupt(self):
         # 看板说 o 已归还：它状态里列着的不算在跑，current 是容器没了留下的，照旧记中断、重跑
@@ -3279,11 +3335,302 @@ jobs = "jobs/q.txt"
     def test_start_refuses_when_other_host_just_launched(self):
         # 收请求之后、放行之前 o 已放了这条清单（两台都登记着）：t 这次不放，不会两台各跑一份
         start = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(self.hosts.now()))
-        r = self.w.prep(self.m.queue_req(self.q, self.m.next_job(self.q)), time.time(), {})
+        r = self.w.prep(self.m.queue_req(self.q, self.m.next_jobs(self.q)[0]), time.time(), {})
         Path(self.q["state"], "current").write_text(f"j1 {dead_pid()} {start} o")
         self.assertTrue(self.w.start(self.q, r, []))
         self.assertEqual(self.w.running, {})
-        self.assertEqual(self.m.read_current(self.q["state"])[3], "o")
+        self.assertEqual(self.m.read_current(self.q["state"])[0][3], "o")
+
+class ParallelListTest(UnitBase):
+    """清单声明并行数（#147）：`# labmon: par=N` 的清单在一台上最多同时跑 N 行，worker 每轮按清单顺序补到上限（窗口）；current 一行一个在跑的。"""
+
+    def lines(self, n, par=3, extra=None):
+        rows = ["# labmon: par=%d" % par] + ["j%d|sleep 30   # gpus=0" % i for i in range(1, n + 1)]
+        return rows + list(extra or ())
+
+    def setup_list(self, rows):
+        self.q, = self.hosts.queues({"s": rows}, "pa")
+        self.hosts.register("t", "s", "pa")
+
+    def test_par_parsed_and_default(self):
+        self.assertEqual(self.m.list_par("# labmon: par=8\na|x"), 8)
+        self.assertEqual(self.m.list_par("#labmon: stop=x par=2\n"), 2)
+        self.assertEqual(self.m.list_par("a|x  # labmon: par=8\n"), 1)       # 只认整行注释
+        self.assertEqual(self.m.list_par("a|x\n# par=8\n"), 1)               # 要写 labmon:
+        self.assertEqual(self.m.list_par("# labmon: par=999"), self.m.PAR_MAX)
+        self.assertEqual(self.m.list_par("# labmon: par=0"), 1)
+
+    def test_runs_up_to_par_and_refills(self):
+        # par=3 的 5 行：同时放 3 行，current 三行；跑完一行补一行，第 5 行等到窗口有空
+        self.setup_list(self.lines(5))
+        self.w.tick(self.w.registry(), True)
+        self.assertEqual(sorted(j["name"] for j in self.w.running.values()), ["j1", "j2", "j3"])
+        self.assertEqual([c[0] for c in self.m.read_current(self.q["state"])], ["j1", "j2", "j3"])
+        self.assertEqual(len({j["key"] for j in self.w.running.values()}), 3)          # 逐行一个 key
+        st = json.loads(Path(self.w.p.status).read_text())
+        self.assertEqual(st["queues"][0]["par"], 3)
+        self.assertEqual(len(st["running"]), 3)
+        j2 = next(j for j in self.w.running.values() if j["name"] == "j2")
+        os.killpg(j2["pid"], signal.SIGKILL)
+        os.waitpid(j2["pid"], 0)
+        Path(self.q["state"], "j2.rc").write_text("0\n")
+        self.w.tick(self.w.registry(), False)
+        self.assertTrue(Path(self.q["state"], "j2.done").exists())
+        self.assertEqual(sorted(j["name"] for j in self.w.running.values()), ["j1", "j3", "j4"])
+        self.assertEqual(sorted(c[0] for c in self.m.read_current(self.q["state"])), ["j1", "j3", "j4"])
+
+    def test_serial_unchanged(self):
+        # 没声明的清单照旧一次一行，key 就是队列 key
+        self.setup_list(["j1|sleep 30   # gpus=0", "j2|sleep 30   # gpus=0"])
+        self.w.tick(self.w.registry(), True)
+        self.assertEqual(list(self.w.running), [self.q["key"]])
+        self.w.tick(self.w.registry(), False)
+        self.assertEqual([j["name"] for j in self.w.running.values()], ["j1"])
+
+    def test_dep_row_holds_its_slot(self):
+        # 窗口里等依赖的行照样占一格（par=1 时同以前：队首等依赖挡住整条清单）
+        self.setup_list(["# labmon: par=2", "a|sleep 30   # gpus=0 after=zz", "b|sleep 30   # gpus=0", "c|sleep 30   # gpus=0"])
+        self.w.tick(self.w.registry(), True)
+        self.assertEqual([j["name"] for j in self.w.running.values()], ["b"])
+        st = json.loads(Path(self.w.p.status).read_text())
+        self.assertEqual([w["name"] for w in st["waiting"]], ["a"])
+
+    def test_paused_list_adds_nothing(self):
+        self.setup_list(self.lines(4, par=2))
+        self.w.tick(self.w.registry(), True)
+        Path(self.q["state"], "paused").write_text("x")
+        j1 = next(j for j in self.w.running.values() if j["name"] == "j1")
+        os.killpg(j1["pid"], signal.SIGKILL)
+        os.waitpid(j1["pid"], 0)
+        Path(self.q["state"], "j1.rc").write_text("0\n")
+        self.w.tick(self.w.registry(), False)
+        self.assertEqual([j["name"] for j in self.w.running.values()], ["j2"])
+
+    def test_adopt_each_line_and_interrupt(self):
+        # 重启接管：current 两行，一行的进程还在（接管），一行的进程没了又没有 .rc（记中断、删掉那一行、重排）
+        self.setup_list(self.lines(3, par=2))
+        os.makedirs(self.q["state"], exist_ok=True)
+        p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "labmon-job:j1"], start_new_session=True)
+        try:
+            now = time.strftime("%Y-%m-%d %H:%M:%S")
+            Path(self.q["state"], "current").write_text("j1 %d %s t\nj2 %d %s t\n" % (p.pid, now, dead_pid(), now))
+            self.w.tick(self.w.registry(), True)
+            names = sorted(j["name"] for j in self.w.running.values())
+            self.assertIn("j1", names)
+            self.assertEqual([e["name"] for e in self.events("interrupt")], ["j2"])
+            self.assertEqual(next(j for j in self.w.running.values() if j["name"] == "j1")["pid"], p.pid)
+            self.assertEqual(len(names), 2)                                                     # 窗口补上一行（j2 重排）
+            cur = self.m.read_current(self.q["state"])
+            self.assertEqual(sorted(c[0] for c in cur), names)
+        finally:
+            p.kill()
+            p.wait()
+
+    def test_other_host_line_blocks_whole_list(self):
+        # 一条清单只归一台（#95 不放宽）：current 里有别的主机放的行（那台没归还），整条清单这台不放
+        self.setup_list(self.lines(3, par=3))
+        os.makedirs(self.q["state"], exist_ok=True)
+        now = time.strftime("%Y-%m-%d %H:%M:%S")
+        Path(self.q["state"], "current").write_text("j1 %d %s o\n" % (dead_pid(), now))
+        self.hosts.status("o")
+        self.w.tick(self.w.registry(), True)
+        self.assertEqual(self.w.running, {})
+        st = json.loads(Path(self.w.p.status).read_text())
+        self.assertEqual(st["waiting"][0]["elsewhere"], ["o", "j1"])
+
+    def end(self, w, name, rc=0):
+        j = next(j for j in w.running.values() if j["name"] == name)
+        os.killpg(j["pid"], signal.SIGKILL)
+        os.waitpid(j["pid"], 0)
+        Path(self.q["state"], name + ".rc").write_text("%d\n" % rc)
+
+    def test_moved_to_other_host_waits_for_all_lines(self):
+        # 多主机（#95 + #147）：t 上并行跑着两行时清单搬到 o。t 把手上两行都跑完（adopt_left 之前就在 running 里，照常收尾），
+        # o 等 current 清空：一行跑完、还剩一行时照样不放；两行都完了 o 才按自己的窗口放
+        self.setup_list(self.lines(5, par=2))
+        self.w.tick(self.w.registry(), True)
+        self.assertEqual(sorted(j["name"] for j in self.w.running.values()), ["j1", "j2"])
+        o = self.hosts.worker("o")
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", out):
+            self.assertEqual(self.m.main(["add", self.q["root"], "jobs/q.txt", "--host", "o", "--project", "pa"]), 0, out.getvalue())
+        self.w.tick(self.w.registry(), False)
+        self.assertEqual(sorted(j["name"] for j in self.w.running.values()), ["j1", "j2"])    # 搬走后 t 不再加行，手上的接着跑
+        o.tick(o.registry(), True)
+        self.assertEqual(o.running, {})
+        self.end(self.w, "j1")
+        self.w.tick(self.w.registry(), False)
+        self.assertEqual([j["name"] for j in self.w.running.values()], ["j2"])
+        self.assertEqual([c[0] for c in self.m.read_current(self.q["state"])], ["j2"])
+        o.tick(o.registry(), False)
+        self.assertEqual(o.running, {})                                                       # 还有 t 放的一行：整条清单这台不放
+        self.end(self.w, "j2")
+        self.w.tick(self.w.registry(), False)
+        self.assertEqual(self.w.running, {})
+        o.tick(o.registry(), False)
+        self.assertEqual(sorted(j["name"] for j in o.running.values()), ["j3", "j4"])
+        self.assertEqual({c[3] for c in self.m.read_current(self.q["state"])}, {"o"})
+        for j in list(o.running.values()):
+            os.killpg(j["pid"], signal.SIGKILL)
+            os.waitpid(j["pid"], 0)
+
+    def test_pause_now_stops_each_row(self):
+        # pause --now：并行清单在跑的几行各停各的、各自重排，current 清空，之后不再加行
+        self.setup_list(self.lines(3, par=3))
+        f = self.hosts.home / "hosts" / "t" / "queues" / "s.json"
+        f.write_text(json.dumps(dict(json.loads(f.read_text()), stop="term")))
+        self.w.tick(self.w.registry(), True)
+        self.assertEqual(len(self.w.running), 3)
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", out):
+            self.assertEqual(self.m.main(["override", "add", "pause", "pa", "--now", "--host", "t"]), 0, out.getvalue())
+        for _ in range(3):
+            self.w.tick(self.w.registry(), False)
+            if not self.w.running:
+                break
+            time.sleep(0.3)
+        self.assertEqual(self.w.running, {})
+        self.assertEqual(self.m.read_current(self.q["state"]), [])
+        self.assertEqual(sorted(x for x in os.listdir(self.q["state"]) if x.endswith((".done", ".failed"))), [])
+
+    def test_adopt_after_par_lowered_keeps_each_row(self):
+        # Codex 审 #159：两行在跑时把 par 调回 1（删掉声明）再重启：两行各自接管，不因都拿到队列 key 而互相盖掉
+        self.setup_list(self.lines(3, par=2))
+        self.w.tick(self.w.registry(), True)
+        procs = [j["pid"] for j in self.w.running.values()]
+        Path(self.q["root"], "jobs", "q.txt").write_text("\n".join(self.lines(3, par=2)[1:]) + "\n")
+        w2 = self.hosts.worker("t")
+        try:
+            w2.tick(w2.registry(), True)
+            self.assertEqual(sorted(j["name"] for j in w2.running.values()), ["j1", "j2"])
+            self.assertEqual(sorted(j["pid"] for j in w2.running.values()), sorted(procs))
+            self.assertIn(self.q["key"], w2.running)                    # 一行照 run_key（串行就是队列 key），另一行逐行
+            w2.tick(w2.registry(), False)
+            self.assertEqual(sorted(j["name"] for j in w2.running.values()), ["j1", "j2"])   # 没有新行加进来，两行都还盯着
+        finally:
+            for pid in procs:
+                os.killpg(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+
+    def test_forecast_deadline_row_keeps_lane(self):
+        # Codex 审 #159：并行清单窗口里只有一行截止前跑不完：整条不排除，别的行照常推演、车道带着目录与清单
+        self.setup_list(["# labmon: par=2", "long|x   # gpus=0 est_min=120", "short|x   # gpus=0 est_min=1", "short2|x   # gpus=0 est_min=1"])
+        qs = self.w.registry()
+        _, reqs = self.w.requests(qs, False)
+        self.w.queue_durs(qs)
+        real, now = self.w.override_hit, time.time()
+        with mock.patch.object(self.w, "override_hit", lambda r, *a, **k: ("deadline", "续租截止前跑不完") if r.get("name") == "long" else real(r, *a, **k)):
+            for r in reqs:
+                self.w.prep(r, now, {})
+            self.assertEqual({r["name"]: bool(r["held"]) for r in reqs}, {"long": True, "short": False})
+            self.w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        lanes = [ln for ln in self.w.plan["lanes"] if ln.get("root") == self.q["root"]]
+        self.assertEqual(len(lanes), 1, self.w.plan["lanes"])
+        self.assertIn("short", [j["name"] for j in lanes[0]["jobs"]])
+
+    def test_forecast_uses_gate_cards(self):
+        # Codex 审 #159：已有行在跑、卡 0 吃满卡 1 空着：推演里再加的行只放卡 1（同真放行的 par_gate），不按整台排到卡 0 上
+        self.cards(40000.0, 20000.0)
+        self.setup_list(["# labmon: par=3", "g1|x   # vram=1 est_min=30", "g2|x   # vram=1 est_min=30"])
+        qs = self.w.registry()
+        self.m.list_jobs(qs[0])
+        now = time.time()
+        self.w.running["s|g1"] = {"key": qs[0]["key"] + "|g1", "kind": "queue", "name": "g1", "project": "pa", "t0": now - 60, "deps": [], "deps_any": [],
+                                  "gpus": ["GPU-a"], "use": {}, "est": None, "excl": None, "tag": None, "q": qs[0], "pid": 1}
+        self.w.uwin = {"GPU-a": [(now - i, 95) for i in range(5)], "GPU-b": [(now - i, 10) for i in range(5)]}
+        _, reqs = self.w.requests(qs, False)
+        self.w.queue_durs(qs)
+        reqs = [r for r in reqs if r["name"] == "g2"]
+        for r in reqs:
+            self.w.prep(r, now, {})
+        self.w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        plan = {j["name"]: j for ln in self.w.plan["lanes"] for j in ln["jobs"]}
+        self.assertEqual(plan["g2"]["gpus"], [1])
+
+    def test_forecast_gate_spares_cpu_rows(self):
+        # Codex 审 #159 第二轮：卡都吃满、门槛不给要卡的行加：窗口里不用卡的行照真放行（par_gate 只看限流）此刻就排，不跟着缩窗口
+        self.cards(40000.0)
+        self.setup_list(["# labmon: par=3", "g1|x   # vram=1 est_min=600", "g2|x   # vram=1 est_min=30", "c1|x   # gpus=0 est_min=30"])
+        qs = self.w.registry()
+        self.m.list_jobs(qs[0])
+        now = time.time()
+        self.w.running["s|g1"] = {"key": qs[0]["key"] + "|g1", "kind": "queue", "name": "g1", "project": "pa", "t0": now - 60, "deps": [], "deps_any": [],
+                                  "gpus": ["GPU-a"], "use": {}, "est": None, "excl": None, "tag": None, "q": qs[0], "pid": 1}
+        self.w.uwin = {"GPU-a": [(now - i, 95) for i in range(5)]}
+        _, reqs = self.w.requests(qs, False)
+        self.w.queue_durs(qs)
+        reqs = [r for r in reqs if r["name"] != "g1"]
+        for r in reqs:
+            self.w.prep(r, now, {})
+        self.assertEqual(self.w.par_gate([r for r in reqs if r["name"] == "c1"][0], now), (None, None))
+        self.w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        plan = {j["name"]: j for ln in self.w.plan["lanes"] for j in ln["jobs"]}
+        self.assertIn("c1", plan, self.w.plan["lanes"])
+        self.assertLess(plan["c1"]["t0"] - now, 120)
+        self.assertTrue("g2" not in plan or plan["g2"]["t0"] - now > 120, plan)   # 要卡的行等在跑的那行腾出（门槛此刻不给加）
+
+    def test_forecast_gate_counts_rows_placed_same_round(self):
+        # Codex 审 #159 第三轮：卡吃满、在跑的一行 10 分钟后结束：腾出的那一格只补一行要卡的，同一轮不一起补上三行（gpar 逐行放行时核）
+        self.cards(40000.0)
+        self.setup_list(["# labmon: par=3", "g0|x   # vram=1", "g1|x   # vram=1 est_min=30", "g2|x   # vram=1 est_min=30", "g3|x   # vram=1 est_min=30"])
+        qs = self.w.registry()
+        self.m.list_jobs(qs[0])
+        now = time.time()
+        self.w.running["s|g0"] = {"key": qs[0]["key"] + "|g0", "kind": "queue", "name": "g0", "project": "pa", "t0": now - 60, "deps": [], "deps_any": [],
+                                  "gpus": ["GPU-a"], "use": {}, "est": None, "excl": None, "tag": None, "q": qs[0], "pid": 1}
+        Path(self.w.p.eta).write_text(json.dumps({"t": now, "jobs": {"pa|g0": now + 600}}))
+        self.w.uwin = {"GPU-a": [(now - i, 95) for i in range(5)]}
+        _, reqs = self.w.requests(qs, False)
+        self.w.queue_durs(qs)
+        reqs = [r for r in reqs if r["name"] != "g0"]
+        for r in reqs:
+            self.w.prep(r, now, {})
+        self.w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        plan = {j["name"]: j for ln in self.w.plan["lanes"] for j in ln["jobs"]}
+        self.assertEqual(round(plan["g0"]["t1"] - now), 600, plan)
+        t0s = sorted(round(plan[n]["t0"] - now) for n in ("g1", "g2", "g3"))
+        self.assertEqual(t0s, [600, 600 + 1800, 600 + 3600], plan)
+
+    def test_stage_one_copy_per_target(self):
+        # Codex 审 #159 第四轮：并行清单两行 needs= 同一个本地文件：另一行正在拷它时这一行不另起一份拷贝（同写一个 .part），等它拷完
+        gate = threading.Event()
+        th = threading.Thread(target=gate.wait, daemon=True)
+        th.start()
+        dst = os.path.join(self.hosts.d, "local", "f.bin")
+        self.w.stagers[("k|a", "a")] = {"th": th, "t0": time.time(), "n": 1, "out": {}, "dst": {dst}}
+        try:
+            why = self.w.stage_bg({"key": "k|b", "name": "b"}, [(os.path.join(self.hosts.d, "src.bin"), dst)])
+            self.assertIn("正在拷同一个本地依赖", why)
+            self.assertNotIn(("k|b", "b"), self.w.stagers)
+        finally:
+            gate.set()
+
+    def test_move_rest_keeps_running_end(self):
+        # Codex 审 #159 第二轮：并行清单里先开跑的长任务比后面的行晚跑完：挪走队尾后原处剩下的仍要等它（rest 取在跑与剩下的行里最晚的）
+        now, H = time.time(), 3600
+        h = {"ngpu": 1, "gang": None, "needs": []}
+        ln = {"host": "o", "root": "/r", "queue": "q.txt", "project": "pa", "run": now + 10 * H, "end": now + 10 * H, "state": "ok", "unread": False,
+              "pend": [("B", h, now + H, now + 2 * H), ("C", h, now + 2 * H, now + 3 * H)]}
+        out, _ = self.w.move_cands([ln], now, now, {})
+        self.assertEqual(out[0]["name"], "C")
+        self.assertEqual(out[0]["rest"], round(now + 10 * H))
+
+    def test_gate_for_gpu_rows(self):
+        # 要卡的行：已有行在跑时，刚加过一行就等 PAR_STEP_S；过了间隔看卡吃满没有（local_cards），吃满了不加
+        self.cards(30000.0)
+        q = dict(self.hosts.queues({"g": ["# labmon: par=4", "g1|x", "g2|x"]}, "pa")[0], par=4)
+        r = self.m.queue_req(q, self.m.job_of("g2", "x"))
+        self.assertEqual(self.w.par_gate(r, time.time()), (None, None))               # 这条清单还没有在跑的：第一行不过门槛
+        self.w.running["k|g1"] = {"key": "k|g1", "kind": "queue", "q": q, "name": "g1", "t0": time.time(), "gpus": ["GPU-a"], "pid": 1}
+        self.w.par_t[q["key"]] = time.time()
+        self.assertIn("刚加过一行", self.w.par_gate(r, time.time())[1])
+        self.w.uwin = {"GPU-a": [(time.time() - i, 95) for i in range(5)]}
+        self.assertIn("不再给这条清单加行", self.w.par_gate(r, time.time() + self.m.PAR_STEP_S)[1])
+        self.w.uwin = {"GPU-a": [(time.time() - i, 40) for i in range(5)]}
+        self.assertEqual(self.w.par_gate(r, time.time() + self.m.PAR_STEP_S), ([0], None))
+        r0 = self.m.queue_req(q, self.m.job_of("g2", "x  # gpus=0"))
+        self.assertEqual(self.w.par_gate(r0, time.time()), (None, None))             # 不用卡的行不等间隔、不看利用率
+
 
 class OffersTest(UnitBase):
     """能接别处的任务（offers，Issue #20 第一档）：别的主机 o 上 pa 的清单排得很晚、本机 t 将空时，t 用自己的推演算出能接哪几行、几点跑完，
@@ -3374,7 +3721,7 @@ class OffersTest(UnitBase):
         qb, = self.hosts.queues({"b": ["a%d|true   # est_min=120 vram=20" % i for i in (3, 4, 5)]}, "pa")
         os.makedirs(qb["state"])                                        # tick 里 requests 建的
         self.w.queue_durs([qb])
-        r = self.w.prep(self.m.new_req("queue", qb["key"], "pa", q=qb, root=qb["root"], queue=qb["jobs"], **self.m.next_job(qb)), self.now, {})
+        r = self.w.prep(self.m.new_req("queue", qb["key"], "pa", q=qb, root=qb["root"], queue=qb["jobs"], **self.m.next_jobs(qb)[0]), self.now, {})
         self.offer([qb], [r])
         plan = {j["name"]: j for ln in self.w.plan["lanes"] for j in ln["jobs"]}
         self.assertEqual(plan["a5"]["t1"], s["to"])
@@ -3387,7 +3734,7 @@ class OffersTest(UnitBase):
         q = self.m.load_queue({"_slug": name, "root": str(self.d / "a"), "jobs": "jobs/%s.txt" % name, "project": "pa"})
         os.makedirs(q["state"], exist_ok=True)
         self.w.queue_durs([q])
-        r = self.w.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_job(q)), self.now, {})
+        r = self.w.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_jobs(q)[0]), self.now, {})
         return q, r
 
     def test_local_lane_offer(self):
@@ -3545,7 +3892,7 @@ class OffersTest(UnitBase):
         qb = self.m.load_queue({"_slug": "r", "root": str(self.d / "a"), "jobs": "jobs/r.txt", "project": "pa"})
         os.makedirs(qb["state"], exist_ok=True)                         # tick 里 requests 建的
         self.w.queue_durs([qb])
-        r = self.w.prep(self.m.new_req("queue", qb["key"], "pa", q=qb, root=qb["root"], queue=qb["jobs"], **self.m.next_job(qb)), self.now, {})
+        r = self.w.prep(self.m.new_req("queue", qb["key"], "pa", q=qb, root=qb["root"], queue=qb["jobs"], **self.m.next_jobs(qb)[0]), self.now, {})
         o = self.offer([qb], [r])["pa"]
         self.assertEqual((o["lane"], self.rel(o["free"])), ([qb["root"], "jobs/r.txt"], 1))
         self.assertEqual([self.rel(j["end"]) for j in o["jobs"][:2]], [3, 5])
@@ -3602,7 +3949,7 @@ class OffersTest(UnitBase):
         qb, = self.hosts.queues({"b": ["b0|true   # est_min=60"]}, "pa")
         os.makedirs(qb["state"])
         self.w.queue_durs([qb])
-        r = self.w.prep(self.m.new_req("queue", qb["key"], "pa", q=qb, root=qb["root"], queue=qb["jobs"], **self.m.next_job(qb)), self.now, {})
+        r = self.w.prep(self.m.new_req("queue", qb["key"], "pa", q=qb, root=qb["root"], queue=qb["jobs"], **self.m.next_jobs(qb)[0]), self.now, {})
         self.w.offer = [{"project": "old"}]
         logs = []
         with mock.patch.object(self.w, "offers", side_effect=RuntimeError("坏了")), mock.patch.object(self.w, "wlog", logs.append):
@@ -3772,7 +4119,7 @@ class OffersTest(UnitBase):
         o.info = dict(o.info, gpus=[{"i": 0, "uuid": "GPU-o", "name": "A", "total": 46000.0, "used": 0.0, "free": 46000.0, "util": 0.0}])
         self.busy_guest(o)
         o.queue_durs([q])
-        r = o.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_job(q)), self.now, {})
+        r = o.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_jobs(q)[0]), self.now, {})
         self.assertEqual(r["held"][0], "guest")
         o.list_state([q], [r])
         o.forecast([q], [r], {}, self.now, self.m.POLICY)
@@ -3787,7 +4134,7 @@ class OffersTest(UnitBase):
         # “只给别的项目用”是持久的挡法：推演照旧不排
         self.busy_guest(o, target="pb")
         o.back_last, o.back = {}, {}
-        r = o.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_job(q)), self.now, {})
+        r = o.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_jobs(q)[0]), self.now, {})
         o.plan_key = None
         o.forecast([q], [r], {}, self.now, self.m.POLICY)
         self.assertEqual([j["name"] for ln in o.plan["lanes"] for j in ln["jobs"]], [])
@@ -3881,7 +4228,7 @@ class OffersTest(UnitBase):
         o = self.hosts.worker("o")
         o.info = dict(o.info, gpus=[{"i": 0, "uuid": "GPU-o", "name": "A", "total": 46000.0, "used": 0.0, "free": 46000.0, "util": 0.0}])
         o.queue_durs([qb])
-        r = self.m.new_req("queue", qb["key"], "pa", q=qb, root=qb["root"], queue=qb["jobs"], **self.m.next_job(qb))
+        r = self.m.new_req("queue", qb["key"], "pa", q=qb, root=qb["root"], queue=qb["jobs"], **self.m.next_jobs(qb)[0])
         o.dep_state([qb], now, [r])
         r = o.prep(r, now, {})
         o.forecast([qb], [r], {}, now, self.m.POLICY)
@@ -3890,7 +4237,7 @@ class OffersTest(UnitBase):
         self.hosts.status("o", plan=o.plan, todo=o.todo,
                           queues=[{"root": qb["root"], "jobs": qb["jobs"], "gpus": None, "project": "pa", "stop": "boundary", "empty": False, "dur": {}}])
         self.w.queue_durs([qx])
-        rt = self.w.prep(self.m.new_req("queue", qx["key"], "pa", q=qx, root=qx["root"], queue=qx["jobs"], **self.m.next_job(qx)), now, {})
+        rt = self.w.prep(self.m.new_req("queue", qx["key"], "pa", q=qx, root=qx["root"], queue=qx["jobs"], **self.m.next_jobs(qx)[0]), now, {})
         off = self.offer([qx], [rt])["pa"]
         self.assertEqual((off["jobs"], list(off["ends"].values())), ([], [None]))
         self.assertIn("b1 等的 x1 跑不成或不知道何时跑完", off["why"])
@@ -3965,7 +4312,7 @@ class OffersTest(UnitBase):
 
         def lane(qs):
             self.w.queue_durs(qs)
-            rs = [self.w.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_job(q)), self.now, {}) for q in qs]
+            rs = [self.w.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_jobs(q)[0]), self.now, {}) for q in qs]
             return self.offer(qs, rs)["pa"]["lane"]
         self.assertIsNone(lane([qb]))
         self.assertEqual(lane([qb, qr]), [str(self.d / "a"), "jobs/r.txt"])
@@ -3984,7 +4331,7 @@ class OffersTest(UnitBase):
 
         def lane():
             self.w.queue_durs([qr])
-            r = self.w.prep(self.m.new_req("queue", qr["key"], "pa", q=qr, root=qr["root"], queue=qr["jobs"], **self.m.next_job(qr)), self.now, {})
+            r = self.w.prep(self.m.new_req("queue", qr["key"], "pa", q=qr, root=qr["root"], queue=qr["jobs"], **self.m.next_jobs(qr)[0]), self.now, {})
             return self.offer([qr], [r])["pa"]["lane"]
         self.assertEqual(lane(), [str(self.d / "a"), "jobs/r.txt"])
         (self.d / "a" / "jobs" / "r.env").write_text("PY=python3.11\nQUEUE_STATE=results/_r\n")
@@ -4018,7 +4365,7 @@ class OffersTest(UnitBase):
             qn = self.m.load_queue({"_slug": "n", "root": str(self.d / "a"), "jobs": "jobs/new.txt", "project": "pa"})
             os.makedirs(qn["state"], exist_ok=True)
             self.w.queue_durs([qn])
-            r = self.w.prep(self.m.new_req("queue", qn["key"], "pa", q=qn, root=qn["root"], queue=qn["jobs"], **self.m.next_job(qn)), self.now, {})
+            r = self.w.prep(self.m.new_req("queue", qn["key"], "pa", q=qn, root=qn["root"], queue=qn["jobs"], **self.m.next_jobs(qn)[0]), self.now, {})
             return self.offer([qn], [r])["pa"]["lane"]
         (jobs / "new.env").write_text("QUEUE_STATE=results/_new\n\nQUEUE_LOGS=results/_new_logs\n")
         self.assertEqual(lane(), [str(self.d / "a"), "jobs/new.txt"])           # 原清单没有 .env，新清单只写 QUEUE_*
@@ -4038,7 +4385,7 @@ class OffersTest(UnitBase):
         self.w.queue_durs([q])
 
         def plan():
-            r = self.w.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_job(q)), self.now, {})
+            r = self.w.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_jobs(q)[0]), self.now, {})
             self.w.list_state([q], [r])
             self.w.forecast([q], [r], {}, self.now, self.m.POLICY)
             return [j["name"] for ln in self.w.plan["lanes"] for j in ln["jobs"]]
@@ -4191,7 +4538,7 @@ class OffersTest(UnitBase):
     def heads(self, qs):
         """几条本机清单的队首请求（同 tick：queue_durs 先算时长，new_req 拼、prep 补全）。"""
         self.w.queue_durs(qs)
-        return [self.w.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_job(q)), self.now, {}) for q in qs]
+        return [self.w.prep(self.m.new_req("queue", q["key"], "pa", q=q, root=q["root"], queue=q["jobs"], **self.m.next_jobs(q)[0]), self.now, {}) for q in qs]
 
     def lane_end(self, root, queue):
         """这一次推演里本机一条清单的最后一行何时跑完。"""
@@ -4613,6 +4960,18 @@ class SimulateTest(unittest.TestCase):
         return dict({"name": name, "ngpu": 1, "vram": vram, "src": "提示值", "ram": 1.0, "ram_src": "提示值", "excl": None, "tag": None, "dur": dur, "hold": False,
                      "cpus": 1, "cpu_src": "缺省 1 核", "cards": vram / 40}, **kw)
 
+    def test_parallel_queue_window(self):
+        # #147：par=3 的队列在推演里同时排 3 行，第 4 行等前面有一行跑完；串行（不写 par）照旧一次一行
+        jobs = [self.job("p%d" % i, vram=1.0, dur=10) for i in range(1, 5)]
+        out, _ = self.run_([(0, "A", 40000.0)], [], [dict(self.q("a", jobs), par=3)])
+        self.assertEqual(sorted(out[n][0] for n in ("p1", "p2", "p3", "p4")), [0.0, 0.0, 0.0, 10.0])
+        out, _ = self.run_([(0, "A", 40000.0)], [], [self.q("a", [dict(j) for j in jobs])])
+        self.assertEqual([out[n][0] for n in ("p1", "p2", "p3", "p4")], [0.0, 10.0, 20.0, 30.0])
+        # 开始时同一车道已有 2 行在跑（快照 jobs 的 lane）：只再排 1 行
+        run = [dict(self.ran("a|r%d" % i, "r%d" % i, 30, 1000.0), lane="a") for i in (1, 2)]
+        out, _ = self.run_([(0, "A", 40000.0)], run, [dict(self.q("a", [dict(j) for j in jobs]), par=3)])
+        self.assertEqual(sorted(out[n][0] for n in ("p1", "p2", "p3", "p4")), [0.0, 10.0, 20.0, 30.0])
+
     def test_duration_by_cards_at_start(self):
         # #67：推演按开跑时那张卡上的 labmon 任务数（含自己）取时长（job_spec 的 durk）：卡上已有 1 条时开跑的按 2 条算，再开的按 3 条算
         durk = lambda k: {"min": 10.0 * k}                                     # noqa: E731
@@ -5019,6 +5378,25 @@ class DurationTest(unittest.TestCase):
             w.running["bp"]["use"]["conc"] = 1.0                                  # k 变了（取整后）：缓存失效、重算
             w.queue_durs(qs)
             self.assertEqual(w.durs["bp"]["v_s1"]["min"], 60.0)
+        finally:
+            h.close()
+
+    def test_running_rows_of_parallel_list_by_own_concurrency(self):
+        # #138 + #147：并行清单同时跑两行（key 是 队列 key|任务名），各行写进状态的时长按各自的 k；以前按队列 key 找在跑的，两行都当排队按 k_now
+        h = Hosts(self.d / "hosts")
+        try:
+            qs = h.queues({"bp": ["# labmon: par=3", "v_s1|true   # est_min=60", "v_s2|true   # est_min=60", "v_s3|true   # est_min=60"]})
+            h.usage("29", [self.rec("v_s%d" % (10 + i), 60.0, 60, conc=1.0) for i in range(3)]
+                    + [self.rec("v_s%d" % (20 + i), 300.0, 60, conc=4.0) for i in range(3)])
+            w = h.worker("t")
+            w.info = {"gpus": [{"i": 0, "uuid": "G0"}, {"i": 1, "uuid": "G1"}]}
+            self.m.list_jobs(qs[0])
+            w.running = {"bp|v_s%d" % i: {"key": "bp|v_s%d" % i, "kind": "queue", "name": "v_s%d" % i, "project": "bp", "est_min": 60.0, "tag": None, "q": qs[0],
+                                          "t0": h.now() - 600, "gpus": ["G0"], "use": {"conc": 4.0}} for i in (1, 2)}
+            w.running.update({"o%d" % i: {"key": "o%d" % i, "kind": "slot", "name": "o_%d" % i, "project": "x", "t0": h.now(), "gpus": ["G0"]} for i in range(2)})
+            self.assertEqual(w.k_now(), 1)
+            w.queue_durs(qs)
+            self.assertEqual([w.durs["bp"]["v_s%d" % i]["min"] for i in (1, 2, 3)], [300.0, 300.0, 60.0])
         finally:
             h.close()
 
