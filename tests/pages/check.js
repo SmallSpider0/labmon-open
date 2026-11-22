@@ -254,13 +254,19 @@ t("overview", "#96 调度卡的暂停与恢复：项目级的（所有主机）�
   has(run(O, `ovrTable([{kind: "drain", target: null, h: D.hosts[0]}], false)`), "labmon undrain srv-a</code>", "drain 的撤销照旧");
   has(run(O, `(() => { ST.set("cardOpen", {"rec:home": true}); ST.set("recTab", {home: "ovr"}); const r = home(); ST.set("cardOpen", {}); return r; })()`), `临时指令<span class="mut">4 条</span>`, "项目级的只列一次");
 });
-t("overview", "etaOf：进度 → 推演的 run 条 → 清单估时 → 没有", () => {
+t("overview", "etaOf：进度 → 推演的 run 条 → worker 的预计时长 → 清单估时 → 没有", () => {
   const r = run(O, `(() => { const [a, b] = D.hosts; const ja = {...a.status.running[0], h: a}, jb = {...b.status.running[0], h: b};
-    return [etaOf(ja), etaOf(jb), etaOf({...ja, prog: null, name: "x", est_min: 60}), etaOf({...ja, prog: null, name: "x", est_min: null})]; })()`);
+    const q = a.status.queues.find(q => q.root === ja.root && q.jobs === ja.queue), d = q.dur.alpha_train_s3;
+    return [etaOf(ja), etaOf(jb), etaOf({...ja, prog: null, name: "x", est_min: 60}), etaOf({...ja, prog: null, name: "x", est_min: null}),
+            etaOf({...ja, prog: null, name: "alpha_train_s3", est_min: 60}), d,
+            etaOf({...ja, prog: null, name: "alpha_train_s3", est_min: 60, queue: "jobs/别的.txt"})]; })()`);
   ok(r[0].ts === NOW + 9 * H && r[0].src === "近期速度", JSON.stringify(r[0]));
   ok(r[1].ts === NOW + 2 * H && r[1].src === "worker 推演", JSON.stringify(r[1]));
   ok(r[2].ts === NOW - 2 * H + 3600 && r[2].src === "清单估时", JSON.stringify(r[2]));
   ok(r[3] === null);
+  // #140：推演里没有这条 run 条时用 worker 给这条清单行的时长（同类历史等），不是原始 est_min；别的清单里的同名行不算
+  ok(r[4].ts === NOW - 2 * H + r[5].min * 60 && r[4].src === r[5].src && r[5].min !== 60, JSON.stringify([r[4], r[5]]));
+  ok(r[6].ts === NOW - 2 * H + 3600 && r[6].src === "清单估时", JSON.stringify(r[6]));
 });
 t("overview", "jobsTable / jobDetail / jobLine 的时刻与时长", () => {
   const r = run(O, `(() => { const a = D.hosts[0], j = {...a.status.running[0], h: a};

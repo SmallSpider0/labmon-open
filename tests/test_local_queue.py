@@ -241,6 +241,9 @@ class LocalQueueTest(unittest.TestCase):
         log = root / "logs" / "a_run.log"
         now = time.time()
         os.utime(log, (now - 400, now - 400))
+        # queue.log 最后一行写的是 10 分钟前开跑：修改时间对上它，不让探针当成盘的时钟快 10 分钟去校正日志时间
+        # （#140 起剩余从最后一个进度采样起算，校正后的采样早于现在 10 分钟，剩余就成了 0）
+        os.utime(root / "state" / "queue.log", (now - 600, now - 600))
         C.collect(load(cfg_path))
         log.write_text("PROGRESS 8/10 loss=0.2\n")
         os.utime(log, (now, now))
@@ -997,6 +1000,47 @@ class ProgressTest(unittest.TestCase):
                 with self.subTest(k=seg0["k"], floor=floor):
                     self.assertEqual(ss, [])
                     self.assertIsNone(C._segment_eta(pr, ss, seg, t, floor, False, t))
+
+    def test_speed_eta_anchored_at_last_sample(self):
+        """#140：日志每 10 分钟一行进度，两行之间的几轮采集预计结束不变（剩余从最后一个采样起算，不是从这一轮起算）。"""
+        ss = [[600.0 * k, 10 * k, 1000] for k in range(1, 6)]          # 每 600 秒 10 步：近期速度与平均速度都是 1/60 步/秒
+        seg = {"t0": 600.0, "i0": 10, "k": 1}
+        end = 3000.0 + 950 * 60
+        for t in (3000.0, 3200.0, 3500.0):
+            with self.subTest(t=t):
+                r = C._segment_eta([50, 1000], ss, seg, t, None, False, t)
+                self.assertEqual(r[1], "近期速度")
+                self.assertAlmostEqual(t + r[0], end, delta=1)
+        # 近 30 分钟里只剩最后一个采样（没有近期速度）、还没算停了一阵时按平均速度，同样从最后一个采样起算
+        for t in (4300.0, 4500.0, 4800.0):
+            with self.subTest(t=t):
+                r = C._segment_eta([50, 1000], ss, seg, t, None, False, t)
+                self.assertEqual(r[1], "进度")
+                self.assertAlmostEqual(t + r[0], end, delta=1)
+
+    def test_speed_eta_passed_not_zero(self):
+        """#140 与 #138 同一口径：外推的结束已过、任务还在跑（没到停了一阵）时剩余不写 0，剩下的步数按这个速度从现在起算。"""
+        ss = [[60.0 * k, 10 * k, 100] for k in range(1, 10)]           # 每分钟 10 步，最后一次 90/100 在 540 秒
+        seg = {"t0": 60.0, "i0": 10, "k": 1}
+        r = C._segment_eta([90, 100], ss, seg, 1000.0, None, False, 1000.0)   # 外推 600 秒跑完，此刻 1000 秒仍在跑
+        self.assertEqual(r[1], "近期速度")
+        self.assertAlmostEqual(r[0], 60.0, delta=1)
+
+    def test_speed_eta_skips_suspended_after_sample(self):
+        """#140 审查：最后一个采样之后挂起了 5 分钟，这段不算在跑，预计结束跟着往后挪 5 分钟（剩余不因挂起变少）。"""
+        ss = [[600.0 * k, 10 * k, 100] for k in range(1, 3)]            # 每 10 分钟 10 步，此刻 20/100
+        seg = {"t0": 600.0, "i0": 10, "k": 1}
+        r0 = C._segment_eta([20, 100], ss, seg, 1200.0, None, False, 1200.0)
+        r = C._segment_eta([20, 100], ss, seg, 1500.0, None, False, 1500.0, paused=300.0)
+        self.assertAlmostEqual(r0[0], 80 * 60, delta=1)
+        self.assertAlmostEqual(r[0], 80 * 60, delta=1)
+        # 经 _progress_samples 记下的 sus0：新采样那一轮的累计挂起，之后又挂起的才扣
+        prog, segs, j = {}, {}, {"lane": "q", "id": "x", "start_ts": 0.0, "log_mtime": 600.0, "progress": [10, 100]}
+        C._progress_samples(prog, segs, j, 600.0, 30.0)
+        _, sg = C._progress_samples(prog, segs, dict(j, log_mtime=1200.0, progress=[20, 100]), 1200.0, 30.0)
+        self.assertEqual(sg["sus0"], 30.0)
+        _, sg = C._progress_samples(prog, segs, dict(j, log_mtime=1200.0, progress=[20, 100]), 1500.0, 330.0)
+        self.assertEqual(sg["sus0"], 30.0)
 
     def test_single_segment_keeps_progress(self):
         # 单段任务按进度估得比估时早：仍用进度
