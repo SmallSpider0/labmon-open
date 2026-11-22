@@ -365,6 +365,18 @@ def build(cfg: dict, probes: dict, out_dir: Path, lan: dict | None = None, glob_
     return snap
 
 
+def _last_probe(path: Path) -> dict | None:
+    """上一次存的探针结果（last_probe_*.json：掉线、已归还时沿用）。#147 之前存的队列 current 是单个对象（一条清单只有一个在跑的），
+    读到就一次迁成列表、写回（已归还又没有代读的主机一直读这份，不迁会一直是旧形状）。#147 部署后各项目采过一轮就可删这段迁移。"""
+    p = load_json(path, None)
+    qs = [q for q in ((p or {}).get("queues") or {}).values() if isinstance(q, dict) and isinstance(q.get("current"), dict)]
+    for q in qs:
+        q["current"] = [q["current"]]
+    if qs:
+        save_json(path, p)
+    return p
+
+
 def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, state: dict, hist: list, sd: Path, t: float) -> dict:
     """各主机：探针结果到 snap["hosts"]（GPU、cgroup、挂载点、自定义检查），连不上的沿用上次存的 last_probe_*.json 并标过期，
     已归还的只留一张标注卡片；这一轮的采样追加到 hist；连通状态（link_step）与磁盘余量的告警。返回各主机的探针原始结果（车道按它读队列）。"""
@@ -386,7 +398,7 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
         if h.get("reader_only"):
             # 只替算力池代读、不是本项目的主机：读到的只用来解析池车道，不进项目快照（主机卡、采样历史、告警都不要）
             if p is None:
-                p = load_json(last_path, None)
+                p = _last_probe(last_path)
             else:
                 save_json(last_path, p)
             raw_by_host[h["id"]] = p
@@ -394,7 +406,7 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
         if h["returned"]:
             # 已归还：只留一张标注卡片；没有代读主机的队列沿用归还前最后一次采到的状态
             hs.update(fails=0, down=None)
-            raw_by_host[h["id"]] = load_json(last_path, None)
+            raw_by_host[h["id"]] = _last_probe(last_path)
             snap["hosts"].append({"id": h["id"], "label": h["label"], "ok": False, "returned": h["returned"], "error": "已归还"})
             continue
         # 掉线判定与工作台同一处（link_step：连续至少 2 次、持续 DOWN_S 秒连不上才算）；掉线的原因就是探针的错误
@@ -402,7 +414,7 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
             hs["down"] = err
         hd: dict = {"id": h["id"], "label": h["label"], "ok": p is not None, "error": err, "borrow": lent.get(h["id"]) or h.get("borrow")}
         if p is None:
-            p = load_json(last_path, None)            # 显示上一次的数据，并标明过期
+            p = _last_probe(last_path)            # 显示上一次的数据，并标明过期
             hd["stale"] = p is not None
             hd["last_ok"] = p["t"] if p else None
         else:

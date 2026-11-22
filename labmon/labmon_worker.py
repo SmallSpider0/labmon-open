@@ -3527,13 +3527,16 @@ class Worker:
                # 成组：别的主机上的成员预计何时能一起开跑（此刻就能的记 0，不随时钟变）、本机成员在不在队首
                tuple((gk, g["at"] and (0 if g["at"] <= now else round(g["at"] / 60)), tuple(sorted((k, n, e and e <= now) for (k, n), e in g["local"].items())))
                      for gk, g in sorted(self.gsim.items())))
-        cards, shut = self.local_cards()         # 并行清单加行的门槛（par_gate）此刻关着：推演里按此刻在跑的行数排，不再加（#147）
-        key += (bool(shut),)
+        cards, shut = self.local_cards()         # 并行清单加行的门槛（par_gate）：推演里按此刻的结论当常量（#147）
+        key += (bool(shut), tuple(cards or ()))
         if key == self.plan_key and now - self.plan["t"] < FORECAST_EVERY:
             return
         self.plan_key = key
         # 只排除被持久的挡法挡住的队列：对方此刻超出预留（guest_block）真放行挡、推演不模拟，照常排（#25）
-        held, base = {lane_key(r) for r in wait if r["held"] and self.override_hit(r, lasting=True)}, self.snapshot(limits)
+        # 并行清单（#147）窗口里只是某一行截止前跑不完的不排除整条：截止由推演逐行判（simulate 的 cutoff），别的行照排
+        held = {lane_key(r) for r in wait if r["held"] for h in [self.override_hit(r, lasting=True)]
+                if h and not (h[0] == "deadline" and ((r.get("q") or {}).get("par") or 1) > 1)}
+        base = self.snapshot(limits)
         qs, info = [], {}
         heads, lanes = {}, {}                     # 各车道等着的行里开始等得最早的（并行清单窗口里有几行，#147）、在跑的行
         for r in sorted(wait, key=lambda r: -r["since"]):
@@ -3556,9 +3559,11 @@ class Worker:
             jobs = [self.job_spec(n, h, self.qest.get(k, {}).get(n) or estimate(self.hist, dict(h, name=n, project=q["project"])),
                                   self.req_dur(x), self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"])), self.req_dur(x, cut=True))
                     for n, h in pend for x in [{"key": k, "name": n, "project": q["project"], "gang": None if is_hold(n) else h["gang"]}]]
-            par = q.get("par") or 1
-            qs.append({"key": k, "kind": "queue", "project": q["project"], "allowed": q["gpus"],
-                       "par": max(1, len(cur)) if shut and par > 1 else par,   # 门槛关着：按此刻在跑的行数排（真放行此刻也不加）
+            par, allowed = q.get("par") or 1, q["gpus"]
+            if par > 1 and cur and not shut and cards is not None:      # 已有行在跑：再加的行只放在门槛给的卡上（同真放行 place 里的 par_gate）
+                allowed = [i for i in cards if allowed is None or i in allowed]
+            qs.append({"key": k, "kind": "queue", "project": q["project"], "allowed": allowed,
+                       "par": max(1, len(cur)) if par > 1 and (shut or allowed == []) else par,   # 门槛关着：按此刻在跑的行数排（真放行此刻也不加）
                        "since": heads[k]["since"] if k in heads else now, "jobs": jobs})
             info[k] = {"root": q["root"], "queue": q["jobs"], "project": q["project"], "kind": "queue"}
         for r in wait:
@@ -4319,7 +4324,7 @@ class Worker:
         if job["gang_stop"] and job["gang_stop"].get("sent"):   # 停止请求已发：收尾照原重排规则记
             job["stopping"] = True
         job["est"] = old.get("est") or estimate(self.hist, dict(job, root=q["root"], queue=q["jobs"]))
-        k = job["key"] = run_key(q, name)
+        k = job["key"] = self.free_key(q, name)
         if local and alive(pid, ("labmon-job:" + name,)):
             self.running[k] = job
             self.active.add(q["key"])
@@ -4337,6 +4342,12 @@ class Worker:
             self.qlog(q, "中断 %s（进程已不在，未留退出码：多半是服务器重启），重新排队" % name)
             self.event("interrupt", "中断 %s（进程已不在，多半是服务器重启），重新排队" % name, name=name, project=q["project"])
 
+    def free_key(self, q, name):
+        """接管、改记名下时给在跑的 name 用的 key：照 run_key；那个 key 已被这条清单另一个在跑的占着（运行中把 par 调小、删掉了声明，
+        几行还在跑，#147）时用逐行的 `队列 key|任务名`，几行各自跟到收尾，不互相盖掉。"""
+        k = run_key(q, name)
+        return k if k not in self.running or self.running[k]["name"] == name else q["key"] + "|" + name
+
     def rekey(self, q):
         """这条清单换了登记文件名、手上在跑的还记在旧名下时（11-06 前不带目录哈希的登记搬走再搬回来，搬回来的用 qslug，#95）：
         沿用那一项、改记到新名下，不再按新名接管一次（同一个任务盯两份，收尾时一份成功一份失败）。状态目录一条清单一个，按它认。"""
@@ -4344,7 +4355,7 @@ class Worker:
         for k, j in list(self.running.items()):
             if j.get("q") and j["q"]["key"] != q["key"] and os.path.normpath(j["q"]["state"]) == st:
                 old = j["q"]["key"]
-                nk = run_key(q, j["name"])
+                nk = self.free_key(q, j["name"])
                 if nk not in self.running:
                     self.running[nk] = dict(self.running.pop(k), key=nk, q=q)
                 if old in self.active:

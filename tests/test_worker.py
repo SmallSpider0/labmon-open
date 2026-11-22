@@ -3452,6 +3452,60 @@ class ParallelListTest(UnitBase):
         self.assertEqual(self.m.read_current(self.q["state"]), [])
         self.assertEqual(sorted(x for x in os.listdir(self.q["state"]) if x.endswith((".done", ".failed"))), [])
 
+    def test_adopt_after_par_lowered_keeps_each_row(self):
+        # Codex 审 #159：两行在跑时把 par 调回 1（删掉声明）再重启：两行各自接管，不因都拿到队列 key 而互相盖掉
+        self.setup_list(self.lines(3, par=2))
+        self.w.tick(self.w.registry(), True)
+        procs = [j["pid"] for j in self.w.running.values()]
+        Path(self.q["root"], "jobs", "q.txt").write_text("\n".join(self.lines(3, par=2)[1:]) + "\n")
+        w2 = self.hosts.worker("t")
+        try:
+            w2.tick(w2.registry(), True)
+            self.assertEqual(sorted(j["name"] for j in w2.running.values()), ["j1", "j2"])
+            self.assertEqual(sorted(j["pid"] for j in w2.running.values()), sorted(procs))
+            self.assertIn(self.q["key"], w2.running)                    # 一行照 run_key（串行就是队列 key），另一行逐行
+            w2.tick(w2.registry(), False)
+            self.assertEqual(sorted(j["name"] for j in w2.running.values()), ["j1", "j2"])   # 没有新行加进来，两行都还盯着
+        finally:
+            for pid in procs:
+                os.killpg(pid, signal.SIGKILL)
+                os.waitpid(pid, 0)
+
+    def test_forecast_deadline_row_keeps_lane(self):
+        # Codex 审 #159：并行清单窗口里只有一行截止前跑不完：整条不排除，别的行照常推演、车道带着目录与清单
+        self.setup_list(["# labmon: par=2", "long|x   # gpus=0 est_min=120", "short|x   # gpus=0 est_min=1", "short2|x   # gpus=0 est_min=1"])
+        qs = self.w.registry()
+        _, reqs = self.w.requests(qs, False)
+        self.w.queue_durs(qs)
+        real, now = self.w.override_hit, time.time()
+        with mock.patch.object(self.w, "override_hit", lambda r, *a, **k: ("deadline", "续租截止前跑不完") if r.get("name") == "long" else real(r, *a, **k)):
+            for r in reqs:
+                self.w.prep(r, now, {})
+            self.assertEqual({r["name"]: bool(r["held"]) for r in reqs}, {"long": True, "short": False})
+            self.w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        lanes = [ln for ln in self.w.plan["lanes"] if ln.get("root") == self.q["root"]]
+        self.assertEqual(len(lanes), 1, self.w.plan["lanes"])
+        self.assertIn("short", [j["name"] for j in lanes[0]["jobs"]])
+
+    def test_forecast_uses_gate_cards(self):
+        # Codex 审 #159：已有行在跑、卡 0 吃满卡 1 空着：推演里再加的行只放卡 1（同真放行的 par_gate），不按整台排到卡 0 上
+        self.cards(40000.0, 20000.0)
+        self.setup_list(["# labmon: par=3", "g1|x   # vram=1 est_min=30", "g2|x   # vram=1 est_min=30"])
+        qs = self.w.registry()
+        self.m.list_jobs(qs[0])
+        now = time.time()
+        self.w.running["s|g1"] = {"key": qs[0]["key"] + "|g1", "kind": "queue", "name": "g1", "project": "pa", "t0": now - 60, "deps": [], "deps_any": [],
+                                  "gpus": ["GPU-a"], "use": {}, "est": None, "excl": None, "tag": None, "q": qs[0], "pid": 1}
+        self.w.uwin = {"GPU-a": [(now - i, 95) for i in range(5)], "GPU-b": [(now - i, 10) for i in range(5)]}
+        _, reqs = self.w.requests(qs, False)
+        self.w.queue_durs(qs)
+        reqs = [r for r in reqs if r["name"] == "g2"]
+        for r in reqs:
+            self.w.prep(r, now, {})
+        self.w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        plan = {j["name"]: j for ln in self.w.plan["lanes"] for j in ln["jobs"]}
+        self.assertEqual(plan["g2"]["gpus"], [1])
+
     def test_gate_for_gpu_rows(self):
         # 要卡的行：已有行在跑时，刚加过一行就等 PAR_STEP_S；过了间隔看卡吃满没有（local_cards），吃满了不加
         self.cards(30000.0)

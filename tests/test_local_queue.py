@@ -1049,6 +1049,18 @@ class ParseGpuQueueTest(unittest.TestCase):
         self.assertEqual((j["q"]["where"], j["r"]["where"]), ("o", None))
         self.assertEqual((lane["par"], lane["running_n"]), (4, 2))
 
+    def test_old_probe_cache_current_migrated(self):
+        # Codex 审 #159：#147 之前存的 last_probe_*.json 里 current 是单个对象：读的时候迁成列表、写回，掉线沿用与已归还主机都按新形状解析
+        from labmon.state import save_json, load_json
+        with tempfile.TemporaryDirectory() as d:
+            f = Path(d) / "last_probe_x.json"
+            save_json(f, {"t": self.T, "queues": {"s": self.raw(current=self.raw()["current"][0])}})
+            p = C._last_probe(f)
+            self.assertEqual([c["name"] for c in p["queues"]["s"]["current"]], ["r"])
+            self.assertIsInstance(load_json(f, None)["queues"]["s"]["current"], list)
+            self.assertEqual({j["id"]: j["status"] for j in C.parse_gpu_queue(p["queues"]["s"], self.T)[1]}["r"], "running")
+            self.assertIsNone(C._last_probe(Path(d) / "none.json"))
+
     def test_queued_times_parallel(self):
         # 并行清单（#147）：排队的不按串行接龙对齐（几行本来同时跑），只跟着推演里挡住它的那一个挪、都不早于现在；串行照旧接在前一个后面
         t = self.T
