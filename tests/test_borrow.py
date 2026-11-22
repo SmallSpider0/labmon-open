@@ -1297,7 +1297,7 @@ class GuestWorkerTest(unittest.TestCase):
     def test_borrow_deadline(self):
         self.w.ovr = [{"kind": "deadline", "target": "borrow", "at": time.time() + 3600}]
         self.assertIsNone(self.block(self.req()))                 # 没估时：到点前照常放
-        self.w.durs = {"r": {"u": {"min": 60}}}                               # 清单的预计时长（queue_durs 算的）
+        self.w.durs = {"r": {"u": self.m.with_cut({"min": 60, "src": "清单估时"})}}   # 清单的预计时长（queue_durs 算的）
         self.assertIn("约定归还", self.block(self.req()))
         self.w.ovr[0]["at"] = time.time() - 1
         self.assertIn("已到", self.block(self.req()))
