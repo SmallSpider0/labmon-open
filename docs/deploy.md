@@ -34,7 +34,7 @@ labmon secret rm platform [--user 账号]    # 删掉（连同存着的平台登
 
 部署脚本 `tools/deploy.py` 在笔记本的主 checkout 里跑，两种模式（[AGENTS.md「部署到本机看板」](../AGENTS.md#部署到本机看板)）：
 
-- **本机模式**（缺省，搬家前一直用它）：看板服务就在这台，pull 主 checkout 本身、重启服务、读本机日志。
+- **本机模式**（缺省，搬家前一直用它；现在只在主回退到笔记本时用：没有 `deploy.toml`、不给 `--to`）：看板服务就在这台，pull 主 checkout 本身、重启服务、读本机日志。
 - **远端模式**：写了 `~/.config/labmon/deploy.toml` 或给了 `--to` 时。脚本不 ssh：确认本地 main 与 `origin/main` 一致，按服务端 checkout 现在的提交打增量 git bundle（服务端的提交本地没有就打整份），经 `POST /api/admin/deploy` 传过去；服务端校验、快进，改了代码的等平台操作做完后自己重启（[api.md「部署接口」](api.md#部署接口)）。脚本等 `GET /api/me` 报出新提交，采集两次（响应体未收全时，该次采集重试一次），改了 worker 的逐台 `POST /api/worker/start`，核对与本机模式同一套（平台操作与日志 Traceback 读 `GET /api/admin/deploy`）。
 
 两种模式核对前都先等结果落地（#70）：最后一次采集后，快照早于采集请求（采集超时）、或拉起成了的主机状态还早于拉起（新 worker 还没写出第一份），就每 10 秒再带 `fresh` 采一次，最多等 2 分钟（`SETTLE_S`）；等不到照样核对，由核对报没过。
@@ -55,6 +55,54 @@ git -C <主 checkout> bundle create /tmp/labmon-main.bundle main
 # 拷到常驻机后：
 git clone -b main /tmp/labmon-main.bundle ~/labmon && git -C ~/labmon remote remove origin
 ```
+
+### 手工部署（脚本跑不了时）
+
+部署脚本本身出错、跑不了时，部署 agent 照这里手工走七步（谁做、怎么派见 [AGENTS.md「部署到本机看板」](../AGENTS.md#部署到本机看板)）。脚本做的是同一件事（第 1–5、7 步），判断（哪些文件不用重启、核对的门槛）照这里写的。
+看板要登录（#160）：下面的 `curl` 都带部署令牌（`-H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)"`）。
+
+看板服务那份 checkout 前进本身就是部署的一部分（远端模式是 dashboard-host 上的 `~/labmon` 快进：它只放 main、不连 GitHub，只收部署传来的 bundle；本机模式是主 checkout 的 `git pull`）：
+一落地，后台采集下一轮就用新模板出页面（`collect.write_page` 每次从磁盘读），续租收尾、借用、看板自动拉起与 `POST /api/worker/start` 推上去的也都是新 worker（`workerctl.committed` 读那份 checkout 的 main）。
+所以前进之前先确认没有平台操作，前进之后紧接着重启，中间不停（远端模式下服务端收 bundle 时自己查、自己等）。下面的命令先设好这两个（本机模式括号里写了不同处）：
+
+```bash
+URL=https://<dashboard-host 内网 IP>:8443   # deploy.toml 的 url，不带末尾的 /（本机模式：http://127.0.0.1:8765）
+C=(--cacert ~/.config/labmon/ca.crt -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)")   # 本机模式不要 --cacert 那一项
+```
+
+1. 确认没有进行中的平台操作：`curl -s "${C[@]}" "$URL/api/admin/deploy"` 的 `busy` 为空（本机模式：`fleetops.busy()`，或 `"$URL/fleet/op.json"` 的 `op.active`），有就等它结束再更新代码。
+2. 更新代码：主 checkout 里 `git pull --ff-only`，确认 `main` 与 `origin/main` 一致（只部署推到 GitHub 的 main）；再从第 1 步回话的 `head`（dashboard-host 那份 checkout 现在的提交）到 main 打 bundle 传上去。
+   回话的 `commits`、`files`、`restart` 是这次带上去的提交、改了哪些文件、要不要重启；不部署时回 409 与原因（不是快进、它那份 checkout 有改动、平台操作在做）。本机模式只做 `git pull --ff-only`。
+   ```bash
+   git bundle create /tmp/labmon-deploy.bundle <head>..main
+   python3 -c 'import base64,json,sys; print(json.dumps({"bundle": base64.b64encode(open(sys.argv[1],"rb").read()).decode()}))' /tmp/labmon-deploy.bundle > /tmp/labmon-deploy.json
+   curl -s "${C[@]}" -X POST -H 'Content-Type: application/json' --data-binary @/tmp/labmon-deploy.json "$URL/api/admin/deploy"
+   ```
+3. 重启服务。只动了文档、测试或工具时不重启：改的文件全在 `*.md`、`docs/`、`skills/`、`.github/`、`tests/`、`tools/`、`.claude/` 里才算（`deploy.is_doc`；看板服务与 worker 都不 import 这些；`labmon/*.html`、`labmon/common.js` 是页面模板，不算）。
+   这时第 3、4 步跳过，第 1、6、7 步照做（核对清单里“快照时刻晚于第 4、5 步”这条不用看），在部署报告里写明。
+   远端模式由服务端自己重启（等平台操作做完再交给 systemd）：等 `curl -s "${C[@]}" "$URL/api/me"` 的 `commit` 是新提交、`started` 变了。本机模式：`git diff --stat ORIG_HEAD HEAD` 看改了哪些文件，要重启的 `labmon service restart`。
+4. `curl -s "${C[@]}" -X POST -H 'Content-Type: application/json' -d '{}' "$URL/collect?fresh"` 两次（看板只认带 JSON 类型的 POST，#158；要登录，#160）。页面在采集时才按模板重新生成；带 `fresh` 才不被 10 秒的节流挡掉，等请求之后开始的那一轮做完。
+5. 改了 `labmon_worker.py` 的，各在用主机（没 `worker stop` 过、连得上的）`LABMON_TOKEN=$(cat ~/.config/labmon/deploy.token) labmon worker start <主机>`（接管任务、不中断；命令行按 `~/.config/labmon/client.toml` 连看板、经 `POST /api/worker/start`，#162），然后再 `POST /collect?fresh` 一次，下面的核对才读得到拉起之后的状态。
+   部署的是看板那份 checkout 里 main 上已提交的版本（`workerctl.committed`），分支上没合并的、工作区里没提交的都不会带上去。
+6. 这次带上去的提交改了 `docs/workflow.html` 或 `docs/intro.html` 的，按[流程总览](../AGENTS.md#流程总览)、[项目介绍页](../AGENTS.md#项目介绍页)核对随源码分发的 HTML 文档（脚本不做，结论里点名）。
+7. 按下面的清单核对。
+
+### 部署后的核对
+
+部署后逐项核对（脚本与手工同一套），有一项不过就不报完成，查原因或回退：
+
+- 没有进行中的平台操作（照第 1 步看）；服务日志重启以来（没重启就是最后一次「服务启动」以来）没有 Traceback：远端模式看 `GET /api/admin/deploy` 的 `tracebacks`（日志在 dashboard-host 的 `<状态根>/labmon.log`），本机模式看 `~/Library/Logs/labmon.log`。
+- 各主机的 worker 在写状态：按 `overview.json` 看，不只看拉起命令的输出（曾经远端最后一句的退出码恒为 0，worker 启动即崩也报“已拉起”，5497dd9）。
+  ```bash
+  curl -s "${C[@]}" "$URL/overview.json" | python3 -c 'import json,sys,time; d=json.load(sys.stdin); hm=lambda t: time.strftime("%H:%M:%S", time.localtime(t)) if t else "—"; print("快照", hm(d.get("generated"))); [print(h["id"], h.get("worker_up"), round(h.get("age") or -1), hm((h.get("status") or {}).get("t")), h.get("stopped") or "", h.get("error") or "") for h in d["hosts"]]'
+  ```
+  快照时刻晚于第 4、5 步；在用的主机 `worker_up` 为真、`age`（距状态里的 `t`）不超过 90 秒；`worker stop` 过、已归还的除外。
+  跑了 `worker start` 的，打印出的 `t` 要晚于拉起的时刻。
+- 页面渲染不报错：脚本把看板上的工作台（`/`、`overview.json`、`records.json`）与各项目页下载下来，用 `tests/pages/smoke.js` 在 node 里装进 `tests/pages` 的 DOM 桩，
+  按路由渲染（`#/`、每台主机、`#/log`、`#/fleet` 与它的选项卡、每台组内服务器的抽屉、每个项目页），不抛异常、文字里不漏 NaN/undefined/Infinity
+  （任务日志原文里本来就有的不算，看结论附的上下文判断）。手工时在内置浏览器里打开 `#/`、`#/host/<id>`、`#/p/<id>`、`#/fleet`，`read_console_messages` 没有报错。
+- 改了页面模板（`labmon/*.html`、`labmon/common.js`）的，另在内置浏览器里打开真看板核对改动处，按[清理规则](../AGENTS.md#怎么测)关掉自己开的标签，并在部署报告里写明结果。没改页面的批不用开浏览器。
+  内网入口用的是 labmon 自签 CA 签的证书：桌面应用所在的电脑要先信任这个 CA（`~/.config/labmon/ca.crt`），否则内置浏览器打不开；没信任时在部署报告里写明没看，以部署脚本的冒烟检查（上一条）为准。
 
 ## 看板服务所在机的体检
 

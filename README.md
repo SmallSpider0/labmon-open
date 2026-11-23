@@ -26,7 +26,7 @@
 | 看板服务所在机：装服务、平台密码、部署（远端模式）、体检、两个入口的证书、TX 公网入口与看门狗、计划维护、主与备用、冷备与恢复 | [docs/deploy.md](docs/deploy.md) |
 | SCM 平台的接口记录 | [docs/platform_scm.md](docs/platform_scm.md) |
 | 配置逐项说明 | [examples/monitor.toml](examples/monitor.toml)、[examples/hosts.toml](examples/hosts.toml) |
-| 改 labmon 本身的规则（怎么开发：Issue 与 PR、子 agent 分工、审查；一个概念只有一处实现、怎么测、怎么部署） | [AGENTS.md](AGENTS.md) |
+| 改 labmon 本身的规则（怎么开发：Issue 与 PR、子 agent 分工、审查；一个概念只有一处实现、怎么测、怎么部署） | [AGENTS.md](AGENTS.md)；唯一实现表在 [docs/concepts.md](docs/concepts.md) |
 | 设计新功能、改行为时逐维度对照的影响清单与设计说明模板 | [docs/interactions.md](docs/interactions.md) |
 | 开发流程一页图：从 Issue 到部署、分工与强度档、实验会话怎么报问题（只概括，以 AGENTS.md 为准） | [docs/workflow.html](docs/workflow.html)；维护规则见 [AGENTS.md「流程总览」](AGENTS.md#流程总览) |
 
