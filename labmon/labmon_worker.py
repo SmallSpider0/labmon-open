@@ -2909,15 +2909,19 @@ class Worker:
             yield from ((x, "组") for x in sorted(mate.get(k, ())) if x != k)
         return nxt
 
-    def dep_waiters(self):
+    def dep_waiters(self, sim=False):
         """谁写了 after= / afterany= 等着谁：{(项目, 任务): {等它的 (项目, 任务)}}，取本机与别的主机还会跑的（todo、peer_todo：peer_st 的，
         另有 worker 不在、已归还的与池里待放的：接收方空着时跳过说不出何时放行的清单，那边的行可能正等着这里的候选，#62）。
-        有人等着的行不挪、不分到新车道：挪走后等它的何时开始会变（offers 的 cant_move、fit --list 共用，#144）。"""
+        有人等着的行不挪、不分到新车道：挪走后等它的何时开始会变（offers 的 cant_move、fit --list 共用，#144）。
+        sim（offers 用）：本机清单里等同一个项目的任务的行不算（暂停的、算力池放的清单除外）：try_move 把它们连同挪来的行一起重推，
+        它们何时跑完进 own，看板按整批比（#167：本机的汇总行 after= 等别处的训练行时，那几行照样能挪过来）。"""
         out = {}
         for ln in self.todo + [x[3] for x in self.peer_todo]:
+            here = sim and any(ln is x for x in self.todo) and ln.get("held") not in ("paused", "pause") and not ln.get("pool")
             for n, ds in (ln.get("deps") or {}).items():
                 for k in ds:
-                    out.setdefault(tuple(k[:2]), set()).add((ln.get("project"), n))
+                    if not (here and k[0] == ln.get("project")):
+                        out.setdefault(tuple(k[:2]), set()).add((ln.get("project"), n))
         return out
 
     def dep_reaches(self, starts, goal):
@@ -3676,7 +3680,7 @@ class Worker:
     def proj_lanes(self, host, todo, plan, running, held=()):
         """一台主机上各清单还没跑完的部分与预计何时跑完（offers 用）：还会跑的行取那台状态里的 todo（list_state；本机取 self.todo），
         预计时刻取那台的推演（本机取这一次或假设的推演）。[{host, root, queue, project, pend [(任务, 资源提示, 推演的开始, 结束)], run（在跑那个的
-        预计结束；没有在跑的为 0）, end, state, why, unread}]。
+        预计结束；没有在跑的为 0）, end, state, dep（unknown 是因为推演停在依赖上）, why, unread}]。
         - end：这条清单预计何时跑完（在跑的与没跑完的预计结束里最晚的；有一个不知道、或 state 是 unknown 就是 None）；
         - state：ok 照常在排；trapped 有没跑完的在推演里排不上（plan 写了 stuck：放不下、时长不明、截止前跑不完…），或被持久的临时指令挡住
           （约定归还、续租截止、drain、只给别的项目用：held 里的，或 todo 的 held 是 drain），在原处跑不了，可以挪（维护者 2026-11-08 定：续租截止
@@ -3708,22 +3712,23 @@ class Worker:
             why = ("%s 上 %s：%s，说不出原处何时放行" % (host, ln["queue"], lp["stuck"]) if dep else
                    "%s 上 %s 推演里没有（读不了状态目录、队列没出请求之类），不知道原处何时放行" % (host, ln["queue"]) if state == "unknown" else None)
             out.append({"host": host, "root": ln["root"], "queue": ln["queue"], "project": ln["project"], "pend": pend, "run": run,
-                        "end": None if None in ts or state == "unknown" else max(ts), "state": state, "unread": rows is None, "why": why})
+                        "end": None if None in ts or state == "unknown" else max(ts), "state": state, "dep": bool(dep), "unread": rows is None, "why": why})
         return out
 
     def offers(self, qs, base, now, pol, focus, use, info, held=()):
         """这台能接别的主机上哪些任务、接来后几点跑完（写进状态的 offers，看板汇总成挪法建议；labmon 不改清单、不改放行）。
         每个项目（别的在用主机上有没跑完的清单的）一项。挪哪些：从别的主机上这个项目排得最晚的清单（跑不了的算最晚）取队尾还没开跑的一行，
         那条清单的完工随之提前到它前一行的预计结束，再取此刻最晚的，至多 MOVE_MAX 行，挪来的已比原处剩下的晚跑完就不再往下试（moved_past）；队尾是占位任务、
-        原处 MOVE_LEAD_S 内就开跑、needs= 缺了又补不了、有别处的任务 after= 等着它、清单文件里找不到、与前面挑的不是同一种环境（目录与 .env）的
-        就到此为止（只从尾巴取：清单里没写 after= 的先后 labmon 看不出来）；这个项目有清单原处何时放行说不出（proj_lanes 的 unknown，
-        那台 worker 不在：状态过了 STATUS_STALE_S、没 worker stop、DEP_STALE_S 内）的一行也不挑，整批推不出（#25）。
+        原处 MOVE_LEAD_S 内就开跑、needs= 缺了又补不了、有别处的任务 after= 等着它（本机这个项目推演里跟着重推的不算，dep_waiters 的 sim）、清单文件里找不到、
+        与前面挑的不是同一种环境（目录与 .env）的就到此为止（只从尾巴取：清单里没写 after= 的先后 labmon 看不出来）；这个项目有清单原处何时放行说不出
+        （proj_lanes 的 unknown，那台 worker 不在：状态过了 STATUS_STALE_S、没 worker stop、DEP_STALE_S 内）的一行也不挑，整批推不出（#25）。
+        本机这个项目的清单何时跑完说不出时只写原因，只停在依赖上的除外（等的常是别处的这些候选，#167）。
         几点跑完：把前 k 行（按原清单的先后）加进这台的推演，走同一份 simulate（本机别的项目、公平份额、约定截止、依赖都算在里面；
         依赖的状态取 dep_state，别的主机上写了依赖的行也算）：这台已有这个项目、与挪来的行同一种环境（list_env）的清单就接在预计最早跑完的那条后面
         （不建议同机多开车道），没有就当新的一条。这个项目在这台不能用（drain、只给别的项目用、暂停；对方此刻超出预留不算，几小时后的事推演不模拟它）
         或这台在预备续租的只写原因。别的主机的状态过期、worker stop 过（含已归还）的不读（peers）。held：本机等待请求被临时指令挡住的 (目录, 清单)。
         算力池借来的主机（guest 指令的 keep.pool，#25）不给：池里的清单放到哪台由看板定。
-        每项 {project, lane 接在本机哪条清单后面（[目录, 清单]，None 要新建）, free 本机这个项目原推演里何时跑完（没有为现在）,
+        每项 {project, lane 接在本机哪条清单后面（[目录, 清单]，None 要新建）, free 本机这个项目原推演里何时跑完（没有为现在；本机清单停在依赖上、说不出时为 None）,
         ends {"主机|目录|清单": 别的主机上这个项目各清单预计何时跑完（不知道为 None）}, jobs [{host, root, queue, name, there 原处预计结束,
         rest 挪走它之后原处那条清单何时跑完, end 挪来前几行时它们在这台何时都跑完, own 这时本机这个项目自己的清单何时跑完}], why 再往下挪不了的原因
         （只放原因本身）, stop 挪到这台排不上的那一行（why 是推演的原因；与具体某行无关的为 None）, idle 这台此刻空着（Worker.idle：挑行时跳过
@@ -3736,7 +3741,7 @@ class Worker:
             if j.get("q"):
                 mine.setdefault((j["q"]["root"], j["q"]["jobs"]), set()).add(j["name"])
         own = self.proj_lanes(self.host, self.todo, self.plan, mine, held)
-        others, waiters = [], self.dep_waiters()
+        others, waiters = [], self.dep_waiters(sim=True)
         for h, st in sorted(self.peer_st.items()):
             run = {}
             for j in st.get("running") or []:
@@ -3747,7 +3752,7 @@ class Worker:
             # 算力池里待放的（#24）不算 worker 不在：放到哪台由看板定，不挡挪法建议
             if h not in self.peer_st and h not in self.gone and h != POOL and ln.get("queue") and ln.get("jobs") and ln.get("held") not in ("paused", "pause"):
                 others.append({"host": h, "root": ln["root"], "queue": ln["queue"], "project": ln["project"], "pend": [], "run": 0, "end": None,
-                               "state": "unknown", "unread": False,
+                               "state": "unknown", "dep": False, "unread": False,
                                "why": "%s 的 worker 不在（状态 %d 分钟没更新），那里的 %s 不知道何时跑完" % (h, age / 60, ln["queue"])})
         renew = [o for o in self.ovr if o["kind"] == "deadline" and o.get("target") != "borrow"]
         cx = {"qs": qs, "base": base, "now": now, "pol": pol, "focus": focus, "use": use, "info": info, "mine": mine, "held": held}
@@ -3761,11 +3766,12 @@ class Worker:
                  "ends": {"%s|%s|%s" % (ln["host"], ln["root"], ln["queue"]): ln["end"] and round(ln["end"]) for ln in lns}}
             out.append(o)
             hit = self.override_hit({"project": p, "name": ""}, ("drain", "guest", "pause"), lasting=True)
-            if hit or renew or free is None:
+            # 本机清单只是停在依赖上（等别处的任务，常是等这些候选本身，#167）不挡：挪来后一起重推，own 说得出就有整批
+            if hit or renew or any(ln["end"] is None and not ln["dep"] for ln in mine_p):
                 o["why"] = (hit[1] if hit else "这台在预备续租（%s），不接别处的任务" % ovr_text(renew[0]) if renew
                             else "这台上本项目的清单推演不出何时跑完")
                 continue
-            cands, o["why"] = self.move_cands(lns, free, now, waiters, skip=idle)
+            cands, o["why"] = self.move_cands(lns, now, waiters, skip=idle)
             o["room"] = self.lane_room(p, cands, sum(len(ln["pend"]) for ln in lns), cx["base"], now)    # 这台吃不满、还能多开几条（#145）
             # 接在本机这个项目、与挪来的行同一种环境（目录与 .env）的清单里预计最早跑完的那条后面（推演里在排的才算）；没有就当新的一条
             ends = {(ln["root"], ln["queue"]): ln["end"] for ln in mine_p}
@@ -3843,7 +3849,7 @@ class Worker:
             if why or any(q.get("project") == p and (q.get("par") or 1) > max(1, len(self.lane(q["key"]))) for q in cx["qs"]):
                 continue                             # 这个项目有窗口没满的并行清单（#147）：卡有余量时 worker 自己会给它加行，不另建议新开车道
             # 原推演何时跑完推不出（free 为 None）时算不了收益，只看是不是因为行没有估时（那样的清单推演里排不上，state 是 trapped，也一起看）
-            cands, why = self.move_cands(lns if free is not None else mine_p, now, now, waiters)
+            cands, why = self.move_cands(lns if free is not None else mine_p, now, waiters)
             for i, c in enumerate(cands):           # 只有提示值的 GPU 行不挪：没有实测，同卡并行怕 OOM（同 fit）
                 e = estimate(self.hist, dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]))
                 if c["h"]["ngpu"] and e["src"] == "提示值":
@@ -3895,20 +3901,21 @@ class Worker:
         tgt = min((ln for ln in live if ln is not late and self.list_env(ln["root"], ln["queue"]) == env), key=lambda ln: ln["end"], default=None)
         if tgt is None:
             return None
-        cands, why = self.move_cands([ln for ln in lns if ln is not tgt], tgt["end"], now, waiters)
+        cands, why = self.move_cands([ln for ln in lns if ln is not tgt], now, waiters)
         q = next(q for q in cx["qs"] if q["key"] == keys[(tgt["root"], tgt["queue"])])
         o = {"project": p, "local": True, "lane": [tgt["root"], tgt["queue"]], "before": self.move_before(p, cands, q), "free": round(free),
              "jobs": [], "why": why, "stop": None, "gpus": None, "ends": ends}
         self.local_moves(o, p, cands, q["key"], cx, now)
         return o if o["jobs"] else None
 
-    def move_cands(self, lns, free, now, waiters, skip=False):
+    def move_cands(self, lns, now, waiters, skip=False):
         """offers 的候选：别的主机上这个项目的清单 lns 里（同机挪时是本机的清单），按“取此刻排得最晚的那条清单的队尾”挑出的几行（至多 MOVE_MAX），
         与挑不下去的原因。各候选带 host、root、queue、name、there（原处预计结束，跑不了为 None）、
         rest（挪走它后那条清单何时跑完：剩下的行与在跑的预计结束里最晚的）、h（资源提示）、i（在原清单里排第几）、lane（第几条清单）：前 k 行加进推演时按 (lane, i) 排，
-        同一条清单里的照原先后。排得最晚的已不晚于本机这个项目何时跑完（free；挪到本机另一条清单时是那条清单何时跑完）的不再挑：挪过来只会更晚。
-        挑出的前几行挪过来以后已比原处剩下的晚跑完时，调用方不再往下试（moved_past）。
-        waiters：{(项目, 任务): {写了 after= 等它的 (项目, 任务)}}（本机与别的主机的 todo）；有不在这批里的等着它就不挪：挪走后等它的何时开始会变。
+        同一条清单里的照原先后。挑到哪一行为止由调用方逐行推演后定：挪过来的已比原处剩下的晚跑完就不再往下试（moved_past）。
+        不按本机这个项目原推演里何时跑完预先停：本机有行在等依赖（汇总行 after= 等别处的训练行）、卡有余量能并行时，那不是挪来的行最早何时跑完（#167）。
+        waiters：{(项目, 任务): {写了 after= 等它的 (项目, 任务)}}（dep_waiters(sim=True)：本机与别的主机的 todo，本机推演里跟着重推的不算）；
+        有不在这批里的等着它就不挪：挪走后等它的何时开始会变。
         有清单原处何时放行说不出（state unknown）的一行也不挑：整批推不出，挪了也算不出提前多少。一批只取同一种环境（list_env：目录与 .env）的行。
         skip（接收方空着，Worker.idle，#62）：看板按行比、不要整批何时跑完，所以说不出何时放行的清单、队尾挪不动的清单（上面那些停的原因）
         跳过这一条、接着看别的清单，不整批停；原因取第一条跳过的。"""
@@ -3923,8 +3930,6 @@ class Worker:
             if not xs:
                 break
             i = max(xs, key=lambda i: math.inf if end[i] is None else end[i])
-            if end[i] is not None and end[i] <= free:
-                break
             ln, (n, h, t0, t1) = lns[i], left[i][-1]
             if len(out) >= MOVE_MAX:
                 if end[i] is None:
