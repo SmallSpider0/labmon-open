@@ -3611,7 +3611,7 @@ class ParallelListTest(UnitBase):
         h = {"ngpu": 1, "gang": None, "needs": []}
         ln = {"host": "o", "root": "/r", "queue": "q.txt", "project": "pa", "run": now + 10 * H, "end": now + 10 * H, "state": "ok", "unread": False,
               "pend": [("B", h, now + H, now + 2 * H), ("C", h, now + 2 * H, now + 3 * H)]}
-        out, _ = self.w.move_cands([ln], now, now, {})
+        out, _ = self.w.move_cands([ln], now, {})
         self.assertEqual(out[0]["name"], "C")
         self.assertEqual(out[0]["rest"], round(now + 10 * H))
 
@@ -3984,6 +3984,54 @@ class OffersTest(UnitBase):
                     extra_todo=[{"project": "pb", "root": None, "queue": None, "jobs": ["w"], "deps": {"w": [["pa", "a3"]]}, "held": None}])
         o = self.offer()["pa"]
         self.assertEqual((o["jobs"], o["why"]), ([], "a3 有 w 写了 after= 等着它，不挪"))
+
+    def cross(self, queues, reqs, project="pa"):
+        """t 推演一遍后 project 的跨主机那一项 offer（同机的另列，offer() 按项目合并时会盖掉它）。"""
+        self.offer(queues, reqs)
+        return next(x for x in self.w.offer if x["project"] == project and not x.get("local"))
+
+    def test_local_summary_waiting_on_origin_rows(self):
+        # #167：o 上 pa 的 a0–a5（各 2 小时，11 小时后跑完）；t 上 pa 只有一条同目录的 CPU 清单，汇总行 sum_x after= 等着 o 上这 6 行。
+        # 以前 t 上本项目“何时跑完”（free）被 sum_x 钉在 11 小时后，o 那条不晚于它，一行不挑；队尾的行又都有 sum_x 等着，挪不动。
+        # sum_x 在 t 上、本项目、挪来后推演里跟着重排（own 算进去）：照常挪，sum_x 跟着提前
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
+        q, r = self.local_lane(["sum_x|true   # gpus=0 est_min=10 after=%s" % ",".join("a%d" % i for i in range(6))], name="s")
+        o = self.cross([q], [r])
+        self.assertEqual((o["lane"], o["before"]), ([q["root"], "jobs/s.txt"], "sum_x"))
+        self.assertEqual([j["name"] for j in o["jobs"]], ["a5", "a4", "a3"])
+        self.assertEqual([self.rel(j["own"]) for j in o["jobs"]], [9.17, 7.17, 6.17])   # sum_x 等 o 上剩下的与挪来的都跑完
+        s = self.suggest()["pa"]
+        self.assertEqual((s["target"], [j["name"] for j in s["jobs"]], self.rel(s["from"]), self.rel(s["to"])), ("t", ["a5", "a4", "a3"], 11.17, 6.17))
+        self.assertIn("插在 %s/jobs/s.txt 里 sum_x 前面" % q["root"], s["text"])
+
+    def test_local_waiter_only_partly_late(self):
+        # #167：sum_x 只等 a3（7 小时后跑完）：free 是 7 小时 10 分，以前挑到 o 剩下的不晚于它（a5、a4）就停；a3 有 sum_x 等着也不挑。
+        # 现在 a3 照挑（sum_x 在 t 上、本项目，跟着重推）：整批到 6 小时 10 分。别的项目在 t 上等着 a3 的照旧不挪（它何时开始不进 own）
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
+        q, r = self.local_lane(["sum_x|true   # gpus=0 est_min=10 after=a3"], name="s")
+        o = self.cross([q], [r])
+        self.assertEqual([j["name"] for j in o["jobs"]], ["a5", "a4", "a3"])
+        self.assertEqual(self.rel(self.suggest()["pa"]["to"]), 6.17)
+        (self.d / "pb" / "jobs").mkdir(parents=True)
+        (self.d / "pb" / "jobs" / "w.txt").write_text("w|true   # gpus=0 est_min=10 after=pa/a3\n")
+        qw = self.m.load_queue({"_slug": "w", "root": str(self.d / "pb"), "jobs": "jobs/w.txt", "project": "pb"})
+        os.makedirs(qw["state"], exist_ok=True)
+        self.w.queue_durs([q, qw])
+        rw = self.w.prep(self.m.new_req("queue", qw["key"], "pb", q=qw, root=qw["root"], queue=qw["jobs"], **self.m.next_jobs(qw)[0]), self.now, {})
+        o = self.cross([q, qw], [r, rw])
+        self.assertEqual([j["name"] for j in o["jobs"]], ["a5", "a4"])
+        self.assertEqual(o["why"], "a3 有 w 写了 after= 等着它，不挪")
+
+    def test_local_waiter_on_trapped_rows(self):
+        # #167：o 上 a0–a6 被续租截止挡住、推演里没有（trapped），t 上的 sum_x after= 等它们，t 的推演停在依赖上（stuck_dep）、本项目何时跑完说不出。
+        # 以前整个项目只写“推演不出何时跑完”；现在照挪：7 行都挪过来后 sum_x 说得出，整批 3 小时 40 分跑完（原处推不出，from 为 None）
+        self.origin(["a%d|true   # est_min=30" % i for i in range(7)], held="deadline", overrides=[{"kind": "deadline", "at": self.now + 1800}])
+        q, r = self.local_lane(["sum_x|true   # gpus=0 est_min=10 after=%s" % ",".join("a%d" % i for i in range(7))], name="s")
+        o = self.cross([q], [r])
+        self.assertEqual((len(o["jobs"]), o["free"], o["why"]), (7, None, None))
+        self.assertEqual([self.rel(j["own"]) for j in o["jobs"]], [None] * 6 + [3.67])
+        s = self.suggest()["pa"]
+        self.assertEqual((len(s["jobs"]), s["from"], self.rel(s["to"])), (7, None, 3.67))
 
     def test_trapped_origin_and_renewing_receiver(self):
         # 维护者 11-08 定：原处被续租截止（或 drain）挡住、在原处跑不了的照常能挪，跑不了的清单一次至多挑 MOVE_TRAP_MAX 行（超过 MOVE_MAX）；
