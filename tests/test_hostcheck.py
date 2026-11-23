@@ -159,7 +159,7 @@ class ThresholdTest(Base):
         self.assertNotIn("updates", self.warn(T0 + 3 * DAY_S, force_updates=True))   # old 装了，new 才刚看到
 
     def test_pause_expiring_within_three_days(self):
-        """暂停到期由 PowerShell 换成 epoch 秒送来（Python 侧不解析时刻文字，见 AGENTS.md 唯一实现表的“时刻的文字与解析”）。"""
+        """暂停到期由 PowerShell 换成 epoch 秒送来（Python 侧不解析时刻文字，见 docs/concepts.md 唯一实现表的“时刻的文字与解析”）。"""
         self.win = win(pause_until=T0 + 3 * DAY_S + 60)
         self.assertNotIn("pause", self.warn(T0))
         self.win = win(pause_until=T0 + 3 * DAY_S)

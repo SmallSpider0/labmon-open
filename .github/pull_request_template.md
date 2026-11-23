@@ -36,11 +36,11 @@ Closes #
 - [ ] `flake8 --select=F --max-line-length=200 labmon tools`
 - [ ] 新用例在旧代码上会失败
 - [ ] 跨主机的逻辑：多主机用例（`tests/fixtures.Hosts`）
-- [ ] 改了页面：`tests/pages` 补了快照与断言，在内置浏览器里用离线预览（`tests/pages/preview.py`，见 AGENTS.md「怎么测」）逐个路由核对，`read_console_messages` 没有报错；看过桌面与窄屏（`resize_window` 的 mobile，375 宽）两档：写明路由、结果及本任务开的标签与预览服务是否已清理（`gh` 传不了图片，不把截图提交进分支；只允许提交合成离线预览截图，提交前核对画面不含私人信息）
+- [ ] 改了页面：`tests/pages` 补了快照与断言，在内置浏览器里用离线预览（`tests/pages/preview.py`，见 AGENTS.md「怎么测」与 tests/pages/README.md）逐个路由核对，`read_console_messages` 没有报错；看过桌面与窄屏（`resize_window` 的 mobile，375 宽）两档：写明路由、结果及本任务开的标签与预览服务是否已清理（`gh` 传不了图片，不把截图提交进分支；只允许提交合成离线预览截图，提交前核对画面不含私人信息）
 
 **唯一实现表**
-- [ ] 对照 AGENTS.md 的表搜过，没有第二份；新增或扩展了表里哪一项：
+- [ ] 对照 docs/concepts.md 的唯一实现表搜过，没有第二份；新增或扩展了表里哪一项：
 
 **文档**
-- [ ] 文档在本 PR 里一起改了（不另开 PR 补）；行为变了的地方已同步、旧说法已删：README.md / docs/workbench.md / docs/worker.md / docs/fleet.md / docs/schema.md / docs/scheduler.md（设计与依据）/ skills/lab-experiments/SKILL.md / AGENTS.md / docs/workflow.html（改了工作流时）
+- [ ] 文档在本 PR 里一起改了（不另开 PR 补）；行为变了的地方已同步、旧说法已删：README.md / docs/workbench.md / docs/worker.md / docs/fleet.md / docs/schema.md / docs/scheduler.md（设计与依据）/ skills/lab-experiments/SKILL.md / AGENTS.md / docs/concepts.md（唯一实现表）/ docs/workflow.html（改了工作流时）
 - [ ] 改了用户看得到的功能或算法：已同步 docs/intro.html（说法、示意图、数字；合并后由落到 main 的 agent 核对 HTML 文档，见 AGENTS.md「项目介绍页」）；没改的写“无关”
