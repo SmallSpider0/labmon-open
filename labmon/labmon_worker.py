@@ -178,7 +178,8 @@ CPU_WARM_S = 600         # 运行中任务开跑（接管后从开始量起）�
 MIB = 2 ** 20
 PAR_RE = re.compile(r"^[ \t]*#[ \t]*labmon:.*?(?<![\w-])par=(\d+)", re.M)   # 清单声明的并行数 `# labmon: par=N`（list_par，#147）
 PAR_MAX = 32             # 一条清单在一台上最多同时跑这么多行
-PAR_STEP_S = 60          # 并行清单已有行在跑时，两次加行至少隔这么久：让卡的利用率来得及反映新加的那行（加行门槛 Worker.par_gate）
+PAR_STEP_S = 60          # 并行清单已有行在跑时，两次往上加行至少隔这么久：让卡的利用率来得及反映新加的那行（加行门槛 Worker.par_gate）
+PAR_REFILL_S = UTIL_WIN_S   # 并行清单近这么久同时跑到过的行数（Worker.par_hi）：跑完一行后补回这个数不等 PAR_STEP_S、不看利用率（#176）
 
 
 def now_str(t=None):
@@ -2076,7 +2077,8 @@ class Worker:
         self.disk = Disk(shared, host) if shared else None   # 共享盘用量（只有拿着租约的那台在扫）
         self.ldisk = LocalDisk(host)          # 容器根盘开机以来的新写入与 labmon 目录的用量（每台扫自己的，#149）
         self.running = {}     # 请求 key（run_key：串行清单是队列 key、并行清单是 队列 key|任务名；单元是 slot:<id>）→ 运行中的任务或单元
-        self.par_t = {}       # 队列 key → 这条清单上次开跑的时刻（并行清单两次加行至少隔 PAR_STEP_S，par_gate）
+        self.par_t = {}       # 队列 key → 这条清单上次往上加行的时刻（并行清单两次加行至少隔 PAR_STEP_S，par_gate；补位不算，#176）
+        self.par_hi = {}      # 队列 key → (近来同时跑到过的行数, 最后一次跑着这么多行的时刻)：补到它以内是补位（par_level、par_note，#176）
         self.active = set()   # 本次已写 lock、记过“队列启动”的队列
         self.noted = {}       # 请求 key → 上次写进 worker.log 的等待原因（只在变化时记）
         self.ext = {}         # 旧 gpu_queue.sh 正在跑的任务（只统计用量，不管）
@@ -3547,7 +3549,8 @@ class Worker:
                tuple((gk, g["at"] and (0 if g["at"] <= now else round(g["at"] / 60)), tuple(sorted((k, n, e and e <= now) for (k, n), e in g["local"].items())))
                      for gk, g in sorted(self.gsim.items())))
         cards, shut = self.local_cards()         # 并行清单加行的门槛（par_gate）：推演里按此刻的结论当常量（#147）
-        key += (bool(shut), tuple(cards or ()))
+        lvl = {q["key"]: self.par_level(q["key"], now) for q in queues if (q.get("par") or 1) > 1}   # 补位到的行数（#176）
+        key += (bool(shut), tuple(cards or ()), tuple(sorted(lvl.items())))
         if key == self.plan_key and now - self.plan["t"] < FORECAST_EVERY:
             return
         self.plan_key = key
@@ -3583,7 +3586,7 @@ class Worker:
                 if shut and self.throttle(now):   # 容器在限流：不用卡的行也不加，按此刻在跑的行数排
                     par = max(1, len(cur))
                 elif shut or (cards is not None and not [i for i in cards if allowed is None or i in allowed]):
-                    gpar = max(1, len(cur))       # 卡吃满：要卡的行只在这条清单在跑的少于此刻时才排（真放行此刻不加），不用卡的照窗口排
+                    gpar = max(1, len(cur), lvl.get(k, 0))   # 卡吃满：要卡的行只补到此刻与近来跑到过的行数（真放行补位照补、不往上加），不用卡的照窗口排
                 elif cards is not None:           # 要卡的行只放在门槛给的卡上
                     allowed = [i for i in cards if allowed is None or i in allowed]
             qs.append({"key": k, "kind": "queue", "project": q["project"], "allowed": allowed, "par": par, "gpar": gpar,
@@ -4153,7 +4156,7 @@ class Worker:
             # 一行一个在跑的任务（并行清单有几行，#147）；放行的主机：别的主机据此不动它（run_elsewhere）
             cf = os.path.join(st, "current")
             write(cf, "".join(l + "\n" for l in (read(cf) or "").splitlines() if l.split()) + "%s %d %s %s\n" % (job["name"], pr.pid, now_str(t0), self.host))
-            self.par_t[q["key"]] = t0                 # 加行门槛的间隔从这次开跑算（par_gate）
+            self.par_note(q["key"], t0, 1)            # 往上加行的：加行门槛的间隔从这次开跑算；补位的不算（par_gate，#176）
         gtxt = "，".join("GPU %d %s" % (c["i"], c["uuid"]) for c in gpus)
         self.qlog(q, "开始 %s" % job["name"] + ("（%s）" % gtxt if gtxt else ""))
         k = run_key(q, job["name"])
@@ -4179,16 +4182,41 @@ class Worker:
         """这条清单（队列 key）此刻在跑的任务（并行清单有几个，#147），按开跑先后。"""
         return sorted((j for j in self.running.values() if lane_key(j) == k), key=lambda j: j["t0"])
 
+    def par_level(self, k, now):
+        """这条清单（队列 key）近 PAR_REFILL_S 同时跑到过的行数（#176）：在跑的少于它时再放一行是补位（跑完空出的格），不是往上加；过期了为 0。"""
+        n, t = self.par_hi.get(k, (0, 0))
+        return n if now - t <= PAR_REFILL_S else 0
+
+    def par_note(self, k, now, add=0):
+        """记下这条清单此刻同时跑着几行（#176）：不少于 par_level 的刷新它（达到过、这时还跑着这么多）。add=1 是 launch 刚放的那行（还没进 running）：
+        超过 par_level 的是往上加，加行门槛的间隔（par_t）从它算；补位不动 par_t。一轮开头收尾之前（settle）、接管一行（adopt）也调，重启后在跑的行数就是达到过的。"""
+        n, lv = len(self.lane(k)) + add, self.par_level(k, now)
+        if add and n > lv:
+            self.par_t[k] = now
+        if n and n >= lv:
+            self.par_hi[k] = (n, now)
+
     def par_gate(self, r, now):
         """并行清单加行的门槛（#147）：这条清单已有行在跑时，再加一行要过它（第一行不过，同以前）。返回 (能放的卡号或 None 不限, 不加的原因或 None)。
         与 fit、offers 同机多开车道同一条规则（local_cards：容器在限流不加；近 10 分钟利用率不低于 UTIL_FULL 的卡、利用率低而上面在跑的被 CPU 卡住的卡不放），
-        不用卡的行只看限流；要卡的另外同一条清单两次开跑至少隔 PAR_STEP_S（利用率窗口来得及反映新加的那行）。真放行在 place 的 pre 里调；推演按此刻的结论当常量（forecast）。"""
-        if r["kind"] != "queue" or not self.lane(r["q"]["key"]):
+        不用卡的行只看限流；要卡的另外同一条清单两次往上加行至少隔 PAR_STEP_S（利用率窗口来得及反映新加的那行）。
+        补位（在跑的少于 par_level，#176）不等间隔、不因卡吃满不补：那个行数刚跑过、门槛没否掉它；只在有没吃满的卡时放在它们上面（同推演的 allowed）。
+        容器在限流时补位也不补，记的行数降到此刻在跑的。真放行在 place 的 pre 里调；推演按此刻的结论当常量（forecast）。"""
+        k = r["q"]["key"] if r["kind"] == "queue" else None
+        n = len(self.lane(k)) if k else 0
+        if not n:
             return None, None
         cards, why = self.local_cards()
+        hot = why and self.throttle(now)
+        if hot:                                   # 限流：补位也不补，记的行数降到此刻在跑的，之后往上加照间隔与利用率来
+            self.par_hi[k] = (n, now)
+            return None, why.replace("不在这台多开车道", "不再给这条清单加行")
         if r["ngpu"] <= 0:                        # 不用卡的行：只看限流（CPU 记账另由 place 管），不等利用率
-            return None, why if why and self.throttle(now) else None
-        left = PAR_STEP_S - (now - self.par_t.get(r["q"]["key"], 0))
+            return None, None
+        if n < self.par_level(k, now):            # 补位：有这条清单能用的、没吃满的卡就只放它们，没有（卡都吃满）不限（同推演的 allowed 与 gpar）
+            allowed = r["q"].get("gpus")
+            return (cards if cards and [i for i in cards if allowed is None or i in allowed] else None), None
+        left = PAR_STEP_S - (now - self.par_t.get(k, 0))
         if left > 0:
             return None, "这条清单刚加过一行，%d 秒后看卡的利用率再决定加不加（并行 par=%d）" % (math.ceil(left), r["q"].get("par") or 1)
         return cards, why and why.replace("不在这台多开车道", "不再给这条清单加行")
@@ -4353,6 +4381,7 @@ class Worker:
         if local and alive(pid, ("labmon-job:" + name,)):
             self.running[k] = job
             self.active.add(q["key"])
+            self.par_note(q["key"], time.time())  # 重启接管：上一个 worker 同时跑着的行数算达到过的，跑完补回不等间隔（#176）
             write(os.path.join(q["state"], "lock"), str(os.getpid()))   # lock 改指本进程，看板才认得队列还在
             self.wlog("接管运行中的 %s（PID %d）" % (name, pid))
         elif os.path.exists(os.path.join(q["state"], name + ".rc")):
@@ -4991,7 +5020,10 @@ class Worker:
         self.write_status(queues, waiting, limits, pol, use, now)
 
     def settle(self, queues):
-        """一轮开头：收尾不在了的任务（finish）、重读用量记录、停法以现在的登记为准、读临时指令，返回 (limits, 调度设置)。"""
+        """一轮开头：记下并行清单此刻跑着几行（par_note，收尾之前）、收尾不在了的任务（finish）、重读用量记录、停法以现在的登记为准、读临时指令，返回 (limits, 调度设置)。"""
+        now = time.time()
+        for k in {lane_key(j) for j in self.running.values() if j.get("kind") == "queue"}:
+            self.par_note(k, now)
         for k, j in list(self.running.items()):
             if not self.alive_job(j):
                 self.finish(k)

@@ -3631,6 +3631,71 @@ class ParallelListTest(UnitBase):
         r0 = self.m.queue_req(q, self.m.job_of("g2", "x  # gpus=0"))
         self.assertEqual(self.w.par_gate(r0, time.time()), (None, None))             # 不用卡的行不等间隔、不看利用率
 
+    def test_refill_skips_step(self):
+        # #176：par=6、一行几分钟的短任务：跑完一行空出的格子当场补上（补位），不等 PAR_STEP_S、卡吃满也补；往上加新的一行照等间隔
+        self.cards(30000.0)
+        q = dict(self.hosts.queues({"g": ["# labmon: par=6"] + ["g%d|x" % i for i in range(1, 7)]}, "pa")[0], par=6)
+        now = time.time()
+        for n in ("g1", "g2", "g3"):
+            self.w.running["k|" + n] = {"key": "k|" + n, "kind": "queue", "q": q, "name": n, "t0": now - 30, "gpus": ["GPU-a"], "pid": 1}
+        with mock.patch.object(self.w, "alive_job", lambda j: True):
+            self.w.settle([q])                    # 一轮开头记下这条清单同时跑着 3 行
+        self.w.par_t[q["key"]] = now - 10         # 第 3 行刚加上
+        self.w.uwin = {"GPU-a": [(now - i, 40) for i in range(5)]}
+        r = self.m.queue_req(q, self.m.job_of("g4", "x"))
+        self.assertIn("刚加过一行", self.w.par_gate(r, now)[1])                      # 往上加第 4 行：照等间隔
+        del self.w.running["k|g1"]                # g1 跑完
+        self.assertEqual(self.w.par_gate(r, now), ([0], None))                       # 补回 3 行：不等间隔
+        self.w.uwin = {"GPU-a": [(now - i, 95) for i in range(5)]}
+        self.assertEqual(self.w.par_gate(r, now), (None, None))                      # 卡吃满也补回 3 行（不往上加）
+        with mock.patch.object(self.w, "throttle", lambda t: {"since": t}), \
+                mock.patch.object(self.w, "local_cards", lambda: (None, "容器在限流：先减线程，不在这台多开车道")):
+            self.assertIn("限流", self.w.par_gate(r, now)[1])                        # 限流：补位也不补，记的行数降到此刻的 2
+        self.assertIn("不再给这条清单加行", self.w.par_gate(r, now + self.m.PAR_STEP_S)[1])
+        self.assertEqual(self.w.par_level(q["key"], now), 2)
+
+    def test_refill_keeps_step_clock(self):
+        # #176：补位开跑不重设加行间隔的起点（par_t），往上加才重设；记的行数过了 PAR_REFILL_S 不再算；重启接管的在跑行数算达到过的
+        q = dict(self.hosts.queues({"g": ["# labmon: par=6", "g1|x", "g2|x", "g3|x"]}, "pa")[0], par=6)
+        k, now = q["key"], time.time()
+        for i, n in enumerate(("g1", "g2")):
+            self.w.par_note(k, now + i, 1)        # 往上加：第 1、2 行
+            self.w.running["k|" + n] = {"key": "k|" + n, "kind": "queue", "q": q, "name": n, "t0": now + i, "gpus": [], "pid": 1}
+        self.assertEqual((self.w.par_t[k], self.w.par_level(k, now + 1)), (now + 1, 2))
+        del self.w.running["k|g1"]
+        self.w.par_note(k, now + 50, 1)           # 补位：间隔仍从第 2 行算
+        self.assertEqual((self.w.par_t[k], self.w.par_level(k, now + 50)), (now + 1, 2))
+        self.assertEqual(self.w.par_level(k, now + 50 + self.m.PAR_REFILL_S + 1), 0)
+        w = self.hosts.worker("t")
+        w.par_note(k, now)                        # 新 worker 接管了 g2（还在 running 里的那行）之前：没有记录
+        self.assertEqual(w.par_level(k, now), 0)
+        w.running["k|g2"] = self.w.running["k|g2"]
+        w.par_note(k, now)
+        self.assertEqual(w.par_level(k, now), 1)
+
+    def test_forecast_refills_to_level(self):
+        # #176：卡吃满、近来同时跑到过 3 行、此刻在跑 2 行：推演里空出的那一格此刻就补（同真放行的补位），再往上的等在跑的腾出
+        self.cards(40000.0)
+        self.setup_list(["# labmon: par=4", "g0|x   # vram=1", "g1|x   # vram=1", "g2|x   # vram=1 est_min=30", "g3|x   # vram=1 est_min=30"])
+        qs = self.w.registry()
+        self.m.list_jobs(qs[0])
+        now = time.time()
+        for n in ("g0", "g1"):
+            self.w.running["s|" + n] = {"key": qs[0]["key"] + "|" + n, "kind": "queue", "name": n, "project": "pa", "t0": now - 60, "deps": [], "deps_any": [],
+                                        "gpus": ["GPU-a"], "use": {}, "est": None, "excl": None, "tag": None, "q": qs[0], "pid": 1}
+        Path(self.w.p.eta).write_text(json.dumps({"t": now, "jobs": {"pa|g0": now + 600, "pa|g1": now + 600}}))
+        self.w.par_hi[qs[0]["key"]] = (3, now - 20)
+        self.w.uwin = {"GPU-a": [(now - i, 95) for i in range(5)]}
+        _, reqs = self.w.requests(qs, False)
+        self.w.queue_durs(qs)
+        reqs = [r for r in reqs if r["name"] in ("g2", "g3")]
+        for r in reqs:
+            self.w.prep(r, now, {})
+        self.w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        plan = {j["name"]: j for ln in self.w.plan["lanes"] for j in ln["jobs"]}
+        self.assertLess(plan["g2"]["t0"] - now, 60, plan)
+        self.assertGreaterEqual(round(plan["g3"]["t0"] - now), 600, plan)
+
 
 class OffersTest(UnitBase):
     """能接别处的任务（offers，Issue #20 第一档）：别的主机 o 上 pa 的清单排得很晚、本机 t 将空时，t 用自己的推演算出能接哪几行、几点跑完，
