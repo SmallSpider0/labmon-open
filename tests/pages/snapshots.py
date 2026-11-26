@@ -305,17 +305,23 @@ def _fleet(mine_host: dict) -> dict:
     holders[-1]["frac"].update(idle=0.0, lent=0.35)
     holders[-1]["h"].update(lent=16.0)
     holders[-1]["util_job"] = None
-    return {"ops": {"t": NOW, "boot": {"srv-b": boot("srv-b", "OWNER"), "srv-d": boot("srv-d", "PERSON3"), "srv-a": {**boot("srv-a", "ME"), "pool": "pool-private"}},
+    return {"ops": {"t": NOW, "boot": {"srv-b": {**boot("srv-b", "OWNER"), "spec": "s2a"}, "srv-d": {**boot("srv-d", "PERSON3"), "spec": "s2a"},
+                                       "srv-a": {**boot("srv-a", "ME"), "pool": "pool-private", "spec": "s1"}},
                     "platform": {"t": NOW - 86400, "running": [{"id": "j" * 8, "name": "OWNER", "pool": "pool-public", "created": "2026-11-05 10:36:50", "left": "6d 11h", "sid": "srv-b"}],
                                  "issues": ["PERSON4 的作业在平台上找不到"], "changes": []},
                     "op": None, "session": {"logged_in": True, "at": NOW - 86400, "until": NOW + 86400},
-                    "names": {"sync": "与平台核对", "renew": "续租", "ka": "开保活", "off": "关机", "swap": "换人", "open": "开机", "borrow": "借来用"},
+                    "names": {"sync": "与平台核对", "renew": "续租", "ka": "开保活", "off": "关机", "swap": "换人", "move": "换节点", "open": "开机", "borrow": "借来用"},
                     "guard": {"idle_min": 60, "watch_min": 5},
                     "people": {"ME": person(["srv-a"]), "OWNER": person(["srv-b"]), "PERSON3": person(["srv-d"]), "PERSON4": person(["srv-e"]),
                                "PERSON5": person([]), "PERSON6": person(["srv-g"]), "NEWBIE": {**person([]), "src": "default", "note": "下个月来"}},
                     "defaults": {"image": "registry.local/lab/ubuntu:base", "run_cmd": "/etc/init.d/ssh restart && sleep infinity", "saved": True},
-                    "pools": {"pool-private": {"private": True, "ref": "srv-a", "spec": "s1", "hosts": [], "specs": [{"specificationId": "s1", "quantityAvailable": 2, "specificationAmount": 4}], "nodes": ["root@192.0.2.1"]},
-                              "pool-public": {"private": False, "ref": "srv-b", "spec": "s2", "hosts": [], "specs": [], "nodes": ["root@192.0.2.9"]}},
+                    "pools": {"pool-private": {"private": True, "ref": "srv-a", "spec": "s1", "hosts": [],
+                                               "specs": [{"specificationId": "s1", "specificationName": "priv-1GPU", "quantityAvailable": 2, "specificationAmount": 4, "isSchedule": 0, "queueNum": 0}],
+                                               "nodes": ["root@192.0.2.1"]},
+                              "pool-public": {"private": False, "ref": "srv-b", "spec": "s2a", "hosts": [],
+                                              "specs": [{"specificationId": "s2a", "specificationName": "nodeA-1GPU", "quantityAvailable": 2, "specificationAmount": 4, "isSchedule": 0, "queueNum": 0},
+                                                        {"specificationId": "s2b", "specificationName": "nodeB-1GPU", "quantityAvailable": 0, "specificationAmount": 4, "isSchedule": 0, "queueNum": 0}],
+                                              "nodes": ["root@192.0.2.9", "root@192.0.2.10"]}},
                     "pools_t": NOW - 86400, "volumes": [{"path": "/nfs/lab", "name": "lab"}], "port_range": [15151, 15199]},
             "servers": servers, "mine": mine, "holders": holders,
             "unknown": [{"id": "srv-d", "holder": "PERSON3", "kind": "unknown", "label": "宿主机 PID 777（容器里找不到）", "mb": 5000, "cwd": None, "chain": [], "names": []}],
@@ -551,6 +557,7 @@ def overview_evil() -> dict:
     me["borrowed"][0]["from"] = "主" + BAD
     owner["lent"][0]["to"] = "借" + BAD
     F["ops"]["pools"]["pool-public"]["nodes"] = ["root@node" + BAD]
+    F["ops"]["pools"]["pool-public"]["specs"][0]["specificationName"] = "规格" + BAD
     F["ops"]["platform"]["issues"] = ["核对" + BAD]
     F["ops"]["people"]["NEWBIE"]["note"] = "注" + BAD
     F["ops"]["boot"]["srv-b"].update(image="registry/" + BAD, run_cmd="sh " + BAD)

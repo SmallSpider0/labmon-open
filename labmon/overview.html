@@ -656,6 +656,10 @@ a.btn { display: inline-flex; align-items: center; }
 .pc-t span { font-size: 11px; color: var(--muted); }
 .pchip:hover { background: var(--soft); }
 .pchip.on { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); background: color-mix(in srgb, var(--accent) 8%, var(--card)); }
+.pchip:disabled { opacity: .55; cursor: not-allowed; }
+.pchip:disabled:hover { background: var(--card); }
+.spchip { padding: 5px 10px; min-width: 108px; }
+.spchip.zero .pc-t span { color: var(--warn); }
 /* 组内服务器页的选项卡；不在「服务器」选项卡时操作面板缩成一条 */
 .ftabs { display: flex; gap: 2px; align-self: stretch; margin: -10px 0 -11px 14px; overflow-x: auto; scrollbar-width: none; }
 .ftab { display: inline-flex; align-items: center; gap: 6px; padding: 0 12px; border-bottom: 2px solid transparent;

@@ -115,20 +115,24 @@ function gpuTiles(gs, st) {
 // 自用主机：没有探针（每轮采集读 worker 状态）、保活由 worker 管，只有续租（主机页概况条上的同一组 renewBtns：预备续租 / 取消预备 / 恢复放行 + 续租）、
 // 换人、关机；能不能动看 x.state（平台操作口径，与 fleetops._probe_mine 同一个），红框、勾选都在 goRenew、offAsk、wizForm 里。
 // 借来用、续租、关机点了先在按钮旁弹出确认；换人、开机步骤多，是抽屉里的向导
+const poolSpecs = p => fops().pools?.[p]?.specs || [];
+const specName = (p, id) => poolSpecs(p).find(s => s.specificationId === id)?.specificationName || id || "";
 function srvBtns(x) {
   if (!canOps()) return opsNote();
-  const dis = fops().op?.active ? "disabled" : "";
-  const swap = `<button class="btn" data-fop="wiz" data-kind="swap" data-id="${esc(x.id)}" ${dis} ${tip(x.mine ? "停掉这台的作业后立刻开新的：同一个池、沿用端口；旧自用主机标成已归还\nworker 有任务在跑时不让换，先在主机页暂停队列" : "停掉这台的作业后立刻给别人开（也可以换给自己）：同一个池、沿用端口，空档只有十几秒，这台不会被别人占走")}>${icon("users")}换人</button>`;
+  const dis = fops().op?.active ? "disabled" : "", specs = poolSpecs(x.pool);
+  const swap = `<button class="btn" data-fop="wiz" data-kind="swap" data-id="${esc(x.id)}" ${dis} ${tip(x.mine ? "停掉这台的作业后立刻开新的：同一个池、沿用端口（可选换规格）；旧自用主机标成已归还\nworker 有任务在跑时不让换，先在主机页暂停队列" : "停掉这台的作业后立刻给别人开（也可以换给自己、可选换规格）：同一个池、沿用端口，空档只有十几秒，这台不会被别人占走")}>${icon("users")}换人</button>`;
+  const move = specs.length === 1 ? "" : `<button class="btn" data-fop="wiz" data-kind="move" data-id="${esc(x.id)}" ${dis || !specs.length ? "disabled" : ""} ${tip(!specs.length ? "还没读到这个池的规格列表：先点「与平台核对」" : x.mine ? "同人同池停旧后立刻按新规格（物理节点）开新的，旧自用主机标成已归还，新台不自动入池\nworker 有任务在跑时不让换，先在主机页暂停队列" : "同人同池停旧后立刻按新规格（物理节点）开新的，空档十几秒；新节点重新登记并给出新连接命令")}>${icon("server")}换节点</button>`;
   const off = `<span class="vsep"></span>` + opPop("off", x, `<button class="btn danger" data-fop="offpick" data-id="${esc(x.id)}" ${dis} ${tip(x.mine ? "在平台上停掉你这台的作业，自用主机标成已归还（看板不再连它）。点了先出确认" : "在平台上停掉这台的作业；之后不探、不提醒租期、不算配额。点了先出确认")}>${icon("power")}关机</button>`,
     () => offAsk(x), () => offGo(x));
-  if (x.mine) { const h = D.hosts.find(e => e.id === x.id); return (h ? renewBtns(h) : "") + (x.state === "down" ? "" : swap) + off; }
+  if (x.mine) { const h = D.hosts.find(e => e.id === x.id); return (h ? renewBtns(h) : "") + (x.state === "down" ? "" : swap + move) + off; }
   const probe = x.off ? "" : `<button class="btn" data-probe="${esc(x.id)}" ${PROBING ? "disabled" : ""} ${tip("立即只读探一次（一条 ssh，约 10 秒）")}>${icon("renew")}${PROBING === x.id ? "探测中…" : "立即探测"}</button>`;
   if (borrowOf(x)) return probe;
   return probe + [x.reserve ? borrowPop(x, `<button class="btn" data-fop="bpick" data-id="${esc(x.id)}" ${dis} ${tip(`和 ${x.holder} 说好后借来给自己的项目跑：拉起 worker，不动平台；${x.using ? `${x.holder} 在轻用（${x.using}），给这人留出余量；` : ""}到约定时间不再放新任务，跑完自动还回去、开保活`)}>${icon("users")}借来用</button>`) : "",
     !x.off && (x.state === "idle" || /主机密钥/.test(x.error || "")) ? `<button class="btn" data-fop="ka" data-id="${esc(x.id)}" ${dis} ${tip(`ssh 上去开保活，已在跑就不重开，不碰平台。\n先探一次，在跑实验就不开；开后盯 ${fops().guard?.watch_min ?? 5} 分钟，有实验或这人自己的保活上来就让出。\n主机密钥变了的先清掉旧密钥`)}>${icon("zap")}开保活</button>` : "",
     !x.off && x.state !== "down" ? goRenew(x) : "",
     !x.off && x.state !== "down" ? swap : "",
-    x.off ? `<button class="btn pri" data-fop="wiz" data-kind="open" data-id="${esc(x.id)}" ${dis} ${tip("在平台上重开这一台（沿用端口，被占了就另挑），可换人")}>开机</button>` : "",
+    !x.off && x.state !== "down" ? move : "",
+    x.off ? `<button class="btn pri" data-fop="wiz" data-kind="open" data-id="${esc(x.id)}" ${dis} ${tip("在平台上重开这一台（沿用端口，被占了就另挑），可换人、可选规格")}>开机</button>` : "",
     !x.off ? off : ""].join("");
 }
 // 卡片上一行「在跑什么」：自用主机列顶层的 work（平台操作口径：worker 的任务，含只用 CPU 的，加 labmon 之外的进程），组内服务器列探到的各组负载
@@ -195,9 +199,11 @@ function fleetCard(x) {
 function poolGroup([p, priv]) {
   const q = D.fleet.quota || {}, info = fops().pools?.[p] || {}, op = fops().op;
   const n = priv ? q.private : q.public, max = priv ? q.private_max : q.public_max, full = max != null && n >= max;
-  const sp = (info.specs || []).find(x => x.specificationId === info.spec);
+  const specs = info.specs || [], sp = specs.find(x => x.specificationId === info.spec);
+  const spText = specs.length > 1 ? `<span ${tip(`${ts(fops().pools_t)} 与平台核对时读的`)}>各规格空：${specs.map(s => `${esc(s.specificationName || s.specificationId)} ${esc(s.quantityAvailable)}/${esc(s.specificationAmount)}`).join(" · ")}</span>`
+    : sp ? `<span ${tip(`${ts(fops().pools_t)} 与平台核对时读的`)}>平台上这种规格空 ${esc(sp.quantityAvailable)} / ${esc(sp.specificationAmount)}</span>` : "";
   const head = [(info.nodes || []).length ? `节点 ${esc(info.nodes.map(fNode).join("、"))}` : "", max != null ? `${priv ? "专用" : "公用"}池已开 ${n} / ${max} 台${priv ? "" : "（全组）"}${full ? `<span class="badge b-mute" style="margin-left:6px" ${tip("到上限了：要给别人用，在一台上点「换人」，或先关掉一台")}>已满</span>` : ""}` : "",
-    sp ? `<span ${tip(`${ts(fops().pools_t)} 与平台核对时读的`)}>平台上这种规格空 ${esc(sp.quantityAvailable)} / ${esc(sp.specificationAmount)}</span>` : ""].filter(Boolean).join(" · ");
+    spText].filter(Boolean).join(" · ");
   const add = !p || full || !canOps() ? "" : `<button class="fc add" data-fop="wiz" data-kind="open" data-pool="${esc(p)}" ${info.ref && !op?.active ? "" : "disabled"} ${info.ref ? "" : tip("这个池还没有模板作业：先与平台核对")}>
         <span class="plus">+</span><b>开新的</b><span class="sm mut">${max == null ? "没写上限" : `还能开 ${max - n} 台`}；端口自动挑</span></button>`;
   return `<div class="pg"><div class="pg-hd"><b>${esc(p || "没写资源池")}</b><span class="chip">${priv ? "专用" : "公用"}</span><span class="sm mut">${head}</span></div>
@@ -305,7 +311,7 @@ function fleetTabs(tab) {
 function opStrip(P, h) {
   const op = fops().op, x = P.sid ? srvById(P.sid) : null, st = op?.steps || [];
   const what = st.length ? `${opName(op.kind)}${op.active ? `进行中：第 ${Math.min(st.length, st.filter(v => v.state === "ok").length + 1)} / ${st.length} 步` : op.error ? "停下了" : "完成"}`
-    : FCAP ? "等你输验证码" : FWIZ ? `${FWIZ.kind === "swap" ? "换人" : "开机"}向导开着` : "续租确认开着";
+    : FCAP ? "等你输验证码" : FWIZ ? `${FWIZ.kind === "swap" ? "换人" : FWIZ.kind === "move" ? "换节点" : "开机"}向导开着` : "续租确认开着";
   return `<div class="fstrip${op?.error ? " bad" : ""}"><span>${esc(what)}${x ? `<span class="mut"> · ${esc(fName(x))}</span>` : P.pool ? `<span class="mut"> · ${esc(P.pool)}</span>` : ""}</span><a href="${esc(h)}" data-drw="${esc(h)}">查看</a></div>`;
 }
 async function loadSer(id) {
@@ -608,10 +614,11 @@ function srvDrawer(id) {
       + (a.vscode || a.terms ? `<div class="sm mut" style="margin-top:6px">${[a.vscode ? "有 VS Code 远程连着" : "", a.terms ? `${a.terms} 个 ssh 终端` : ""].filter(Boolean).join("，")}（说明有人在用，但不算 GPU 负载）</div>` : ""));
     if (L?.ok) s += dSec("本地盘", lwBlock(L, {started: x.started, loc: hm?.status?.storage?.local, why: x.mine ? "worker 还没扫到：限速轮流扫，开机后头一轮要一会儿"
       : borrowOf(x) ? "借用中不扫：扫出来的混着我们的" : L.used < 0.0625 ? "开机以来几乎没写" : "下一次探测时扫"}),
-      `<span class="sm mut">续租、关机、换人前要挪的</span>`);
+      `<span class="sm mut">续租、关机、换人、换节点前要挪的</span>`);
   }
   s += weekSec(x);
   s += dSec("开机参数", Object.keys(e).length ? `<details class="dfold"><summary class="sm">${esc((e.image || "").split("/").pop() || "—")} · ${esc(e.src || "")} ${ts(e.t)}</summary>${kvHtml([["镜像", `<code>${esc(e.image || "—")}</code>`],
+    ...(e.spec ? [["规格", esc(specName(x.pool, e.spec))]] : []),
     ["端口", esc(Object.entries(e.ports || {}).map(([p, c]) => `${p}→${c}`).join(" ") || "—")], ["配置", esc(`${e.cpu ?? "—"} 核 · ${e.memory ?? "—"} GB 内存 · ${e.disk ?? "—"} GB 硬盘 · ${e.gpu ?? "—"} 卡`)],
     ["IP", esc(e.ip || "—")], ["作业", `${esc(e.job || "—")}${e.job_id ? ` <span class="mut">id ${esc(e.job_id)}</span>` : ""}`], ["启动命令", `<code>${esc(e.run_cmd || "—（与平台核对时补存）")}</code>`],
     ...((e.volumes || []).length ? [["挂载", e.volumes.map(esc).join("<br>")]] : [])])}</details>` : `<div class="empty">在「服务器」选项卡点「与平台核对」，或 labmon fleet import ${esc(id)} &lt;Json 文件&gt;。</div>`);
