@@ -2012,6 +2012,80 @@ t("timeline", "窄屏（343 宽）：近景同一比例，渲染不漏 NaN/undef
   const tl = el(A, "tlbox").innerHTML; clean(tl, "窄屏时间线"); has(tl, 'viewBox="0 0 343 ');
   const f = fitOf(A, DEND); ok(f.w <= 2 * H && near(f.now, 1 / 3), JSON.stringify(f));
 });
+t("timeline", "#178 并行车道 par=10 重叠 7 层不重叠、超 4 道压细不写字；超上限最后一道合成「+N 个」聚合条", () => {
+  const A = pjCtx(J("project_par10.json"), EVN);
+  run(A, `TL.v = {a: ${-2 * H}, b: ${2 * H}}; drawTimeline()`);
+  const tl = el(A, "tlbox").innerHTML; clean(tl, "par10 时间线");
+  // 提取 p10_r0..r6 的主矩形（class="j"）的 y 与 height，验证 7 层互不重叠且无条内文字
+  const rects = id => {
+    const m = tl.match(new RegExp(`<g class="jg[^"]*" data-j="${id}">([\\s\\S]*?)</g>`));
+    ok(m, "缺少任务条 " + id);
+    const r = m[1].match(/<rect x="([^"]+)" y="([^"]+)" width="([^"]+)" height="([^"]+)"[^>]*class="j"/);
+    ok(r, "缺少主矩形 " + id);
+    return {x: +r[1], y: +r[2], w: +r[3], h: +r[4], hasText: m[1].includes("<text ")};
+  };
+  const rs = Array.from({length: 7}, (_, i) => rects(`p10_r${i}`)).sort((a, b) => a.y - b.y);
+  for (let i = 1; i < rs.length; i++) ok(rs[i - 1].y + rs[i - 1].h <= rs[i].y + 0.01, `p10 第 ${i} 层与前一层重叠：${JSON.stringify(rs)}`);
+  ok(rs.every(r => !r.hasText), "超过 4 道时条上不该写字：" + JSON.stringify(rs));
+  const pk10 = run(A, 'parPack(D.lanes.find(x => x.id === "par/jobs/p10.txt"), rowJobs(D.lanes.find(x => x.id === "par/jobs/p10.txt"), "srv-a"))');
+  ok(pk10.n === 7 && pk10.h <= 86 && !pk10.over, "par=10 7 层应分 7 道且行高 <= 86：" + JSON.stringify(pk10));
+  // par=6 但重叠 8 层：前 5 道正常画，第 6 道合成 +3 个聚合条，悬停列明细
+  const pk6 = run(A, 'parPack(D.lanes.find(x => x.id === "par/jobs/p6.txt"), rowJobs(D.lanes.find(x => x.id === "par/jobs/p6.txt"), "srv-a"))');
+  ok(pk6.n === 6 && pk6.over && pk6.h <= 86, "par=6 8 层应封顶 6 道并触发聚合：" + JSON.stringify(pk6));
+  has(tl, 'class="tl-more"', "缺少溢出聚合条");
+  has(tl, ">+3 个</text>", "聚合条应标 +3 个");
+  const tp = tips(tl);
+  has(tp, "另有 3 个重叠任务", "聚合条悬停应列明细");
+  for (const id of ["p6_j5", "p6_j6", "p6_j7"]) has(tp, id, "聚合条悬停应包含 " + id);
+  // 窄屏渲染不漏 NaN/undefined
+  el(A, "tlbox").clientWidth = 343; run(A, "drawTimeline()");
+  clean(el(A, "tlbox").innerHTML, "窄屏 par10 时间线");
+});
+t("timeline", "#178 占用行（工作台卡行与项目页同机别的项目）共用防叠与聚合，超 6 道合成「+N 个」", () => {
+  const mkOcc = n => Array.from({length: n}, (_, i) => ({p: "proj-b", n: `occ_${i}`, lane: "车道 1", t0: NOW - 1800 + i * 30, t1: NOW + 1800 + i * 30, g: [0], st: "run"}));
+  const O = ovCtx(clone(OV), RR); page(O, "#/");
+  run(O, `D.occ["srv-a"] = ${JSON.stringify(mkOcc(8))}; TL.v = {a: ${-2 * H}, b: ${2 * H}}; drawTimeline()`);
+  const otl = el(O, "tlbox").innerHTML; clean(otl, "工作台高重叠占用");
+  has(otl, 'class="tl-more"', "工作台占用行应出聚合条");
+  has(otl, ">+3 个</text>", "工作台占用行应聚合多出的 3 条");
+  has(tips(otl), "另有 3 个重叠任务", "工作台聚合条悬停明细");
+  const P2 = pjCtx(clone(PJ), {...EVN, occ: {"srv-a": mkOcc(8)}});
+  run(P2, `TL.v = {a: ${-2 * H}, b: ${2 * H}}; drawTimeline()`);
+  const ptl = el(P2, "tlbox").innerHTML; clean(ptl, "项目页同机别的项目高重叠");
+  has(ptl, 'class="tl-more"', "项目页 othersRow 应出聚合条");
+  has(ptl, ">+3 个</text>", "项目页 othersRow 应聚合多出的 3 条");
+});
+t("timeline", "#143 左右平移视图时道号与行高不变；项目页拖动期间锁行结构、松手后收紧", () => {
+  // 1. 工作台：srv-a 卡 0 有多条重叠任务，只平移视图（不触发拖动）使最早一条滑出窗口，同一条任务的 y 与整图高度不变
+  const O = ovCtx(clone(OV), RR); page(O, "#/");
+  const ovOcc = [
+    {p: "proj-a", n: "early_0", lane: "车道 1", t0: NOW - 7200, t1: NOW - 3000, g: [0], st: "done"},
+    {p: "proj-b", n: "mid_1", lane: "车道 1", t0: NOW - 5400, t1: NOW - 1200, g: [0], st: "done"},
+    {p: "proj-a", n: "late_2", lane: "车道 1", t0: NOW - 4800, t1: NOW + 600, g: [0], st: "run"},
+  ];
+  run(O, `D.occ["srv-a"] = ${JSON.stringify(ovOcc)}; TL.v = {a: ${-3 * H}, b: ${H}}; drawTimeline()`);
+  const svgH = X => Number((el(X, "tlbox").innerHTML.match(/<svg[^>]*height="([^"]+)"/) || [])[1]);
+  const barY = (X, name) => {
+    const m = el(X, "tlbox").innerHTML.match(new RegExp(`<rect x="[^"]+" y="([^"]+)"[^>]*data-tip="[^"]*${name}`));
+    ok(m, "找不到任务条 " + name); return +m[1];
+  };
+  const h1 = svgH(O), y1 = barY(O, "late_2");
+  // 向右平移使 early_0 完全滑出视图
+  run(O, `TL.v = {a: ${-2600}, b: ${-2600 + 4 * H}}; drawTimeline()`);
+  const h2 = svgH(O), y2 = barY(O, "late_2");
+  ok(h1 === h2 && y1 === y2, `工作台平移后高度或道号跳动：h ${h1}→${h2}, y ${y1}→${y2}`);
+  // 2. 项目页：拖动锁期间平移到无任务区间，行数、图高与左栏宽不收缩；松手解锁后收紧
+  const A = pjCtx(clone(PJ), EVN);
+  run(A, `TL.v = {a: ${-4 * H}, b: ${4 * H}}; drawTimeline()`);
+  const ph0 = svgH(A), pl0 = run(A, "TL.g.L"), rows0 = (el(A, "tlbox").innerHTML.match(/<text class="lab"/g) || []).length;
+  run(A, `tlLock(); TL.v = {a: ${20 * H}, b: ${28 * H}}; drawTimeline()`);
+  const ph1 = svgH(A), pl1 = run(A, "TL.g.L"), rows1 = (el(A, "tlbox").innerHTML.match(/<text class="lab"/g) || []).length;
+  ok(ph1 >= ph0 && pl1 >= pl0 && rows1 >= rows0, `项目页拖动中不该收缩：h ${ph0}→${ph1}, L ${pl0}→${pl1}, rows ${rows0}→${rows1}`);
+  // 松手解锁后重画，允许收紧
+  run(A, "TL.lk = null; drawTimeline()");
+  const ph2 = svgH(A);
+  ok(ph2 <= ph1, `松手后应允许收紧：${ph1}→${ph2}`);
+});
 t("escape", "恶意项目快照与事件：转义", () => {
   const E = pjCtx(PJE, EVE); run(E, 'LS.get = (k, d) => k === "filter" ? "all" : d; render()');
   const h = app(E); ok(!raw(h), "项目页没转义"); has(h, BADESC);
