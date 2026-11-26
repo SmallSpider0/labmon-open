@@ -1,6 +1,11 @@
-# 在 Codex 与 Claude 中持续等实验
+# 在各客户端（Antigravity、Codex 与 Claude）中持续等实验
 
 共用 [SKILL.md](SKILL.md) 的项目、SSH、清单和告警流程。这里只处理会话工具差异；先看当前会话实际提供的工具。
+
+## Antigravity
+
+1. 在项目目录执行 `labmon wait -c monitor.toml`；等指定任务时加 `--job 名称`。使用 `run_command` 工具运行，设置 `WaitMsBeforeAsync` 转为后台任务，保存任务 ID。
+2. 命令后台运行时系统会在输出到达或进程退出时响应式唤醒（Reactive Wakeup），无需轮询；收到完成通知后读取输出与退出码，按规则处理。
 
 ## Codex
 
@@ -35,4 +40,4 @@
 
 在项目已有的交接记录中简记项目目录、等待命令（含任务名）、已收到未处理的事件，以及尚存的 session/task ID。续接时先核这个进程是否仍可访问；跨会话 ID 可能失效，先核对本机原等待进程并收尾，再重挂，避免留下两份监听。用 `labmon status` 补看当前状态（`labmon check` 末尾另列出这期间页面上的改动），不能只等旧告警再通知一次。
 
-Skill 只提供操作方式，不安装新的守护或唤醒服务。Codex 的技能发现说明见 [OpenAI 官方文档](https://learn.chatgpt.com/docs/build-skills)；具体进程等待能力以当前工具说明和实测为准。
+Skill 只提供操作方式，不安装新的守护或唤醒服务。各客户端的技能发现说明见官方文档；具体进程等待能力以当前工具说明和实测为准。

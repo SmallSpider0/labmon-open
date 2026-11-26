@@ -19,8 +19,7 @@ labmon：本机各科研项目在实验室 GPU 服务器上跑实验的统一工
 
 - 回复、文档、代码注释、页面文字都用中文；代码标识符、命令、路径保留原文。
   上下文压缩、会话续接之后也用中文回复，汇报与小结同样，不跟着英文摘要走。
-  压缩与续接时 `.claude/settings.json` 的 SessionStart hook 注入这条提醒：在仓库主目录与 worktree 里另起的会话收得到；
-  Agent 工具派出的子 agent 自己压缩时会不会触发，Claude Code 文档没写，所以给子 agent 的 brief 里照样写“用中文”。
+  Claude 环境下由 `.claude/settings.json` 的 SessionStart hook 注入这条提醒；其他客户端（如 Antigravity / Codex）由客户端系统规则保证。子 agent brief 里照样写“用中文”。
 - 页面上提到某个人用“这人”或名字，不用他/她。
 
 ## 沟通与主动推进
@@ -131,7 +130,7 @@ Issue、PR、评论、源码、测试夹具和 CI 输出均可公开阅读。只
 - 公开仓库的分支规则由维护者设置；无论平台设置如何，合并前均须遵守本节规则与 CI。
 - **实验会话**遇到 labmon 的问题：用 `labmon report` 提交给看板（现象、证据、主机、时刻），不直接改 main、不绕开（[SKILL「发现 labmon 的问题」](skills/lab-experiments/SKILL.md#发现-labmon-的问题)）。
   开发 agent 接手时先自己核实证据（复现，或查 worker 状态、日志、代码），实验会话的判断只当线索：它曾把看门狗的归属判断错，错误前提写进了 SKILL（f460888 更正）。
-- `workflow` 标签的 Issue 改的是工作流本身：本节、下两节、`docs/interactions.md`、`.github/`、`.claude/settings.json` 与 `docs/workflow.html`。
+- `workflow` 标签的 Issue 改的是工作流本身：本节、下两节、`docs/interactions.md`、`.github/`、客户端配置（如 `.claude/settings.json`）与 `docs/workflow.html`。
 
 ### 流程总览
 
@@ -182,7 +181,7 @@ Issue、PR、评论、源码、测试夹具和 CI 输出均可公开阅读。只
 
 主会话（仓库主目录里和维护者对话的总控会话；worktree 里另起的会话、Agent 工具派出的子 agent 都不是）只做总控：开 Issue、派子 agent、转达维护者的决定、读子 agent 几行的报告。维护者在对话里给的批复（方案定了、待定问题的结论），由主会话把去掉私人部署与研究信息的批复摘要贴到 Issue 评论里，写明“维护者已定”和日期；原话保留在私有会话。不自己读整份代码与日志，不自己改代码或部署。
 定档、合批也由主会话做（[「怎么开发」](#怎么开发)）。例外只有[第 0 档急修](#怎么开发)：维护者在场明说当场修时，主会话自己在 worktree 里改、测、推到 main，再按[部署步骤](#部署到本机看板)部署，事后在 Issue 上记一笔。
-PR 合并后，由总控把它从会话的 PR 栏关掉（`unbind_pr`），栏里只留没合并的。
+PR 合并后，总控清理已合并 PR（若客户端有会话 PR 栏，如 `unbind_pr`，将其关掉），栏里只留没合并的。
 
 **总控的等待**（2026-11-09 维护者定，Issue #44；Issue #58 改成总控自己挂，不再另起值守会话）：总控在后台挂一个常驻等待，不靠转告也知道有新 Issue（如实验会话开的 `from-experiment`）与新报告。续接、应用重启后后台命令断了，总控重新挂上。
 
@@ -235,10 +234,10 @@ Codex 派工时由总控自动选型（#281）：
   - Issue 号、PR 号、提交号从 `gh` 的输出复制，不凭记忆写（#57 的 brief 把号写成了 56）；子 agent 用到 PR 号、提交号时自己用 `gh` 查，不照抄 brief。
   - 唯一实现表在 `docs/concepts.md`（不随 AGENTS.md 自动加载），动手前在里面搜要动的概念。
   - 其余照 AGENTS.md（已自动加载）与 Issue 原文：brief 不复述 Issue 内容、不加实现方案。
-- **负责部署的 agent 不在 worktree 里派**（Agent 工具不加 `isolation: worktree`）：worktree 里的 agent 对主 checkout 执行不了 git，拉不了代码、重启不了看板（11-08 介绍页与 #28 措辞两次卡在这里）。直接提交 main 的改动同理：在 worktree 里改完推到 `origin main`，由不在 worktree 里的部署 agent 在主 checkout 收尾（2026-11-08 维护者定）。
+- **负责部署的 agent 不在 worktree 里派**（派工工具不启用独立 worktree 隔离，如 Agent 工具不加 `isolation: worktree`，直接在主 checkout 派工）：worktree 里的 agent 对主 checkout 执行不了 git，拉不了代码、重启不了看板（11-08 介绍页与 #28 措辞两次卡在这里）。直接提交 main 的改动同理：在 worktree 里改完推到 `origin main`，由在主 checkout 的部署 agent 收尾（2026-11-08 维护者定）。
 - **兜底审查用全新的子 agent**，只给 PR 号与档位（PR 正文里有 Issue 与影响清单），不给实现者的结论，免得被带着走。
 - **交接**：一个子 agent 停在检查点（设计写完、实现与测试过了、PR 开了），交接写在 Issue 评论里，按「沟通与主动推进」附当前目标、最新决定、已验证证据与剩余工作。
-  Claude 的交接线按强度档分：medium 约 20 万 token，high、xhigh 约 40 万。Codex 按当前会话的上下文预算判断。需要交接时做到下一个检查点，不在调试或比较方案做到一半时交接。
+  各客户端交接预算：Claude 按强度档（medium 约 20 万 token，high、xhigh 约 40 万）；Antigravity / Codex 按会话上下文预算与窗口上限判断。需要交接时做到下一个检查点，不在调试或比较方案做到一半时交接。
 - **接着用同一个 agent，只有不停顿时才省**（Issue #73 的 Claude 实测）：停了几分钟以上再接着用，要把整段上下文重写一遍缓存（设计后接着实现 17–31 万、修阻塞 35 万），
   比新开一个（开工底子 7 万多，加上要读的代码）还贵。所以：
   - 第 3 档由同一个实现者从设计做到实现，没有“必须等”的问题就不停；第 4 档的设计者定了以后接着实现，也不换人。
@@ -311,11 +310,14 @@ LABMON_STATE=$(mktemp -d) LABMON_NO_NOTIFY=1 LABMON_NO_KEYCHAIN=1 LABMON_LAN=off
   别的主机的假状态（`todo`、`share`、`plan`、`t`、`stopped`），推进时钟看过期（例子见 `tests/test_worker.py` 的 `CrossHostTest`）。
 - 改了页面：`tests.test_pages` 会渲染工作台、项目页与登录页、编译脚本，再在 node 的 DOM 桩里逐个路由渲染并断言（不漏 NaN/undefined、恶意字符串都转义、各处回归）。
   快照在 `tests/pages/snapshots.py`，加了字段或页面分支就补进去，断言在 `tests/pages/check.js`。
-  然后在 Claude 桌面应用的内置浏览器（Browser 面板，工具 `mcp__Claude_Browser__*`）里逐个路由核对离线预览（`#/`、`#/host/srv-a`、`#/p/proj-a`、`#/fleet`、抽屉），宽屏与窄屏各截一次图自己看（截图不进分支，PR 正文按模板用文字写看了哪些路由、各看到了什么），确认控制台没有报错；
+  然后在各客户端对应的浏览器工具核对离线预览（`#/`、`#/host/srv-a`、`#/p/proj-a`、`#/fleet`、抽屉），宽屏与窄屏各看一次（截图不进分支，PR 正文按模板用文字写看了哪些路由、各看到了什么），确认控制台没有报错；
   改了按身份收起的按钮、账号自助与人员管理或登录页的，`--as` 的三种身份都看。预览怎么起（`tests/pages/preview.py`、worktree 里不能按名字起的情况）、窄屏、读控制台与它放了哪些数据（只该有 404、501 两类报错），见 [tests/pages/README.md](tests/pages/README.md)。
-- **验收用完立即关闭自己开的标签**（#224）。实现、审查和部署的人工页面验收用内置浏览器。开本任务专用的标签，记下 `preview_start` 回的 `tabId`，验收期间尽量只复用这一个。
-  用完立即 `tabs_close` 关掉，失败或中断也清理；只关确认由本任务开的标签。先关预览标签，再停预览服务：按名字起的用 `preview_stop`（传它回的 `serverId`），Bash 后台起的结束那条后台命令。
-  验收结果写明是否已确认清理完毕。中断时有残留就记在交接里，写清可识别的标签（地址、`tabId`）与没停的预览服务，便于接手清理。
+  页面人工验收方式按客户端并列：
+  1. **Antigravity**：使用 `browser` 子代理（`Model: "flash"`）核验离线预览页面与控制台报错；Swarm worker 若环境无内置浏览器工具，可回退本机无头浏览器脚本核对，或交总控调 `browser` 验收；
+  2. **Claude 桌面应用**：使用内置浏览器（Browser 面板，`mcp__Claude_Browser__*`）；缺省参数在 `.claude/launch.json` 登记为 `labmon-preview`，worktree 子 agent 后台跑 `preview.py` 并用 `preview_start` 传 url 检验；
+  3. **Codex / CLI 等无原生内置浏览器环境**：后台启动 `preview.py` 后，用无头浏览器脚本（或测试桩）做 DOM / 接口核对，或交总控/人工核验。
+- **验收用完立即清理标签与进程**（#224）。开本任务专用的标签与服务，用完立即关闭打开的标签并停掉预览服务（如 `tabs_close`、`preview_stop` 或结束后台 `preview.py` 进程），失败或中断也清理；只关确认由本任务开的标签。先关预览标签，再停预览服务。
+  验收结果写明是否已确认清理完毕。中断时有残留就记在交接里，写清可识别的标签或没停的预览服务，便于接手清理。
 - Bash 里的 `grep` 是 shell 函数，要计数或要可靠结果时用 `/usr/bin/grep`。
 
 ### 验收隔离与清理
