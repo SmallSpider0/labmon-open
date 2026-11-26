@@ -85,11 +85,13 @@ body.mini .sfoot .nav { width: 40px; }
 .bar-top { position: sticky; top: 0; z-index: 3; background: var(--card); border-bottom: 1px solid var(--line);
            padding: 10px 20px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .bar-top h1 { font-size: 16px; font-weight: 650; margin: 0; }
-.bar-top:has(.project-title) { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 4px 10px; }
-.project-title { min-width: 0; display: flex; gap: 8px; align-items: center; }
+.bar-top:has(.project-title) { gap: 4px 10px; }
+.project-title { flex: 1 1 0; min-width: 4em; display: flex; gap: 8px; align-items: center; }
+.project-title .crumb { flex: none; white-space: nowrap; }
 .project-title h1 { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.project-actions { display: flex; gap: 6px; white-space: nowrap; }
-.project-update, .project-feedback { grid-column: 1 / -1; overflow-wrap: anywhere; }
+.project-actions { display: flex; gap: 6px; flex: none; white-space: nowrap; }
+.project-actions:empty, .project-feedback:empty { display: none; }
+.project-feedback { flex-basis: 100%; overflow-wrap: anywhere; }
 .crumb { color: var(--muted); font-size: 12px; }
 #view { padding: 14px 20px 30px; }
 #frames { flex: 1; display: flex; }
@@ -869,7 +871,7 @@ body.more-open { overflow: hidden; }
   #side { display: none; }                                               /* 侧栏换成底栏 + 「更多」 */
   #tabbar { display: flex; }
   .dsk, .crumb { display: none; }                                         /* 只在宽屏显示的字 */
-  .bar-top .btn[data-now] { min-width: 32px; padding: 0 7px; justify-content: center; }
+  .bar-top .btn:has(.ico) { min-width: 32px; padding: 0 7px; justify-content: center; }
   #view { padding-bottom: calc(30px + var(--tabh)); }
   #frames iframe { min-height: calc(100vh - 50px - var(--tabh)); margin-bottom: var(--tabh); }
   #main { height: auto; overflow: visible; }

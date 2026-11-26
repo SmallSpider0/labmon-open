@@ -325,7 +325,9 @@ t("overview", "嵌着项目页时更新时间、动作和反馈分开", () => {
   run(O, 'document.querySelectorAll = s => s.includes("iframe") ? [FR] : []');
   O.location.hash = "#/p/proj-a"; run(O, "render(true)"); run(O, "render(false)");
   const top = el(O, "top").innerHTML;
-  has(top, "Alpha 实验"); has(top, run(O, `tsHM(${NOW - 3})`), "取嵌着的页面的时刻");
+  has(top, "Alpha 实验");
+  has(top, `<span class="dsk">${run(O, `tsMD(${NOW - 3})`)} </span>${run(O, `tsHM(${NOW - 3})`)}<span class="dsk"> 更新</span>`, "取嵌着的页面的时刻并与其它顶栏一致");
+  ok(!top.includes("project-update"), "更新时间不应再用独占一行的 project-update");
   ok(!top.includes("刚采过"));
   const actions = html => html.match(/<div class="project-actions">([\s\S]*?)<\/div>/)?.[1];
   O.FR.contentWindow.embedState = () => ({now: NOW, offline: "ECONNREFUSED", busy: true}); run(O, "render(true)");

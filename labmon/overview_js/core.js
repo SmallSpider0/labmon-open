@@ -296,17 +296,18 @@ function topbar(r) {
     return `<div class="account-content account-top"><h1>我的账号</h1>${LIVE && ME?.account ? meTabs(r.tab) : ""}
       ${off ? `<div class="account-feedback" role="status">${offBadge(off)}</div>` : ""}</div>`;
   }
+  const upd = `<span class="sm mut nw" style="${stale ? "color:var(--bad);font-weight:600" : ""}" ${tip(`${ts(gen)} 更新。每分钟采集一次，页面每 15 秒取一次`)}><span class="dsk">${tsMD(gen)} </span>${tsHM(gen)}<span class="dsk"> 更新</span>${stale ? `（${Math.round(age / 60)} 分钟未更新）` : ""}</span>`;
   if (r.kind === "p") {
     const writable = canWrite(r.id), busy = BUSY || fs?.busy;
     return `<div class="project-title"><span class="crumb">项目 /</span><h1 ${tip(title)}>${esc(title)}</h1></div>
+      ${upd}
       <div class="project-actions">${writable ? `<button class="btn" data-now ${busy ? "disabled" : ""} ${tip("立即采集一次")} aria-label="立即采集">${icon("renew")}<span class="dsk">立即采集</span></button>` : ""}
         ${LIVE ? `<button class="btn" data-drw="${esc(DH.proj(r.id))}" aria-label="管理" ${tip("这个项目登记在哪几台主机、调度与配置")}>${icon("gear")}<span class="dsk">管理</span></button>` : ""}</div>
-      <div class="project-update sm mut" style="${stale ? "color:var(--bad);font-weight:600" : ""}">${tsHM(gen)} 更新${stale ? `（${Math.round(age / 60)} 分钟未更新）` : ""}</div>
       <div class="project-feedback" role="status">${offBadge(off) || (busy ? '<span class="sm mut">采集中…</span>' : "")}</div>`;
   }
   return `${crumb ? `<span class="crumb">${crumb} /</span>` : ""}<h1>${esc(title)}</h1>${extra}<span class="sp"></span>
     ${offBadge(off)}
-    <span class="sm mut nw" style="${stale ? "color:var(--bad);font-weight:600" : ""}" ${tip(`${ts(gen)} 更新。每分钟采集一次，页面每 15 秒取一次`)}><span class="dsk">${tsMD(gen)} </span>${tsHM(gen)}<span class="dsk"> 更新</span>${stale ? `（${Math.round(age / 60)} 分钟未更新）` : ""}</span>
-    ${canWrite(r.kind === "p" ? r.id : undefined) ? `<button class="btn" data-now ${BUSY ? "disabled" : ""} ${tip("立即采集一次")} aria-label="立即采集">${icon("renew")}<span class="dsk">${BUSY ? "采集中…" : "立即采集"}</span></button>` : ""}
+    ${upd}
+    ${canWrite() ? `<button class="btn" data-now ${BUSY ? "disabled" : ""} ${tip("立即采集一次")} aria-label="立即采集">${icon("renew")}<span class="dsk">${BUSY ? "采集中…" : "立即采集"}</span></button>` : ""}
     `;
 }
