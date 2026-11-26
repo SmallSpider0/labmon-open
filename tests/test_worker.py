@@ -1122,6 +1122,15 @@ class AdmissionUnitTest(UnitBase):
             ],
         }
         self.assertEqual(self.m.other_load(paused_dir_st, "bp"), {"running": 0, "queued": 0, "until": None})
+        # Codex 审查：目录 paused 文件暂停但仍有任务在收尾时，plan 中未运行后续任务不计入排队与 until，保留收尾任务
+        paused_tail_st = {
+            "running": [{"project": "p2", "root": "/x/p", "queue": "jobs/p.txt", "name": "r1"}],
+            "todo": [{"project": "p2", "root": "/x/p", "queue": "jobs/p.txt", "jobs": ["r1", "p_later"], "held": "paused"}],
+            "plan": {"t": now, "lanes": [{"project": "p2", "root": "/x/p", "queue": "jobs/p.txt",
+                                          "jobs": [{"name": "r1", "t0": now - 600, "t1": now + 1200, "run": True},
+                                                   {"name": "p_later", "t0": now + 1200, "t1": now + 36000}]}]},
+        }
+        self.assertEqual(self.m.other_load(paused_tail_st, "bp"), {"running": 1, "queued": 0, "until": float(now + 1200)})
 
     def test_fit_list_deps_by_state(self):
         # #144：写了 after= 的行按前置此刻的状态（同真放行的 dep_block）分：前置已跑成功的、afterany= 等的已跑完（失败也算）的照常分；

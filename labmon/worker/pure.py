@@ -216,8 +216,11 @@ def other_load(st, project):
     for ln in (st.get("plan") or {}).get("lanes") or []:
         if not isinstance(ln, dict) or ln.get("project") == project:
             continue
+        is_paused = (ln.get("project"), ln.get("root"), ln.get("queue")) in paused_lanes
         for j in ln.get("jobs") or []:
             if not isinstance(j, dict) or is_hold(j.get("name")):
+                continue
+            if is_paused and not j.get("run"):
                 continue
             if not j.get("run"):
                 q_plan += 1
