@@ -571,8 +571,9 @@ class MeasureMixin:
         on = set(j["gpus"]) | set(vb)
         if any(ovram.get(x) for x in on):
             j["owner_gpu"] = True             # 运行期间所用的卡上有过 labmon 之外的进程（借来的主机上据此判断 CUDA OOM 是不是被挤的）
+        stopped = any(procs[p].get("state") == "T" for p in pids)
         if u.get("t") and t > u["t"]:
-            if any(procs[p].get("state") == "T" for p in pids):
+            if stopped and u.get("sus_on") and t - u["t"] <= _C.STATUS_STALE_S:
                 u["sus_s"] = round(u.get("sus_s", 0.0) + t - u["t"], 1)
             dc = cpu_since(ticks, u.get("ticks"))
             u["cores"] = round(dc / (t - u["t"]), 2)
@@ -598,6 +599,10 @@ class MeasureMixin:
                 u["util_s"], u["util_wall"] = u.get("util_s", 0) + sum(ut) / len(ut) * (t - u["t"]), u.get("util_wall", 0) + t - u["t"]
                 u["util_mean"] = round(u["util_s"] / u["util_wall"])
         u.setdefault("pk0", round(t))         # 从何时起量窗口核数（pks）：开跑的就是开跑时，接管旧 worker 的从接管起，满 CPU_WARM_S 才回收
+        if stopped:
+            u["sus_on"] = True
+        else:
+            u.pop("sus_on", None)
         u.update(t=t, ticks=ticks, rchar=rd, wchar=wr, nproc=len(pids), ram=round(ram, 2), ram_peak=round(max(ram, u.get("ram_peak") or 0), 2),
                  vram=vram, vram_peak=max(vram, u.get("vram_peak") or 0), vram_by=vb)
         card, host = (sum(_C.intruders(s, on, jobs, gp, None, j), []) for s in ("gpu", "host"))

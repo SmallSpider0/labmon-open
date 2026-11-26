@@ -1876,11 +1876,12 @@ class AdmissionUnitTest(UnitBase):
         t0 = 10000.0
         j = {"key": "q1", "kind": "queue", "name": "a1", "project": "p", "pid": 101, "t0": t0, "est_min": 60, "gpus": ["GPU-a"], "use": {}}
         self.w.info = {"gpus": [{"i": 0, "uuid": "GPU-a", "name": "A", "total": 40000, "free": 40000}]}
-        # 首轮建立基线 → 正常跑 600s（不累）→ 子进程 T 状态挂起 1800s → 恢复跑 600s（不累）
+        # 首轮建立基线 → 正常跑 600s → 连续观测子进程 T 状态累计挂起 1800s（15 步 × 120s，首轮刚见 T 建基线不累）→ 恢复跑 600s
         p_run = {101: {"comm": "sh", "state": "S", "ppid": 1, "sid": 101, "ticks": 0, "hpid": None},
                  102: {"comm": "py", "state": "R", "ppid": 101, "sid": 101, "ticks": 10, "hpid": None}}
         p_sus = {101: p_run[101], 102: dict(p_run[102], state="T")}
-        for ts, pr in ((t0, p_run), (t0 + 600, p_run), (t0 + 2400, p_sus), (t0 + 3000, p_run)):
+        samples = [(t0, p_run), (t0 + 600, p_run)] + [(t0 + 600 + 120 * i, p_sus) for i in range(1, 17)] + [(t0 + 3000, p_run)]
+        for ts, pr in samples:
             self.w.measure(j, [101, 102], pr, [], {}, {}, [j], ts)
         self.assertEqual(j["use"]["sus_s"], 1800.0)
 
@@ -1891,11 +1892,32 @@ class AdmissionUnitTest(UnitBase):
         # run_tot 扣挂起：看板预计结束 t0 + 6000（墙钟 100 分），扣挂起 30 分 → 总长 70 分
         self.assertEqual(self.m.run_tot([j], {"p|a1": t0 + 6000}, t0 + 3000, {"p|a1"}), {("p", "a1"): [("a1", 70)]})
 
-        # 重启接管（adopt）保留累计 sus_s，且重启期间已完成按 .rc 收尾时 usage_rec 扣挂起并记 sus（秒）
+        # worker 停机 24 小时后接管、任务此刻恰好被挂起：绝不把未观测的 86400s 计为挂起，只保留已确认的 sus_s，之后连续观测到 T 才续累
+        j_gap = dict(j, use=dict(j["use"], sus_on=True))
         root = self.d / "proj"
         (root / "jobs").mkdir(parents=True)
         (root / "jobs" / "q.txt").write_text("a1|true   # est_min=60\n")
         q = self.m.load_queue({"_slug": "q1", "root": str(root), "jobs": "jobs/q.txt", "project": "p"})
+        Path(q["state"]).mkdir(parents=True, exist_ok=True)
+        j_gap["q"] = q
+        self.w.running = {"q1": j_gap}
+        self.w.write_status([q], [], {}, self.m.POLICY, {}, t0 + 3000)
+        w_gap = self.m.Worker(self.w.host)
+        old_alive = self.m.alive
+        self.m.alive = lambda pid, *a: pid == 101
+        try:
+            w_gap.adopt(q, ("a1", 101, t0, self.w.host))
+        finally:
+            self.m.alive = old_alive
+        jg = w_gap.running["q1"]
+        self.assertEqual(jg["use"]["sus_s"], 1800.0)
+        self.assertFalse(jg["use"].get("sus_on"))
+        w_gap.measure(jg, [101, 102], p_sus, [], {}, {}, [jg], t0 + 3000 + 86400)   # 接管后首轮见 T：重建基线，不计 86400s
+        self.assertEqual(jg["use"]["sus_s"], 1800.0)
+        w_gap.measure(jg, [101, 102], p_sus, [], {}, {}, [jg], t0 + 3000 + 86460)   # 连续观测到 T：累 60s
+        self.assertEqual(jg["use"]["sus_s"], 1860.0)
+
+        # 重启接管（adopt）且重启期间已完成按 .rc 收尾时：usage_rec 扣挂起并记 sus（秒）
         j["q"] = q
         self.w.running = {"q1": j}
         self.w.write_status([q], [], {}, self.m.POLICY, {}, t0 + 3000)
@@ -5542,7 +5564,7 @@ class DurationTest(unittest.TestCase):
         now = time.time()
         w.running = {"a": {"key": "a", "name": "vit_s42", "project": "bp", "t0": now - 9000, "gpus": ["G"]},
                      "b": {"key": "b", "name": "hold_x", "project": "bp", "t0": now - 60, "gpus": []}}
-        w.eta, w.eta_t = {"bp|vit_s42": now + 9000, "bp|hold_x": now + 60}, now - 30
+        w.eta, w.eta_prog, w.eta_t = {"bp|vit_s42": now + 9000, "bp|hold_x": now + 60}, {"bp|vit_s42", "bp|hold_x"}, now - 30
         self.assertEqual(w.run_tot(), {("bp", "vit"): [("vit_s42", 300)]})
         root = self.d / "bp"
         (root / "jobs").mkdir(parents=True)
@@ -5590,12 +5612,14 @@ class DurationTest(unittest.TestCase):
         w.queue_durs([q])
         self.assertEqual((w.durs["k"]["vit_s44"]["min"], w.durs["k"]["vit_s44"]["src"]), (300.0, "同类在跑的 1 个按进度估"))
 
-        # 兼容旧看板（eta.json 没有 prog 字段）：eta_prog 为 None，沿用原行为
+        # 不含 prog 字段的旧 eta.json：不留旧版兼容回退，视作无按进度外推（落回借比值/清单估时，避免估时回声）
         Path(w.p.eta).write_text(json.dumps({"t": now - 2, "jobs": {"bp|vit_s42": now + 17400}}))
         w.eta_m = None
         w.load_eta()
-        self.assertIsNone(w.eta_prog)
-        self.assertEqual(w.run_tot(), {("bp", "vit"): [("vit_s42", 300)]})
+        self.assertEqual(w.eta_prog, set())
+        self.assertEqual(w.run_tot(), {})
+        fh.eta = {"t": now - 2, "jobs": {"bp|vit_s42": now + 17400}}
+        self.assertEqual(fh.runs({"project": "bp", "name": "vit_s44"}), [])
 
     def test_concurrency_by_ratio(self):
         # #138：以前容差是“最接近的差 + 1”，单跑（conc 1）与两条挤一张卡（conc 2）落在一档，k=1、2、4 都给 120；按比例的差 |c − k| / k 分开

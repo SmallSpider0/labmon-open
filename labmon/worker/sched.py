@@ -579,14 +579,14 @@ def conc_key(k):
     return min(_C.CONC_MAX, max(1, int(round(k))))
 
 
-def run_tot(running, eta, eta_t, prog=None):
+def run_tot(running, eta, eta_t, prog=()):
     """在跑任务按日志进度估的总时长 {(项目, 同类名): [(任务, 分钟)]}：看板写来的预计结束（eta.json 的 jobs，写的时刻 eta_t 在任务开始之后才算）− 开始 − 累计挂起。
-    只认看板标进 eta.json 的 prog（真正按日志进度外推，#149）的任务；prog 为 None 时兼容不含 prog 的旧 eta.json。
+    只认看板标进 eta.json 的 prog（真正按日志进度外推，#149）的任务。
     同类还没有跑完的时，排队的按它估（duration 的 run，#67）。占位任务不算（它没有日志进度）。Worker.run_tot 与 fit（读状态里的 running）共用。"""
     out = {}
     for j in running:
         k = "%s|%s" % (j.get("project"), j["name"])
-        if _C.is_hold(j["name"]) or (prog is not None and k not in prog):
+        if _C.is_hold(j["name"]) or k not in prog:
             continue
         e = eta.get(k)
         sus = _M.job_sus(j, e) if e and e > j["t0"] else 0.0
@@ -1005,7 +1005,7 @@ class SchedMixin:
         try:
             m = _C.fsig(self.p.eta)
         except OSError:
-            self.eta, self.eta_prog, self.eta_t, self.eta_m = {}, None, 0, None
+            self.eta, self.eta_prog, self.eta_t, self.eta_m = {}, set(), 0, None
             return
         if m != self.eta_m:
             try:
@@ -1013,7 +1013,7 @@ class SchedMixin:
             except ValueError:
                 d = {}
             p = d.get("prog")
-            self.eta, self.eta_prog, self.eta_t, self.eta_m = d.get("jobs") or {}, set(p) if isinstance(p, list) else None, d.get("t") or 0, m
+            self.eta, self.eta_prog, self.eta_t, self.eta_m = d.get("jobs") or {}, set(p) if isinstance(p, list) else set(), d.get("t") or 0, m
 
     def run_end(self, j, now):
         """运行中任务的预计结束：看板写来的（任务开始后写的才算这一次）、否则 开始 + 累计挂起 + 预计时长；超了预计的剩余按 overrun_left 估（已跑不含挂起的 20%、至少 10 分钟，#149），
