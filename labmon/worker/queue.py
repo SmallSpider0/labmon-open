@@ -30,14 +30,15 @@ def regs(qdir):
     return out
 
 
-def registry(qdir):
-    """登记的队列（load_queue 载入，带登记文件 file）与坏了的登记 [(文件, 异常)]（不是 JSON、缺 root / jobs / project）。"""
+def registry(qdir, *, read_env=True):
+    """登记的队列（load_queue 载入，带登记文件 file）与坏了的登记 [(文件, 异常)]（不是 JSON、缺 root / jobs / project）。
+    read_env=False 时不读 .env、不查其存在（peers 认归属、休眠登记用，省掉共享盘 I/O）。"""
     qs, bad = [], []
     for f, reg in regs(qdir):
         try:
             if isinstance(reg, Exception):
                 raise reg
-            qs.append(dict(load_queue(reg), file=f))
+            qs.append(dict(load_queue(reg, read_env=read_env), file=f))
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             bad.append((f, e))
     return qs, bad
@@ -104,23 +105,30 @@ def env_path(root, jobs):
     return os.path.join(root, re.sub(r"\.txt$", ".env", jobs))
 
 
-def load_queue(reg):
-    """登记文件 → 队列：清单路径、.env、状态与日志目录（解析方式与看板探针相同）。"""
+def load_queue(reg, *, read_env=True):
+    """登记文件 → 队列：清单路径、.env、状态与日志目录（解析方式与看板探针相同）。
+    read_env=False 时跳过读 .env（休眠登记与 peers 认归属用，不碰清单目录里的 .env）。"""
     root, jobs = reg["root"], reg["jobs"]
-    envf = env_path(root, jobs)
-    env_txt = _C.read(envf, "") or ""
+    project = reg["project"]
+    if read_env:
+        envf = env_path(root, jobs)
+        env_txt = _C.read(envf, "") or ""
 
-    def env(key, default):
-        m = re.search(r"^%s=(\S+)" % key, env_txt, re.M)
-        return os.path.join(root, (m.group(1) if m else default).strip("\"'"))
+        def env(key, default):
+            m = re.search(r"^%s=(\S+)" % key, env_txt, re.M)
+            return os.path.join(root, (m.group(1) if m else default).strip("\"'"))
 
+        ev = envf if os.path.exists(envf) else None
+        st, lg = env("QUEUE_STATE", "results/_queue"), env("QUEUE_LOGS", "results/_logs")
+    else:
+        ev, st, lg = None, None, None
     return {"key": reg["_slug"], "root": root, "jobs": jobs, "jobs_path": os.path.join(root, jobs),
-            "env": envf if os.path.exists(envf) else None, "gpus": reg.get("gpus"),
+            "env": ev, "gpus": reg.get("gpus"),
             # 项目 id 就是登记时写的 --project（add 必写）
-            "project": reg["project"], "stop": reg.get("stop") or "boundary",
+            "project": project, "stop": reg.get("stop") or "boundary",
             "pool": bool(reg.get("pool")),        # 算力池放过来的（#79，worker add --pool）：看板认哪些清单是池放的（自用主机上与主人的清单分开），offers 不叫会话挪它
             "added_t": reg_added(reg),            # 登记时刻（epoch 秒）：状态里带出去，看板在同一清单登记在两台在用主机上时取晚的（collect.reg_queues）
-            "state": env("QUEUE_STATE", "results/_queue"), "logs": env("QUEUE_LOGS", "results/_logs")}
+            "state": st, "logs": lg}
 
 
 def hints(cmd):

@@ -11,6 +11,7 @@ import threading
 import traceback
 
 from . import common as _C
+from . import pure as _P
 from . import queue as _Q
 from . import disk as _D
 from . import measure as _M
@@ -82,6 +83,12 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.olists = {}                      # 别的主机上清单与 .env 的 {路径: (fsig, [(任务, 资源提示)] 或 .env 内容)}（list_of、list_env 缓存）
         self.offer, self.offer_t = [], 0.0    # 能接别处的任务（offers，写进状态给看板汇总挪法建议）与算出它的时刻
         self.bad_reg = set()                  # 坏了的登记文件（registry 跳过，只记一次事件）
+        self.reg_cache = {}                   # 本机登记文件 {路径: (fsig, st_mtime, reg 或 Exception)}：未变时不重读 JSON
+        self.reg_idle = {}                    # 空置计时与休眠态 {队列 key: {since, sig, sleep}}（#164；重启经 load_prev 找回）
+        self.sleep_marks = {}                 # 休眠队列的标记快照 {队列 key: {任务名: done|failed}}（转休眠时记，list_state 零 I/O 合入）
+        self.pool_reg_cache = {}              # 算力池登记文件缓存 {路径: (fsig, st_mtime, reg)}（pool_todo 用）
+        self.pool_idle = {}                   # 算力池待放清单的空置计时与休眠态 {队列 key: {since, sig, sleep}}（#164）
+        self.opars = {}                       # 算力池清单并行数缓存 {路径: (fsig, par)}（pool_todo 用）
         self.peer_regs = {}                   # 别的在用主机（peer_st）登记的清单 {(目录, 清单): [(登记文件修改时间, 主机)]}（peers 一起读，registry 认同一条清单归谁，#95）
         self.yielded = {}                     # 本机登记着、但别的在用主机登记得更晚的清单 {队列 key: 那台主机}（registry 不交给 tick，变了才记事件）
         self.stagers = {}                     # (请求 key, 任务) → 后台拷本地依赖的线程与结果（stage_bg）
@@ -503,6 +510,13 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             km = (old.get("keepalive") or {}).get("mine")   # 自己开的保活：停多久都沿用，按出生时钟认（ka_groups 对不上就清掉，换了容器不会认错）
             self.ka_mine = km if isinstance(km, dict) and {"g", "born"} <= set(km) else None
             self.thr_since = (old.get("throttle") or {}).get("since") if fresh else None   # 限流的起算时刻：升级、重启不从头计时
+            # 跑空登记的空置起点与休眠态（#164）：重启照常沿用，不重置 2 天倒计时；记着休眠时的清单与登记 file_sig，停机期间变动也会醒来
+            ri = old.get("reg_idle") if isinstance(old.get("reg_idle"), dict) else {}
+            self.reg_idle = {str(k): {"since": float(v["since"]),
+                                      "sig": tuple(v["sig"]) if isinstance(v.get("sig"), list) and len(v["sig"]) == 3 else None,
+                                      "rsig": tuple(v["rsig"]) if isinstance(v.get("rsig"), list) and len(v["rsig"]) == 3 else None,
+                                      "sleep": bool(v.get("sleep"))}
+                             for k, v in ri.items() if isinstance(v, dict) and isinstance(v.get("since"), (int, float))}
         except (OSError, ValueError, KeyError, TypeError, AttributeError):
             self.prev, self.voided = {}, []
         # 成组成员近一天的结果（gang.json 里结束了的）：重启后照样告诉同伴（#180）
@@ -716,8 +730,62 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         同一条清单只归一台（#95）：别的在用主机（peers 的 peer_st：worker 在、没 stop 过）也登记着它、登记文件比本机的新（共享盘上的修改时间，
         各台同一个时钟；一样新按主机 id 大的），这台不碰它（不接管、不放行，状态里不列，看板的车道与管理抽屉随之只在那台），变了才记一次事件。
         worker add 会把别处的登记搬走，两台都登记着的只有旧版留下的或两处同时登记的；那台不在了（归还、worker stop、状态过期）这台照常跑。
-        这台手上已在跑的照样盯到跑完（running 不靠登记）。第一轮也先读一次别的主机（peers）再定。"""
-        out, bad = _Q.registry(self.p.queues)
+        这台手上已在跑的照样盯到跑完（running 不靠登记）。第一轮也先读一次别的主机（peers）再定。
+        跑空满 IDLE_REG_S（2 天，#164）转休眠的登记：每轮只对清单文件做一次 file_sig（复用登记文件的 stat 判重登记），
+        不读 .env、状态目录与标记；清单文件或登记文件一变立即醒来照常排。"""
+        out, bad, seen_f = [], [], set()
+        prev_q = {(os.path.normpath(j.get("root") or ""), j.get("queue")) for j in getattr(self, "prev", {}).values() if j.get("kind") == "queue"}
+        for f in sorted(glob.glob(os.path.join(self.p.queues, "*.json"))):
+            try:
+                st = os.stat(f)
+            except OSError:                       # 这一轮刚被 rm、被 worker add 搬走
+                continue
+            seen_f.add(f)
+            rsig, mtime = (st.st_ino, st.st_mtime_ns, st.st_size), st.st_mtime
+            cached = self.reg_cache.get(f)
+            if cached and cached[0] == rsig:
+                reg, changed = cached[2], False
+            else:
+                changed = cached is not None
+                try:
+                    with open(f) as fh:
+                        reg = json.load(fh)
+                    reg["_slug"] = os.path.basename(f)[:-5]
+                except (OSError, ValueError, TypeError, AttributeError) as e:
+                    reg = e
+                self.reg_cache[f] = (rsig, mtime, reg)
+            if isinstance(reg, Exception):
+                bad.append((f, reg))
+                continue
+            try:
+                key, root, jobs = reg["_slug"], reg["root"], reg["jobs"]
+                _ = reg["project"]
+            except (KeyError, TypeError, AttributeError) as e:
+                bad.append((f, e))
+                continue
+            idle = self.reg_idle.get(key)
+            if changed or (idle and idle.get("rsig") and idle["rsig"] != rsig):   # 重新 worker add：立即唤醒
+                self.reg_idle.pop(key, None)
+                self.sleep_marks.pop(key, None)
+                idle = None
+            try:
+                if idle and idle.get("sleep") and not self.lane(key) and (os.path.normpath(root), jobs) not in prev_q:
+                    jsig = _P.file_sig(os.path.join(root, jobs))
+                    if jsig == idle.get("sig"):
+                        q = dict(_Q.load_queue(reg, read_env=False), file=f, _mtime=mtime, _rsig=rsig, _reg=reg,
+                                 empty=True, sleeping=True, empty_since=round(idle["since"]), par=1)
+                    else:
+                        self.reg_idle.pop(key, None)
+                        self.sleep_marks.pop(key, None)
+                        self.wlog("清单 %s/%s 文件有变动，从休眠唤醒" % (root, jobs))
+                        q = dict(_Q.load_queue(reg), file=f, _mtime=mtime, _rsig=rsig, _reg=reg)
+                else:
+                    q = dict(_Q.load_queue(reg), file=f, _mtime=mtime, _rsig=rsig, _reg=reg)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                bad.append((f, e))
+                continue
+            out.append(q)
+        self.reg_cache = {f: v for f, v in self.reg_cache.items() if f in seen_f}
         for f, e in bad:
             if f not in self.bad_reg:
                 self.bad_reg.add(f)
@@ -725,10 +793,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.peers(_C.time.time())
         keep, yielded = [], {}
         for q in out:
-            try:
-                mine = (os.stat(q["file"]).st_mtime, self.host)
-            except OSError:                       # 这一轮刚被 rm、被 worker add 搬走
-                continue
+            mine = (q["_mtime"], self.host)
             win = max(self.peer_regs.get((os.path.normpath(q["root"]), q["jobs"]), []) + [mine])
             if win == mine:
                 keep.append(q)
@@ -743,6 +808,9 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 self.event("worker", "清单 %s/%s 不再被主机 %s 的登记挡着，这台接着跑" % (q["root"], q["jobs"], self.yielded[k]),
                            project=q["project"], root=q["root"], queue=q["jobs"])
         self.yielded = yielded
+        live = {q["key"] for q in keep}
+        self.reg_idle = {k: v for k, v in self.reg_idle.items() if k in live}
+        self.sleep_marks = {k: v for k, v in self.sleep_marks.items() if k in live}
         return keep
 
     def publish(self, j):
@@ -907,17 +975,47 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             limits = {}
         return limits, self.policy()
 
+    def _idle_start(self, q, now, was_active=False):
+        """首次见到空队列时推算空置起点（#164）：本轮刚跑完的从现在起算；重启或升级后首次见到的取登记时刻（added_t）与用量历史最晚结束（t1）
+        的较晚者（均用容器时钟，不拿文件 mtime 比），都没有则从现在起算。"""
+        if was_active:
+            return now
+        t_add = q.get("added_t") or 0
+        rn = os.path.normpath(q["root"])
+        t_hist = max((h.get("t1") or 0 for h in self.hist if h.get("queue") == q["jobs"] and os.path.normpath(h.get("root") or "") == rn), default=0)
+        since = max(t_add, t_hist)
+        return min(now, since) if since else now
+
+    @staticmethod
+    def _mark_snapshot(state, rows):
+        """把状态目录里这条清单的 .done/.failed 标记拍成快照（转休眠时记一份，之后不读状态目录）。"""
+        try:
+            ms = set(os.listdir(state))
+        except OSError:
+            return {}
+        out = {}
+        for n, _ in rows:
+            v = "done" if n + ".done" in ms else "failed" if n + ".failed" in ms else None
+            if v:
+                out[n] = v
+        return out
+
     def requests(self, queues, first):
-        """各队列这一轮的请求：目录不在、旧 gpu_queue.sh 还在跑、已暂停的直接进等待表；清单跑空的标 empty（项目暂时没实验）并收掉 lock；
-        其余取队首拼请求（new_req），加上单元申请（slot_reqs）。状态目录里有不是本机在盯的 current 时：别的主机放行的（run_elsewhere）不动、进等待表，
-        其余接管（adopt：第一轮是上一个 worker 留下的；之后是那台被看板标成已归还以后留下的）。返回 (等待表, 请求)。"""
+        """各队列这一轮的请求：休眠中的跳过；目录不在、旧 gpu_queue.sh 还在跑、已暂停的直接进等待表；清单跑空的标 empty（项目暂时没实验）、收掉 lock，
+        空满 IDLE_REG_S（2 天，#164）转休眠；其余取队首拼请求（new_req），加上单元申请（slot_reqs）。状态目录里有不是本机在盯的 current 时：
+        别的主机放行的（run_elsewhere）不动、进等待表，其余接管（adopt：第一轮是上一个 worker 留下的；之后是那台被看板标成已归还以后留下的）。返回 (等待表, 请求)。"""
         waiting, reqs = [], []
-        self.peers(_C.time.time())                   # 第一轮也要知道看板说哪些主机已归还（gone）
+        now = _C.time.time()
+        self.peers(now)                              # 第一轮也要知道看板说哪些主机已归还（gone）
         elsewhere = {}
         if first:
             self.adopt_left(queues)
         for q in queues:
+            if q.get("sleeping"):                    # 已休眠：每轮只由 registry 用 file_sig 查清单文件，不再读状态目录与标记
+                continue
             if not os.path.isdir(q["root"]):
+                self.reg_idle.pop(q["key"], None)
+                self.sleep_marks.pop(q["key"], None)
                 waiting.append({"key": q["key"], "q": q, "name": None, "why": "目录不存在：" + q["root"]})
                 continue
             os.makedirs(q["state"], exist_ok=True)
@@ -928,6 +1026,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             curs = [c for c in _Q.read_current(q["state"]) if c[:2] not in mine]   # 不是本机在盯的行
             cur, other = next(((c, h) for c in curs for h in [_Q.run_elsewhere(self.host, q, c, self.gone)] if h), (None, None))
             if other:
+                self.reg_idle.pop(q["key"], None)
+                self.sleep_marks.pop(q["key"], None)
                 elsewhere[q["key"]] = (other, cur[0])
                 if self.elsewhere.get(q["key"]) != (other, cur[0]):
                     self.event("worker", "清单 %s/%s 的 %s 是主机 %s 放行的，这台不接管、不重跑，等那台收尾" % (q["root"], q["jobs"], cur[0], other),
@@ -942,25 +1042,46 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if not run:
                 lock = _C.read_pid(os.path.join(q["state"], "lock"))
                 if _C.alive(lock, ("gpu_queue",)):
+                    self.reg_idle.pop(q["key"], None)
+                    self.sleep_marks.pop(q["key"], None)
                     waiting.append({"key": q["key"], "q": q, "name": None, "why": "旧 gpu_queue.sh（PID %d）还在跑这条队列" % lock})
                     continue
             if os.path.exists(os.path.join(q["state"], "paused")):
+                self.reg_idle.pop(q["key"], None)
+                self.sleep_marks.pop(q["key"], None)
                 if not run:
                     waiting.append({"key": q["key"], "q": q, "name": None, "why": "已暂停（状态目录有 paused）"})
                 continue
             jobs = _Q.next_jobs(q, {j["name"] for j in run}, rows)   # 窗口：串行清单在跑时为空，同以前
             if run:
+                self.reg_idle.pop(q["key"], None)
+                self.sleep_marks.pop(q["key"], None)
                 reqs += [_Q.queue_req(q, job) for job in jobs]
                 continue
             if not jobs:
                 q["empty"] = True                 # 空着：清单里没有待办（项目暂时没实验），状态里标出来，别的项目不当它在抢卡
-                if q["key"] in self.active:
+                was_active = q["key"] in self.active
+                if was_active:
                     self.qlog(q, "队列结束（清单中已无待办任务）")
                     self.event("qend", "队列结束：%s 清单中已无待办任务" % q["jobs"], project=q["project"], root=q["root"], queue=q["jobs"])
                     self.active.discard(q["key"])
                     if _C.read(os.path.join(q["state"], "lock")) == str(os.getpid()):
                         os.remove(os.path.join(q["state"], "lock"))
+                ent = self.reg_idle.get(q["key"])
+                if ent is None:
+                    ent = self.reg_idle[q["key"]] = {"since": self._idle_start(q, now, was_active), "sig": None, "rsig": q.get("_rsig"), "sleep": False}
+                else:
+                    ent["rsig"] = q.get("_rsig")
+                q["empty_since"] = round(ent["since"])
+                if now - ent["since"] >= _P.IDLE_REG_S:
+                    ent["sig"] = _P.file_sig(q["jobs_path"])
+                    ent["sleep"] = True
+                    q["sleeping"] = True
+                    self.sleep_marks[q["key"]] = self._mark_snapshot(q["state"], rows)
+                    self.wlog("清单 %s/%s 空满 %d 天，转为休眠（仅监听清单文件变动）" % (q["root"], q["jobs"], _P.IDLE_REG_S // 86400))
                 continue
+            self.reg_idle.pop(q["key"], None)
+            self.sleep_marks.pop(q["key"], None)
             reqs += [_Q.queue_req(q, job) for job in jobs]
         self.elsewhere = elsewhere
         return waiting, reqs + self.slot_reqs()
@@ -1024,8 +1145,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         if now - self.local_t >= _Q.LOCAL_EVERY:
             self.local_t = now
             try:
-                # 只留 40 行：补不回来的排前面，几个项目的任务多了也不会把要紧的挤掉
-                self.local = {"t": now, "jobs": sorted(_Q.local_deps(queues, _C.DATA_ROOT, self.qenv), key=lambda r: r["heal"])[:40]}
+                # 只留 40 行：补不回来的排前面，几个项目的任务多了也不会把要紧的挤掉；休眠队列无待办，跳过不扫
+                self.local = {"t": now, "jobs": sorted(_Q.local_deps([q for q in queues if not q.get("sleeping")], _C.DATA_ROOT, self.qenv), key=lambda r: r["heal"])[:40]}
             except Exception as e:  # noqa: BLE001 — 统计出错不能拖垮调度
                 self.wlog("统计本地依赖出错：%r" % e)
         def local():
@@ -1113,8 +1234,12 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                      "keep": {c["uuid"]: round(c["keep"]) for c in S["cards"] if c["keep"]},   # 各卡给对方留着的 MB（keep_left）：fit 的整卡封顶 card_need 照它
                      "owner": sorted(S["owner"])},        # 不放的卡（对方超出预留或刚回落、有停不了的保活）：fit 的快照照它（fit_snapshot）
             "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"], **({"pool": True} if q.get("pool") else {}),
-                        "empty": q.get("empty", False), "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {}),
+                        "empty": q.get("empty", False), "sleeping": bool(q.get("sleeping")), "empty_since": q.get("empty_since"),
+                        "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {}),
                         "par": q.get("par") or 1} for q in queues],   # 清单声明的并行数（list_par，#147）：看板车道写“并行 k/N”
+            "reg_idle": {k: {"since": round(v["since"]), "sig": list(v["sig"]) if v.get("sig") else None,
+                             "rsig": list(v["rsig"]) if v.get("rsig") else None, "sleep": bool(v.get("sleep"))}
+                         for k, v in sorted(self.reg_idle.items())},   # 跑空登记的空置起点与休眠签名（#164；重启接管时找回）
             "plan": self.plan,                    # 推演（forecast）：各队列与单元每个任务的预计开始、结束、用哪几张卡
             "todo": self.todo,                    # 还会跑的任务（list_state）：别的主机的依赖按它认谁还会跑、排在谁后面
             "pool_heads": self.pool_view(now),    # 算力池里待放的各清单还要跑什么、队首依赖满足没有（#25）：看板据此放、借

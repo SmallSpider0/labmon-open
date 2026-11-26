@@ -100,7 +100,12 @@ class DepsMixin:
         暂停、drain 的清单照样列（任务还会跑），held 写 paused（状态目录有 paused）、pause 或 drain（项目暂停优先于主机 drain：用户有意停的，
         offers 不当成可挪的活，#25），等它的任务的等待原因据此写清。"""
         marks, todo, seen, gl = {}, [], set(), {}
+        smarks = getattr(self, "sleep_marks", None) or {}
         for q in queues:
+            if q.get("sleeping"):                 # 休眠队列无待办，不读状态目录；转休眠时的标记快照合入 marks（#164）
+                for n, v in (smarks.get(q["key"]) or {}).items():
+                    marks[(q["project"], n)] = v if marks.get((q["project"], n), v) == v else "?"
+                continue
             c = self.qlists.get(q["key"])
             if not c:
                 continue
@@ -164,9 +169,23 @@ class DepsMixin:
                 if k not in where or age < where[k][1]:                 # 几处都有的取本机的、再取状态最新的
                     where[k] = (host, age, ln.get("held"))
         idx.update((k, "pending") for k in where)
-        self.dep_idx, self.dead, self.dep_where, self.dep_lanes = idx, {k for k, v in idx.items() if v == "failed"}, where, lanes
         want = ({(p, x) for ln in self.todo for ds in ln["deps"].values() for p, x in ds} | {k[:2] for r in reqs for k in dep_keys(r)}
                 | {k[:2] for r in self.pool_heads for x in [r] + [dict(h, project=r["project"]) for _, h in r.get("win") or ()] for k in dep_keys(x)})
+        # 重启后恢复休眠态的队列尚未缓存 sleep_marks：仅当真有依赖找不到（手工 .done 不在 usage.jsonl 里）时按需懒读一次同项目休眠队列的状态目录
+        miss_p = {p for p, n in want if (p, n) not in idx}
+        if miss_p:
+            smarks = getattr(self, "sleep_marks", None)
+            if smarks is not None:
+                for q in queues:
+                    if q.get("sleeping") and q["project"] in miss_p and q["key"] not in smarks and q.get("_reg"):
+                        full = _Q.load_queue(q["_reg"])
+                        sm = self._mark_snapshot(full["state"], _Q.list_jobs(full))
+                        smarks[q["key"]] = sm
+                        for n, v in sm.items():
+                            self.marks[(q["project"], n)] = v if self.marks.get((q["project"], n), v) == v else "?"
+                            if (q["project"], n) not in where:
+                                idx[(q["project"], n)] = self.marks[(q["project"], n)] if self.marks[(q["project"], n)] != "?" else idx.get((q["project"], n), "failed")
+        self.dep_idx, self.dead, self.dep_where, self.dep_lanes = idx, {k for k, v in idx.items() if v == "failed"}, where, lanes
         self.dep_miss = {k: t for k, t in self.dep_miss.items() if k in want and k not in idx}
 
     def pool_view(self, now):
@@ -186,8 +205,10 @@ class DepsMixin:
         out = {}
         for r in self.pool_heads:
             n, dep = head(r) if r["name"] else (None, None)
-            out["%s|%s" % (os.path.normpath(r["root"]), r["queue"])] = dict({"head": n, "n": r["n"], "held": r["held"], "elsewhere": r["elsewhere"], "dep": dep},
-                                                                            **({"err": r["err"]} if r.get("err") else {}))
+            out["%s|%s" % (os.path.normpath(r["root"]), r["queue"])] = dict(
+                {"head": n, "n": r["n"], "held": r["held"], "elsewhere": r["elsewhere"], "dep": dep},
+                **({"err": r["err"]} if r.get("err") else {}),
+                **({"sleeping": True} if r.get("sleeping") else {}))
         return out
 
     def dep_block(self, r, now):

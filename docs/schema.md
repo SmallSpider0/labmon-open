@@ -15,10 +15,10 @@
                                                // 有 key 时出 rebalance: 告警，页面上 rebalMark 标一个图标（docs/workbench.md「挪法建议」）
   "lan": {"ok": false, "since": 1793776000, "checked": 1793776260},   // 只在本机不在内网时有（lan.check）：这轮没连 ssh，数据是离开前的，
                                                // ssh_fail、log_silent、noprogress、gpu_idle 这几条告警不报；页面顶上据此写说明
-  "quiet": [{"host": "29", "root": "/root/data1/alice/projects/a1", "queue": "jobs/old.txt", "last": 1793500000, "idle": true}],
-                                               // 这一轮收起的只在登记里有的车道（跑完久了没动，collect._quiet，#117）；last 最后一次活动（epoch 秒，没有为 0）；
-                                               // idle：登记还在、空了 2 天以上，进了 idle_regs: 提示（collect._idle_regs，#47）；
-                                               // 工作台 projects[] 带上，项目「管理」抽屉的逐条清单不列它们（#121），悬停写其中几条已提示会话
+  "quiet": [{"host": "29", "root": "/root/data1/alice/projects/a1", "queue": "jobs/old.txt", "last": 1793500000, "sleeping": true}],
+                                               // 这一轮收起的只在登记里有的车道（跑完久了/已休眠/空清单/已归还跑完/已摘登记，collect._quiet，#117、#164）；last 最后一次活动（epoch 秒，没有为 0）；
+                                               // sleeping：空满 IDLE_REG_S（2 天）已由 worker 转休眠（不再扫状态目录与 .env，清单文件变动自动唤醒）；
+                                               // 工作台 projects[] 带上，项目「管理」抽屉的逐条清单不列它们（#121），悬停写其中几条已休眠
 
   "hosts": [{
     "id": "29", "label": "29（A6000）", "ok": true, "error": null,   // 掉线按 health.link_step 判（连续失败 ≥ 2 次且持续 150 秒），掉线了才报 ssh_fail 告警
@@ -40,7 +40,7 @@
 
   "lanes": [{                                   // 一条车道 = 一条清单（一次一行；写了 `# labmon: par=N` 的同时至多 N 行，#147）
     "id": "r9_a6000", "label": "车道 2", "host": "29", "type": "gpu_queue",   // 自动发现的车道 id 为 <队列 id>:<清单名>；只在 worker 登记里有的为 <目录末级名>/<清单>（#94）
-                                                 // label：同机照配置顺序编号的车道名，配置里写了 label（用途）的接在后面
+                                                 // label：同机照配置顺序编号的车道名，配置里写了 label（用途）的接在后面；24 小时内全成功跑完的非 monitor.toml 写明车道不占号（叫“已跑完”，带 done_lane: true，#164）
     "alive": true, "pid": 6341, "missing": false, "stale": false, "started": true,   // started=false：从没启动过，不报 lock_dead
     "paused": null,                              // 队列进程不在且状态目录有 paused 标记时为其内容（原因）；此时 eta_ts 为 null
     "managed": true, "waiting": null,            // worker 在管这条队列（status.json 新鲜且登记了它）：没有锁也不报 lock_dead；waiting 为 worker 说的等待原因
@@ -156,7 +156,7 @@
 
 - `hosts[]` 每台在用主机一条：`error` 只表示连不上（进掉线判定）；`status_error` 是连得上但 `status.json` 读不出（半行、坏文件），页面另标，不算掉线，也不触发自动拉起 worker。
   `status` 是 worker 的 `status.json` 原样：`running[]` 的开始时刻是 `t0`（epoch 秒），等待项的 `start` 是推演的预计开始（epoch 秒），
-  `queues[]` 的 `par` 是清单声明的并行数（`# labmon: par=N`，没写为 1，#147）：并行清单在 `running[]`、等待项与 `plan.lanes[].jobs` 里同一条清单可有几项（车道仍按 `root`、`queue` 认），状态目录的 `current` 一行一个在跑的；
+  `queues[]` 的 `par` 是清单声明的并行数（`# labmon: par=N`，没写为 1，#147）：并行清单在 `running[]`、等待项与 `plan.lanes[].jobs` 里同一条清单可有几项（车道仍按 `root`、`queue` 认），状态目录的 `current` 一行一个在跑的；`sleeping` 为真表示该登记空满 2 天已转休眠，`empty_since` 为连续空置起点（epoch 秒，非空为 null）；顶层 `reg_idle` 记各空置队列的 `{since, sig, rsig, sleep}` 供 worker 重启接管恢复（#164）；
   等待项的 `miss` 为真表示缺本地文件又补不了（看板的提醒与主机页按它认，不按 `why` 的文字）；`dep` 是依赖没满足（`wait`，以及出提醒的 `failed`、`missing`、`cycle`，见 [worker.md「依赖」](worker.md#依赖)）；
   `dep_miss` 是依赖等的、哪里都找不到的任务与起算时刻 `[[项目, 任务, epoch 秒]]`（满 2 分钟才报找不到，worker 接管时从上一份状态找回，见 [worker.md「依赖」](worker.md#依赖)）；
   `todo` 是这台还会跑的任务（每条清单一项 `{project, root, queue, jobs 在跑的在前、其余按清单顺序, deps {任务: [[项目, 任务]]}, gang {任务: [组名, 人数（没写为 null）]}（成组的行，#180）, held paused|pause|drain|null, par（并行清单才有，#147：依赖成环的判断里窗口内的行不算互相排队）}`，在跑、在等的单元各一项，root、queue 为 null；别的主机的依赖按它认，offers 按它取别的主机各清单还没跑的行）；`local[]` 的 `how` 是 `copy`（有主副本可拷）、`redo`（命令会自己重算）、`mixed` 或 null（补不了），
@@ -196,7 +196,7 @@
   算力池借来的（#25）：`borrow.pool` 为真（`holder` 照写持有人，`by` 是「算力池」）；换了容器的那一轮另带 `gone: true`（`pool._returns` 标，工作台不重新拉起 worker）。
   自用主机（不是借来、换来的）另带 `lend`（#79，`pool.tick` 写的 `pool.lend_view`：`{on, hours, open, lent, returning, rest, say, mine: true, placed 此刻这台上池放的清单数, bar 不能入池的原因, holder}`；组内页 `fleet.mine[]` 的 `lend` 是同一份）。
   借来的主机的 `status.guest` 另有 `owner`（算力池用：对方超出预留的几项里去掉只因 `ka.sh` 停不了的保活超出的卡，算力池借的再加上有了对方 GPU 进程的卡；非空算主人回来了），各台状态另有 `pool_heads`：
-  `{"目录|清单": {head 队首（并行清单取窗口里第一行依赖满足的，#147）, n 还要跑几行, held 清单暂停（"paused" 或 null）, dep 队首的依赖没满足时 [状态, 原因]（worker 的 dep_block）, elsewhere 交给池之前在别的主机放行、还没收尾的那一格 [主机, 任务]（不算在 head、n 里；没有为 null，#80）, err 这台读不到清单文件时的一句（没有不带，head 为 null）}}`，
+  `{"目录|清单": {head 队首（并行清单取窗口里第一行依赖满足的，#147）, n 还要跑几行, held 清单暂停（"paused" 或 null）, dep 队首的依赖没满足时 [状态, 原因]（worker 的 dep_block）, elsewhere 交给池之前在别的主机放行、还没收尾的那一格 [主机, 任务]（不算在 head、n 里；没有为 null，#80）, err 这台读不到清单文件时的一句（没有不带，head 为 null）, sleeping 空满 2 天已休眠（只在为真时带，#164）}}`，
   算力池里登记着的每条清单（都跑完了的 head 为 null、n 为 0，#86）；`pool_t` 是这份 pool_heads 读池目录的时刻（epoch 秒，worker 每 60 秒读一次）。
   看板逐条合并池那个 worker_home 下各台的（`pool._heads`：没有 err 的优先，再取 `pool_t` 最晚的），哪一份里都没有的算还没有 worker 读到。
   `offers_kept` 只在这一轮读这台失败（`error`、`status_error`，没 `worker stop`）、沿用它上一轮的 offers 时出现：`{t 那份状态写下的时刻（本机时钟 epoch 秒）, offers}`，按 `STALE_S` 过期（`rebalance.keep_offers`）。
@@ -207,14 +207,14 @@
 - 顶层 `lan`（`lan.check` 的结果，总是有）、`wake`（给 `labmon wait` 的全局消息 `[{key, msg, projects, host}]`；作废与被挤掉的 `void:` 另带 `job: [项目, 任务]`（`overview._voided`，`labmon wait --job` 按它认等的任务被作废，#135）；页面上的改动 `records.told` 给的 key 是 `page:<what>:<项目>:<毫秒>`、不带 `host`，#121；借来的主机空着半小时以上的 `borrow_idle:<主机>:<起点>`、不带 `host`，#43）、`sched`（调度卡；`use_sum` 是各项目用量（`share.use`）之和；`projects[]` 的 `person` 是项目算在谁名下、`pk` 是 `sched.json` 里的人员键，看板上没有的项目两者为 null，`puse` 是同一个 `pk` 名下各项目的用量合计（取完整的 `share.use`，含已归档的项目；与 worker 的 `person_use` 同一口径），普通用户看到的别人项目 `person` 为 null，#23）、`occ`（各卡被谁占着）、`fleet`、`disk`（共享盘，`disk.update`：其中 `ours` 是自己目录下的各单位 `dirs[]`（`u`、`name`、`b`、`t`、`p` 项目、`d24`、`d7`、`n`、`m`、`top`）与按项目的汇总 `projects{项目: {roots, b, d24, d7, pending, burst, gone, jobs}}`，项目快照的 `storage` 由它来，#53）、`projects`（各项目看板的摘要）。
   `sched.projects[]` 的 `focus`、`paused` 是 null 或 `{until（epoch 秒，null 为无期限）, hosts}`：`hosts` 为 null 是项目级的（主机清单 `[sched.focus]`、`[sched.pause]`，所有主机），否则是只在这几台单独下的（`--host`），`until` 取最晚的（#96）。项目级的暂停另带 `by`：谁下的（主机清单 `[sched.pause_by]`，`config.pause_by`；没记的为 null，当管理员下的，#16），只在几台单独下的暂停的 `by` 是 `{主机: 谁下的}`（不算 `once`，没记的为 null，#27）；普通用户看到的快照只留他自己项目的 `by`。
   `hosts[].status.overrides[]` 里项目级的暂停、优先带 `global: true`（worker 从 `sched.json` 接上的，每台都有一份），`once: true` 的是不带 `--host` 的 `pause --now` 给各台下的“只停一次”：停完照样挡着，全局暂停送到就删（最多 30 分钟）。经看板带 `--host` 下的暂停、优先另带 `by`：谁下的（看板账号名；没有的当管理员下的，#27），普通用户看到的快照里别人项目的指令去掉 `by`。
-- 顶层 `pool` 是算力池这一轮（`pool.tick`，#25；不持有服务租约的那台为空）：`{lists {"目录|清单": {project, root, jobs, host 此刻登记在哪（pool 是池里待放）, since 从何时起等（epoch 秒）, why 为什么还没放（放过去了的没有）, done 清单里的行都跑完了（#86：不算在等，只在为真时带）, nofit 这一轮问到了 fit、借着的都放不下，也挑不出能借的入池服务器（#130：`pool_wait:` 据此另报一次，只在为真时带）}}, gone [这一轮换了容器、直接还的主机]}`；
+- 顶层 `pool` 是算力池这一轮（`pool.tick`，#25；不持有服务租约的那台为空）：`{lists {"目录|清单": {project, root, jobs, host 此刻登记在哪（pool 是池里待放）, since 从何时起等（epoch 秒）, why 为什么还没放（放过去了的没有）, done 清单里的行都跑完了（#86：不算在等，只在为真时带）, sleeping 空满 2 天已休眠（只在为真时带，#164）, nofit 这一轮问到了 fit、借着的都放不下，也挑不出能借的入池服务器（#130：`pool_wait:` 据此另报一次，只在为真时带）}}, gone [这一轮换了容器、直接还的主机]}`；
   项目车道的等待原因与 `pool_wait:` 告警取它。
 - 顶层 `regs` 是登记的全局视图（`overview._regs`，项目「管理」抽屉用，[workbench.md「项目的管理抽屉」](workbench.md#项目的管理抽屉)）：各主机目录下登记的清单，每台一项
   `{host, label, state active|pool|returned|unlisted（在用、算力池里待放的（host 为 pool，#24）、主机清单里已归还、主机清单里已没有）, returned 归还时刻（epoch 秒，没有为 null）, home 所在 worker_home, t 读到的时刻（在用的是那份状态的 t）,
   stale 这一轮没读到、沿用上一轮的, queues [{root, jobs, project, stop, gpus}] 或 null（在用主机这轮既没状态、也没读到文件，上一轮也没有）}`；
   算力池放过去的登记（`worker add --pool`，登记文件与状态 `queues[]` 里的 `pool`，#79）另带 `pool: true`，别的不带这个键（`overview._pool_mark`）；
   在用主机那项另带 `pool`（`platform_pool`）与 `prev`（上一台：同一个池里最近归还的自用主机的 id，`fleetboot.last_mine`，没有为 null；接上卡排序用，#95）；
-  在用主机的 `queues` 取状态里的，另带 `empty` 与 `added_t`（登记时刻，epoch 秒，那台容器的时钟）；其余取登记文件，另带 `added`（登记时刻的文字，那台容器的时钟）、`added_t`（登记文件的修改时刻，epoch 秒，共享盘服务器的时钟；读不到为 null）与 `key`（登记键，文件名去掉 `.json`）。在用的在前（照主机清单顺序），再是算力池、已归还的（归还晚的在前）、主机清单里没有的。
+  在用主机的 `queues` 取状态里的，另带 `empty`、`sleeping` 与 `added_t`（登记时刻，epoch 秒，那台容器的时钟）；其余取登记文件，另带 `added`（登记时刻的文字，那台容器的时钟）、`added_t`（登记文件的修改时刻，epoch 秒，共享盘服务器的时钟；读不到为 null）与 `key`（登记键，文件名去掉 `.json`）。在用的在前（照主机清单顺序），再是算力池、已归还的（归还晚的在前）、主机清单里没有的。
 - `projects[]` 是各项目看板的摘要（`serve.Overview.proj_info` 给什么带什么，只去掉写 `eta.json` 用的 `running`）：`id`、`title`、`alerts`、`alert_msgs`、`generated`、`no_work_since`、`markers`、`quiet`（项目快照的，见上）、`groups`（计划项的进度：`[{id, label, color, auto 自动归出来的, total, done, failed, running, queued}]`，取项目快照的）、`ungrouped`（没归进任何组的任务数，占位任务不算）；`lanes[]` 是 `{host, root, queue, label, unfinished, run 在跑几个, returned}`（项目探针没读到的车道 `unfinished`、`run` 为 null）；
   `cfg` 是项目配置的摘要（`serve.Overview.cfg_info`）：`{path 看板上的配置（登记目录里的 monitor.toml）, out_dir 输出目录（登记目录的 out/）, title, interval, interval_fixed（服务启动参数定了采集间隔）, refresh, hide_done_hours, groups [{id, label, color}], auto_groups,
   markers [{date 原文, label, ts load 解析好的时刻（页面按它填日期框）}], alerts {gpu_idle_util, gpu_idle_min, stale_min, log_silent_min}, spec, stale}`（管理抽屉的「项目配置」节按它画控件，#122、#133）；

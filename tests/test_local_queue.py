@@ -1163,18 +1163,42 @@ class LaneSpecsTest(unittest.TestCase):
                          [("q1", "h1", "车道 1 训练"), ("q2", "h2", "车道 1"), ("all:live", "h1", "车道 2"), ("all:managed", "h1", "车道 3"), ("all:new", "h1", "车道 4"),
                           ("far:b", "h3", "车道 1")])
         self.assertEqual(C._lane_specs({"hosts": hosts, "queues": [q("all", "h1", discover=True)]}, {}, t), ([], 0, []))    # 探针没给：一条也没有
-        # 只在登记里有的空清单从没启动过：收起车道的最后活动与收起判定同一口径，取登记时刻（Codex 审查 #119：不然“暂时没实验”的起点每轮刷新成现在）
+        # #164：0 任务空清单不出车道（立即收起），且最后活动为 0（不拿 reg_t 当活动，避免误报 no_work:）；
+        # quiet 带 sleeping 而不再带 idle；休眠、已摘登记无未完成、已归还无失败立即收起；24 小时内全成功跑完标 done_lane 不占号
         reg = {"hosts": hosts, "queues": [q("r/jobs/r.txt", "h1", reg=True, reg_t=t - 30 * 3600, root="/d/r", jobs="jobs/r.txt"),
                                           q("r/jobs/s.txt", "h1", reg=True, reg_t=t - 3600, root="/d/r", jobs="jobs/s.txt")]}
-        raw = {"h1": {"queues": {"r/jobs/r.txt": {"lock_alive": False, "worker": {"wait": None}, "activity": None, "jobs": []},
+        raw = {"h1": {"queues": {"r/jobs/r.txt": {"lock_alive": False, "worker": {"wait": None, "sleeping": True}, "activity": None, "jobs": []},
                                  "r/jobs/s.txt": {"lock_alive": False, "worker": {"wait": None}, "activity": None, "jobs": []}}}}
         out, last, hid = C._lane_specs(reg, raw, t)
-        self.assertEqual(([x["id"] for x in out], last), (["r/jobs/s.txt"], t - 30 * 3600))     # 刚登记的空清单留着
-        self.assertEqual(hid, [{"host": "h1", "root": "/d/r", "queue": "jobs/r.txt", "last": t - 30 * 3600, "idle": False}])   # 收起的登记车道进快照的 quiet：管理抽屉不列（#121）
-        # idle（#47）：登记这一轮还在（reg_live）、空了 IDLE_REG_S 以上才算；登记没了、按 REG_KEEP_S 留着的不算（已经 worker rm 了）
-        for live, age, idle in ((True, 3 * 86400, True), (True, 30 * 3600, False), (False, 3 * 86400, False)):
-            reg["queues"][0].update(reg_live=live, reg_t=t - age)
-            self.assertEqual(C._lane_specs(reg, raw, t)[2][0]["idle"], idle, (live, age))
+        self.assertEqual((out, last), ([], 0.0))
+        self.assertEqual(hid, [{"host": "h1", "root": "/d/r", "queue": "jobs/r.txt", "last": 0, "sleeping": True},
+                               {"host": "h1", "root": "/d/r", "queue": "jobs/s.txt", "last": 0, "sleeping": False}])
+        # 在用主机 24h 内全成功跑完：不占“车道 N”编号（叫“已跑完”），新活跃车道从“车道 1”起排；有失败的不提前收起且占号；已摘登记跑完立即收起
+        reg2 = {"hosts": hosts, "queues": [
+            q("r/jobs/done.txt", "h1", reg=True, reg_live=True, root="/d/r", jobs="jobs/done.txt"),
+            q("r/jobs/fail.txt", "h1", reg=True, reg_live=True, root="/d/r", jobs="jobs/fail.txt"),
+            q("r/jobs/rmed.txt", "h1", reg=True, reg_live=False, root="/d/r", jobs="jobs/rmed.txt"),
+            q("r/jobs/run.txt", "h1", reg=True, reg_live=True, root="/d/r", jobs="jobs/run.txt"),
+            q("r/jobs/ret_done.txt", "h3", reg=True, reg_live=True, read_via="h1", root="/d/r", jobs="jobs/ret_done.txt"),
+            q("r/jobs/ret_fail.txt", "h3", reg=True, reg_live=True, read_via="h1", root="/d/r", jobs="jobs/ret_fail.txt"),
+        ]}
+        raw2 = {"h1": {"queues": {
+            "r/jobs/done.txt": {"lock_alive": False, "worker": {"wait": None}, "activity": t - 3600, "jobs": [{"name": "a"}], "marks": {"a.done": t - 3600}},
+            "r/jobs/fail.txt": {"lock_alive": False, "worker": {"wait": None}, "activity": t - 3600, "jobs": [{"name": "a"}], "marks": {"a.failed": t - 3600}},
+            "r/jobs/rmed.txt": {"lock_alive": False, "worker": None, "activity": t - 3600, "jobs": [{"name": "a"}], "marks": {"a.done": t - 3600}},
+            "r/jobs/run.txt": {"lock_alive": False, "worker": {"wait": None}, "activity": t - 60, "jobs": [{"name": "a"}]},
+            "r/jobs/ret_done.txt": {"lock_alive": False, "worker": None, "activity": t - 3600, "jobs": [{"name": "a"}], "marks": {"a.done": t - 3600}},
+            "r/jobs/ret_fail.txt": {"lock_alive": False, "worker": None, "activity": t - 3600, "jobs": [{"name": "a"}], "marks": {"a.failed": t - 3600}},
+        }}}
+        out2, last2, hid2 = C._lane_specs(reg2, raw2, t)
+        self.assertEqual([(x["id"], x["host"], x["name"], bool(x.get("done_lane"))) for x in out2],
+                         [("r/jobs/done.txt", "h1", "已跑完", True),
+                          ("r/jobs/fail.txt", "h1", "车道 1", False),
+                          ("r/jobs/run.txt", "h1", "车道 2", False),
+                          ("r/jobs/ret_fail.txt", "h3", "车道 1", False)])
+        self.assertEqual([(x["host"], x["queue"], x["sleeping"]) for x in hid2],
+                         [("h1", "jobs/rmed.txt", False), ("h3", "jobs/ret_done.txt", False)])
+        self.assertEqual(last2, t - 3600)
 
 
 class ConfigTest(unittest.TestCase):

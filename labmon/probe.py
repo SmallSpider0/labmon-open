@@ -217,6 +217,24 @@ def queue_gpu_queue(q):
     - 日志目录：<名称>.log，进度行形如 `PROGRESS i/N`。
     """
     root = q["root"]
+    jpath = os.path.join(root, q["jobs"])
+    wk = q.get("worker") or {}
+    if wk.get("sleeping"):                       # worker 已休眠（空满 IDLE_REG_S，#164）：不读 .env、状态目录与清单
+        return {"jobs": [], "marks": {}, "state_dir": None, "logs_dir": None, "worker": q.get("worker"),
+                "lock_pid": None, "lock_alive": False, "paused": None, "activity": wk.get("empty_since"),
+                "current": [], "log_tail": [], "sleeping": True}
+    ro = q.get("readonly")                       # 队列在已归还的机器上：PID 属于那台机器，在这里查进程没有意义
+    jsig = None
+    if ro:
+        try:
+            st = os.stat(jpath)
+            jsig = [st.st_ino, st.st_mtime_ns, st.st_size]
+        except OSError:
+            jsig = None
+        if q.get("done_sig") and jsig == q["done_sig"]:   # 已归还且已确认全跑完的清单没变动：省掉状态目录与 .env 读取（#164）
+            return {"jobs": [], "marks": {}, "state_dir": None, "logs_dir": None, "worker": None,
+                    "lock_pid": None, "lock_alive": False, "paused": None, "activity": q.get("done_act"),
+                    "current": [], "log_tail": [], "readonly_done": True}
     envf = os.path.join(root, re.sub(r"\.txt$", ".env", q["jobs"]))
     env_txt = read(envf, "") or ""
 
@@ -227,13 +245,14 @@ def queue_gpu_queue(q):
     state = env("QUEUE_STATE", q.get("state", "results/_queue"))
     logs = env("QUEUE_LOGS", q.get("logs", "results/_logs"))
     out = {"jobs": [], "marks": {}, "state_dir": state, "logs_dir": logs, "worker": q.get("worker")}   # worker 在管这条队列时为 {"wait": 等待原因或 None}
+    if ro and jsig is not None:
+        out["jobs_sig"] = jsig
     skew = _fs_skew(os.path.join(state, "queue.log"))
     out["fs_skew"] = round(skew, 1) if skew else None
 
     def mtime(f):                                # 文件修改时间换算成本机时钟
         return os.path.getmtime(f) - skew
 
-    ro = q.get("readonly")                       # 队列在已归还的机器上：PID 属于那台机器，在这里查进程没有意义
     lock = read(os.path.join(state, "lock"))
     out["lock_pid"] = int(lock) if lock and lock.isdigit() else None
     out["lock_alive"] = False if ro else any(_pid_alive(out["lock_pid"], m) for m in (
@@ -343,7 +362,8 @@ def worker_view(path, stale):
     def key(root, jobs):
         return os.path.normpath(os.path.join(root or "", jobs or ""))
     out = {key(q.get("root"), q.get("jobs")): {"wait": None, "held": None, "held_t": None, "dep": None, "head": None, "cpu": None,
-                                               "dur": q.get("dur") or {}, "plan": {}, "stuck": None, "par": q.get("par") or 1}
+                                               "dur": q.get("dur") or {}, "plan": {}, "stuck": None, "par": q.get("par") or 1,
+                                               "sleeping": bool(q.get("sleeping")), "empty_since": q.get("empty_since")}
            for q in st.get("queues", [])}
     ovt = {}                                    # 各种临时指令最晚下的时刻：告警 key 带它（drain:，#129），同种同目标再下一次就是新的
     for o in st.get("overrides") or []:

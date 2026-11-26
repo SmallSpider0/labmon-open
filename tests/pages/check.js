@@ -908,11 +908,11 @@ t("manage", "主机与队列：每台主机一行（清单数按状态分），�
   const b = drw(O, "#/p/proj-b/manage"), sec = b.slice(b.indexOf("主机与队列"), b.indexOf("<b>调度</b>"));
   const starts = [...sec.matchAll(/<div class="rg( rg-off)?">/g)].map(m => m.index);       // 每台主机一组
   const grp = h => { const k = sec.indexOf(`data-h="${h}"`), i = starts.filter(x => x < k).pop(); return k < 0 ? "" : sec.slice(i, starts.find(x => x > k)); };
-  // srv-a：jobs/b.txt 车道 2 在跑（占位任务）、限定卡 0；jobs/bd.txt 跑完久了，项目页已收起（quiet）：数进“跑完”，展开里不列
+  // srv-a：jobs/b.txt 车道 2 在跑（占位任务）、限定卡 0；jobs/bd.txt 空满 2 天已休眠，项目页已收起（quiet）：数进“跑完”，展开里不列并标含已休眠
   const a = grp("srv-a");
   has(a, 'href="#/host/srv-a"'); has(a, "2 条清单"); has(a, "1 在跑"); has(a, "1 跑完"); has(a, "展开 1 条"); has(a, "<b>车道 2</b>"); has(a, "限定卡 0");
-  has(a, "另有 1 条跑完、久没动，不列"); ok(!a.includes("jobs/bd.txt"), "项目页收起的清单不该列出");
-  has(tips(a), "其中 1 条空得更久，已提示实验会话：不再用的摘掉登记（worker rm）", "空了很久的登记（quiet 的 idle，#47）");
+  has(a, "另有 1 条已收起，不列（含 1 条已休眠）"); ok(!a.includes("jobs/bd.txt"), "项目页收起的清单不该列出");
+  has(tips(a), "其中 1 条空满 2 天已自动休眠：worker 只检查清单文件是否变动，不读状态目录", "休眠登记提示（quiet 的 sleeping，#164）");
   ok(/<details class="dfold rg-q"><summary/.test(a), "逐条清单该折起来");
   // srv-b（借来的，短名“借 OWNER”）：jobs/b2.txt 在跑、jobs/b4.txt 刚登记（下一轮采集后显示）；停法 file:STOP
   const bb = grp("srv-b");
@@ -937,6 +937,7 @@ t("manage", "主机与队列：对不上车道时在用主机按 worker 状态�
   const n = run(O, `regRow(D.regs[0], D.regs[0].queues[0], {id: "proj-a", lanes: []})`);
   has(n, "下一轮采集后显示"); has(n, "运行中 2 个");
   has(run(O, `regRow(D.regs[0], {root: "/data/me/none", jobs: "x.txt", project: "proj-b", empty: true}, {id: "proj-b", lanes: []})`), "空着");
+  has(run(O, `regRow(D.regs[0], {root: "/data/me/none", jobs: "s.txt", project: "proj-b", empty: true, sleeping: true}, {id: "proj-b", lanes: []})`), "已休眠");
   ok(run(O, `regTally(D.regs[0], [{root: "/data/me/none", jobs: "x.txt", project: "proj-b", empty: true}], {id: "proj-b", lanes: []}).done`) === 1, "状态里 empty 的登记该算跑完");
   has(run(O, `regRow({host: "x", state: "returned"}, {root: "/r", jobs: "j.txt"}, {id: "p", lanes: []})`), "进度没读到");
   // 暂停、drain 的清单推演里没有（forecast 排除），todo 里照样列着：按 todo 数，不当成空着；todo 里也没有、又没标 empty 的说不出（Codex 审查 #105）
@@ -1547,6 +1548,27 @@ t("project", "任务明细（全部）：预计时长、已用 / 实际、开始
   has(h, `<td class="r">${run(P, "dur(120 * 60)")}</td>`, "已用"); has(h, `清单估时 ${run(P, "dur(300 * 60)")}，预计按同 tag alpha-train 近 11 个`, "估时提示");
   has(h, "被终止"); has(h, "暂停中");
   has(h, `<td class="r">—</td>`, "没有估时");
+});
+t("project", "已跑完的无编号车道（done_lane，#164）：KPI 标注已跑完数量、时间线默认折起可展开、任务明细折进 dlane-more", () => {
+  const N = JSON.parse(JSON.stringify(PJ));
+  N.lanes.push({id: "done/jobs/d.txt", label: "已跑完", host: "srv-a", type: "gpu_queue", stale: false, root: "/data/me/proj-a/done",
+    queue: "jobs/d.txt", alive: false, managed: true, total: 2, done: 2, failed: 0, unfinished: 0, done_lane: true});
+  N.jobs.push({id: "done_j1", est_min: 10, status: "done", start_ts: NOW - 2 * H, end_ts: NOW - 1.5 * H, lane: "done/jobs/d.txt", hold: false, group: "alpha_", dur_min: 10, actual_min: 30},
+    {id: "done_j2", est_min: 10, status: "done", start_ts: NOW - 1.5 * H, end_ts: NOW - H, lane: "done/jobs/d.txt", hold: false, group: "alpha_", dur_min: 10, actual_min: 30});
+  const A = pjCtx(N, EVN);
+  run(A, 'LS.get = (k, d) => k === "filter" ? "all" : d; render()');
+  const h = app(A);
+  has(h, "· 1 已跑完", "KPI 标出已跑完车道数");
+  has(h, 'class="dlane-more"', "任务明细折起已跑完车道");
+  has(h, "另有 1 条已跑完的车道（2 个任务）", "明细折叠汇总");
+  run(A, "drawTimeline()");
+  const tl1 = el(A, "tlbox").innerHTML;
+  ok(!tl1.includes("done_j1"), "有未完成车道时时间线默认折起 done_lane");
+  has(tl1, "另有 1 条已跑完的车道，显示", "时间线展开提示");
+  run(A, 'LS.get = (k, d) => k === "tlall" ? true : d; drawTimeline()');
+  const tl2 = el(A, "tlbox").innerHTML;
+  has(tl2, "done_j1", "点展开后显示已跑完车道");
+  has(tl2, "收起已跑完与这段时间没有任务的车道", "展开后收起文案");
 });
 // 时间线上的依赖连线（depLines）：[[等的, 等它的, 类名]]
 const depOf = html => [...html.matchAll(/<g class="dl([^"]*)" data-a="([^"]*)" data-b="([^"]*)"/g)].map(m => [m[2], m[3], m[1].trim().split(" ").filter(Boolean)]);

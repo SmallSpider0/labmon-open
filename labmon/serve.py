@@ -323,7 +323,7 @@ class Overview(_Collector):
                         # 计划项（写明的与自动归出来的）各有几个任务、跑完几个，没归进任何组的几个（占位任务不算）：「管理」抽屉看归组对不对（#133）
                         "groups": [{k: g.get(k) for k in ("id", "label", "color", "auto", "total", "done", "failed", "running", "queued")} for g in s.get("groups", [])],
                         "ungrouped": sum(1 for j in s.get("jobs", []) if not j.get("hold") and not j.get("group")),
-                        # 项目页收起的只在登记里有的车道（跑完久了没动，collect._quiet）：管理抽屉的逐条清单不列（#121）
+                        # 项目页收起的只在登记里有的车道（跑完/休眠/已归还/已摘登记/空清单，collect._quiet）：管理抽屉的逐条清单不列（#121、#164）
                         "quiet": s.get("quiet") or [],
                         "cfg": self.cfg_info(p),
                         # 能不能归档（null 能，否则一句原因）：项目「管理」抽屉的「归档」节照它置灰与写原因（#97）

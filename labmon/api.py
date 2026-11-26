@@ -317,12 +317,17 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
                 o.p(f"    {ln}")
     lanes = {ln["id"]: ln for ln in snap.get("lanes") or []}
     o.p("车道：")
-    for ln in lanes.values():
+    active_lanes = [ln for ln in lanes.values() if not ln.get("done_lane")]
+    done_lanes = [ln for ln in lanes.values() if ln.get("done_lane")]
+    show_lanes = active_lanes + (done_lanes if not active_lanes and len(done_lanes) <= 3 else [])
+    for ln in show_lanes:
         cnt = f"{ln.get('done', 0)}/{ln.get('total', 0)} 跑完" + (f"，失败 {ln['failed']}" if ln.get("failed") else "") \
             + (f"，并行 {ln.get('running_n') or 0}/{ln['par']} 在跑" if (ln.get("par") or 1) > 1 else "")     # 并行清单（#147）
         end = f"；预计 {fmt_time(ln['eta_ts'])} 跑完" if ln.get("eta_ts") and ln.get("unfinished") else ""
         why = _lane_state(ln)
         o.p(f"  {_lane_name(ln)}：{cnt}{end}" + (f"；{why}" if why else ""))
+    if done_lanes and len(show_lanes) < len(lanes):
+        o.p(f"  另有 {len(done_lanes)} 条已跑完的车道（共 {sum(ln.get('total', 0) for ln in done_lanes)} 个任务，不占车道编号）")
     jobs = snap.get("jobs") or []
 
     def where(j):

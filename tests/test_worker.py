@@ -7954,6 +7954,174 @@ class RoomSuggestTest(unittest.TestCase):
         self.assertIn("此刻合计还能多开 3 条车道", s["text"])
 
 
+class IdleSleepTest(UnitBase):
+    """#164：跑空登记满 IDLE_REG_S（2 天）自动休眠：不摘登记、每轮只 stat 清单文件（不读 .env、状态目录、清单正文）；
+    清单文件变动或重新 worker add 自动醒来；worker 重启从 status.json 恢复休眠态；
+    多主机（fixtures.Hosts）下休眠清单作为 after= 被等方仍能正常认出；池待放清单同样休眠与唤醒。"""
+
+    def add(self, q, host="t", *extra):
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", out):
+            rc = self.m.main(["add", q["root"], q["jobs"], "--host", host, "--project", q["project"], *extra])
+        return rc, out.getvalue()
+
+    def status(self, w=None):
+        return json.loads(Path((w or self.w).p.status).read_text())
+
+    def test_sleep_skip_io_wake_and_restart(self):
+        q, = self.hosts.queues({"s": ["j1|true   # gpus=0"]}, "pa")
+        os.makedirs(q["state"], exist_ok=True)
+        Path(q["state"], "j1.done").write_text("")
+        self.assertEqual(self.add(q)[0], 0)
+        # 首轮空队列但未满 IDLE_REG_S：不休眠，记录 empty_since
+        self.w.tick(self.w.registry(), True)
+        st0 = self.status()
+        (sq0,) = st0["queues"]
+        self.assertFalse(sq0["sleeping"])
+        self.assertIsNotNone(sq0["empty_since"])
+        # 推进超过 IDLE_REG_S：自动转休眠
+        self.hosts.advance(self.m.IDLE_REG_S + 10)
+        self.w.tick(self.w.registry(), False)
+        st1 = self.status()
+        (sq1,) = st1["queues"]
+        self.assertTrue(sq1["sleeping"])
+        self.assertTrue(st1.get("reg_idle"))
+        # 休眠期间每轮不再读 .env、状态目录与清单正文（断言 env_path 未被调验证）
+        envf = Path(q["jobs_path"]).with_suffix(".env")
+        real_env = self.m.queue.env_path
+        env_calls = []
+        with mock.patch.object(self.m.queue, "env_path", side_effect=lambda *a, **k: (env_calls.append(a), real_env(*a, **k))[1]):
+            qs = self.w.registry()
+            self.assertTrue(qs[0]["sleeping"])
+            self.w.tick(qs, False)
+        self.assertEqual(env_calls, [])
+        self.assertTrue(self.status()["queues"][0]["sleeping"])
+        # worker 重启：从 status.json 恢复休眠态，仍不读 .env
+        w2 = self.hosts.worker("t")
+        w2.load_prev()
+        with mock.patch.object(self.m.queue, "env_path", side_effect=lambda *a, **k: (env_calls.append(a), real_env(*a, **k))[1]):
+            qs2 = w2.registry()
+            self.assertTrue(qs2[0]["sleeping"])
+            w2.tick(qs2, False)
+        self.assertEqual(env_calls, [])
+        # 往清单追加新行：改清单文件，下一轮 file_sig 变化自动醒来并放行 j2
+        with Path(q["jobs_path"]).open("a") as f:
+            f.write("j2|sleep 30   # gpus=0\n")
+        qs3 = w2.registry()
+        self.assertFalse(qs3[0].get("sleeping"))
+        w2.tick(qs3, False)
+        self.assertFalse(self.status(w2)["queues"][0]["sleeping"])
+        self.assertTrue(any(j["name"] == "j2" for j in w2.running.values()) or Path(q["state"], "j2.done").exists())
+        # 清理并测试停机期间修改清单后重启立刻醒来 + 重新 worker add 醒来
+        for j in list(w2.running.values()):
+            try:
+                os.killpg(j["pid"], 9)
+            except OSError:
+                pass
+        w2.running.clear()
+        Path(q["state"], "j2.done").write_text("")
+        if Path(q["state"], "current").exists():
+            Path(q["state"], "current").unlink()
+        w2.tick(w2.registry(), False)
+        self.hosts.advance(self.m.IDLE_REG_S + 10)
+        w2.tick(w2.registry(), False)
+        self.assertTrue(self.status(w2)["queues"][0]["sleeping"])
+        # 停机期间改清单文件 → 新 worker load_prev 后 registry 立即醒来
+        with Path(q["jobs_path"]).open("a") as f:
+            f.write("j3|true   # gpus=0\n")
+        w3 = self.hosts.worker("t")
+        w3.load_prev()
+        qs4 = w3.registry()
+        self.assertFalse(qs4[0].get("sleeping"))
+        # 再休眠一次，然后重新 worker add 刷新登记文件 → 自动醒来
+        Path(q["state"], "j3.done").write_text("")
+        w3.tick(w3.registry(), False)
+        self.hosts.advance(self.m.IDLE_REG_S + 10)
+        w3.tick(w3.registry(), False)
+        self.assertTrue(self.status(w3)["queues"][0]["sleeping"])
+        self.assertEqual(self.add(q)[0], 0)
+        self.assertFalse(w3.registry()[0].get("sleeping"))
+
+    def test_sleeping_as_after_dependency_across_hosts(self):
+        # 多主机（fixtures.Hosts）：主机 o 上清单 s 跑完 A 后满 2 天休眠；主机 t 上清单 b 写 after=A，
+        # 1) 休眠时 t 的 sleep_marks 保留已完成标记，同机能正常认出 A 已完成；
+        # 2) 重启后 sleep_marks 为空且 A 是手工写 .done（不在 usage.jsonl）：同机 dep_state 懒查休眠清单状态目录仍能认出 A 已完成，不会误报找不到；
+        # 3) 跨主机：o 上 s 休眠且 usage.jsonl 记了 A 完成，t 上仍能认出 A 已完成。
+        qa, qb = self.hosts.queues({"s": ["A|true   # gpus=0"], "b": ["B|sleep 30   # gpus=0 after=A"]}, "pa")
+        for q in (qa, qb):
+            os.makedirs(q["state"], exist_ok=True)
+        Path(qa["state"], "A.done").write_text("")
+        self.assertEqual(self.add(qa, host="t")[0], 0)
+        self.w.tick(self.w.registry(), True)
+        self.hosts.advance(self.m.IDLE_REG_S + 10)
+        self.w.tick(self.w.registry(), False)
+        self.assertTrue(self.status()["queues"][0]["sleeping"])
+        # 1) 同机休眠且保留 sleep_marks：加入 B after=A 直接认出 A 已完成并放行
+        self.assertEqual(self.add(qb, host="t")[0], 0)
+        self.w.tick(self.w.registry(), False)
+        self.assertTrue(any(j["name"] == "B" for j in self.w.running.values()))
+        # 2) 重启后 sleep_marks 为空（且无 usage.jsonl 记录），A 在已休眠的 s 清单中靠手工 .done 存在：dep_state 懒查仍认出 done
+        for j in list(self.w.running.values()):
+            try:
+                os.killpg(j["pid"], 9)
+            except OSError:
+                pass
+        self.w.running.clear()
+        for f in ("B.done", "current"):
+            p = Path(qb["state"], f)
+            if p.exists():
+                p.unlink()
+        w2 = self.hosts.worker("t")
+        w2.load_prev()
+        qs = w2.registry()
+        self.assertTrue(any(q["root"] == qa["root"] and q.get("sleeping") for q in qs))
+        w2.tick(qs, True)
+        self.assertEqual(w2.dep_idx.get(("pa", "A")), "done")
+        self.assertTrue(any(j["name"] == "B" for j in w2.running.values()))
+        for j in list(w2.running.values()):
+            try:
+                os.killpg(j["pid"], 9)
+            except OSError:
+                pass
+        w2.running.clear()
+        for f in ("B.done", "current"):
+            p = Path(qb["state"], f)
+            if p.exists():
+                p.unlink()
+        # 3) 跨主机：o 有 usage.jsonl 记录 A 完成且 s 已休眠，t 上的 B after=A 通过 usage 认出已完成
+        o = self.hosts.worker("o")
+        self.hosts.usage("o", [{"name": "A", "project": "pa", "rc": "0", "t0": int(self.hosts.now() - 3 * 86400), "t1": int(self.hosts.now() - 3 * 86400 + 60)}])
+        self.assertEqual(self.add(qa, host="o")[0], 0)
+        o.tick(o.registry(), True)
+        self.hosts.advance(self.m.IDLE_REG_S + 10)
+        o.tick(o.registry(), False)
+        self.assertTrue(self.status(o)["queues"][0]["sleeping"])
+        w2.peer_t = 0
+        w2.tick(w2.registry(), False)
+        self.assertFalse(any(x["name"] == "B" and x.get("dep") == "missing" for x in self.status(w2)["waiting"]))
+        for j in list(w2.running.values()):
+            try:
+                os.killpg(j["pid"], 9)
+            except OSError:
+                pass
+
+    def test_status_cli_folds_many_sleeping(self):
+        # worker status：超过 3 条休眠队列合并成一行汇总，不刷屏
+        st = {"t": time.time(), "pid": os.getpid(), "running": [], "waiting": [], "queues": [
+            {"root": "/r/p", "jobs": "jobs/active.txt", "project": "pa", "empty": False, "sleeping": False},
+            *[{"root": "/r/p", "jobs": f"jobs/s{i}.txt", "project": "pa", "empty": True, "sleeping": True} for i in range(4)],
+        ]}
+        Path(self.w.p.status).write_text(json.dumps(st))
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out):
+            rc = self.m.main(["ls", "--host", "t"])
+        self.assertEqual(rc, 0)
+        txt = out.getvalue()
+        self.assertIn("active.txt", txt)
+        self.assertIn("另有 4 条已休眠的登记", txt)
+        self.assertNotIn("s3.txt", txt)
+
+
 class WorkerPackageTest(unittest.TestCase):
     """#168 第 1 步：worker 拆成 labmon/worker/ 子包后，默认路径、薄入口转发与模块级打桩透传均保持与原单文件一致。"""
 

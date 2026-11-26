@@ -11,6 +11,7 @@ import re
 # ---------- 共用常量 ----------
 GIB = 2 ** 30                  # 容量单位（字节 → GiB）
 STALE_S = 180                  # status.json 这么久没更新（按里面的 t）就算那台 worker 不在
+IDLE_REG_S = 2 * 86400         # 跑空的登记满这么久自动休眠（只看清单 file_sig，不再读状态目录与 .env；#164）
 POOL = "pool"                  # 算力池的保留主机 id：池里待放的清单登记在 hosts/pool/queues/
 
 # 占位任务（清单里插的“等条件再放行”的 hold / pause）：按词认，不占卡、不独占、不进估时比值与等待统计
