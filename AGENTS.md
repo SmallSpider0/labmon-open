@@ -194,16 +194,29 @@ PR 合并后，由总控把它从会话的 PR 栏关掉（`unbind_pr`），栏�
 
 按发起派工的环境选下面对应的列，分档、分工和检查点共用。GitHub 上的 Codex PR 审查单独触发，不走子 agent 选型。
 
-| 角色 | Claude 模型 / 强度 | Codex 模型 / 推理强度（默认选择） |
-|---|---|---|
-| 机械活、查状态 | Sonnet medium | `gpt-6.1-sol` medium |
-| 部署（每批一个） | Sonnet low 跑 [部署脚本](#部署到本机看板)；脚本跑不了时 Sonnet medium 手工走七步 | `gpt-6.1-sol` low 跑脚本；手工走七步用 `gpt-6.1-sol` medium |
-| 修小阻塞（审查已给出修法，只是一两处改动） | 新的 Sonnet medium，只带审查意见与 PR 号 | 新的 `gpt-6.1-sol` medium，同样只带审查意见与 PR 号 |
-| 第 1 档、第 2 档（单个或一批）、按已定方案实现 | Opus medium（第 1 档只改文档的用 Sonnet medium） | `gpt-6.1-sol` medium |
-| 第 3 档从设计做到实现；第 4 档设计（定了接着实现）；设计与影响调研、原因不明的 bug | Opus high | `gpt-6.1-sol` high |
-| 第 4 档跨多个模块的设计；最难的设计；high 做错过一次的重试 | Opus xhigh（最高一档，2026-11-08 维护者定） | `gpt-6-astra` xhigh |
-| 主审（含只改文档的 PR，Issue #73） | GitHub Codex 审查 | GitHub Codex 审查 |
-| 独立兜底审查（主审约 30 分钟没结果或报失败）；用全新子 agent | 第 2 档（含只改文档的 PR）Opus medium、第 3 档 Opus high、第 4 档 Opus xhigh | 第 2 档（含只改文档的 PR）`gpt-6.1-sol` medium、第 3 档 `gpt-6-astra` high、第 4 档 `gpt-6-astra` xhigh |
+| 角色 | Antigravity 模型 / 强度（默认 Gemini 池） | Claude 模型 / 强度 | Codex 模型 / 推理强度（默认选择） |
+|---|---|---|---|
+| Swarm `monitor`（防卡顿） | `gemini-3.8-flash-low` | — | — |
+| 机械活、查状态、纯文档（第 1 档文档小修） | `gemini-3.8-flash-medium` | Sonnet medium | `gpt-6.1-sol` medium |
+| 部署（每批一个） | `gemini-3.8-flash-medium` 跑 [部署脚本](#部署到本机看板)；手工走七步用 `gemini-4-neon-medium` | Sonnet low 跑 [部署脚本](#部署到本机看板)；脚本跑不了时 Sonnet medium 手工走七步 | `gpt-6.1-sol` low 跑脚本；手工走七步用 `gpt-6.1-sol` medium |
+| 总控（`coordinator`） | `gemini-4-neon-medium` | Sonnet medium / Opus medium | `gpt-6.1-sol` medium |
+| 修小阻塞（审查已给出修法，1–2 处明确改动） | 原实现者热缓存当场修；停后新开 `gemini-4-neon-medium`（或 `gemini-3.8-flash-high`） | 新的 Sonnet medium，只带审查意见与 PR 号 | 新的 `gpt-6.1-sol` medium，同样只带审查意见与 PR 号 |
+| 第 1 档、第 2 档（单个或一批）、常规第 3 档、按已定方案实现 | `gemini-4-neon-medium`（备选 `claude-sonnet-5-5-medium`） | Opus medium（第 1 档只改文档的用 Sonnet medium） | `gpt-6.1-sol` medium |
+| 复杂第 3 档、第 4 档设计与实现、原因不明的 bug | `gemini-4-neon-high`（备选 `claude-opus-5-5-high`） | Opus high | `gpt-6.1-sol` high |
+| 第 4 档最难跨模块的设计；最难的设计；high 做错过一次的重试 | `gemini-4-neon-xhigh`（备选 `claude-opus-5-5-high`） | Opus xhigh（最高一档，2026-11-08 维护者定） | `gpt-6-astra` xhigh |
+| 主审（含只改文档的 PR，Issue #73） | GitHub Codex 审查 | GitHub Codex 审查 | GitHub Codex 审查 |
+| 独立兜底审查（主审约 30 分钟没结果或报失败；用全新子 agent） | 第 2 档 `gemini-4-neon-medium`；第 3–4 档 `gemini-4-neon-high`（难项或跨家族可用 `claude-opus-5-5-high`） | 第 2 档（含只改文档的 PR）Opus medium、第 3 档 Opus high、第 4 档 Opus xhigh | 第 2 档（含只改文档的 PR）`gpt-6.1-sol` medium、第 3 档 `gpt-6-astra` high、第 4 档 `gpt-6-astra` xhigh |
+
+**Claude 独立池用完后的三级备选策略（2026-11-26 维护者定，#186）：**
+
+1. **平时优先 Gemini 池**：不拿 Claude 跑 `monitor`/部署/总控/机械活，把少量 Claude 池留给 Gemini 池见底时的第 4 档或跨家族兜底审查。
+2. **Claude 池用完、Gemini 池尚有余量**：全线回退 Gemini 池内降档控耗——`monitor`/部署/机械活锁 `gemini-3.8-flash-low|medium`；总控降 `gemini-4-neon-low`（或 `gemini-3.8-flash-high`）；第 1–2 档用 `gemini-4-neon-low` / `gemini-3.8-flash-high`；第 3 档用 `gemini-4-neon-medium`；第 4 档优先保 `gemini-4-neon-high`（或配外部 GitHub Codex 主审用 `gemini-4-neon-medium`，极难项延后到 Gemini 5 小时重置窗口）。
+3. **Gemini 与 Claude 双池均见底**：若 `gpt-oss-120b-medium` 有余量，仅用于纯文档、整理、总控或低风险第 1 档（不做第 4 档核心调度/平台操作，防返工）；暂停新开第 3–4 档并行写手，已有 PR 留单人等外部 GitHub Codex 主审合并，待配额重置后再开新批。
+
+**流程省额配合**：
+- `#168` 拆包后，brief 注明只读目标子模块，不通读全包；
+- 等 CI / 等 Codex 主审用单条阻塞等待命令，避免高频多轮轮询重复喂缓存；
+- 合并后及时回收已完成 worker。
 
 Codex 派工时由总控自动选型（#281）：
 
