@@ -140,8 +140,9 @@ def view(hosts: list[dict] | None = None, t: float | None = None, cfg: dict | No
                                    for w in smp.get("work", [])]}
         lease = None if o else F.lease_end(st, cfg)
         servers.append({**{k: s.get(k) for k in ("id", "holder", "job", "label", "ssh", "port", "pool")},
-                        "public": s["pool"] not in cfg["private_pools"], "last": st.get("last"), "error": None if o else st.get("error"),
-                        "down": None if o else st.get("down"), "fails": st.get("fails", 0), "since": st.get("since"), "started": (smp.get("started") if live else None) or st.get("started"),
+                        "public": s["pool"] not in cfg["private_pools"], "last": st.get("last"), "error": None if o or live else st.get("error"),
+                        "down": None if o or live else st.get("down"), "fails": 0 if live else st.get("fails", 0), "since": None if o or live else st.get("since"),
+                        "started": (smp.get("started") if live else None) or st.get("started"),
                         "lease_end": lease, "lease_cut": B.cutoff({"holder": s["holder"]}, lease)[0], "off": o,   # lease_cut：借用最晚截止到它（借来用的表单提示）
                         "last_job": st.get("last_job"), "state": "off" if o else smp["state"] if live else "down" if st.get("down") else smp.get("state"),
                         "sample": None if o else smp or None,

@@ -401,6 +401,27 @@ class TickTest(unittest.TestCase):
         srv = FV.view([host], T0 + 30, c)["servers"][0]
         self.assertEqual((srv["state"], srv["sample"]["vram_real"], srv["sample"]["vram_ka"]), ("keepalive", 0, 6000))
 
+    def test_borrowed_live_clears_stale_probe_down(self):
+        """借用中探针曾判掉线、随后 worker 采集先恢复时，展示层同步清除陈旧的 down/error/since/fails，避免页面一边显示实时负载一边标红掉线。"""
+        c = cfg(me="ME")
+        c["servers"][0] = {**c["servers"][0], "borrow_since": "2026-11-01 00:00", "borrow_by": "ME"}
+        fail = lambda s: (None, "ssh 超时")  # noqa: E731
+        F.tick(T0, fail, c, force="a")
+        F.tick(T0 + 200, fail, c, force="a")                  # 探针已判掉线
+        info = {"gpus": [{"i": 0, "uuid": "G0", "name": "A6000", "used": 8000, "total": 46000, "free": 38000, "util": 75}],
+                "mem": {"used": 16.0, "limit": 120.0, "anon": 4.0, "src": "cgroup"}, "cpu_used": 4.0, "cpu_quota": 16.0, "nproc": 64}
+        st = fake_status(t=T0 + 230, info=info,
+                         gpu_procs=[{"owner": "job", "job": "t1", "pid": 11, "hpid": 101, "mb": 8000, "comm": "python"}],
+                         running=[{"name": "t1", "project": "p1", "t0": T0 + 200, "root": "/tmp/p1"}])
+        host = {"id": "a", "worker_up": True, "lan_off": False, "status": st,
+                "health": {"state": "ok", "fails": 0, "since": None, "why": None}}
+        srv = FV.view([host], T0 + 230, c)["servers"][0]
+        self.assertEqual((srv["state"], srv["down"], srv["error"], srv["since"], srv["fails"]), ("job", None, None, None, 0))
+        # worker 不新鲜时仍按探针状态显示掉线
+        stale = FV.view([{**host, "worker_up": False}], T0 + 230, c)["servers"][0]
+        self.assertEqual(stale["state"], "down")
+        self.assertTrue(stale["down"] and stale["error"] and stale["since"])
+
     def test_stats_by_hour(self):
         """按人统计按小时归一：一人两台，一台每小时 60 次样本（自用主机每分钟一次）、一台 6 次（探针），各一小时，时间占比各一半。"""
         from labmon.state import append_row
