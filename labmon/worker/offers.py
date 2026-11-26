@@ -73,8 +73,12 @@ class OffersMixin:
                      "trapped" if key in held or ln.get("held") == "drain" or lp.get("stuck") else "unknown")
             why = ("%s 上 %s：%s，说不出原处何时放行" % (host, ln["queue"], lp["stuck"]) if dep else
                    "%s 上 %s 推演里没有（读不了状态目录、队列没出请求之类），不知道原处何时放行" % (host, ln["queue"]) if state == "unknown" else None)
+            par = ln.get("par") or 1
+            slots = par - len(cur)
+            par_dep_win = slots if par > 1 and slots > 0 and len(pend) > slots and all(self.dep_waiting(ln["project"], x[1]) for x in pend[:slots]) else 0
             out.append({"host": host, "root": ln["root"], "queue": ln["queue"], "project": ln["project"], "pend": pend, "run": run,
-                        "end": None if None in ts or state == "unknown" else max(ts), "state": state, "dep": bool(dep), "unread": rows is None, "why": why})
+                        "end": None if None in ts or state == "unknown" else max(ts), "state": state, "dep": bool(dep), "unread": rows is None, "why": why,
+                        "par_dep_win": par_dep_win})
         return out
 
     def offers(self, qs, base, now, pol, focus, use, info, held=()):
@@ -310,6 +314,12 @@ class OffersMixin:
                     "rest": end[i] and round(end[i]), "h": h, "i": len(left[i]), "lane": i}
             if nmiss:
                 cand["needs_miss"] = nmiss
+            win = ln.get("par_dep_win") or 0
+            if win and len(left[i]) >= win:       # 落在并行窗口外且窗口此刻被等依赖的行占满：原处推演因占格推后于自身依赖满足时标出（#166）
+                dk = _DP.dep_keys(dict(h, project=ln["project"])) if h else []
+                d0 = _DP.dep_end(dk, now, self.ends, self.dead) if dk else now
+                if t0 is None or (d0 is not None and t0 > d0 + 60):
+                    cand["par_dep_full"] = True
             out.append(cand)
         return out, why
 

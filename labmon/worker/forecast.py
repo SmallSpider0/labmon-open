@@ -93,7 +93,7 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
             busy[y.get("lane") or y["key"]] = busy.get(y.get("lane") or y["key"], 0) + 1
         for q in queues:
             k = q["key"]
-            win = [i for i in range(len(q["jobs"])) if i not in put[k]][:max(0, (q.get("par") or 1) - busy.get(k, 0))]   # 窗口（同 next_jobs）
+            win = [i for i in range(len(q["jobs"])) if i not in put[k]][:max(0, (q.get("wpar") or q.get("par") or 1) - busy.get(k, 0))]   # 窗口（同 next_jobs；wpar 为限流缩小的窗口上限）
             if win:
                 blocked.pop(k, None)
             for i in win:
@@ -194,9 +194,12 @@ class ForecastMixin:
         第二遍代入第一遍的结果（在跑的占位任务也按它重算预计结束）。"""
         self.load_eta()
         wait = [r for r in reqs if r["key"] not in self.running]
+        base_ends = self.dep_base_ends()
+        peer_key = tuple(sorted((k, None if v is None else round(v / 60)) for k, v in base_ends.items() if v != 0))   # 跨主机依赖预计结束（按分取整）：变了当轮重推（#166）
         key = (tuple(sorted((r["key"], r["name"], bool(r["held"])) for r in wait)), tuple(sorted((k, j["name"]) for k, j in self.running.items())),
                tuple(q["key"] for q in queues),
                self.durs_key, json.dumps(self.ovr, sort_keys=True), self.eta_m, json.dumps(pol, sort_keys=True), frozenset(self.dep_idx.items()),
+               peer_key,
                json.dumps(self.todo),         # 还会跑的行（删了 .failed 重跑时清单与队首都没变）：plan 与写进状态的 todo 同一轮对得上（#25）
                frozenset(self.other["ka"]),   # 借来的主机上有停不了的保活的卡（推演不放它，#45）：出现、消失当轮重推
                # 成组：别的主机上的成员预计何时能一起开跑（此刻就能的记 0，不随时钟变）、本机成员在不在队首
@@ -219,7 +222,6 @@ class ForecastMixin:
             heads[_C.lane_key(r)] = r
         for j in self.running.values():
             lanes.setdefault(_C.lane_key(j), []).append(j["name"])
-        ends = {k: 0 for k, v in self.dep_idx.items() if v == "done"}
         for q in queues:
             k = q["key"]
             if k in held or (k not in lanes and k not in heads) or k not in self.qlists:
@@ -235,15 +237,16 @@ class ForecastMixin:
             jobs = [self.job_spec(n, h, self.qest.get(k, {}).get(n) or _S.estimate(self.hist, dict(h, name=n, project=q["project"])),
                                   self.req_dur(x), self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"])), self.req_dur(x, cut=True))
                     for n, h in pend for x in [{"key": k, "name": n, "project": q["project"], "gang": None if _C.is_hold(n) else h["gang"]}]]
-            par, allowed, gpar = q.get("par") or 1, q["gpus"], None
+            par, wpar, allowed, gpar = q.get("par") or 1, None, q["gpus"], None
             if par > 1 and cur:                   # 已有行在跑：再加的行要过门槛（同真放行 place 里的 par_gate）
-                if shut and self.throttle(now):   # 容器在限流：不用卡的行也不加，按此刻在跑的行数排
-                    par = max(1, len(cur))
+                if shut and self.throttle(now):   # 容器在限流：不用卡的行也不加，按此刻在跑的行数排（保留 par 供 run_key 对齐 starts）
+                    wpar = max(1, len(cur))
                 elif shut or (cards is not None and not [i for i in cards if allowed is None or i in allowed]):
                     gpar = max(1, len(cur), lvl.get(k, 0))   # 卡吃满：要卡的行只补到此刻与近来跑到过的行数（真放行补位照补、不往上加），不用卡的照窗口排
                 elif cards is not None:           # 要卡的行只放在门槛给的卡上
                     allowed = [i for i in cards if allowed is None or i in allowed]
             qs.append({"key": k, "kind": "queue", "project": q["project"], "allowed": allowed, "par": par, "gpar": gpar,
+                       **({"wpar": wpar} if wpar is not None else {}),
                        "since": heads[k]["since"] if k in heads else now, "jobs": jobs})
             info[k] = {"root": q["root"], "queue": q["jobs"], "project": q["project"], "kind": "queue"}
         for r in wait:
@@ -259,20 +262,29 @@ class ForecastMixin:
         waits = {(_Q.run_key(q, x["name"]), x["name"]): _DP.dep_keys(dict(x, project=q["project"])) for q in qs for x in q["jobs"]}     # 写了依赖的任务
         waits.update({(k, j["name"]): _DP.dep_keys(j) for k, j in self.running.items()})
         waits = {k: v for k, v in waits.items() if v}
-        ends.update((k, v) for k, v in self.peer_end.items() if self.dep_idx.get(k) == "pending")   # 那台写推演之后已跑完的不再取它的预计
         gangs = self.gsim
-        for i in range(2):
-            ends.update(((y["project"], y["name"]), y["t1"]) for y in base["jobs"])
+        local_ends, run_ends = {}, None
+        # 有依赖或成组未知成员时从干净的 base_ends 迭代至收敛（最多 6 遍，防多跳链或资源反馈导致 self.ends 与 starts 不自洽，#166）
+        max_pass = 6 if (waits or any(e is None for g in gangs.values() for e in g["local"].values())) else 1
+        for i in range(max_pass):
+            ends_in = dict(base_ends)
+            ends_in.update(local_ends)
+            ends_in.update(((y["project"], y["name"]), y["t1"]) for y in base["jobs"])
             on_dep = {}
             first = {}                            # 成组成员最早何时放得下（place 记）：写进 gang.json 给同伴，只看本机，几台互相引用也不会越推越晚
-            out, stuck = simulate(now, base, qs, focus, self.cutoff(), pol=pol, use=use, ends=ends, dead=self.dead, on_dep=on_dep,
+            out, stuck = simulate(now, base, qs, focus, self.cutoff(), pol=pol, use=use, ends=ends_in, dead=self.dead, on_dep=on_dep,
                                   gangs=gangs, first=first)
-            ends.update(((e["project"], e["name"]), e["t1"]) for e in out)
-            self.ends = ends
-            # 本机成员还不知道何时放得下的（上一轮推演没有它、不在队首）：第二遍按这一遍里它最早何时放得下算，同组的才留得住
+            new_local = {(e["project"], e["name"]): e["t1"] for e in out}
+            new_run = {(y["project"], y["name"]): y["t1"] for y in base["jobs"]}
+            ends_out = dict(base_ends)
+            ends_out.update(new_run)
+            ends_out.update(new_local)
+            self.ends = ends_out
+            # 本机成员还不知道何时放得下的（上一轮推演没有它、不在队首）：下一遍按这一遍里它最早何时放得下算，同组的才留得住
             unk = any(e is None for g in gangs.values() for e in g["local"].values())
-            if i or not (waits or unk):
+            if i + 1 >= max_pass or (not unk and new_local == local_ends and new_run == run_ends):
                 break
+            local_ends, run_ends = new_local, new_run
             gangs = {gk: dict(g, local={x: first.get(x) if e is None else e for x, e in g["local"].items()}) for gk, g in gangs.items()}
             base = self.snapshot(limits)
         self.plan = {"t": now, "lanes": self.plan_lanes(base["jobs"], out, stuck, info, waits, on_dep)}

@@ -200,7 +200,7 @@ def fit_deps(p, q, rows, hist, now):
     w.host, w.p, w.info, w.ovr, w.running, w.hist = p.host, types.SimpleNamespace(status=None, returned=p.returned), {}, [], {}, hist
     w.qlists, w.olists, w.pool_heads, w.dep_miss, w.peer_t = {q["key"]: (None, [(n, _Q.hints(c)) for n, c in rows])}, {}, [], {}, -math.inf
     w.dep_state([q], now)
-    w.ends = dict(w.peer_end)                 # 别的主机推演里的预计结束：等待原因写“预计几点”
+    w.ends = w.dep_base_ends()                # 与推演共用同一份基础依赖结束表：等待原因写“预计几点”（#166）
     return w
 
 

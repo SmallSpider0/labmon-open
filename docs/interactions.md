@@ -13,7 +13,7 @@
 
 几台主机的 worker 共用共享盘上同一个 `worker_home`，各写 `hosts/<主机>/` 下自己的 `status.json`、`usage.jsonl`，互相读。
 
-- 别的主机要不要知道这件事？要的话写进 `write_status` 的哪个字段，`peers` 读不读得到（`share.run`、`plan` → `peer_end`、`todo` → `peer_todo`）。
+- 别的主机要不要知道这件事？要的话写进 `write_status` 的哪个字段，`peers` 读不读得到（`share.run`、`plan` → `peer_ends`、`todo` → `peer_todo`）。
 - 那台 worker 不在时怎么算：状态过了 `STATUS_STALE_S` 还算不算；续租、重启的一天内（`DEP_STALE_S`）照样算吗；`worker stop` 过（`stopped`，含借用归还）的呢。
 - 过期一律看状态里那台自己写的 `t`，不看文件修改时间（时钟偏差见[第 7 维](#7-主机与项目的进出)）。
 - 用量记录：各主机的 `usage.jsonl` 由 `load_hist` / `reload_hist` 一起读，新加的字段各台口径一致吗；公平份额（`share`）是不是跨主机算。

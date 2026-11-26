@@ -92,6 +92,7 @@ def _text(p: dict, proj: str, label: dict, t: float) -> str:
         when = f"整批预计从 {fmt_time(p['from'])} 提前到 {fmt_time(p['to'])}（早 {fmt_dur(p['from'] - p['to'])}）"
     else:
         when = f"整批预计 {fmt_time(p['to'])} 跑完（现在有任务在原处跑不了，整批何时跑完推不出）"
+    par_dep = "；原清单的并行窗口被等依赖的行占满" if p.get("par_dep_full") or any(j.get("par_dep_full") for j in p.get("jobs") or ()) else ""
     miss = p.get("needs_miss") or _needs_miss(p.get("jobs") or [])
     if miss:
         shown = "、".join(miss[:3]) + (f" 等 {len(miss)} 个" if len(miss) > 3 else "")
@@ -105,16 +106,16 @@ def _text(p: dict, proj: str, label: dict, t: float) -> str:
     where = (f"插在 {lane} 里 {p['before']} 前面（它写了 after=，要等别的任务；接在它后面会被它堵住）" if lane and p.get("before")
              else f"接在 {lane} 后面" if lane else None)
     if p.get("local") and lane:        # 同机挪到另一条早跑完的清单（#110）：车道数不变，原清单在同一台排到别的清单跑完后才跑完
-        return f"把 {what} 挪到同一台上另一条早跑完的清单（{where}{tail}）：{when}{cache}{TAIL % fmt_time(t, date=False)}"
+        return f"把 {what} 挪到同一台上另一条早跑完的清单（{where}{tail}）：{when}{par_dep}{cache}{TAIL % fmt_time(t, date=False)}"
     if p.get("local"):                 # 同机多开一条车道（#43）：剪到新的长期清单，与原清单同目录、同环境
         # 推演只在没吃满的卡上排（offer 的 gpus）：登记时照样限卡，否则真放行可能放到吃满的卡上（Codex 审 #63）
         gp = f" --gpus {','.join(map(str, p['gpus']))}（只用这几张卡：别的卡已吃满）" if p.get("gpus") else ""
         return (f"在 {label.get(tid, tid)} 上多开一条车道：把 {what} 剪到一条新的长期清单（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；"
                 f"原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}{gp}，以后同类任务也往这条追加{tail}："
-                f"{when}{cache}{TAIL % fmt_time(t, date=False)}")
+                f"{when}{par_dep}{cache}{TAIL % fmt_time(t, date=False)}")
     where = where or (f"这台还没有本项目同一种环境的清单：新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；"
                       f"原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}")
-    return f"把 {what} 挪到 {label.get(tid, tid)}（{where}{tail}）：{when}{cache}{TAIL % fmt_time(t, date=False)}"
+    return f"把 {what} 挪到 {label.get(tid, tid)}（{where}{tail}）：{when}{par_dep}{cache}{TAIL % fmt_time(t, date=False)}"
 
 
 def log_text(msg: str) -> str:
@@ -243,6 +244,8 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
             miss = _needs_miss(best["jobs"])
             if miss:
                 best["needs_miss"] = miss
+            if any(j.get("par_dep_full") for j in best["jobs"]):
+                best["par_dep_full"] = True
             best["text"] = _text(best, proj, label, t)
             if under:                  # 有吃不满的主机（#145）：句首写合计还能开几条、还有多少行排队；不是按整批门槛收下的，key 按吃不满的那几台
                 best["room"] = {"hosts": {h: r["lanes"] for h, r in sorted(under.items())}, "busy": {h: r["busy"] for h, r in sorted(under.items())},

@@ -1070,8 +1070,8 @@ class SchedMixin:
 
     def peers(self, now):
         """别的主机在跑的任务 [(项目, 卡数, 开始, 预计结束)]：各自状态里的 share.run（共享盘上同一个 HOME，PEER_EVERY 秒读一次；
-        STATUS_STALE_S 秒没更新的状态不算，那台 worker 不在）。同时记下各自推演（plan，含在跑的 run 条）里每个任务的预计结束
-        （peer_end）与还会跑的任务（状态里的 todo，见 list_state；peer_todo）：依赖等别的主机上的任务时查（dep_state、forecast）。
+        STATUS_STALE_S 秒没更新的状态不算，那台 worker 不在）。同时按主机记下各自推演（plan，含在跑的 run 条）里每个任务的预计结束
+        （peer_ends，跳过已 stopped 主机）与还会跑的任务（状态里的 todo，见 list_state；peer_todo）：依赖等别的主机上的任务时查（dep_state、dep_base_ends、forecast）。
         todo 在那台 worker 不在时（状态没更新、又没有 worker stop 留下的 stopped）DEP_STALE_S 内照样算：续租、重启后那些任务还会跑；
         worker stop 过的（含借用归还）不算。另记下与本机在同一物理机上（状态里共享盘的 clientaddr 相同）的别的主机在跑的任务（peer_box，
         读写拥塞嫌疑的事件里列出）：29、29-15158、29-15159 这类同一物理机的几个容器读到的共享盘计数是同一份，按 addr 归到一起、不相加。
@@ -1079,29 +1079,31 @@ class SchedMixin:
         一并读看板写来的 returned.json（主机清单里已归还的，平台上关了机的自用主机也标成归还）进 gone：只给 offers 用，依赖照旧按 peer_todo。
         有没有更新看状态里那台 worker 自己写的时刻 t，不看文件修改时间：修改时间是共享盘服务器的时钟，比各容器慢 3 分多钟，看上去总超过 STATUS_STALE_S。"""
         if now - self.peer_t >= _C.PEER_EVERY:
-            self.peer_t, self.peer, self.peer_end, self.peer_todo, self.peer_box, self.peer_st = now, [], {}, [], [], {}
+            self.peer_t, self.peer, self.peer_ends, self.peer_todo, self.peer_box, self.peer_st = now, [], {}, [], [], {}
             try:
                 self.gone = set(json.loads(_C.read(self.p.returned, "{}") or "{}").get("hosts") or [])
             except (ValueError, AttributeError, TypeError):
                 self.gone = set()
             addr = ((self.info.get("press") or {}).get("nfs") or {}).get("addr")
-            for f in glob.glob(os.path.join(_C.HOME, "hosts", "*", "status.json")):
+            for f in sorted(glob.glob(os.path.join(_C.HOME, "hosts", "*", "status.json"))):
                 try:
                     if f == self.p.status:
                         continue
                     st = json.loads(_C.read(f, "{}") or "{}")
                     d, age = os.path.dirname(f), now - (st.get("t") or 0)
-                    if age <= _C.DEP_STALE_S and not os.path.exists(os.path.join(d, "stopped")):
-                        self.peer_todo += [(os.path.basename(d), age, st["t"], ln) for ln in st.get("todo") or []]
+                    h = os.path.basename(d)
+                    stopped = os.path.exists(os.path.join(d, "stopped"))
+                    if age <= _C.DEP_STALE_S and not stopped:
+                        self.peer_todo += [(h, age, st["t"], ln) for ln in st.get("todo") or []]
                     if age > _C.STATUS_STALE_S:
                         continue
-                    if not os.path.exists(os.path.join(d, "stopped")):
-                        self.peer_st[os.path.basename(d)] = st
+                    if not stopped:
+                        self.peer_st[h] = st
+                        self.peer_ends[h] = {(ln.get("project"), j["name"]): j.get("t1")
+                                             for ln in (st.get("plan") or {}).get("lanes") or [] for j in ln.get("jobs") or []}
                     self.peer += [tuple(x) for x in (st.get("share") or {}).get("run") or []]
-                    self.peer_end.update(((ln.get("project"), j["name"]), j.get("t1"))
-                                         for ln in (st.get("plan") or {}).get("lanes") or [] for j in ln.get("jobs") or [])
                     if addr and (((st.get("info") or {}).get("press") or {}).get("nfs") or {}).get("addr") == addr:
-                        self.peer_box += [(st.get("host") or os.path.basename(d), j.get("project"), j["name"]) for j in st.get("running") or [] if not j.get("hold")]
+                        self.peer_box += [(st.get("host") or h, j.get("project"), j["name"]) for j in st.get("running") or [] if not j.get("hold")]
                 except (OSError, ValueError, TypeError, AttributeError, KeyError):
                     continue
             self.peer_todo += self.pool_todo(now)
