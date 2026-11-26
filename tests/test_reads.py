@@ -99,8 +99,8 @@ class ReadsTest(unittest.TestCase):
                   "挪法建议：可以把 h1 上 jobs/a.txt 的 train_s2 挪到 h4", "告警（2 条）", "[failed:train_s0] train_s0 失败", "[ssh_fail:h2] h2 连不上（要用户处理）"):
             self.assertIn(s, out)
         self.assertNotIn("看板没在采集", out)
-        # 这台的保活（#61）：nvidia-smi 里的 PID 对得上；连不上、worker 不在的主机不报
-        self.assertIn("h1（A6000）：正常；卡 0 97% 30.0/45 GiB\n    GPU 保活：在跑（", out)
+        # 这台的保活（#61）：nvidia-smi 里的 PID 对得上；连不上、worker 不在的主机不报；#197 同时附他项聚合数
+        self.assertIn("h1（A6000）：正常；卡 0 97% 30.0/45 GiB；他项 1 跑\n    GPU 保活：在跑（", out)
         self.assertIn("PID 5300（容器内 300），卡 0 占 6.7 GiB；有任务要卡时 worker 自动停", out)
         self.assertEqual(out.count("GPU 保活"), 1)
         # 这台的 CPU 配额与已记的核（#112，同 worker status 的 cpu_line）；worker 不在的主机不报

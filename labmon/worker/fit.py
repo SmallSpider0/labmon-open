@@ -6,6 +6,7 @@ import os
 import types
 
 from . import common as _C
+from . import pure as _P
 from . import queue as _Q
 from . import sched as _S
 from . import core as _W
@@ -70,15 +71,26 @@ class FitHost:
         self.lanes, self.say, self.why = [], [], None     # 这次假设开的 [(任务, 卡号)] 与各行的说明；最近一行没开成的原因
         self.solo, self.solo_host = {}, None              # 这次分给只有提示值的行的卡 {uuid: 任务}（之后哪一行都不与它同卡）；不用卡的那种占了整台：任务名
 
-    def card_lines(self):
-        """各卡此刻的样子（可用显存、利用率、在跑谁、CPU 受限）、这台的 CPU 配额与记账（cpu_line，#112）与限流：fit 先列出来。"""
+    def card_lines(self, project=None):
+        """各卡此刻的样子（可用显存、利用率、在跑谁、CPU 受限）、这台的 CPU 配额与记账（cpu_line，#112）与限流：fit 先列出来。
+        给了 project（fit --list）时，非本项目的在跑任务只报聚合数（他项 N 跑），不输出他人任务名（#197）。"""
         free, out = _S.card_free(self.S), []
+        by_proj = {j["name"]: j.get("project") for j in self.S["jobs"]} if project is not None else None
         for c in self.cards:
-            jobs = [j["name"] for j in self.S["jobs"] if c["uuid"] in j["gpus"]]
+            if project is None:
+                jobs = [j["name"] for j in self.S["jobs"] if c["uuid"] in j["gpus"]]
+                on_card = "（在跑 %s）" % "、".join(jobs) if jobs else "（空着）"
+            else:
+                mine = [j["name"] for j in self.S["jobs"] if c["uuid"] in j["gpus"] and j.get("project") == project]
+                other_n = sum(1 for j in self.S["jobs"] if c["uuid"] in j["gpus"] and j.get("project") != project and not j.get("hold"))
+                bits = (["在跑 " + "、".join(mine)] if mine else []) + (["他项 %d 跑" % other_n] if other_n else [])
+                on_card = "（%s）" % "；".join(bits) if bits else "（空着）"
             b = self.slack["bound"].get(c["uuid"])
+            if b and by_proj is not None:
+                b = [(n if by_proj.get(n) == project else "他项任务", avg, cap) for n, avg, cap in b]
             out.append("卡 %d：可用 %.1f GiB，近 10 分钟利用率 %s%s%s" % (
                 c["i"], max(0.0, free[c["uuid"]]) / 1024, "%d%%" % c["util"] if c["util"] is not None else "—（样本不够）",
-                "（在跑 %s）" % "、".join(jobs) if jobs else "（空着）",
+                on_card,
                 "；%s 跑满了给的核（CPU 受限）" % "、".join("%s %.1f/%d 核" % x for x in b) if b else ""))
         if _S.cpu_line(self.st):
             out.append(_S.cpu_line(self.st))
@@ -161,9 +173,11 @@ class FitHost:
             b = self.slack["bound"].get(c["uuid"]) if c else None
             if b and not hint:
                 left = _S.cpu_free(S)
+                by_proj = {j["name"]: j.get("project") for j in S["jobs"]}
+                b_show = [(n if not x.get("project") or by_proj.get(n) == x["project"] else "他项任务", avg, cap) for n, avg, cap in b]
                 return None, "卡 %d 近 10 分钟利用率 %d%%，低是因为在跑的 %s跑满了给它的核 → 不在这张卡上开新车道：先给它那条车道加核（清单行 cpus=）%s" % (
                     c["i"], next(x_["util"] for x_ in self.cards if x_["uuid"] == c["uuid"]),
-                    "、".join("%s（近 10 分钟平均 %.1f 核，给了 %d 核）" % y for y in b),
+                    "、".join("%s（近 10 分钟平均 %.1f 核，给了 %d 核）" % y for y in b_show),
                     "；这台还能给 %.0f 核" % left if left is not None and left >= 1 else "；这台已没有余核，瓶颈在 CPU")
             k, v = ("vram", r["vram"]) if gpu else ("ram", r["ram"])
             return None, "%s，%s → 不开新车道（%s），排在已有车道后面%s" % (
@@ -352,12 +366,13 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
         print("没有能算的主机")
         return 2
     for fh in fhs:
-        fh.pre = fh.card_lines()                  # 卡的样子是开车道之前的
+        fh.other = _P.other_load(fh.st, q["project"])
+        fh.pre = fh.card_lines(q["project"])      # 卡的样子是开车道之前的（非本项目任务脱敏）
     left = list(todo)
     while left:
         n, c, _ = left[0]
         done = False
-        for fh in sorted(fhs, key=lambda f: (len(f.lanes), fhs.index(f))):
+        for fh in sorted(fhs, key=lambda f: (len(f.lanes), f.other["running"] + f.other["queued"], f.other["until"] or 0.0, fhs.index(f))):
             r, e, x = fh.req(q, n, c, None)
             say, why = fh.open(r, e, x, now)
             if say:
@@ -369,7 +384,8 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
             break
         left.pop(0)
     for fh in fhs:
-        print("== %s ==" % fh.host)
+        hint = _P.other_load_text(fh.other, now=now, show_until=True)
+        print("== %s%s ==" % (fh.host, "（%s）" % hint if hint else ""))
         for x in fh.pre:
             print("  " + x)
         if fh.lanes:

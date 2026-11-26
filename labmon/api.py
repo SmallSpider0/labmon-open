@@ -18,6 +18,7 @@ from . import projects as PJ
 from . import workerctl as W
 from .config import HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
 from .worker import cpu_line, ka_lines
+from .worker.pure import other_load, other_load_text
 from .records import EVENT_KINDS, project_rows
 from .state import load_json, snapshot
 
@@ -330,8 +331,9 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
             continue
         st = "正常" if h.get("ok") else f"连不上：{h.get('error')}" + (f"（上次 {fmt_time(h['last_ok'])}）" if h.get("last_ok") else "")
         cards = "，".join(_card(g) for g in h.get("gpus") or [])
-        o.p(f"  {name}：{st}" + (f"；{cards}" if cards else "") + (f"；{borrow_text(h['borrow'])}" if h.get("borrow") else ""))
         hst = (wst.get(h["id"]) or {}) if h.get("ok") else {}
+        other = other_load_text(other_load(hst, pid)) if hst else ""
+        o.p(f"  {name}：{st}" + (f"；{cards}" if cards else "") + (f"；{other}" if other else "") + (f"；{borrow_text(h['borrow'])}" if h.get("borrow") else ""))
         for ln in ka_lines(hst) + [cpu_line(hst)] if hst else []:   # 这台的 GPU 保活（#61：nvidia-smi 里哪个进程是 labmon 的保活）与 CPU 配额、已记的核（#112）
             if ln:
                 o.p(f"    {ln}")

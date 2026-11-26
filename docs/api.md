@@ -299,7 +299,7 @@ labmon disk    [项目 id] [--json]      # 共享盘上本项目各目录的大�
 labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # 项目所用主机上与本项目有关的记录（拉起、掉线、续租、失败、临时指令……）
 ```
 
-- `status` 首行写快照是几分钟前的；超过 `config.stale_limit` 的门槛（项目快照的 `thresholds.stale_s`）时写“看板没在采集”，会话告诉用户。运行中任务的日志尾行（`last_line`）压成单行并截断至 100 字符（`--json` 仍返回原始快照，#200）。项目已归档时先写那句（`projects.archived_msg`）。
+- `status` 首行写快照是几分钟前的；超过 `config.stale_limit` 的门槛（项目快照的 `thresholds.stale_s`）时写“看板没在采集”，会话告诉用户。正常且 worker 在跑的主机摘要行仅当存在其他项目在跑或排队时附极短聚合数（如 `他项 2 跑/8 排`，与 `fit --list` 共用 `worker.pure.other_load` 口径，不暴露他人项目名与任务名，#197）。运行中任务的日志尾行（`last_line`）压成单行并截断至 100 字符（`--json` 仍返回原始快照，#200）。项目已归档时先写那句（`projects.archived_msg`）。
 - `disk` 与项目页「本项目占用」同一份数据（项目快照的 `storage`，#53：项目根下的一级目录、删掉的目录、近来结束的任务写了多少；同一组扫描量得的几个任务合成一条，与 `bigwrite:` 告警同一句 `collect.write_text`）；别人的、组里的明细只给管理员。
 - `records` 的“与本项目有关”与项目页时间线的事件同一规则（`records.project_mine`）：去掉同机别的项目的作废、被挤掉与对它的暂停、优先，加上对本项目下的项目级暂停与优先。普通用户再按 `users.visible` 筛。
 

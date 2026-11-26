@@ -7,6 +7,7 @@ import json
 import os
 import posixpath
 import re
+import time
 
 # ---------- 共用常量 ----------
 GIB = 2 ** 30                  # 容量单位（字节 → GiB）
@@ -157,3 +158,96 @@ def script_arg(args, cwd):
     if i >= len(args):
         return None
     return posixpath.normpath(posixpath.join(cwd, args[i])), i + 1
+
+
+# ---------- 他项聚合负载（#197：fit --list 与 labmon status 共用，绝不暴露他人项目名/任务名） ----------
+def other_load(st, project):
+    """统计一台主机 status.json 上除 project 外其他项目的聚合负载：
+    返回 {"running": 在跑数（不含占位）, "queued": 排队数（不含占位、不含暂停清单）, "until": 预计最晚忙到时刻（epoch 秒或 None）}。
+    只读已有 status.json 的 running、todo、waiting、plan，不暴露他人项目名或任务名。"""
+    if not isinstance(st, dict):
+        return {"running": 0, "queued": 0, "until": None}
+    run_n = 0
+    run_lane, run_pn = {}, {}
+    for j in st.get("running") or []:
+        if not isinstance(j, dict):
+            continue
+        p, n = j.get("project"), j.get("name")
+        if p == project or j.get("hold") or is_hold(n):
+            continue
+        run_n += 1
+        lk = (p, j.get("root"), j.get("queue"), n)
+        run_lane[lk] = run_lane.get(lk, 0) + 1
+        pk = (p, n)
+        run_pn[pk] = run_pn.get(pk, 0) + 1
+    q_todo = 0
+    rem_lane, rem_pn = dict(run_lane), dict(run_pn)
+    for item in st.get("todo") or []:
+        if not isinstance(item, dict):
+            continue
+        p = item.get("project")
+        if p == project or item.get("held") in ("paused", "pause"):
+            continue
+        root, queue = item.get("root"), item.get("queue")
+        for n in item.get("jobs") or []:
+            if is_hold(n):
+                continue
+            lk = (p, root, queue, n)
+            pk = (p, n)
+            if rem_lane.get(lk, 0) > 0:
+                rem_lane[lk] -= 1
+                if rem_pn.get(pk, 0) > 0:
+                    rem_pn[pk] -= 1
+                continue
+            if root is not None and rem_lane.get((p, None, None, n), 0) > 0:
+                rem_lane[(p, None, None, n)] -= 1
+                if rem_pn.get(pk, 0) > 0:
+                    rem_pn[pk] -= 1
+                continue
+            if root is None and rem_pn.get(pk, 0) > 0:
+                rem_pn[pk] -= 1
+                continue
+            q_todo += 1
+    q_plan, until = 0, None
+    for ln in (st.get("plan") or {}).get("lanes") or []:
+        if not isinstance(ln, dict) or ln.get("project") == project:
+            continue
+        for j in ln.get("jobs") or []:
+            if not isinstance(j, dict) or is_hold(j.get("name")):
+                continue
+            if not j.get("run"):
+                q_plan += 1
+            t1 = j.get("t1")
+            if isinstance(t1, (int, float)) and not isinstance(t1, bool) and t1 > 0:
+                until = float(t1) if until is None or float(t1) > until else until
+    q_wait = 0
+    for w in st.get("waiting") or []:
+        if not isinstance(w, dict):
+            continue
+        if w.get("project") == project or w.get("held") in ("paused", "pause") or is_hold(w.get("name")):
+            continue
+        q_wait += 1
+    return {"running": run_n, "queued": max(q_todo, q_plan, q_wait), "until": until}
+
+
+def other_load_text(load, now=None, show_until=False):
+    """把 other_load 的结果格式化成极短聚合提示（无他项负载时返回空串）。
+    例：'他项 2 跑/8 排'；show_until=True 且有未来预计结束时：'他项 2 跑/8 排，忙至 23:40'（跨天附月-日）。"""
+    if not isinstance(load, dict):
+        return ""
+    r, q = int(load.get("running") or 0), int(load.get("queued") or 0)
+    if r <= 0 and q <= 0:
+        return ""
+    parts = []
+    if r > 0:
+        parts.append("%d 跑" % r)
+    if q > 0:
+        parts.append("%d 排" % q)
+    s = "他项 " + "/".join(parts)
+    until = load.get("until")
+    if show_until and isinstance(until, (int, float)) and not isinstance(until, bool) and until > 0:
+        if now is None or until > now:
+            lt = time.localtime(until)
+            same_day = now is not None and lt[:3] == time.localtime(now)[:3]
+            s += "，忙至 " + time.strftime("%H:%M" if same_day else "%m-%d %H:%M", lt)
+    return s
