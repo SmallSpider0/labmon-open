@@ -238,7 +238,7 @@ function hostPage(id) {
   let s = alertBox(alertsOf(h), ST.get("agal", false)) + hostStrip(h) + renewCard(h) + poolCard(h);
   const evTab = {id: "events", name: "事件", note: recNote({host: h.id}, 40), body: () => recSlice({host: h.id}, 40)};
   if (!st) return s + `<div class="card empty">${esc(h.error || h.status_error || "这台主机上还没有 worker 状态。")}</div>` + recCard("host", [evTab]);
-  s += adoptCard(h) + resCard(h);
+  s += adoptCard(h) + assignCard(h) + resCard(h);
   s += tasksCard([h], jobsOf(h).map(j => ({...j, h})), (st.waiting || []).map(w => ({...w, h})), false);
   const done = (h.done || []).slice(-15).reverse(), ho = st.overrides || [], qs = st.queues || [], tags = Object.entries(st.limits?.tags || {});
   const deps = st.local?.jobs || [];

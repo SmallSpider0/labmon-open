@@ -1036,6 +1036,60 @@ class AuthTest(unittest.TestCase):
         self.assertIn("算力池借来的", body.decode())
         run.assert_not_called()
 
+    def test_host_assign_permissions_and_behavior(self):
+        # #173：无登记自用主机「给项目用」：路由鉴权（need_host + need_project）、主备租约（lease.need）、仅自用主机、经 records.tell 通知实验会话
+        admin = make_token("boss", role="admin", scopes=("project",))
+        amy = make_token("amy", role="user", scopes=("project",))
+        bob = make_token("bob", role="user", scopes=("project",))
+        PJ.put_config("exp", 'id = "exp"\n', owner="amy")
+        PJ.put_config("other", 'id = "other"\n', owner="bob")
+        PJ.put_config("arch", 'id = "arch"\n', owner="amy")
+        now = time.time()
+        PJ.archive("arch", {"generated": now, "no_work_since": now, "jobs": []}, {"generated": now, "hosts": [], "regs": []}, 60)
+        K.hosts_file().write_text(
+            '[[hosts]]\nid = "a"\nssh = "remote-a"\nusers = ["amy"]\n'
+            '[[hosts]]\nid = "b"\nssh = "remote-b"\n'
+            '[[hosts]]\nid = "swap1"\nssh = "remote-s"\nusers = ["amy"]\n[hosts.borrow]\nholder = "bob"\nsince = 1\nswap = true\n'
+            '[[hosts]]\nid = "lent1"\nssh = "remote-l"\nusers = ["amy"]\n[hosts.borrow]\nholder = "bob"\nsince = 1\n'
+            '[[hosts]]\nid = "old"\nssh = "remote-o"\nreturned = "2026-11-01 00:00"\n'
+        )
+        # 参数校验（管理员与普通用户一致返回 400）
+        for tok in (admin, amy):
+            for bad in ({}, {"host": "", "project": "exp"}, {"host": "a", "project": " "},
+                        {"host": 1, "project": "exp"}, {"host": "a\x00", "project": "exp"}):
+                self.assertEqual(self.call(self.lan + "/host/assign", bad, tok=tok)[0], 400, bad)
+        # 普通用户越权：无主机权限或非项目主人 -> 403
+        self.assertEqual(self.call(self.lan + "/host/assign", {"host": "b", "project": "exp"}, tok=amy)[0], 403)
+        self.assertEqual(self.call(self.lan + "/host/assign", {"host": "a", "project": "other"}, tok=amy)[0], 403)
+        self.assertEqual(self.call(self.lan + "/host/assign", {"host": "a", "project": "exp"}, tok=bob)[0], 403)
+        # 非自用主机、已归还/不存在主机、已归档/未登记项目 -> 409
+        for data in ({"host": "lent1", "project": "exp"}, {"host": "old", "project": "exp"},
+                     {"host": "nope", "project": "exp"}, {"host": "a", "project": "arch"},
+                     {"host": "a", "project": "missing"}):
+            self.assertEqual(self.call(self.lan + "/host/assign", data, tok=admin)[0], 409, data)
+        self.assertEqual(told(), [])
+        # 管理员、普通用户、换人换给自己的自用主机（borrow.swap）均成功，写 tell.jsonl 与事件并叫醒 overview
+        n0 = len(records(cat="config"))
+        self.srv.overview.wake.clear()
+        status, _, body = self.call(self.lan + "/host/assign", {"host": "a", "project": "exp"}, tok=amy)
+        self.assertEqual(status, 200, body)
+        self.assertIn("已通知 exp 的实验会话使用 a", json.loads(body)["msg"])
+        self.assertTrue(self.srv.overview.wake.is_set())
+        self.assertEqual(self.call(self.lan + "/host/assign", {"host": "swap1", "project": "exp"}, tok=amy)[0], 200)
+        self.assertEqual(self.call(self.lan + "/host/assign", {"host": "b", "project": "other"}, tok=admin)[0], 200)
+        ts = told()
+        self.assertEqual([(x["key"].split(":")[1], x["projects"]) for x in ts],
+                         [("host", ["exp"]), ("host", ["exp"]), ("host", ["other"])])
+        self.assertIn("labmon worker add a ROOT JOBS --project exp", ts[0]["msg"])
+        self.assertEqual(len(records(cat="config")) - n0, 3)
+        # 备用看板拒绝（HTTP 409 standby，直接调用 host_assign 也过 lease.need）
+        with mock.patch.object(S.LS, "primary", return_value=False):
+            status, _, body = self.call(self.lan + "/host/assign", {"host": "a", "project": "exp"}, tok=admin)
+            self.assertEqual(status, 409, body)
+            self.assertTrue(json.loads(body).get("standby"))
+            with self.assertRaises(K.ConfigError):
+                S.host_assign("a", "exp")
+
     def test_worker_and_override_authorize_executed_parameters(self):
         amy = make_token("amy", role="user", scopes=("project",))
         PJ.put_config("exp", 'id = "exp"\n', owner="amy")

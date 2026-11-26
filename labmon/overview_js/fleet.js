@@ -340,7 +340,7 @@ async function probeNow(id) {
    （#/fleet/srv/<id>、#/fleet/people/<名字>、#/fleet/new/<池>，不记历史），Esc、点空白处、右上角 × 都能关 ---------- */
 const DH = {srv: id => "#/fleet/srv/" + encodeURIComponent(id), person: n => "#/fleet/people/" + encodeURIComponent(n), new: p => "#/fleet/new/" + encodeURIComponent(p), guard: () => "#/fleet/guard", pool: () => "#/fleet/pool",
   renew: (id = "") => "#/fleet/renew" + (id ? "/" + encodeURIComponent(id) : ""),
-            proj: id => `#/p/${encodeURIComponent(id)}/manage`, arch: () => "#/archived"};
+            proj: id => `#/p/${encodeURIComponent(id)}/manage`, arch: () => "#/archived", assign: id => `#/host/${encodeURIComponent(id)}/assign`};
 let DKEY = null, DLAST = "";
 const dHead = (av, title, sub, right = "", mark = "", status = "") => { const b = dBack();
   return `<header class="dh">${b ? `<button class="ib" data-dback aria-label="返回${esc(b)}" ${tip(`返回「${b}」`)}>${icon("chevl")}</button>` : ""}${av}

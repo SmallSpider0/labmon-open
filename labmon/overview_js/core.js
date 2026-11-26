@@ -11,6 +11,8 @@ let BGTAB = null;           // 抽屉背后的选项卡：从哪个选项卡打�
 function route(h = location.hash) {
   const dec = decodeURIComponent, pm = h.match(/^#\/p\/([^/]+)\/manage$/);
   if (pm) return {kind: "p", id: dec(pm[1]), drw: {k: "proj", id: dec(pm[1])}};
+  const ha = h.match(/^#\/host\/([^/]+)\/assign$/);
+  if (ha) return {kind: "host", id: dec(ha[1]), drw: {k: "assign", id: dec(ha[1])}};
   if (h === "#/archived") return {kind: "home", drw: {k: "arch", id: ""}};
   const account = h.match(/^#\/me(?:\/(security|tokens|push))?$/);
   if (account) return {kind: "me", tab: account[1] || "overview"};
@@ -66,11 +68,11 @@ addEventListener("popstate", () => {
 addEventListener("hashchange", onRoute);              // 地址栏里改的
 function closeDrw() {
   const r = route();
-  if (r.drw) nav(r.kind === "p" ? "#/p/" + encodeURIComponent(r.id) : r.kind === "home" ? "#/" : r.tab === "slots" ? "#/fleet" : "#/fleet/" + r.tab);
+  if (r.drw) nav(r.kind === "p" ? "#/p/" + encodeURIComponent(r.id) : r.kind === "host" ? "#/host/" + encodeURIComponent(r.id) : r.kind === "home" ? "#/" : r.tab === "slots" ? "#/fleet" : "#/fleet/" + r.tab);
 }
 function stepDrw(dir) {
   const d = route().drw;
-  if (!d || d.k === "new" || d.k === "guard" || d.k === "pool" || d.k === "renew" || d.k === "proj" || d.k === "arch" || d.k === "account" || d.id === "+") return;
+  if (!d || d.k === "new" || d.k === "guard" || d.k === "pool" || d.k === "renew" || d.k === "proj" || d.k === "arch" || d.k === "assign" || d.k === "account" || d.id === "+") return;
   const ids = d.k === "srv" ? srvOrder() : peopleOrder(), k = ids.indexOf(d.id);
   if (k >= 0 && ids.length > 1) nav(DH[d.k](ids[(k + dir + ids.length) % ids.length]));
 }

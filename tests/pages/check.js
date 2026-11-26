@@ -1332,6 +1332,66 @@ t("reg", "恶意快照：换到、不用这台的弹窗与接上卡都转义", (
   run(E, "POP = null; D.regs[0].queues = []; D.hosts[0].status.queues = []; D.regs.at(-1).home = D.regs[0].home; ADOPT = null");
   const c = run(E, 'hostPage("srv-a")'); clean(c, "接上卡"); has(c, "坏" + BADESC);
 });
+t("reg", "给项目用（#173）：无登记自用主机显示（多项目进抽屉、单项目走浮窗），借来或有登记的不显示，普通用户按权限过滤，恶意快照转义", () => {
+  const S = ovCtx(OV, RR);
+  ok(!run(S, 'hostPage("srv-a")').includes("给项目用"), "有登记时不该出");
+  run(S, "D.regs[0].queues = []; D.hosts[0].status.queues = []");
+  const ha = run(S, 'hostPage("srv-a")');
+  has(ha, "给项目用"); has(ha, 'data-drw="#/host/srv-a/assign"'); clean(ha, "多项目给项目用卡片");
+  const dh = page(S, "#/host/srv-a/assign");
+  has(dh, 'class="dft"'); has(dh, 'data-assignto="proj-a"'); has(dh, 'data-assignto="proj-b"'); clean(dh, "给项目用抽屉");
+  // 直接借来的组内服务器不显示；换人换给自己的自用主机（borrow.swap）显示
+  run(S, "D.regs[1].queues = []; D.hosts[1].status.queues = []");
+  ok(!run(S, 'hostPage("srv-b")').includes("给项目用"), "借来的组内服务器不该出");
+  run(S, "D.hosts[1].borrow.swap = true");
+  has(run(S, 'hostPage("srv-b")'), "给项目用");
+  // 普通用户（只有 1 个项目 proj-a）：有别人登记不显示；无登记时用短确认浮窗（data-assign="open"）；无主机权限时不显示
+  const U = mkCtx(ovSrc, OV, {hash: "#/host/srv-a", filename: "overview.js", me: {...ADMIN_ME, name: "amy", role: "user", admin: false, ops: false, write: true, own: ["proj-a"], hosts: ["srv-a"]}});
+  run(U, "D.regs[0].queues = []");
+  ok(!run(U, 'hostPage("srv-a")').includes("给项目用"), "主机上有别人登记时不该误判为空");
+  run(U, "D.hosts[0].status.queues = []");
+  has(run(U, 'hostPage("srv-a")'), 'data-assign="open"');
+  run(U, 'ME = {...ME, hosts: []}');
+  ok(!run(U, 'hostPage("srv-a")').includes("给项目用"), "无主机权限时不该出");
+  // file:// 离线文件不显示
+  const F = mkCtx(ovSrc, OV, {hash: "#/host/srv-a", filename: "overview.js", protocol: "file:"});
+  run(F, "D.regs[0].queues = []; D.hosts[0].status.queues = []");
+  ok(!run(F, 'hostPage("srv-a")').includes("给项目用"), "file:// 不该出");
+  // 恶意快照转义（抽屉与单项目浮窗）
+  const E = ovCtx(OVE, RRE);
+  run(E, 'D.regs[0].queues = []; D.hosts[0].status.queues = []');
+  clean(page(E, "#/host/srv-a/assign"), "恶意快照给项目用抽屉");
+  run(E, 'D.projects = D.projects.slice(0, 1); assignAct("open", {h: "srv-a"})');
+  clean(run(E, 'hostPage("srv-a")'), "恶意快照单项目给项目用浮窗");
+});
+ta("reg", "给项目用（#173）：多项目抽屉与单项目浮窗提交 POST host/assign，成功显示回执并关闭，失败报错", async () => {
+  const S = ovCtx(OV, RR, "#/host/srv-a"), sent = [];
+  run(S, "D.regs[0].queues = []; D.hosts[0].status.queues = []");
+  S.fetch = async (u, o) => {
+    const b = JSON.parse(o.body); sent.push([u, b]);
+    return b.project === "proj-b" ? {ok: true, status: 200, json: async () => ({msg: "已通知 proj-b 的实验会话使用 srv-a"})}
+      : {ok: false, status: 409, json: async () => ({error: "项目已归档"})};
+  };
+  // 多项目抽屉：默认选中 proj-a，失败时在抽屉底部报错并保持打开
+  page(S, "#/host/srv-a/assign");
+  await run(S, 'assignAct("dgo", {h: "srv-a"})');
+  has(run(S, 'assignDrawer("srv-a")'), "项目已归档");
+  ok(run(S, 'APICK?.host === "srv-a"'), "失败后抽屉选择状态应保留");
+  // 切换选 proj-b 提交成功：关闭抽屉并回到主机页显示回执
+  run(S, 'APICK.to = "proj-b"');
+  await run(S, 'assignAct("dgo", {h: "srv-a"})');
+  ok(sent.length === 2 && sent[1][0] === "host/assign" && sent[1][1].host === "srv-a" && sent[1][1].project === "proj-b", "请求不对：" + JSON.stringify(sent));
+  ok(S.location.hash === "#/host/srv-a" && !run(S, "APICK"), "成功后应关闭抽屉回到主机页");
+  has(run(S, 'hostPage("srv-a")'), "已通知 proj-b 的实验会话使用 srv-a");
+  // 单项目浮窗提交成功
+  const U = mkCtx(ovSrc, OV, {hash: "#/host/srv-a", filename: "overview.js", me: {...ADMIN_ME, name: "amy", role: "user", admin: false, ops: false, write: true, own: ["proj-b"], hosts: ["srv-a"]}});
+  run(U, "D.regs[0].queues = []; D.hosts[0].status.queues = []");
+  U.fetch = S.fetch;
+  run(U, 'assignAct("open", {h: "srv-a"})');
+  await run(U, 'assignAct("go", {h: "srv-a"})');
+  ok(!run(U, "POP"), "单项目浮窗成功后应关闭");
+  has(run(U, 'hostPage("srv-a")'), "已通知 proj-b 的实验会话使用 srv-a");
+});
 t("manage", "缺省快照（没有 regs、项目没有 cfg）：抽屉照样画、写明还没有数据", () => {
   const S = ovCtx(OVS, RR), h = drw(S, "#/p/proj-a/manage");
   clean(h, "缺省快照的抽屉"); has(h, "还没有登记数据"); has(h, "还没有配置摘要"); has(h, "还没有调度数据");

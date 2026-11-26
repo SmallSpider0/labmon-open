@@ -82,6 +82,8 @@
                             别的主机上同一条清单的登记搬过来；--gpus 不带）、rm {"host", "home", "project", "items": [{"root", "jobs"}]}（逐条 worker rm，已不在用的主机经在用主机代办；
                             有一条在这台上有任务在跑就整批拒绝）。成功回 {"msg"}；失败回 409 {"error"}（做了几条后失败的，error 里带已做的）。
                             做成的按项目给实验会话一条消息（records.tell → 全局快照的 wake）
+    POST /host/assign       给项目用（project 作用域，#173）：{"host", "project"} 通知该项目的实验会话可以使用这台自用主机（records.tell(project, "host", …)），
+                            不改登记、不替会话挑清单；仅主服务可写，权限按 users.need_host + need_project。成功回 {"msg"}；失败回 400 / 403 / 409 {"error"}
 """
 from __future__ import annotations
 
@@ -748,6 +750,10 @@ class Handler(BaseHTTPRequestHandler):
                 U.need_project(who, s("project"))
                 if sub == "fit" and body.get("list"):     # fit --list 读这条清单：别的项目名下的清单不给看
                     U.need_list(who, *args, s("project"))
+        elif r.own == "host_assign":                   # 给项目用（#173）：主机要开给他，项目要是他的
+            hid, pid = _assign_args(body)
+            U.need_host(who, hid)
+            U.need_project(who, pid)
         elif r.own == "reg":                           # 页面上搬、移除登记：逐条核
             snap = snapshot()
             items = _reg_items(body, move=path.endswith("/move"))
@@ -1022,6 +1028,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._project(path[len("/project/"):], who)
         if path.startswith("/reg/"):
             return self._reg(path[len("/reg/"):], who)
+        if path == "/host/assign":
+            return self._host_assign(who)
         if path != "/collect" and (proj is None or rest != "collect"):
             return self._send(404, "{}", "application/json")
         if path == "/collect":
@@ -1504,6 +1512,22 @@ class Handler(BaseHTTPRequestHandler):
         log(f"队列登记：{msg}")
         return self._json(200, {"msg": msg})
 
+    def _host_assign(self, who: U.Ident):
+        """无登记自用主机页的「给项目用」（#173）：经 records.tell 通知实验会话登记，不改任何登记；做完叫醒全局采集把消息尽快写进快照 wake。"""
+        body = self._body()
+        if body is None:
+            return
+        try:
+            hid, pid = _assign_args(body)
+            msg = host_assign(hid, pid)
+        except U.Denied as x:
+            return self._json(x.code, {"error": x.msg})
+        except ConfigError as x:
+            return self._json(409, {"error": str(x)})
+        self.board.overview.wake.set()
+        log(f"主机：{msg}（{who.name}）")
+        return self._json(200, {"msg": msg})
+
 
 def _strings(body: dict, key: str) -> list[str]:
     xs = body.get(key)
@@ -1562,6 +1586,34 @@ def _stop_method(stop: str | None) -> None:
         queue_stop_path(stop)
     except ValueError as e:
         raise U.Denied(400, str(e)) from e
+
+
+def _assign_args(body: dict) -> tuple[str, str]:
+    """POST /host/assign 的参数核对：host 与 project 都要是非空字符串（不含空字符）。"""
+    out = []
+    for k, label in (("host", "主机"), ("project", "项目")):
+        v = body.get(k)
+        if not isinstance(v, str) or not v.strip() or "\x00" in v:
+            raise U.Denied(400, f"要选定{label}")
+        out.append(v.strip())
+    return out[0], out[1]
+
+
+def host_assign(hid: str, pid: str) -> str:
+    """通知项目 pid 的实验会话可以使用自用主机 hid（#173）：仅主服务可写（lease.need），不改登记、不替会话挑清单，
+    复用 records.tell(pid, "host", …) 让会话在下一轮 labmon wait 收到，并记一条配置改动事件。"""
+    LS.need("通知实验会话使用这台主机")
+    h = next((x for x in active_hosts() if str(x.get("id")) == hid), None)
+    if h is None:
+        raise ConfigError(f"没有在用主机 {hid}")
+    if h.get("borrow") and not h["borrow"].get("swap"):
+        raise ConfigError(f"{hid} 是借来的组内服务器，不是自用主机")
+    with PJ._reg_locked():
+        if reason := A.unknown_project(pid, require=True):
+            raise ConfigError(reason)
+    tell(pid, "host", f"自用主机 {hid} 可以给 {pid} 用：请按 skill 评估并登记清单（labmon worker add {hid} ROOT JOBS --project {pid}）")
+    log_events([{"kind": "config", "host": hid, "project": pid, "msg": f"看板通知 {pid} 的实验会话使用自用主机 {hid}"}])
+    return f"已通知 {pid} 的实验会话使用 {hid}（下一轮 labmon wait 收到）"
 
 
 def _reg_items(body: dict, move: bool) -> list[dict]:
@@ -1737,7 +1789,7 @@ class Route(NamedTuple):
 OPEN = ""
 # own（#167，Handler._own）：普通用户的这个请求按什么核。path 地址里的项目要是他的；new 同 path，还没登记的也放（第一次推就登记）；
 # body 请求体的 project；worker、override、init、wait、reg 见 _own；self 只动自己的账号；holder 请求体 id 那台组内服务器的持有人本人（#24）。
-OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self", "holder")
+OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self", "holder", "host_assign")
 _R = lambda m, p, scope, admin=False, lan=False, own=None, ops=False: Route(m, re.compile(p), scope, admin, lan, own, ops)   # noqa: E731
 # 看板服务的路由表（#160）：每条路由要什么权限只在这里写；Handler._allow 按它调 users.check。
 # 没登记的路径 GET 按 read、POST 与 PUT 按管理员的 admin（新写路由忘了登记时从严）。平台操作由 ops 核对账号入口许可；部署等纯内网路由用 lan。
@@ -1780,6 +1832,7 @@ ROUTES = [
     _R("POST", r"/project/(owner|delete)", "admin", admin=True),                # 换项目主人（#167）：只给管理员
     _R("POST", r"/(sched|project)/[^/]+", "project", own="body"),
     _R("POST", r"/reg/(move|rm)", "project", own="reg"),
+    _R("POST", r"/host/assign", "project", own="host_assign"),
     _R("POST", r"/p/[^/]+/collect", "project", own="path"),
     _R("POST", r"/collect", ("project", "deploy"), admin=True),         # 部署核对也要立即采集（tools/deploy.py 用 deploy 令牌）
 ]
