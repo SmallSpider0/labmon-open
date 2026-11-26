@@ -267,7 +267,7 @@ html { scroll-behavior: smooth; }
 
         <rect class="node-p" x="520" y="394" width="384" height="60" rx="6"/>
         <text class="t" x="540" y="418">SCM 平台</text>
-        <text class="s" x="540" y="440">续租 · 开机 · 关机 · 换人 · 核对</text>
+        <text class="s" x="540" y="440">续租 · 开机 · 关机 · 换人 · 换节点 · 核对</text>
 
         <path class="edge" d="M326,96 H538" marker-end="url(#a1)"/>
         <text class="lbl" x="340" y="88">worker add、pause（ssh）</text>
@@ -287,7 +287,7 @@ html { scroll-behavior: smooth; }
     <div class="part"><h3>工作台</h3><div class="where">/ · overview.html</div><p>各主机的资源与任务、跨项目的放行顺序与推演、调度卡、租期与续租、记录页。权重、优先、续租、借卡都在这里点。</p></div>
     <div class="part"><h3>账号与两个入口</h3><p>管理员账号详情可开启公网平台操作，允许在公网续租、借还和管理保活；其余账号默认关闭。部署、冷备与账号管理只在内网入口。</p><div class="where">users.py · /login · #/fleet/people</div><p>看板一律要登录：浏览器用口令，脚本用令牌。管理员能做全部；普通用户管理自己的项目，在获准的主机上登记任务，名下最多 20 个项目（含已归档的），每天最多交 10 份问题报告，同时最多挂 8 个 <code>labmon wait</code>。组内服务器仅供管理员查看。有一对一对应的账号与组内人员共用卡片和详情，可切换账号权限与服务器用量。内网入口在实验室内网（可配 HTTPS），公网入口经隧道挂在 TX 的 nginx 后面（随机路径前缀、要客户端证书），平台操作可在内网进行，管理员账号可另开启公网许可。TX 上的看门狗每 5 分钟探一次 <code>/healthz</code>，连不上或采集停了 15 分钟就推到手机。</p></div>
     <div class="part"><h3>项目看板</h3><div class="where">/p/&lt;id&gt;/ · page.html</div><p>一个项目一张：时间线（已跑、在跑、推演的排队、依赖连线、空档原因）、计划项进度、运行中任务的速度与预计结束、告警。</p></div>
-    <div class="part"><h3>组内服务器</h3><div class="where">#/fleet · fleet.py、fleetops.py</div><p>组里别人的服务器只读轮探，逐小时攒记录；保活守护；平台上的核对、续租、开关机、换人；借来用与归还；共享盘按人统计。</p></div>
+    <div class="part"><h3>组内服务器</h3><div class="where">#/fleet · fleet.py、fleetops.py</div><p>组里别人的服务器只读轮探，逐小时攒记录；保活守护；平台上的核对、续租、开关机、换人、换节点；借来用与归还；共享盘按人统计。</p></div>
     <div class="part"><h3>实验会话与 skill</h3><div class="where">skills/lab-experiments/SKILL.md</div><p>各项目的编码会话照这份规程接入项目、写清单、挂 <code>labmon wait</code> 等告警；租期、借卡、权重由你定，会话不碰。skill 随看板发的命令行一起装、一起更新；<code>labmon wait</code> 换了版本、skill 又有改动时叫醒会话一次，说改了哪几节、请它重读。</p></div>
   </div>
 </section>
@@ -1076,12 +1076,12 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
       <ul>
         <li><b>预备续租</b>：点了先确认（列出在跑的任务与续租会丢的本地文件），之后对主机下 drain，正在跑的跑完、不再放新的；全部跑完通知“可以续租了”（占位任务不算在跑）。自动预备（到期前 <code>lease_reserve_h</code> 小时，缺省 24）用截止准入：截止是到期前 1 小时，预计时长 ×1.2 赶得上的照常放。这 24 小时里取消预备的，这一期不再自动预备。</li>
         <li><b>本地盘</b>：worker 算出每个待跑任务 <code>needs=</code> 声明的本地文件能不能自愈（有共享盘主副本就拷、能重算就重算）；有不能自愈的，续租完先 drain 再拉 worker、不恢复放行，免得一格格失败。</li>
-        <li><b>开机以来新写的</b>：续租、关机、换人清空的是整个容器根盘，不只 <code>/tmp</code>。根盘是有配额的 overlay 时已用就是开机以来写的量；worker 用共享盘扫描那一套限速扫自己的根盘（只进开机后动过的目录，按前三级目录汇总），组内别人的服务器在平常的探测里顺带用 <code>find</code> 扫（只读元数据、最低优先级、限时 60 秒，对方在跑实验照样扫，借用中不扫）。labmon 之外写的（加容器私有的 <code>/dev/shm</code>）到 1 GiB，续租、关机、换人前要勾确认，确认里写着大头在哪几个目录，要留的先挪到共享盘。借来的主机归还时只删 <code>/tmp/labmon</code>，借用期间我们在别处写的会列在还的确认里。</li>
+        <li><b>开机以来新写的</b>：续租、关机、换人、换节点清空的是整个容器根盘，不只 <code>/tmp</code>。根盘是有配额的 overlay 时已用就是开机以来写的量；worker 用共享盘扫描那一套限速扫自己的根盘（只进开机后动过的目录，按前三级目录汇总），组内别人的服务器在平常的探测里顺带用 <code>find</code> 扫（只读元数据、最低优先级、限时 60 秒，对方在跑实验照样扫，借用中不扫）。labmon 之外写的（加容器私有的 <code>/dev/shm</code>）到 1 GiB，续租、关机、换人、换节点前要勾确认，确认里写着大头在哪几个目录，要留的先挪到共享盘。借来的主机归还时只删 <code>/tmp/labmon</code>，借用期间我们在别处写的会列在还的确认里。</li>
         <li><b>核对</b>：在平台上按名字找运行中的作业，作业名、资源池、端口 22→port 都对上才动；克隆只返回配置，不建作业。等作业停下、跑起来时 20 秒查一次，最多等 15 分钟。</li>
         <li><b>平台会话</b>：账号全组共用，同一账号只保留一个登录，令牌连着几次操作复用、与平台密码存在一处（macOS 钥匙串，Linux 600 权限的文件），失效就停在那一步重新输验证码，不后台轮询。验证码永远由你输，接口返回明文也不自动填。</li>
-        <li><b>其他平台操作</b>：与平台核对（只读，更新开机参数）、关机、开机、换人（关机和开机连成一步，免得停旧之后被别人占走）、开保活，都在组内服务器抽屉里，一次一台。</li>
+        <li><b>其他平台操作</b>：与平台核对（只读，更新开机参数与各池规格空位）、关机、开机、换人（关机和开机连成一步，免得停旧之后被别人占走；与开机一样可选同池各规格/物理节点）、换节点（同人同池先停后开换到另一个规格，新节点重新登记并给新连接命令）、开保活，都在组内服务器抽屉里，一次一台。</li>
       </ul>
-      <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/workbench.md#平台续租">workbench.md「平台续租」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/fleet.md#续租">fleet.md「续租」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/fleet.md#关机开机与换人">「关机、开机与换人」</a></p>
+      <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/workbench.md#平台续租">workbench.md「平台续租」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/fleet.md#续租">fleet.md「续租」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/fleet.md#关机开机换人与换节点">「关机、开机、换人与换节点」</a></p>
     </div></details>
   </div>
 

@@ -56,8 +56,8 @@ SESS: dict = {"cli": None, "at": None, "user": None, "pending": None, "captcha_a
 SYNC_STEPS = ["登录", "读作业列表", "核对各台", "补克隆配置", "读资源池与镜像", "汇总"]
 RENEW_EACH = ["停止旧作业", "提交新作业、等运行", "等 ssh、开保活"]
 TAIL_MINE = "等 ssh、拉起 worker"            # 自用主机续租的最后一步：保活由 worker 管
-KINDS = ("sync", "renew", "ka", "off", "swap", "open")          # 页面组内面板里的操作；借来用（borrow）从这台的「借用」里发起，同样在后台跑、显示进度
-OP_NAMES = {"sync": "与平台核对", "renew": "续租", "ka": "开保活", "off": "关机", "swap": "换人", "open": "开机", "borrow": "借来用"}
+KINDS = ("sync", "renew", "ka", "off", "swap", "move", "open")  # 页面组内面板里的操作；借来用（borrow）从这台的「借用」里发起，同样在后台跑、显示进度
+OP_NAMES = {"sync": "与平台核对", "renew": "续租", "ka": "开保活", "off": "关机", "swap": "换人", "move": "换节点", "open": "开机", "borrow": "借来用"}
 
 
 def boot() -> dict:
@@ -269,7 +269,7 @@ def steps_of(kind: str, cfg: dict, ids: list[str], person: str | None = None) ->
     if kind == "borrow":
         from .borrow import BEGIN_STEPS           # borrow 在上层 import 本模块（busy、_probe），这里只能延迟 import
         return list(BEGIN_STEPS)
-    if kind in ("off", "swap", "open"):
+    if kind in ("off", "swap", "move", "open"):
         old, new = (names[ids[0]] if ids else None), person or (names[ids[0]] if ids else None)
         out = ["登录", "核对"]
         if kind != "open":
@@ -281,18 +281,18 @@ def steps_of(kind: str, cfg: dict, ids: list[str], person: str | None = None) ->
 
 
 def _check_start(kind: str, cfg: dict, ids: list[str], kw: dict) -> None:
-    """开始前的本地检查（不连平台）：选的服务器、人、池、镜像。续租、开保活、关机、换人也可以选自用主机。"""
+    """开始前的本地检查（不连平台）：选的服务器、人、池、规格。续租、开保活、关机、换人、换节点也可以选自用主机。"""
     known, off = {x["id"] for x in (cfg["servers"] if kind == "open" else FB.slots(cfg))}, F.off_servers()
     if kind == "sync":
         return
     if any(i not in known for i in ids) or (not ids and kind != "open"):
         raise P.PlatformError(f"要选组内服务器里有的服务器：{ids}")
-    if kind != "borrow":                              # 借来在用的：续租、关机、换人、开保活都会停掉自己的 worker 与 /tmp/labmon，先还
+    if kind != "borrow":                              # 借来在用的：续租、关机、换人、换节点、开保活都会停掉自己的 worker 与 /tmp/labmon，先还
         lent = [s["id"] for s in cfg["servers"] if s["id"] in ids and F.borrowed(s)]
         if lent:
             raise P.PlatformError(f"{'、'.join(lent)} 正借来在用：先在它的「借用」里还掉（若已被平台停掉连不上，先点「与平台核对」，确认作业不在运行后会自动归还），再{OP_NAMES[kind]}")
-    if kind in ("off", "swap", "open") and len(ids) > 1:
-        raise P.PlatformError("关机、换人、开机一次一台")
+    if kind in ("off", "swap", "move", "open") and len(ids) > 1:
+        raise P.PlatformError("关机、换人、换节点、开机一次一台")
     if kind == "open":
         if ids and ids[0] not in off:
             raise P.PlatformError(f"{ids[0]} 没关机：要换人用「换人」")
@@ -300,6 +300,16 @@ def _check_start(kind: str, cfg: dict, ids: list[str], kw: dict) -> None:
             raise P.PlatformError(f"要选看板认得的资源池：{kw.get('pool')}")
     elif any(i in off for i in ids):
         raise P.PlatformError(f"{'、'.join(i for i in ids if i in off)} 已关机：要用就开机")
+    if kind in ("swap", "move", "open"):
+        kw["spec"] = str(kw.get("spec") or "").strip() or None
+    if kind == "move":
+        if not kw["spec"]:
+            raise P.PlatformError("换节点要选目标规格")
+        holder = next((x["holder"] for x in FB.slots(cfg) if x["id"] == ids[0]), None)
+        p = str(kw.get("person") or "").strip() or None
+        if p and holder and p != holder:
+            raise P.PlatformError("换节点不换使用人：要同时换人请用「换人」")
+        kw.pop("person", None)
     if kind in ("swap", "open"):
         kw["person"] = str(kw.get("person") or "").strip() or None
         if not kw["person"] and not ids:
@@ -337,10 +347,15 @@ def start(kind: str, cfg: dict, code: str | None = None, ids: list[str] | None =
     steps = steps_of(kind, cfg, ids, kw.get("person"))
     sl = {x["id"]: x for x in [*cfg["servers"], *FB.slots(cfg)]}
     what = "、".join(f"{sl[i]['holder']} {i}" if i in sl else i for i in ids) or kw.get("pool")
+    spec_label = None
     if kind in ("swap", "open") and kw.get("person"):
         what = f"{what} → {kw['person']}"
+    elif kind == "move" and kw.get("spec"):
+        pl = sl[ids[0]]["pool"] if ids and ids[0] in sl else None
+        spec_label = FB.spec_name(FB.pool_specs(pl), kw["spec"]) if pl else kw["spec"]
+        what = f"{what} → {spec_label}"
 
-    fn = {"sync": run_sync, "renew": run_renew, "ka": run_ka, "off": run_swap, "swap": run_swap, "open": run_swap, "borrow": run_borrow}[kind]
+    fn = {"sync": run_sync, "renew": run_renew, "ka": run_ka, "off": run_swap, "swap": run_swap, "move": run_swap, "open": run_swap, "borrow": run_borrow}[kind]
     if kind != "sync":
         kw["ids"] = ids
     if fn is run_swap:
@@ -348,6 +363,7 @@ def start(kind: str, cfg: dict, code: str | None = None, ids: list[str] | None =
     if fn is run_borrow:
         kw["account"] = account
     th = threading.Thread(target=fn, args=(cfg, cli, code), kwargs=kw, name=f"fleet-{kind}", daemon=True)
+    who = kw.get("person") or (sl[ids[0]]["holder"] if kind == "move" and ids and ids[0] in sl else None)
 
     def init(st):
         if st.get("active") and _live(st):
@@ -356,7 +372,7 @@ def start(kind: str, cfg: dict, code: str | None = None, ids: list[str] | None =
             return "看板服务马上要重启（刚部署了新代码），等它起来再做"
         st.clear()
         st.update(kind=kind, t0=round(time.time()), active=True, error=None, pid=os.getpid(), ids=ids, what=what,
-                  person=kw.get("person"), pool=kw.get("pool"),
+                  person=who, pool=kw.get("pool"), spec=kw.get("spec"), spec_name=spec_label,
                   servers={i: {} for i in ids}, steps=[{"name": n, "state": "wait", "note": None} for n in steps])
         th.start()                                    # 写进 op.json 的同时拉起线程：op() 按线程判活，中间不留空档
         return ""
@@ -692,9 +708,9 @@ def _note(kind: str, old: dict | None, name: str | None, x: dict) -> str:
             return f"{name} 的旧作业已停、新作业没提交成，这台现在不可用：再点一次续租会克隆重开。"
         if old.get("mine"):
             return (f"你的自用主机 {old['id']} 的作业已停、已标成归还"
-                    + (f"；{name} 的新作业还没提交：要接着开就在这个池点「+ 开新的」。" if kind == "swap" else "。"))
+                    + (f"；{name} 的新作业还没提交：要接着开就在这个池点「+ 开新的」。" if kind in ("swap", "move") else "。"))
         return (f"{old['holder']} 的作业已停，这台已标成关机"
-                + ("；新作业还没提交：要接着开就在这台的详情页点「开机」。" if kind == "swap" else "。"))
+                + ("；新作业还没提交：要接着开就在这台的详情页点「开机」。" if kind in ("swap", "move") else "。"))
     if x.get("stop_sent"):
         return f"{old['label'] if old.get('mine') else old['holder']} 的停止请求已发出，还没确认停下：到平台上看它的状态。"
     return "平台上什么都没动。"
@@ -891,17 +907,18 @@ def _old_job(r: _Run, cli: P.Client, kind: str, old: dict, ack, probe, probe_min
         return None, [], st
     if not run:
         raise P.PlatformError(f"平台上没有运行中的 {old['job']}（{old['pool']}）；什么都没动"
-                              + ("：连不上的服务器先点「关机」标为已关机，再开机" if st == "down" and kind == "swap" else ""))
+                              + ("：连不上的服务器先点「关机」标为已关机，再开机" if st == "down" and kind in ("swap", "move") else ""))
     oj, roles, why = find_job(cli, run, old, r.human)
     if oj is None:
         raise P.PlatformError(f"{why}；什么都没动")
     return oj, roles, st
 
 
-def _new_job(r: _Run, cli: P.Client, cfg: dict, old: dict | None, oj: dict | None, prev: dict | None, pool: str | None, name: str, tcp) -> dict:
-    """换人、开机：拼好要提交的新作业并逐项核对（不提交）。模板：换人克隆旧作业，开机用这个池的模板作业；
+def _new_job(r: _Run, cli: P.Client, cfg: dict, old: dict | None, oj: dict | None, prev: dict | None, pool: str | None, name: str, tcp,
+             *, kind: str = "swap", spec: str | None = None) -> dict:
+    """换人、换节点、开机：拼好要提交的新作业并逐项核对（不提交）。模板：换人/换节点克隆旧作业，开机用这个池的模板作业；
     数配额、定作业名（同名在跑就加后缀）、挑端口（接替的那台的端口优先，没登记的运行中作业占的也避开）、核对规格、挂载卷、镜像。
-    返回 {job 作业名, pool, port, c 克隆配置, nodes 池的节点, note 核对步骤的说明}；有一项不对就抛错，什么都没动。"""
+    返回 {job 作业名, pool, port, c 克隆配置, nodes 池的节点, spec, spec_name, note 核对步骤的说明}；有一项不对就抛错，什么都没动。"""
     pl = prev["pool"] if prev else pool
     if old:
         r.human()
@@ -912,6 +929,14 @@ def _new_job(r: _Run, cli: P.Client, cfg: dict, old: dict | None, oj: dict | Non
         base = FB.ref(pl, prev["id"] if prev else None)[1]       # 重开已关机的服务器：用它自己的克隆配置
         if base is None:
             raise P.PlatformError(f"开机参数里没有 {pl} 的克隆配置做模板：先与平台核对；什么都没动")
+    orig_spec = FB.summary(base)["spec"]
+    spec = (spec or "").strip() or None
+    if kind == "move":
+        if not spec:
+            raise P.PlatformError("换节点要选目标规格；什么都没动")
+        if orig_spec and spec == orig_spec:
+            raise P.PlatformError("目标规格与当前规格相同：原地重启请用「续租」；什么都没动")
+    target_spec = spec or orig_spec
     pp = FB.people(cfg).get(name) or {}
     r.human()
     jobs = cli.jobs()
@@ -925,12 +950,17 @@ def _new_job(r: _Run, cli: P.Client, cfg: dict, old: dict | None, oj: dict | Non
     port, why = FB.pick_port(cfg, nodes, used, int(prev["port"]) if prev else FB.back_port(cfg, pl, name), [(old["ssh"], old["port"])] if old else [], tcp,
                              what="原端口" if prev else "上次的端口")
     img, cmd, _ = FB.settings_of(pp)
-    c = FB.compose(base, job, img, cmd, port)
-    bad = [x for x in FB.check(cli, c, r.human, freed=bool(old)) if x["ok"] is False]
+    c = FB.compose(base, job, img, cmd, port, spec=target_spec)
+    same_spec = bool(orig_spec and target_spec == orig_spec)
+    checks = FB.check(cli, c, r.human, freed=bool(old and same_spec))
+    bad = [x for x in checks if x["ok"] is False]
     if bad:
         raise P.PlatformError("；".join(f"{x['item']}：{x['note']}" for x in bad) + "；什么都没动")
-    return {"job": job, "pool": pl, "port": port, "c": c, "nodes": nodes,
-            "note": f"开 {name}" + (f"（作业名 {job}）" if job != name else "") + f"：{FB.summary(c)['image']}，端口 {port}（{why}）"}
+    sp_note = next((x["note"] for x in checks if x["item"] == "规格"), None)
+    sp_label = sp_note.split("，", 1)[0] if sp_note and "，" in sp_note else FB.spec_name(FB.pool_specs(pl), target_spec)
+    return {"job": job, "pool": pl, "port": port, "c": c, "nodes": nodes, "spec": target_spec, "spec_name": sp_label,
+            "note": f"开 {name}" + (f"（作业名 {job}）" if job != name else "") + f"：{FB.summary(c)['image']}"
+            + (f"，规格 {sp_label}" if sp_label else "") + f"，端口 {port}（{why}）"}
 
 
 def _mark_off(hosts: dict, old: dict, oj: dict | None, t1: float) -> None:
@@ -959,13 +989,13 @@ def _adopt(cli: P.Client, cfg: dict, kind: str, prev: dict | None, roles: list[d
     if prev:
         prev_ip = (roles[0].get("ipAddress") if roles else None) or (boot().get(prev["id"]) or {}).get("ip")
     node = FB.ext_host(d.get("ip"), cfg) or (prev["ssh"] if prev and d.get("ip") and d.get("ip") == prev_ip else None) \
-        or (plan["nodes"][0] if len(plan["nodes"]) == 1 else None)
+        or (plan["nodes"][0] if len(plan["nodes"]) == 1 and (not d.get("ip") or not prev_ip or d.get("ip") == prev_ip) else None)
     if not node:
         raise P.PlatformError(f"新作业在 {d.get('ip')} 上，不知道本机怎么连它：在主机清单里登记这一台")
     nport = int((d.get("ports") or {}).get("22") or plan["port"])
     nsid = next((x["id"] for x in cfg["servers"] if x["ssh"] == node and int(x["port"]) == nport), None) or FB.sid_of(node, nport)
     fleet_ids, job = {x["id"] for x in cfg["servers"]}, plan["job"]
-    if to_me:                                      # 换给自己：组内服务器里这台去掉，主机清单加一台自用主机
+    if to_me:                                      # 换给自己 / 自用主机换节点：组内服务器里这台去掉，主机清单加一台自用主机
         if prev and not prev.get("mine") and prev["id"] in fleet_ids:
             hosts["remove"](prev["id"])
         if nsid in fleet_ids and (not prev or nsid != prev["id"]):
@@ -989,13 +1019,18 @@ def _adopt(cli: P.Client, cfg: dict, kind: str, prev: dict | None, roles: list[d
         x = b.setdefault(nsid, {})
         x.pop("off", None)
         x.update(d, holder=name, job=job, job_id=nj.get("id"), created=nj.get("createTime"), clone=plan["c"], clone_job=nj.get("id"),
-                 clone_t=round(t1), src={"swap": "换人", "open": "开机"}[kind], t=round(t1))
+                 clone_t=round(t1), src={"swap": "换人", "move": "换节点", "open": "开机"}[kind], t=round(t1))
     F.edit_state("boot.json", upd)
     _clear_stopped(nsid)
-    was = f"，接替 {prev['holder']}（{prev['id']}）" if prev and (prev["holder"] != name or prev["id"] != nsid) else ""
-    F._event("fleet_boot", nsid, f"{name}（{nsid}）开机：新作业 {_created(nj)} 创建{was}"
-             + (f"，作业名 {job}" if job != name else "") + ("，接成自用主机" if to_me else ""), t1, name)
-    conn = {"sid": nsid, "holder": name, "cmd": f"ssh -p {nport} {node}", "image": FB.summary(plan["c"])["image"], "mine": to_me}
+    if kind == "move":
+        was = f"，原节点 {prev['id']}" if prev and prev["id"] != nsid else ""
+        msg = f"{name}（{nsid}）换节点：新作业 {_created(nj)} 创建{was}"
+    else:
+        was = f"，接替 {prev['holder']}（{prev['id']}）" if prev and (prev["holder"] != name or prev["id"] != nsid) else ""
+        msg = f"{name}（{nsid}）开机：新作业 {_created(nj)} 创建{was}"
+    F._event("fleet_boot", nsid, msg + (f"，作业名 {job}" if job != name else "") + ("，接成自用主机" if to_me else ""), t1, name)
+    conn = {"sid": nsid, "holder": name, "cmd": f"ssh -p {nport} {node}", "image": FB.summary(plan["c"])["image"],
+            "spec": plan.get("spec_name") or FB.summary(plan["c"])["spec"], "mine": to_me}
     F.edit_state("op.json", lambda st: st.update(conn=conn))
     return new, conn
 
@@ -1010,16 +1045,17 @@ def _mine_host_spec(hid: str, tgt: dict) -> dict:
 
 
 def run_swap(cfg: dict, cli: P.Client, code: str | None, ids=(), kind: str = "swap", person: str | None = None,
-             pool: str | None = None, ack=(), password=P.password,
+             pool: str | None = None, spec: str | None = None, ack=(), password=P.password,
              pace: float = 3, poll: float = 20, fast: float = 6, wait_s: float = 900, ssh_poll: float = 30, ssh_wait_s: float = 900,
              probe=_probe, probe_mine=_probe_mine, ssh_fn=None, forget_fn=None, tcp=None, hosts=None, t: float | None = None,
              account: str | None = None, clear_ovr=None) -> None:
-    """后台线程：关机（off）、换人（swap：同一个池，停旧作业后立刻开新的，沿用端口）、开机（open：重开一台已关机的，或在一个池开新的）。
+    """后台线程：关机（off）、换人（swap：同一个池，停旧作业后立刻开新的，沿用端口，可选换规格）、
+    换节点（move：同人同池，停旧作业后立刻按新规格开新的，端口按现有规则挑）、开机（open：重开一台已关机的，或在一个池开新的，可选规格）。
     登录 → 核对（_old_job：探旧服务器、在平台上找到旧作业；_new_job：拼好新作业并逐项核对），有一项不对就什么都不动 →
     停旧作业（stop_job，停旧到提交新之间每 fast 秒查一次，空档只有十几秒；停下就记关机或归还，_mark_off）→ 关机到此为止；
     提交新作业、等运行（submit_job）→ 登记新服务器（_adopt）→ 等 ssh、开保活 → 给出连接命令。出错停在那一步，不自动重试。
     旧服务器可以是自用主机：worker 有任务在跑就拒绝（先在主机页暂停队列），停了作业后标成已归还；
-    新的使用人是自己时，开好的服务器接成自用主机（也先开保活，worker 由看板下一轮采集拉起），并清掉同 id 遗留的借用指令（guest、target=borrow 的 deadline）。
+    新的使用人是自己时（或自用主机换节点），开好的服务器接成自用主机（也先开保活，worker 由看板下一轮采集拉起），并清掉同 id 遗留的借用指令（guest、target=borrow 的 deadline）。
     关机时连不上、平台上也没有它运行中的作业：只在看板上标为已关机。
     hosts：改主机清单的函数（holder、add、remove 管组内服务器，add_mine、return_mine 管自用主机），测试替换用。"""
     ssh_fn, forget_fn, tcp = ssh_fn or F.ssh, forget_fn or F.forget, tcp or FB.tcp_open
@@ -1030,10 +1066,10 @@ def run_swap(cfg: dict, cli: P.Client, code: str | None, ids=(), kind: str = "sw
                       "return_mine": lambda hid: C.set_returned(hid, fmt_time(time.time(), year=True))}
     srv = {x["id"]: x for x in FB.slots(cfg)}
     sid0 = ids[0] if ids else None
-    old = srv[sid0] if sid0 and kind in ("off", "swap") else None      # 要停掉的服务器
-    prev = srv[sid0] if sid0 else None                                 # 新作业接替的服务器（换人：旧服务器；开机：已关机的服务器）
-    key = sid0 or "new"                                                # op.json 里这一台进度的键
-    name = person or (prev or {}).get("holder")
+    old = srv[sid0] if sid0 and kind in ("off", "swap", "move") else None      # 要停掉的服务器
+    prev = srv[sid0] if sid0 else None                                         # 新作业接替的服务器（换人/换节点：旧服务器；开机：已关机的服务器）
+    key = sid0 or "new"                                                        # op.json 里这一台进度的键
+    name = old["holder"] if kind == "move" and old else (person or (prev or {}).get("holder"))
     r = _Run(pace)
     try:
         url, user = platform_conf(cfg)
@@ -1049,13 +1085,16 @@ def run_swap(cfg: dict, cli: P.Client, code: str | None, ids=(), kind: str = "sw
             notes.append(f"{old['holder']}：{_created(oj)} 创建，现在{F.NAMES.get(st, '没探到')}")
         to_me = False
         if kind != "off":
-            actor, error = person_of(account)
-            if error:
-                raise P.PlatformError(error)
-            to_me = bool(name and actor and name.casefold() == actor.casefold())
-            if to_me:
-                name = actor
-            plan = _new_job(r, cli, cfg, old, oj, prev, pool, name, tcp)
+            if kind == "move":
+                to_me = bool(old.get("mine"))
+            else:
+                actor, error = person_of(account)
+                if error:
+                    raise P.PlatformError(error)
+                to_me = bool(name and actor and name.casefold() == actor.casefold())
+                if to_me:
+                    name = actor
+            plan = _new_job(r, cli, cfg, old, oj, prev, pool, name, tcp, kind=kind, spec=spec)
             notes.append(plan["note"])
         r.step("；".join(notes))
         if old:
@@ -1095,7 +1134,7 @@ def run_swap(cfg: dict, cli: P.Client, code: str | None, ids=(), kind: str = "sw
         else:
             probe(new["id"])
         r.done(note)
-        notify([f"{name}（{new['id']}）开机完成：{conn['cmd']}"])
+        notify([f"{name}（{new['id']}）{'换节点' if kind == 'move' else '开机'}完成：{conn['cmd']}"])
     except Exception as x:  # noqa: BLE001 — 停在出错的那一步，页面写明这一台此刻的状态
         note = _note(kind, old, name, op().get("servers", {}).get(key, {}))
         r.fail(x, note)
@@ -1110,7 +1149,7 @@ def view(cfg: dict | None = None) -> dict:
     for sid, e in boot().items():
         c = e.get("clone") or {}
         role = (c.get("cloneTaskRoleVOList") or [{}])[0]
-        b[sid] = {**{k: v for k, v in e.items() if k != "clone"}, "has_clone": bool(c),
+        b[sid] = {**{k: v for k, v in e.items() if k != "clone"}, "has_clone": bool(c), "spec": role.get("specificationId"),
                   "run_cmd": role.get("runCmd"), "volumes": [f"{v.get('storagePath')} → {v.get('mountPath')}（{v.get('perm')}）"
                                                              for v in c.get("cloneStorageVolumeVOList") or []]}
     try:

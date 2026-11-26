@@ -1,4 +1,4 @@
-"""组内服务器的开机参数：人 × 池 × 端口（见 docs/fleet.md「人员、端口与模板作业」「关机、开机与换人」）。
+"""组内服务器的开机参数：人 × 池 × 规格 × 端口（见 docs/fleet.md「人员、端口与模板作业」「关机、开机、换人与换节点」）。
 
 - 人：一份名单 people.json，每人一份设置（镜像、启动命令、备注），提交时就用它，没有别的优先级。
   占着服务器的人第一次读到他现有作业的克隆配置时自动记进名单（只记一次，之后照名单）；新的人按「新的人默认」（defaults.json，
@@ -284,8 +284,39 @@ def pools_info() -> dict:
     return load_json(F.state_file("pools.json"), {})
 
 
-def compose(base: dict, name: str, image: str | None, run_cmd: str | None, port: int) -> dict:
-    """模板作业的克隆配置 → 要提交的配置：改作业名、镜像、启动命令，端口只留 22→port（别的映射在新服务器上可能撞）。"""
+def pool_specs(pool: str) -> list[dict]:
+    """上次核对存进 pools.json 的这个池的规格列表。"""
+    return ((pools_info().get("pools") or {}).get(pool) or {}).get("specs") or []
+
+
+def spec_of(specs: list[dict], spec_id: str | None) -> dict | None:
+    """规格列表里找 specificationId == spec_id 的那一项。"""
+    return next((x for x in specs or [] if x.get("specificationId") == spec_id), None)
+
+
+def spec_name(specs: list[dict], spec_id: str | None) -> str | None:
+    sp = spec_of(specs, spec_id)
+    return (sp.get("specificationName") if sp else None) or spec_id
+
+
+def check_spec(specs: list[dict], spec_id: str | None, *, freed: bool = False, cached: bool = False) -> tuple[bool | None, str]:
+    """核对规格在不在池里、有没有空位（fleetboot.check 与 preview 共用）。
+    freed：同池、同规格先停一台再开（停完会空出同规格 1 位，不要求此刻有空位）；改选别的规格或换节点时为 False。
+    cached：来自上次核对的 pools.json。"""
+    if not specs or not any("specificationId" in x for x in specs):
+        return None, "还没读过这个池的规格列表，先「与平台核对」" if cached else "规格列表格式认不出，没核对"
+    sp = spec_of(specs, spec_id)
+    if sp is None:
+        return False, f"池里没有规格 {spec_id}"
+    avail = sp.get("quantityAvailable")
+    q = "；不可排队" if str(sp.get("isSchedule")) == "0" else f"；排队 {sp.get('queueNum')}" if sp.get("queueNum") else ""
+    ok = True if freed or avail is None else int(avail or 0) >= 1
+    when = "上次核对时空" if cached else "空"
+    return ok, f"{sp.get('specificationName') or spec_id}，{when} {avail} / {sp.get('specificationAmount')}{q}"
+
+
+def compose(base: dict, name: str, image: str | None, run_cmd: str | None, port: int, spec: str | None = None) -> dict:
+    """模板作业的克隆配置 → 要提交的配置：改作业名、镜像、启动命令、规格（spec 给了才换，否则沿用原规格），端口只留 22→port（别的映射在新服务器上可能撞）。"""
     c = copy.deepcopy(base)
     c["taskName"] = name
     for role in c.get("cloneTaskRoleVOList") or []:
@@ -293,6 +324,8 @@ def compose(base: dict, name: str, image: str | None, run_cmd: str | None, port:
             role["imageName"] = image
         if run_cmd:
             role["runCmd"] = run_cmd
+        if spec:
+            role["specificationId"] = spec
         p22 = next((p for p in role.get("cloneTaskHostPortDTOList") or [] if str(p.get("containerPort")) == "22"), None)
         role["cloneTaskHostPortDTOList"] = [{**(p22 or {"environmentPortName": "OTHER"}), "containerPort": "22", "hostPort": str(port)}]
     return c
@@ -436,22 +469,13 @@ def find_image(cli: P.Client, image: str, human=lambda: None) -> tuple[bool | No
 
 
 def check(cli: P.Client, c: dict, human=lambda: None, freed: bool = False) -> list[dict]:
-    """提交前逐项核对（只读）：[{"item", "ok": True/False/None, "note"}]。freed：同池先停一台再开（不要求现在有空卡）。"""
+    """提交前逐项核对（只读）：[{"item", "ok": True/False/None, "note"}]。freed：同池同规格先停一台再开（不要求现在有空位）。"""
     s = summary(c)
     out = [{"item": "作业名", "ok": bool(P.NAME_RE.match(s["name"] or "")), "note": s["name"]},
            {"item": "端口", "ok": bool(s["port"]) and P.PORTS[0] <= int(s["port"]) <= P.PORTS[1], "note": f"22→{s['port']}"}]
     human()
-    specs = cli.specs(c.get("poolId"))
-    sp = next((x for x in specs if x.get("specificationId") == s["spec"]), None)
-    if not specs or not any("specificationId" in x for x in specs):
-        out.append({"item": "规格", "ok": None, "note": "规格列表格式认不出，没核对"})
-    elif sp is None:
-        out.append({"item": "规格", "ok": False, "note": f"池里没有规格 {s['spec']}"})
-    else:
-        avail = sp.get("quantityAvailable")
-        q = "；不可排队" if str(sp.get("isSchedule")) == "0" else f"；排队 {sp.get('queueNum')}" if sp.get("queueNum") else ""
-        ok = True if freed or avail is None else int(avail or 0) >= 1
-        out.append({"item": "规格", "ok": ok, "note": f"{sp.get('specificationName') or s['spec']}，空 {avail} / {sp.get('specificationAmount')}{q}"})
+    ok, note = check_spec(cli.specs(c.get("poolId")), s["spec"], freed=freed)
+    out.append({"item": "规格", "ok": ok, "note": note})
     human()
     vols = cli.volumes()
     paths = {v.get("fullPath") for v in vols}
@@ -512,38 +536,56 @@ def settings_of(pp: dict) -> tuple[str | None, str | None, str]:
 
 
 def preview(cfg: dict, kind: str, sid: str | None = None, person: str | None = None, pool: str | None = None,
-            tcp=tcp_open, *, account: str | None = None) -> dict:
-    """向导里的预览：要提交的参数、挑出的端口、本地能核对的各项（真正提交前还会连平台再核一次，端口也再探一次）。
+            tcp=tcp_open, *, account: str | None = None, spec: str | None = None) -> dict:
+    """向导里的预览：要提交的参数、挑出的端口、可选规格、本地能核对的各项（真正提交前还会连平台再核一次，端口也再探一次）。
     端口试连的结果按 tcp_cached 缓存：页面每改一下就取一次预览，不能每次都去连节点的 sshd。"""
+    if kind not in ("open", "swap", "move"):
+        raise P.PlatformError(f"不支持这种向导预览：{kind}")
     srv = {s["id"]: s for s in slots(cfg)}
     old = srv.get(sid) if sid else None
     off = F.off_servers()
     if old is None and sid:
         raise P.PlatformError(f"组内服务器里没有 {sid}")
+    if kind == "move":
+        if old is None:
+            raise P.PlatformError("换节点要选一台在用的服务器")
+        if old["id"] in off:
+            raise P.PlatformError(f"{old['id']} 已关机：要换规格点「开机」")
     pool = old["pool"] if old else pool
     if not pool:
         raise P.PlatformError("要选资源池")
-    name = (person or ((old or {}).get("holder") if kind == "open" else "") or "").strip()     # 换人不默认原来的人
+    spec = (spec or "").strip() or None
     ppl = people(cfg)
-    pp = ppl.get(name) or {}
-    actor, error = person_of(account)
-    if error:
-        raise P.PlatformError(error)
-    mine = bool(name and actor and name.casefold() == actor.casefold())
-    if mine:
-        name = actor
+    if kind == "move":
+        name = old["holder"]
         pp = ppl.get(name) or {}
+        mine = bool(old.get("mine"))
+    else:
+        name = (person or ((old or {}).get("holder") if kind == "open" else "") or "").strip()     # 换人不默认原来的人
+        pp = ppl.get(name) or {}
+        actor, error = person_of(account)
+        if error:
+            raise P.PlatformError(error)
+        mine = bool(name and actor and name.casefold() == actor.casefold())
+        if mine:
+            name = actor
+            pp = ppl.get(name) or {}
     live = old and old["id"] not in off
-    job_n = job_name(name, taken_jobs(cfg, old["job"] if live and kind == "swap" else None)) if P.NAME_RE.match(name) else name
-    job, base, ref_sid = ref(pool, old["id"] if old else None)        # 换人、重开一台：先用这台自己的克隆配置
+    stopping = bool(live and kind in ("swap", "move"))
+    job_n = job_name(name, taken_jobs(cfg, old["job"] if stopping else None)) if P.NAME_RE.match(name) else name
+    job, base, ref_sid = ref(pool, old["id"] if old else None)        # 换人、换节点、重开一台：先用这台自己的克隆配置
+    info = pools_info()
+    specs = ((info.get("pools") or {}).get(pool) or {}).get("specs") or []
+    orig_spec = summary(base)["spec"] if base else None
+    chosen_spec = spec if kind == "move" else (spec or orig_spec)
     items = [{"item": "作业名", "ok": bool(P.NAME_RE.match(name)), "note": (job_n + (f"（{name} 已在用，加了后缀）" if job_n != name else "")) if name else "要选人"}]
     out = {"kind": kind, "pool": pool, "private": is_private(cfg, pool), "person": name, "new_person": name not in ppl, "mine": mine,
-           "job": job_n, "ref": ref_sid, "items": items}
+           "job": job_n, "ref": ref_sid, "orig_spec": orig_spec, "specs": specs, "checked_at": info.get("t"), "items": items}
     if base is None:
         items.append({"item": "模板作业", "ok": False, "note": "开机参数里没有这个池的克隆配置：先与平台核对"})
         return out
     nodes = pool_nodes(cfg, pool)
-    release = [(old["ssh"], old["port"])] if live and kind == "swap" else []
+    release = [(old["ssh"], old["port"])] if stopping else []
     prefer = int(old["port"]) if old else back_port(cfg, pool, name)
     try:
         port, why = pick_port(cfg, nodes, used_ports(cfg), prefer, release, lambda n, p: tcp_cached(n, p, tcp=tcp), what="原端口" if old else "上次的端口")
@@ -552,9 +594,14 @@ def preview(cfg: dict, kind: str, sid: str | None = None, person: str | None = N
         port = None
         items.append({"item": "端口", "ok": False, "note": str(x)})
     img, cmd, src = settings_of(pp)
-    c = compose(base, job_n or "?", img, cmd, port or 0)
-    out.update(summary(c), nodes=nodes, sid=sid_of(nodes[0], port) if port and len(nodes) == 1 else None, image_src=src, job=job_n)
-    if mine and old and not old.get("mine"):
+    c = compose(base, job_n or "?", img, cmd, port or 0, spec=chosen_spec)
+    same_spec = bool(orig_spec and chosen_spec == orig_spec)
+    out.update(summary(c), spec=chosen_spec, spec_name=spec_name(specs, chosen_spec), nodes=nodes,
+               sid=sid_of(nodes[0], port) if port and len(nodes) == 1 and same_spec else None, image_src=src, job=job_n)
+    if kind == "move":
+        out["after"] = (f"换好后原自用主机 {old['id']} 标成已归还，新节点接入自用（照抄现有自用主机，不自动入池，worker 自动拉起；原来的队列登记可到新主机页接上）" if mine
+                        else f"换好后按新节点与端口重新登记（删掉旧的 {old['id']}，不带原入池设置），给出新的连接命令")
+    elif mine and old and not old.get("mine"):
         out["after"] = "开好后接入自用：主机清单里这台从组内服务器移到自用主机（照抄现有自用主机，worker 自动拉起、开保活）"
     elif mine and not old:
         # config.add_mine_host 遇到同一 ssh 与端口、已归还的自用主机就恢复那一块（端口沿用上次的、多半落回同一节点时）
@@ -565,7 +612,8 @@ def preview(cfg: dict, kind: str, sid: str | None = None, person: str | None = N
         out["after"] = "开好后接成你的自用主机，worker 自动拉起、开保活"
     elif (old or {}).get("mine"):
         out["after"] = f"开好后这台从 {old['holder']} 的自用主机移到组内服务器，交给 {name or '？'}（自用主机 {old['id']} 标成已归还）"
-    info = pools_info()
+    elif old and chosen_spec and orig_spec and not same_spec:
+        out["after"] = f"改选了规格，开好后若落到新节点会按新 id 重新登记、删掉旧的 {old['id']}（不带原入池设置）"
     known = info.get("images") or {}
     repo, tag = _repo_of(img or "")
     tags = next((v for k, v in known.items() if k == repo or repo.endswith("/" + k) or k.endswith("/" + repo)), None)
@@ -578,12 +626,14 @@ def preview(cfg: dict, kind: str, sid: str | None = None, person: str | None = N
     n = sum(1 for s in cfg["servers"] if s["id"] not in off and is_private(cfg, s["pool"]) == priv)
     n += sum(1 for h in active_hosts() if h.get("platform_job") and h.get("platform_pool")
              and is_private(cfg, h["platform_pool"]) == priv)
-    after = n - (1 if live and kind == "swap" else 0) + 1
+    after = n - (1 if stopping else 0) + 1
     items.append({"item": "配额", "ok": lim is None or after <= lim,
                   "note": f"{'专用' if priv else '公用'}池开完 {after} 台" + (f"（上限 {lim}）" if lim is not None else "")})
-    sp = next((x for x in ((info.get("pools") or {}).get(pool) or {}).get("specs") or [] if x.get("specificationId") == out["spec"]), None)
-    if sp:
-        items.append({"item": "空卡", "ok": True if release else int(sp.get("quantityAvailable") or 0) >= 1,
-                      "note": f"上次核对时空 {sp.get('quantityAvailable')} / {sp.get('specificationAmount')}"})
-    out["checked_at"] = info.get("t")
+    if kind == "move" and not chosen_spec:
+        items.append({"item": "规格", "ok": False, "note": "要选目标规格"})
+    elif kind == "move" and orig_spec and same_spec:
+        items.append({"item": "规格", "ok": False, "note": f"与当前规格（{spec_name(specs, orig_spec)}）相同：原地重启请用「续租」"})
+    elif chosen_spec:
+        ok, note = check_spec(specs, chosen_spec, freed=bool(stopping and same_spec), cached=True)
+        items.append({"item": "规格", "ok": ok, "note": note})
     return out

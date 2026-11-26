@@ -66,7 +66,7 @@
 | 57 | 掉线与恢复判定；换了新容器 | `health.link_step`；`health.container_step` |
 | 58 | 平台操作 | `fleetops.run_*`（`fleetops.OP_NAMES`）；核对的比对 `fleetops.reconcile`、确认作业不在运行 `fleetops.job_stopped`（`platform.json` 的 `stopped`）；停平台作业、提交克隆并等运行 `fleetops.stop_job`、`fleetops.submit_job`（`op.json`）；出错时这一台的状态一句话 `fleetops._note` |
 | 59 | 这一台此刻能不能动 | `fleetops._risk`、`fleetops._need_ack`（`lw`、`fleetops._lw`）；页面上 `FBUSY`、`FRISKY`，勾选框的文字 `ackText`（overview_js/fleetops.js） |
-| 60 | 换人、开机的作业名与端口；续租、开机换了容器清旧主机密钥；连一台时新主机密钥记在哪份 | `fleetboot.taken_jobs`、`fleetboot.job_name`；`fleetboot.back_port`、`fleetboot.pick_port`（`fleetboot.used_ports`）；`fleet.forget`（`fleetboot.mine`、`known_hosts`）；`fleet._ssh_cmd` |
+| 60 | 换人、换节点、开机的作业名、端口与规格核对；续租、开机换了容器清旧主机密钥；连一台时新主机密钥记在哪份 | `fleetboot.taken_jobs`、`fleetboot.job_name`；`fleetboot.back_port`、`fleetboot.pick_port`（`fleetboot.used_ports`）；`fleetboot.pool_specs`、`fleetboot.spec_of`、`fleetboot.spec_name`、`fleetboot.check_spec`（`fleetboot.check`、`fleetboot.preview`）；`fleet.forget`（`fleetboot.mine`、`known_hosts`）；`fleet._ssh_cmd` |
 | 61 | worker 停启保活 | worker 的 `keepalive`、`ka`；`gpu_owners`（`ka_full`、`ka_owned`）、`guest_scan`；推演经快照卡的 `ka` 由 `sim_snapshot` 挡 |
 | 62 | 命令行里保活的那几句 | worker 的 `ka_lines`（`labmon worker status`、`api.status`、`keepalive`、`gpu_procs[].t0`） |
 | 63 | 命令行里一台的 CPU 那一句 | worker 的 `cpu_line`（`labmon worker status`、`worker fit`、`FitHost.card_lines`、`api.status`、`info.cpu_quota`、`room.cpu`、`running[].acct`） |
@@ -313,12 +313,12 @@
    实现：`health.lease_end`；`health.lease_due`
 57. **掉线与恢复判定；换了新容器**：掉线与恢复判定（连续至少 2 次、持续 `DOWN_S` 秒连不上才算掉线；工作台主机、组内服务器、项目页同一条）；换了新容器（续租或重启）
    实现：`health.link_step`；`health.container_step`
-58. **平台操作**：平台操作（核对、续租、开保活、关机、开机、换人、借来用；自用主机与组内服务器同一套；核对把无运行中同名同池作业的记入 `platform.json` 的 `stopped`（不含端口映射不对），续租/开机新作业起后从中移除；接成自用主机时清掉同 id 遗留借用指令，#171）
-   实现：`fleetops.run_*`（中文名 `fleetops.OP_NAMES`）；核对的比对 `fleetops.reconcile`（纯函数）、确认作业不在运行 `fleetops.job_stopped`（`SYNC_GRACE_S`）；停平台作业、提交克隆并等运行 `fleetops.stop_job`、`fleetops.submit_job`（续租、换人、开关机共用，进度记进 `op.json`）；出错时这一台的状态一句话 `fleetops._note`
-59. **这一台此刻能不能动**：这一台此刻能不能动（在跑实验、未识别的 GPU 进程、没探到的、本地盘 labmon 之外写得多（`lw.risk`）的要勾「已说好」；自用主机 worker 在跑只许续租勾「可以中断」）
-   实现：`fleetops._risk`、`fleetops._need_ack`（这一台的 `lw`：`fleetops._lw`）；页面上 `FBUSY`、`FRISKY`，勾选框的文字 `ackText`（overview_js/fleetops.js；续租一台、批量续租、关机、换人共用）
-60. **换人、开机的作业名与端口；续租、开机换了容器清旧主机密钥；连一台时新主机密钥记在哪份**：换人、开机的作业名（同名已在用就加后缀；真操作只认刚读的平台列表，预览用上次核对存的）与端口（接替的那台的、这人在这个池里上次关掉那台的优先，被占了往后挑；向导预览与真操作同一处取，连同“为什么选它”那句）；续租、开机换了容器清旧主机密钥（状态目录的与自用主机自己那份）；连一台时新主机密钥记在哪份（服务器项带 `known_hosts` 的自用主机记在它那份、与实验会话裸 ssh 同一份，其余记在状态目录，#109）
-   实现：`fleetboot.taken_jobs`、`fleetboot.job_name`；`fleetboot.back_port`、`fleetboot.pick_port`（已占的 `fleetboot.used_ports`）；`fleet.forget`（自用主机的那份取 `fleetboot.mine` 的 `known_hosts`）；`fleet._ssh_cmd`
+58. **平台操作**：平台操作（核对、续租、开保活、关机、开机、换人、换节点、借来用；自用主机与组内服务器同一套；核对把无运行中同名同池作业的记入 `platform.json` 的 `stopped`（不含端口映射不对），续租/开机/换节点新作业起后从中移除；接成自用主机时清掉同 id 遗留借用指令，#171）
+   实现：`fleetops.run_*`（中文名 `fleetops.OP_NAMES`）；核对的比对 `fleetops.reconcile`（纯函数）、确认作业不在运行 `fleetops.job_stopped`（`SYNC_GRACE_S`）；停平台作业、提交克隆并等运行 `fleetops.stop_job`、`fleetops.submit_job`（续租、换人、换节点、开关机共用，进度记进 `op.json`）；出错时这一台的状态一句话 `fleetops._note`
+59. **这一台此刻能不能动**：这一台此刻能不能动（在跑实验、未识别的 GPU 进程、没探到的、本地盘 labmon 之外写得多（`lw.risk`）的要勾「已说好」；自用主机 worker 在跑只许续租勾「可以中断」，关机、换人、换节点直接拒绝）
+   实现：`fleetops._risk`、`fleetops._need_ack`（这一台的 `lw`：`fleetops._lw`）；页面上 `FBUSY`、`FRISKY`，勾选框的文字 `ackText`（overview_js/fleetops.js；续租一台、批量续租、关机、换人、换节点共用）
+60. **换人、换节点、开机的作业名、端口与规格核对；续租、开机换了容器清旧主机密钥；连一台时新主机密钥记在哪份**：换人、换节点、开机的作业名（同名已在用就加后缀；真操作只认刚读的平台列表，预览用上次核对存的）、端口（接替的那台的、这人在这个池里上次关掉那台的优先，被占了往后挑；向导预览与真操作同一处取，连同“为什么选它”那句）与规格核对（池内各规格空位取 `pools.json` 预览、提交前实时再核对；仅同池同规格先停后开时 `freed=True`，换规格与换节点要求目标规格此刻有空位）；续租、开机换了容器清旧主机密钥（状态目录的与自用主机自己那份）；连一台时新主机密钥记在哪份（服务器项带 `known_hosts` 的自用主机记在它那份、与实验会话裸 ssh 同一份，其余记在状态目录，#109）
+   实现：`fleetboot.taken_jobs`、`fleetboot.job_name`；`fleetboot.back_port`、`fleetboot.pick_port`（已占的 `fleetboot.used_ports`）；`fleetboot.pool_specs`、`fleetboot.spec_of`、`fleetboot.spec_name`、`fleetboot.check_spec`（`fleetboot.check` 与 `fleetboot.preview` 共用）；`fleet.forget`（自用主机的那份取 `fleetboot.mine` 的 `known_hosts`）；`fleet._ssh_cmd`
 61. **worker 停启保活**：worker 停启保活（要卡时停、空闲时开、有了别的 GPU 进程让路；借来的主机上 `ka.sh` 停不了的保活：那张卡不放（推演同样不放），用量不算对方的）
    实现：worker 的 `keepalive`、`ka`；`gpu_owners`（`ka_full`，认不认 `ka_owned`）、`guest_scan`；推演经快照卡的 `ka` 由 `sim_snapshot` 挡（#45）
 62. **命令行里保活的那几句**：命令行里保活的那几句（在跑：几点起、nvidia-smi 里的 PID 与卡、显存；停着、不拉起的原因、对方停不了的、近 1 小时被拉起；归属取状态里 `gpu_procs` 的 `owner`、`ka`，不另判，#61）
