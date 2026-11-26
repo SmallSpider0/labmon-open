@@ -8256,6 +8256,41 @@ class IdleSleepTest(UnitBase):
         h2 = next(x for x in self.w.pool_heads if x["root"] == qp["root"])
         self.assertEqual((h2["name"], h2["n"]), ("p2", 1))
 
+    def test_transient_jobs_read_error_does_not_sleep(self):
+        # 第二轮主审意见 #1：清单满 2 天且已追加待办，但本轮读清单正文遇到临时 OSError（返回 None）：
+        # 不能把含待办的 file_sig 当空清单缓存成休眠，恢复可读后下一轮应立即放行。
+        q, = self.hosts.queues({"s": ["j1|true   # gpus=0"]}, "pa")
+        os.makedirs(q["state"], exist_ok=True)
+        Path(q["state"], "j1.done").write_text("")
+        self.assertEqual(self.add(q)[0], 0)
+        self.w.tick(self.w.registry(), True)
+        self.hosts.advance(self.m.IDLE_REG_S + 10)
+        with Path(q["jobs_path"]).open("a") as f:
+            f.write("j2|sleep 30   # gpus=0\n")
+        real_read = self.m.common.read
+        fail_once = [True]
+
+        def flaky_read(p, default=None):
+            if fail_once[0] and str(p) == str(q["jobs_path"]):
+                fail_once[0] = False
+                return default
+            return real_read(p, default)
+
+        with mock.patch.object(self.m.common, "read", side_effect=flaky_read):
+            self.w.tick(self.w.registry(), False)
+        self.assertFalse(self.status()["queues"][0]["sleeping"])
+        qs2 = self.w.registry()
+        self.assertFalse(qs2[0].get("sleeping"))
+        self.w.tick(qs2, False)
+        try:
+            self.assertTrue(any(j["name"] == "j2" for j in self.w.running.values()))
+        finally:
+            for j in list(self.w.running.values()):
+                try:
+                    os.killpg(j["pid"], 9)
+                except OSError:
+                    pass
+
 
 class WorkerPackageTest(unittest.TestCase):
     """#168 第 1 步：worker 拆成 labmon/worker/ 子包后，默认路径、薄入口转发与模块级打桩透传均保持与原单文件一致。"""

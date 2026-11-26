@@ -745,6 +745,60 @@ class RegLanesTest(Base):
         self.assertEqual((ln["id"], ln["total"], ln["done"], ln["failed"]), ("kept", 2, 1, 1))
         self.assertTrue(any(a["key"] == "failed:kept_1" for a in snap["alerts"]))
 
+    def test_returned_read_error_not_cached_as_done_sig(self):
+        # 第二轮主审意见 #2：已归还主机代读清单时，stat 成功但正文读取临时失败，不得缓存 done_sig；
+        # 恢复可读后应立即识别未完成任务并报 returned_unfinished。
+        from labmon import probe as P
+        from labmon.state import load_json, save_json, state_dir
+        (self.d / "hosts.toml").write_text(f'[[hosts]]\nid = "here"\ndata_root = "{self.d / "data"}"\nshared = ["{self.d}"]\n\n[[hosts]]\nid = "gone"\n'
+                                           f'ssh = "nobody@invalid.example"\nreturned = "2026-11-04 18:40"\nshared = ["{self.d}"]\n')
+        gpend = self.done_list("gpend", 0, jobs=1, done=False)
+        jpath = str(gpend / "jobs" / "gpend.txt")
+        save_json(state_dir() / "snapshot.json", {"regs": [
+            {"host": "here", "state": "active", "stale": False, "t": 0, "queues": []},
+            {"host": "gone", "state": "returned", "stale": False, "t": 0,
+             "queues": [{"root": str(gpend), "jobs": "jobs/gpend.txt", "project": "p1", "stop": None, "gpus": None, "added": "2026-11-01 10:00"}]},
+        ]})
+        cfg = self.cfg()
+        sd = PJ.out_dir("p1") / ".labmon"
+        # 模拟一次探针读正文失败（不经子进程，直接调 P.queue_gpu_queue 测探针输出 + C.build 端到端）
+        real_read = P.read
+        with unittest.mock.patch.object(P, "read", side_effect=lambda p, default=None: default if str(p) == jpath else real_read(p, default)):
+            raw_err = P.queue_gpu_queue({"root": str(gpend), "jobs": "jobs/gpend.txt", "readonly": True})
+        self.assertNotIn("jobs_sig", raw_err)
+        # 即使拿该次探针结果跑一轮 collect，也不写 done_sig；下一轮恢复可读立即报 returned_unfinished
+        with unittest.mock.patch.object(C, "run_probe", return_value=({"t": time.time(), "queues": {"gpend/jobs/gpend.txt": raw_err}}, None)):
+            C.collect(cfg)
+        gk = C.list_path(str(gpend), "jobs/gpend.txt")
+        self.assertNotIn("done_sig", (load_json(sd / "reg_lanes.json", {}).get(gk) or {}))
+        snap2 = C.collect(cfg)
+        self.assertIn("gpend/jobs/gpend.txt", [ln["id"] for ln in snap2["lanes"]])
+        self.assertTrue(any(a["key"].startswith("returned_unfinished:gpend/jobs/gpend.txt:gone:") for a in snap2["alerts"]))
+
+    def test_stale_sleeping_status_does_not_hide_live_queued_jobs(self):
+        # 第二轮主审意见 #3：worker 休眠后停止更新状态（status.json 过期），用户往清单追加了新任务：
+        # 探针现场读到新排队任务（worker=None），不得被旧全局快照里的 reg_sleeping=True 盖掉导致车道与队列不在告警消失。
+        from labmon.state import save_json, state_dir
+        (self.d / "hosts.toml").write_text(f'[[hosts]]\nid = "here"\ndata_root = "{self.d / "data"}"\nshared = ["{self.d}"]\n')
+        slp = self.done_list("slp", 3 * 86400, jobs=1, done=True)
+        with (slp / "jobs" / "slp.txt").open("a") as f:
+            f.write("slp_new|echo new\n")
+        now = time.time()
+        wst = self.d / "data" / "labmon" / "hosts" / "here" / "status.json"
+        wst.parent.mkdir(parents=True)
+        # status.json 已经过期（早于 STALE_S），所以 probe.worker_view 忽略它，现场读清单
+        wst.write_text(json.dumps(fake_status(t=now - 3600, queues=[
+            {"root": str(slp), "jobs": "jobs/slp.txt", "project": "p1", "empty": True, "sleeping": True, "empty_since": int(now - 3 * 86400)},
+        ])))
+        save_json(state_dir() / "snapshot.json", {"regs": [
+            {"host": "here", "state": "active", "stale": True, "t": now - 3600,
+             "queues": [{"root": str(slp), "jobs": "jobs/slp.txt", "project": "p1", "stop": None, "gpus": None, "empty": True, "sleeping": True, "added_t": now - 9 * 86400}]},
+        ]})
+        snap = C.collect(self.cfg())
+        self.assertEqual([ln["id"] for ln in snap["lanes"]], ["slp/jobs/slp.txt"])
+        self.assertEqual({j["id"]: j["status"] for j in snap["jobs"]}["slp_new"], "queued")
+        self.assertTrue(any(a["key"].startswith("lock_dead:") for a in snap["alerts"]))
+
     def test_wait_targets_hosts_with_lanes(self):
         # labmon wait 的主机定向按项目快照的主机（登记带来的主机也算），不看 monitor.toml
         from labmon.waits import wait_check

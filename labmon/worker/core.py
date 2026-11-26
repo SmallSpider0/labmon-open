@@ -1041,6 +1041,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 reqs += [_Q.queue_req(q, job) for job in jobs]
                 continue
             if not jobs:
+                if not q.get("_jobs_ok"):         # 清单正文临时读取失败：不能当成跑空，更不能把当前文件签名缓存进休眠（#164）
+                    continue
                 q["empty"] = True                 # 空着：清单里没有待办（项目暂时没实验），状态里标出来，别的项目不当它在抢卡
                 was_active = q["key"] in self.active
                 if was_active:

@@ -208,10 +208,12 @@ def first_rows(rows):
 
 
 def list_jobs(q):
-    """清单里的任务 [(名称, 命令)]：跳过空行、# 注释与没有 | 的行。顺带把清单声明的并行数记进 q["par"]（list_par；读不到清单为 1）。"""
-    text = _C.read(q["jobs_path"], "") or ""
-    q["par"] = list_par(text)
-    return parse_jobs(text)
+    """清单里的任务 [(名称, 命令)]：跳过空行、# 注释与没有 | 的行。顺带把清单声明的并行数记进 q["par"]（list_par；读不到清单为 1），
+    并把正文是否读成功记进 q["_jobs_ok"]（用于休眠判定：临时读取失败不能当成空清单进休眠，#164）。"""
+    text = _C.read(q["jobs_path"], None)
+    q["_jobs_ok"] = text is not None
+    q["par"] = list_par(text or "")
+    return parse_jobs(text or "")
 
 
 def list_par(text):

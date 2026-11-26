@@ -236,7 +236,9 @@ def queue_gpu_queue(q):
                     "lock_pid": None, "lock_alive": False, "paused": None, "activity": q.get("done_act"),
                     "current": [], "log_tail": [], "readonly_done": True}
     envf = os.path.join(root, re.sub(r"\.txt$", ".env", q["jobs"]))
-    env_txt = read(envf, "") or ""
+    env_raw = read(envf, None)
+    env_ok = env_raw is not None or not os.path.exists(envf)
+    env_txt = env_raw or ""
 
     def env(key, default):
         m = re.search(r"^%s=(\S+)" % key, env_txt, re.M)
@@ -245,8 +247,6 @@ def queue_gpu_queue(q):
     state = env("QUEUE_STATE", q.get("state", "results/_queue"))
     logs = env("QUEUE_LOGS", q.get("logs", "results/_logs"))
     out = {"jobs": [], "marks": {}, "state_dir": state, "logs_dir": logs, "worker": q.get("worker")}   # worker 在管这条队列时为 {"wait": 等待原因或 None}
-    if ro and jsig is not None:
-        out["jobs_sig"] = jsig
     skew = _fs_skew(os.path.join(state, "queue.log"))
     out["fs_skew"] = round(skew, 1) if skew else None
 
@@ -301,12 +301,23 @@ def queue_gpu_queue(q):
         c["log_mtime"] = mtime(lf) if os.path.exists(lf) else None
         out["current"].append(c)
     est_re = re.compile(q.get("est_re", r"est_min=(\d+(?:\.\d+)?)"))
-    for line in (read(os.path.join(root, q["jobs"]), "") or "").splitlines():
-        if not line.strip() or line.lstrip().startswith("#") or "|" not in line:
-            continue
-        name, cmd = line.split("|", 1)
-        m = est_re.search(cmd)
-        out["jobs"].append({"name": name.strip(), "est_min": float(m.group(1)) if m else None})
+    jtxt = read(jpath, None)
+    if jtxt is None:
+        out["jobs_err"] = True                   # 清单正文读失败：不缓存 done_sig，看板不按空清单收起（#164）
+    else:
+        for line in jtxt.splitlines():
+            if not line.strip() or line.lstrip().startswith("#") or "|" not in line:
+                continue
+            name, cmd = line.split("|", 1)
+            m = est_re.search(cmd)
+            out["jobs"].append({"name": name.strip(), "est_min": float(m.group(1)) if m else None})
+        if ro and jsig is not None and env_ok:
+            try:
+                st2 = os.stat(jpath)
+                if [st2.st_ino, st2.st_mtime_ns, st2.st_size] == jsig:
+                    out["jobs_sig"] = jsig       # 仅在正文与 .env 均成功读取且读前后签名一致时输出 jobs_sig
+            except OSError:
+                pass
     out["log_tail"] = (read(os.path.join(state, "queue.log"), "") or "").splitlines()[-400:]
     return out
 

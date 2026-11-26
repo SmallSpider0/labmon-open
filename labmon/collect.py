@@ -241,36 +241,41 @@ def _last_act(q: dict, raw: dict) -> float:
 
 
 def _sleeping_of(q: dict, raw: dict | None, pool: dict | None = None) -> bool:
-    """这条队列此刻是不是已休眠（#164）：探针现场读到的 worker.sleeping / sleeping 优先，算力池看 pool.lists[].sleeping，其余退回全局快照的 reg_sleeping。"""
+    """这条队列此刻是不是已休眠（#164）：在用主机有探针现场结果时只认现场（raw.sleeping / raw.worker.sleeping），
+    不因 worker 状态过期（raw.worker 为 None）误回退旧快照的 reg_sleeping；算力池看 pool.lists[].sleeping；其余才退回 reg_sleeping。"""
+    if q.get("host") == POOL:
+        if pool and (pool.get(PO.key(q.get("root"), q.get("jobs"))) or {}).get("sleeping"):
+            return True
+        return bool(raw.get("sleeping")) if raw is not None else bool(q.get("reg_sleeping"))
     if raw is not None:
-        if raw.get("sleeping"):
-            return True
-        if raw.get("worker") is not None:
-            return bool(raw["worker"].get("sleeping"))
-    if q.get("host") == POOL and pool:
-        if (pool.get(PO.key(q.get("root"), q.get("jobs"))) or {}).get("sleeping"):
-            return True
+        return bool(raw.get("sleeping") or (raw.get("worker") or {}).get("sleeping"))
     return bool(q.get("reg_sleeping"))
 
 
 def _quiet(q: dict, raw: dict | None, returned: bool, t: float, pool: dict | None = None) -> bool:
     """不是 monitor.toml 写明的车道（只在登记里有的、通配符自动发现的）收不收起（#117、#164）：
     - 这一轮没有这条清单的数据（刚登记、探针还没读到）：不收；
-    - 已休眠（worker 空满 IDLE_REG_S 转休眠）或已归还且确认全跑完短路（readonly_done）：立即收起；
+    - 探针已确认休眠短路（raw.sleeping）或已归还且确认全跑完短路（readonly_done）：立即收起；
     - 队列进程还在跑（已归还无代读除外）：不收；
-    - 清单里还有在跑或排队的任务：不收；
+    - 清单里还有在跑或排队的任务（现场读到的待办优先于任何旧休眠标记）：不收；
+    - 其余情况下若已休眠（含算力池休眠）：立即收起；
+    - 探针正文读取失败（jobs_err）：不误判为空清单或已跑完而收起；
     - 0 个任务的空清单：不出车道，立即收起；
     - 已摘登记（worker rm，reg_live 为 False）且无未完成任务：立即收起；
     - 已归还主机上没有未完成也没有失败任务：立即收起；
     - 其余（在用主机上登记还在、有任务的，或有失败任务的，或自动发现的）：最后一次活动早于 hide_done_hours 的收起。"""
     if raw is None:
         return False
-    if _sleeping_of(q, raw, pool) or raw.get("readonly_done"):
+    if raw.get("sleeping") or raw.get("readonly_done"):
         return True
     if raw.get("lock_alive") and not (returned and not q.get("read_via")):
         return False
     jobs = QUEUE_PARSERS[q["type"]](raw, t)[1]
     if any(j["status"] in ("running", "queued") for j in jobs):
+        return False
+    if _sleeping_of(q, raw, pool):
+        return True
+    if raw.get("jobs_err"):
         return False
     if "jobs" in raw and not jobs:
         return True
@@ -348,7 +353,7 @@ def _sync_returned_done(cfg: dict, raw_by_host: dict, sd: Path, t: float) -> Non
         if not isinstance(m, dict) or m.get("host") != q["host"]:
             continue
         raw = ((raw_by_host.get(q["read_via"]) or {}).get("queues") or {}).get(q["id"])
-        if raw is None or raw.get("readonly_done"):
+        if raw is None or raw.get("readonly_done") or raw.get("jobs_err"):
             continue
         sig = raw.get("jobs_sig")
         jobs = QUEUE_PARSERS[q["type"]](raw, t)[1]
