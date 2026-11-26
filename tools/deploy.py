@@ -523,7 +523,7 @@ def deploy(wait_min: float) -> tuple[int, list[str]]:
         checks.append(page_check(snap))
     out += [("✓ " if ok else "– " if ok is None else "✗ ") + t for ok, t in checks]
     todo = [f"核对 HTML 文档 {f}（说明见 AGENTS.md「{s}」）" for f, s in ARTIFACTS.items() if f in files]
-    pages = [f for f in files if f.startswith("labmon/") and f.endswith((".html", "common.js"))]
+    pages = [f for f in files if D.is_page(f)]
     if pages:
         todo.append(f"在内置浏览器里核对改动处（{'、'.join(pages)}；电脑没信任 labmon CA 打不开就写明没看），用完关掉本任务开的标签并记录清理结果")
     if todo:

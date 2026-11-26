@@ -92,14 +92,40 @@ class PagesTest(unittest.TestCase):
         self.assertTrue(x["ok"], x.get("d"))
 
     # ---- 渲染（Python 侧） ----
+    def _page_sources(self):
+        pkg = Path(ROOT, "labmon")
+        js = sorted(p.relative_to(pkg).as_posix() for p in (pkg / "overview_js").glob("*.js"))
+        return ["overview.html", "page.html", "login.html", "common.js", *js]
+
     def test_write_page_escapes_data_and_title(self):
         """数据里的 < 转成 \\u003c、标题转义：恶意字符串进不了页面结构。"""
         for name, h in self.html.items():                                   # 只有一个 <script>：check.js 的 syntax 组数过
             self.assertNotIn("<i id=x>", h, name)
             self.assertNotIn("<!--<script>", h, name)
             self.assertNotIn("/*__DATA__*/null", h, name)
-            self.assertNotIn("/*__COMMON__*/", h, name)
+            self.assertNotRegex(h, r"/\*__(?:COMMON|JS:[^*]+)__\*/", name)
+            self.assertNotRegex(h, r"<script\b[^>]*\bsrc=", name)
         self.assertTrue("<title>题&lt;i id=x&gt;" in self.html["page"], "项目页标题没转义")   # 工作台的 <title> 是固定的，write_page 只换项目页的
+
+    def test_overview_js_split_and_inlining(self):
+        """#168 第 3 步：overview_js/*.js 全部内联进 overview.html、可单独通过语法检查，且数据里的占位符不被二次展开。"""
+        pkg = Path(ROOT, "labmon")
+        ov_tpl = (pkg / "overview.html").read_text(encoding="utf-8")
+        js_files = sorted((pkg / "overview_js").glob("*.js"))
+        self.assertTrue(js_files, "labmon/overview_js 下没有拆出的脚本")
+        for p in js_files:
+            rel = p.relative_to(pkg).as_posix()
+            self.assertIn(f"/*__JS:{rel}__*/", ov_tpl, f"overview.html 漏内联 {rel}")
+            r = subprocess.run([NODE, "--check", str(p)], capture_output=True, text=True, timeout=30)
+            self.assertEqual(r.returncode, 0, f"{rel} 语法错误：\n{r.stderr}")
+        # 数据里带 /*__JS:common.js__*/ 时不能触发内联（_inline_js 先于 fill 执行）
+        sentinel = "/*__JS:common.js__*/"
+        rendered = C.render_page("login.html", {"empty": False, "entry": "lan", "entry_name": sentinel, "next": "", "pw_min": 8, "lock_min": 15, "fails": 5})
+        self.assertIn(json.dumps(sentinel), rendered)
+        # 路径越界或不存在的脚本立即报错
+        for bad in ("/*__JS:../tests/pages/dom.js__*/", "/*__JS:overview_js/missing.js__*/"):
+            with self.assertRaises(FileNotFoundError, msg=bad):
+                C._inline_js(bad)
 
     def test_snapshots_have_no_real_names(self):
         """构造的快照里只许假名：没有真实网段、真人名字、真作业名。"""
@@ -112,7 +138,7 @@ class PagesTest(unittest.TestCase):
         """页面上的写请求都经 common.js 的 postJSON（带 JSON 类型；看板只认 application/json 的 POST，漏了的那个按钮会被拒，#158）：
         模板里不另写 POST 的 fetch，也不用 XMLHttpRequest、sendBeacon 发请求。表单（登录页、账号详情，#160）只用来接回车与让口令管理认出来：
         提交由页面拦下改经 postJSON；都写 method="post"、不写 action，脚本没跑起来时浏览器自己提交也是表单类型的 POST（看板回 415），口令不会进地址栏。"""
-        for f in ("overview.html", "page.html", "login.html", "common.js"):
+        for f in self._page_sources():
             with open(os.path.join(ROOT, "labmon", f), encoding="utf-8") as fh:
                 s = fh.read()
             self.assertEqual(len(re.findall(r"""method\s*:\s*["'`]post""", s, re.I)), int(f == "common.js"), f)
@@ -120,7 +146,7 @@ class PagesTest(unittest.TestCase):
             for m in re.finditer(r"<form\b[^>]*>", s):
                 self.assertIn('method="post"', m[0], f)
                 self.assertNotIn("action=", m[0], f)
-            self.assertEqual(len(re.findall(r"<form\b", s)), {"overview.html": 2, "login.html": 1}.get(f, 0), f)
+            self.assertEqual(len(re.findall(r"<form\b", s)), {"overview_js/account.js": 2, "login.html": 1}.get(f, 0), f)
             if f == "common.js":
                 self.assertRegex(s, r'const postJSON = \(url, body = \{\}, how\) => api\(url, \{method: "POST", headers: \{"Content-Type": "application/json"\}')
             # 请求都经 api（连不上时说人话、按需重试，#177）：模板里不另写 fetch；“看板服务连不上”的说法只在 common.js 的 netText
@@ -130,7 +156,7 @@ class PagesTest(unittest.TestCase):
     def test_urls_relative(self):
         """页面上的请求、链接与 iframe 都写相对地址（#165）：TX 的 nginx 把公网入口挂在 /<前缀>/ 下，以 / 开头的会跑出前缀。
         node 里的「路径前缀」那组按 /pfx/ 实际跑一遍；这里把模板里的写法全扫一遍，免得新加的按钮漏掉。"""
-        for f in ("overview.html", "page.html", "login.html", "common.js"):
+        for f in self._page_sources():
             with open(os.path.join(ROOT, "labmon", f), encoding="utf-8") as fh:
                 s = fh.read()
             bad = re.findall(r"""\b(?:api|postJSON|fetch)\(\s*["'`]/|\b(?:href|src|action)\s*=\s*\\?["'`]/(?!/)|\.src\s*=\s*["'`]/|location(?:\.href)?\s*=\s*["'`]/""", s)

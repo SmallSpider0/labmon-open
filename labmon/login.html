@@ -55,7 +55,7 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 1
 <script>
 let ME = null;
 let D = /*__DATA__*/null;
-/*__COMMON__*/
+/*__JS:common.js__*/
 // 登录页的数据由看板服务填（serve.Handler._login_page）：有没有账号、哪个入口、口令下限、锁定规则、登录后回哪（next，已按 safe_next 核过）
 D = D || {empty: false, entry: "lan", entry_name: "内网入口", pw_min: 8, lock_min: 15, fails: 5, next: ""};
 let MODE = new URLSearchParams(location.search).get("setup") != null || D.empty ? "setup" : "login";

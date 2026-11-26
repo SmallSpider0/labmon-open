@@ -78,7 +78,7 @@ C=(--cacert ~/.config/labmon/ca.crt -H "Authorization: Bearer $(cat ~/.config/la
    python3 -c 'import base64,json,sys; print(json.dumps({"bundle": base64.b64encode(open(sys.argv[1],"rb").read()).decode()}))' /tmp/labmon-deploy.bundle > /tmp/labmon-deploy.json
    curl -s "${C[@]}" -X POST -H 'Content-Type: application/json' --data-binary @/tmp/labmon-deploy.json "$URL/api/admin/deploy"
    ```
-3. 重启服务。只动了文档、测试或工具时不重启：改的文件全在 `*.md`、`docs/`、`skills/`、`.github/`、`tests/`、`tools/`、`.claude/` 里才算（`deploy.is_doc`；看板服务与 worker 都不 import 这些；`labmon/*.html`、`labmon/common.js` 是页面模板，不算）。
+3. 重启服务。只动了文档、测试或工具时不重启：改的文件全在 `*.md`、`docs/`、`skills/`、`.github/`、`tests/`、`tools/`、`.claude/` 里才算（`deploy.is_doc`；看板服务与 worker 都不 import 这些；`labmon/*.html`、`labmon/*.js` 与 `labmon/overview_js/*.js` 是页面模板，不算）。
    这时第 3、4 步跳过，第 1、6、7 步照做（核对清单里“快照时刻晚于第 4、5 步”这条不用看），在部署报告里写明。
    远端模式由服务端自己重启（等平台操作做完再交给 systemd）：等 `curl -s "${C[@]}" "$URL/api/me"` 的 `commit` 是新提交、`started` 变了。本机模式：`git diff --stat ORIG_HEAD HEAD` 看改了哪些文件，要重启的 `labmon service restart`。
 4. `curl -s "${C[@]}" -X POST -H 'Content-Type: application/json' -d '{}' "$URL/collect?fresh"` 两次（看板只认带 JSON 类型的 POST，#158；要登录，#160）。页面在采集时才按模板重新生成；带 `fresh` 才不被 10 秒的节流挡掉，等请求之后开始的那一轮做完。
@@ -101,7 +101,7 @@ C=(--cacert ~/.config/labmon/ca.crt -H "Authorization: Bearer $(cat ~/.config/la
 - 页面渲染不报错：脚本把看板上的工作台（`/`、`overview.json`、`records.json`）与各项目页下载下来，用 `tests/pages/smoke.js` 在 node 里装进 `tests/pages` 的 DOM 桩，
   按路由渲染（`#/`、每台主机、`#/log`、`#/fleet` 与它的选项卡、每台组内服务器的抽屉、每个项目页），不抛异常、文字里不漏 NaN/undefined/Infinity
   （任务日志原文里本来就有的不算，看结论附的上下文判断）。手工时在内置浏览器里打开 `#/`、`#/host/<id>`、`#/p/<id>`、`#/fleet`，`read_console_messages` 没有报错。
-- 改了页面模板（`labmon/*.html`、`labmon/common.js`）的，另在内置浏览器里打开真看板核对改动处，按[清理规则](../AGENTS.md#怎么测)关掉自己开的标签，并在部署报告里写明结果。没改页面的批不用开浏览器。
+- 改了页面模板（`labmon/*.html`、`labmon/*.js` 与 `labmon/overview_js/*.js`，`deploy.is_page`）的，另在内置浏览器里打开真看板核对改动处，按[清理规则](../AGENTS.md#怎么测)关掉自己开的标签，并在部署报告里写明结果。没改页面的批不用开浏览器。
   内网入口用的是 labmon 自签 CA 签的证书：桌面应用所在的电脑要先信任这个 CA（`~/.config/labmon/ca.crt`），否则内置浏览器打不开；没信任时在部署报告里写明没看，以部署脚本的冒烟检查（上一条）为准。
 
 ## 看板服务所在机的体检
