@@ -182,11 +182,15 @@ def other_load(st, project):
         run_pn[pk] = run_pn.get(pk, 0) + 1
     q_todo = 0
     rem_lane, rem_pn = dict(run_lane), dict(run_pn)
+    paused_lanes = set()
     for item in st.get("todo") or []:
         if not isinstance(item, dict):
             continue
         p = item.get("project")
-        if p == project or item.get("held") in ("paused", "pause"):
+        if p == project:
+            continue
+        if item.get("held") in ("paused", "pause"):
+            paused_lanes.add((p, item.get("root"), item.get("queue")))
             continue
         root, queue = item.get("root"), item.get("queue")
         for n in item.get("jobs") or []:
@@ -224,7 +228,10 @@ def other_load(st, project):
     for w in st.get("waiting") or []:
         if not isinstance(w, dict):
             continue
-        if w.get("project") == project or w.get("held") in ("paused", "pause") or is_hold(w.get("name")):
+        p, n = w.get("project"), w.get("name")
+        if not n or p == project or w.get("held") in ("paused", "pause") or is_hold(n):
+            continue
+        if (p, w.get("root"), w.get("queue")) in paused_lanes:
             continue
         q_wait += 1
     return {"running": run_n, "queued": max(q_todo, q_plan, q_wait), "until": until}

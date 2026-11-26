@@ -1113,6 +1113,15 @@ class AdmissionUnitTest(UnitBase):
         self.assertEqual(self.m.other_load_text({"running": 0, "queued": 3, "until": now - 60}, now=now, show_until=True), "他项 3 排")
         w_only = self.m.other_load({"waiting": [{"project": "p2", "name": "a", "held": None}, {"project": "p2", "name": "b", "held": "pause"}]}, "bp")
         self.assertEqual(w_only, {"running": 0, "queued": 1, "until": None})
+        # Codex 审查：目录 paused 文件暂停生成的 name=None、held=None 等待记录不计入他项排队
+        paused_dir_st = {
+            "todo": [{"project": "p2", "root": "/x/p", "queue": "jobs/p.txt", "jobs": ["p1"], "held": "paused"}],
+            "waiting": [
+                {"project": "p2", "root": "/x/p", "queue": "jobs/p.txt", "name": None, "held": None, "why": "队列暂停中"},
+                {"project": "p2", "root": "/x/p", "queue": "jobs/p.txt", "name": "p1", "held": None, "why": "队列暂停中"},
+            ],
+        }
+        self.assertEqual(self.m.other_load(paused_dir_st, "bp"), {"running": 0, "queued": 0, "until": None})
 
     def test_fit_list_deps_by_state(self):
         # #144：写了 after= 的行按前置此刻的状态（同真放行的 dep_block）分：前置已跑成功的、afterany= 等的已跑完（失败也算）的照常分；
