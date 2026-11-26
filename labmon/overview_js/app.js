@@ -171,13 +171,14 @@ async function gdSave() {
 }
 function renewLeave() { RPICK = null; if (FCAP?.pop === "renew") FCAP = null; }     // 离开续租抽屉：勾选与抽屉里取的验证码一起作废，在途的回执经 startOp 的实例比较丢掉
 function drawer(r) {
-  const el = document.getElementById("drw"), pane = document.getElementById("drwp"), d = r.kind === "fleet" && (!LIVE || ME?.admin) && ((D.fleet && !D.fleet.error) || (r.drw?.k === "person" && ME?.scopes.includes("admin"))) || r.kind === "p" || r.kind === "home" ? r.drw : null;
+  const el = document.getElementById("drw"), pane = document.getElementById("drwp"), d = r.kind === "fleet" && (!LIVE || ME?.admin) && ((D.fleet && !D.fleet.error) || (r.drw?.k === "person" && ME?.scopes.includes("admin"))) || r.kind === "p" || r.kind === "home" || r.kind === "host" ? r.drw : null;
   if (!d) {
     if (!DKEY) return;
     const k = DKEY, back = pane.contains(document.activeElement) || document.activeElement === document.body;
     if (k.startsWith("person:")) { FPED = null; FDK = {}; }
     if (k.startsWith("guard:")) GDERR = null;
     if (k.startsWith("renew:")) renewLeave();
+    if (k.startsWith("assign:")) APICK = null;
     pane.querySelector(".secret")?.remove();
     DKEY = null; DLAST = ""; DBACK = null;
     el.classList.remove("on"); el.setAttribute("aria-hidden", "true"); document.documentElement.classList.remove("drw-on");
@@ -189,8 +190,9 @@ function drawer(r) {
   const key = `${d.k}:${d.id}`;
   if (DKEY && DKEY !== key && DKEY.startsWith("person:")) { FDK = {}; if (FPED && !FPED.isNew) FPED = null; }
   if (DKEY?.startsWith("renew:") && d.k !== "renew") renewLeave();     // 切到别的抽屉也算离开续租
+  if (DKEY?.startsWith("assign:") && d.k !== "assign") APICK = null;
   const html = d.k === "srv" ? srvDrawer(d.id) : d.k === "new" ? newDrawer(d.id) : d.k === "guard" ? guardDrawer() : d.k === "pool" ? poolDrawer() : d.k === "renew" ? renewDrawer(d.id) : d.k === "proj" ? projDrawer(d.id)
-    : d.k === "arch" ? archDrawer() : directoryDrawer(d);
+    : d.k === "assign" ? assignDrawer(d.id) : d.k === "arch" ? archDrawer() : directoryDrawer(d);
   const section = d.section || "";
   const previous = pane.dataset.section;
   if (html !== DLAST || key !== DKEY) {
@@ -229,7 +231,7 @@ document.addEventListener("change", e => {               // 批量续租的勾�
   if ("achost" in d && POP?.k === "acc-hosts") { t.checked ? POP.sel.add(d.achost) : POP.sel.delete(d.achost); return; }
   if ("pushkind" in d && POP?.k === "acc-push") { POP.kind = t.value; ACC.err = null; t.blur(); return render(false); }
   if ("regto" in d && POP) { POP.to = d.regto; POP.err = null; return render(false); }   // 换到哪台
-  if ("assignto" in d && POP?.k === "assign") { POP.to = d.assignto; POP.err = null; return render(false); }   // 给项目用：选项目
+  if ("assignto" in d && APICK && !APICK.busy) { APICK.to = d.assignto; APICK.err = null; return render(false); }   // 给项目用：抽屉内选项目
   if ("adopt" in d && ADOPT) { ADOPT.sel[d.adopt] = t.checked; return render(false); }    // 接上卡的勾选
   const sel = d.rsel, ack = d.rack;
   if (!RPICK || (!sel && !ack) || FCAP?.pop === "renew" || RPICK.busy) return;      // 输验证码、提交中不改（同 renewDrawer 的 lock）
