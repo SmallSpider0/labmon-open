@@ -74,9 +74,10 @@ class ClientDistTest(unittest.TestCase):
         self.git("config", "user.email", "test@example.invalid")
         (self.repo / "pyproject.toml").write_text('[project]\nversion = "0.1.0"\n')
         source = dist.HERE
-        for p in source.glob("*.py"):
+        for p in (*source.glob("*.py"), *source.glob("*.html"), *source.glob("*.js")):
             shutil.copy(p, self.package / p.name)
         shutil.copytree(source / "worker", self.package / "worker", ignore=shutil.ignore_patterns("__pycache__"))
+        shutil.copytree(source / "overview_js", self.package / "overview_js")
         self.skill = self.repo / "skills/lab-experiments"
         self.skill.mkdir(parents=True)
         (self.skill / "SKILL.md").write_text(SKILL_MD)
@@ -116,7 +117,8 @@ class ClientDistTest(unittest.TestCase):
             # #57：skill 与它链接到的文档照仓库的相对位置放进包目录（../../docs/… 打得开），别的 skill、网页、子目录不带
             names = set(z.namelist())
             self.assertLessEqual({"labmon/skills/lab-experiments/SKILL.md", "labmon/docs/api.md", "labmon/README.md",
-                                  "labmon/examples/monitor.toml", "labmon/worker/__init__.py", "labmon/worker/pure.py", "labmon/worker/core.py"}, names)
+                                  "labmon/examples/monitor.toml", "labmon/worker/__init__.py", "labmon/worker/pure.py", "labmon/worker/core.py",
+                                  "labmon/overview.html", "labmon/common.js", "labmon/overview_js/core.js", "labmon/overview_js/app.js"}, names)
             self.assertFalse({"labmon/docs/intro.html", "labmon/docs/sub/deep.md", "labmon/skills/other/SKILL.md"} & names)
             self.assertEqual(SKILL_MD.encode(), z.read("labmon/skills/lab-experiments/SKILL.md"))
             self.assertIn("labmon/skills/lab-experiments/SKILL.md,sha256=", z.read(next(n for n in names if n.endswith("RECORD"))).decode())

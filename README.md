@@ -127,8 +127,9 @@ labmon/collect.py       项目页：跑探针 → 统一快照（hosts / lanes /
 labmon/page.html        项目页的单文件页面模板，只读快照
 labmon/overview.py      工作台的数据：读各主机 worker 的状态、连通与租期（health）、调度卡 sched_view、各卡被谁占着 occupancy；
                         写给各主机 worker 的 eta.json、sched.json 与 returned.json；渲染 overview.html
-labmon/overview.html    工作台的单文件页面：总览、主机页、项目页入口、记录、组内服务器
-labmon/common.js        两个页面共用的脚本（转义、悬停提示、本机存的设置、时刻与时长的文字、借用的说明与小标签、主机短名与车道名、时间线引擎与占用条），渲染时内联进页面
+labmon/overview.html    工作台的单文件页面模板（HTML、样式与脚本内联壳，渲染时内联 common.js 与 overview_js/*.js）
+labmon/overview_js/     工作台脚本模块（渲染时按序内联进 overview.html）：core（路由/告警/租期/导航）/ account（我的账号与算力池入池）/ home（记录/总览/表格/主机资源卡）/ sched（临时指令/调度卡/记录卡/自用续租）/ storage（共享盘/本地盘/主机页）/ fleet（组内卡片墙/算力池抽屉/借用/弹窗与时刻选择）/ fleetops（平台操作/批量续租/人员）/ project（项目管理抽屉/登记搬移/项目配置/归档）/ app（顶层渲染/保活守护抽屉/抽屉分发/全局事件与轮询）
+labmon/common.js        页面共用的脚本（转义、悬停提示、本机存的设置、时刻与时长的文字、借用的说明与小标签、主机短名与车道名、时间线引擎与占用条），渲染时内联进页面
 labmon/serve.py         看板服务：各项目、工作台、组内服务器的采集线程与 HTTP（路由全表见文件头部注释）；内网与公网两个入口，路由表 ROUTES 定每条要的权限（docs/api.md）；
                         只认 JSON 类型与同源的 POST、校验 Host（防跨站，docs/workbench.md「防跨站请求」）
 labmon/users.py         看板的账号、会话与令牌：口令哈希、登录限速、作用域、普通用户看到的快照与记录（docs/api.md）

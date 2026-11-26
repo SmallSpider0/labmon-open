@@ -16,4 +16,4 @@ labmon = "labmon.__main__:main"
 packages = ["labmon", "labmon.worker"]
 
 [tool.setuptools.package-data]
-labmon = ["page.html", "overview.html", "common.js", "data_root_readme.md", "labmon_worker.py", "fleet_probe.sh", "fleet_guard.sh", "ka.sh"]
+labmon = ["page.html", "overview.html", "login.html", "common.js", "overview_js/*.js", "data_root_readme.md", "labmon_worker.py", "fleet_probe.sh", "fleet_guard.sh", "ka.sh"]

@@ -142,7 +142,7 @@ tr.run td { background: color-mix(in srgb, var(--warn) 7%, transparent); }
 <script>
 let ME = /*__ME__*/null;        // 看板账号（#160）：看板服务发页面时填，见 common.js 的 canOps
 let D = /*__DATA__*/null;
-/*__COMMON__*/
+/*__JS:common.js__*/
 // 本机存的设置（common.js 的 mkStore），键名按项目标题分开：SS 只存这一次浏览（滚动位置、展开了什么），LS 长期存（筛选、时间线视图）
 const KEY = "labmon:" + (D && D.title || "");
 const SS = mkStore(KEY, sessionStorage), LS = mkStore(KEY);

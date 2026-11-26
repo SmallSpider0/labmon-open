@@ -1214,6 +1214,20 @@ def _recent_rate(ss: list, t: float) -> float | None:
     return None
 
 
+_JS_SLOT = re.compile(r"/\*__JS:([A-Za-z0-9_./-]+\.js)__\*/")
+
+
+def _inline_js(html: str) -> str:
+    """把模板里的 /*__JS:<相对路径>__*/ 替换成包内对应脚本原文（单文件渲染，file:// 打开也可用）。"""
+    def _read(m: re.Match[str]) -> str:
+        rel = m.group(1)
+        p = (HERE / rel).resolve()
+        if not p.is_relative_to(HERE) or not p.is_file():
+            raise FileNotFoundError(f"找不到内联脚本：{rel}")
+        return p.read_text(encoding="utf-8")
+    return _JS_SLOT.sub(_read, html)
+
+
 def fill(html: str, slot: str, data) -> str:
     """把页面里的 /*__<slot>__*/null 换成数据（第一处）：数据里的 < 一律写成 \\u003c，任务名、日志里的 </script>、<!-- 都不能让浏览器提前结束脚本。
     DATA 在渲染时填（render_page）；ME（看板账号，#160）由看板服务发页面时按请求填（serve.Handler._page）。"""
@@ -1221,9 +1235,9 @@ def fill(html: str, slot: str, data) -> str:
 
 
 def render_page(tpl: str, data: dict, title: str | None = None) -> str:
-    """把模板（page.html / overview.html / login.html）渲染成数据内联的静态页：内联共用脚本 common.js 与数据。
+    """把模板（page.html / overview.html / login.html）渲染成数据内联的静态页：先内联脚本（common.js 与 overview_js/*.js），再填数据。
     看板服务给普通用户现渲染去掉组内数据的工作台（users.view）也经它。"""
-    html = fill((HERE / tpl).read_text().replace("/*__COMMON__*/", (HERE / "common.js").read_text(), 1), "DATA", data)
+    html = fill(_inline_js((HERE / tpl).read_text(encoding="utf-8")), "DATA", data)
     if title:
         html = html.replace("<title>labmon</title>", f"<title>{_esc(title)}</title>", 1)
     return html

@@ -219,6 +219,26 @@ class DeployTest(unittest.TestCase):
         self.assertTrue(DP.D.has_worker(["labmon/labmon_worker.py"]))
         self.assertFalse(DP.D.has_worker(["labmon/serve.py"]))
 
+    def test_overview_js_change_restarts_and_prompts_browser_check(self):
+        """#168 第 3 步：只改 labmon/overview_js/*.js 触发看板重启与浏览器核对，不误判为 doc 或 worker。"""
+        f = "labmon/overview_js/fleet.js"
+        self.assertFalse(DP.D.is_doc(f))
+        self.assertFalse(DP.D.is_worker(f))
+        self.assertFalse(DP.D.has_worker([f]))
+        self.assertTrue(DP.D.is_page(f))
+        self.assertTrue(DP.D.is_page("labmon/common.js"))
+        self.assertTrue(DP.D.is_page("labmon/overview.html"))
+        self.assertFalse(DP.D.is_page("labmon/serve.py"))
+        self.assertFalse(DP.D.is_page("docs/intro.html"))
+        r = self.rig(files=[f])
+        rc, out = r.run()
+        self.assertEqual(rc, 0, out)
+        self.assertIn("kickstart", r.calls)
+        self.assertEqual([c for c in r.calls if c.startswith("start")], [])
+        text = "\n".join(out)
+        self.assertIn("worker：没改，不拉起", text)
+        self.assertIn(f"在内置浏览器里核对改动处（{f}；", text)
+
     def test_worker_status_older_than_start_fails(self):
         """拉起之后 worker 状态的时刻（generated − age）早于拉起时刻：新 worker 没写状态，不过。"""
         r = self.rig(files=["labmon/labmon_worker.py"])

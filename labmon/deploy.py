@@ -44,6 +44,10 @@ def is_worker(f: str) -> bool:
     return f == WORKER or f.startswith(WORKER_DIR)
 
 
+def is_page(f: str) -> bool:
+    return f.startswith("labmon/") and f.endswith((".html", ".js"))
+
+
 def has_worker(files: list[str]) -> bool:
     return any(is_worker(f) for f in files)
 
