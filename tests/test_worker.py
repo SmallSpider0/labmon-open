@@ -7959,5 +7959,39 @@ class RoomSuggestTest(unittest.TestCase):
         self.assertIn("此刻合计还能多开 3 条车道", s["text"])
 
 
+class WorkerPackageTest(unittest.TestCase):
+    """#168 第 1 步：worker 拆成 labmon/worker/ 子包后，默认路径、薄入口转发与模块级打桩透传均保持与原单文件一致。"""
+
+    def test_default_paths_and_facade_forwarding(self):
+        from labmon import labmon_worker, worker as WPKG
+        pkg_parent = str(WORKER.resolve().parent)
+        m = load_worker({})
+        # 默认 HOME 与 KA_SH 指回 worker/ 的上级目录（即 <worker_home>），不是 worker/ 子目录本身
+        self.assertEqual(m.BASE_DIR, pkg_parent)
+        self.assertEqual(os.path.dirname(m.KA_SH), pkg_parent)
+        self.assertEqual(os.path.basename(m.KA_SH), "ka.sh")
+        # 薄入口 labmon_worker.py 透明转发公共符号，与 labmon.worker 同一对象
+        self.assertIs(labmon_worker.Worker, WPKG.Worker)
+        self.assertIs(labmon_worker.queue_stop_path, WPKG.queue_stop_path)
+        self.assertIs(labmon_worker.fair_key, WPKG.fair_key)
+        # 对包外观写入属性（如 Clock、PROC）同步穿透到归属子模块，恢复后不残留
+        orig_proc = m.PROC
+        with mock.patch.object(m, "PROC", "/fake/proc"):
+            self.assertEqual(m.common.PROC, "/fake/proc")
+        self.assertEqual(m.common.PROC, orig_proc)
+
+    def test_entry_script_runs_from_copied_worker_home(self):
+        """把入口与 worker/ 拷到独立临时目录（模拟服务器 <worker_home>）：不依赖仓库路径也能独立运行子命令。"""
+        from fixtures import copy_worker
+        with tempfile.TemporaryDirectory() as td:
+            wh = Path(td).resolve() / "home"
+            copy_worker(wh)
+            env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "LABMON_HOME", "KA_SH")}
+            r = subprocess.run([sys.executable, str(wh / "labmon_worker.py"), "ls", "--host", "demo"],
+                               cwd=td, env=env, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            self.assertIn("worker：未运行", r.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

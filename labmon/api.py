@@ -17,7 +17,7 @@ from . import pool as P
 from . import projects as PJ
 from . import workerctl as W
 from .config import HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
-from .labmon_worker import cpu_line, ka_lines
+from .worker import cpu_line, ka_lines
 from .records import EVENT_KINDS, project_rows
 from .state import load_json, snapshot
 

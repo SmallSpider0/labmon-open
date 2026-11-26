@@ -2,13 +2,13 @@
 
 [AGENTS.md「一个概念只有一处实现」](../AGENTS.md#一个概念只有一处实现硬约束)的那张表。动手前在这里搜要动的概念（中文说法、函数名、字段名都可以搜），表里有的只能调用表里的实现、不够用就扩展它；新增一个会被多处用到的概念时补进表里。审查清单第 2 条按这张表核对（[AGENTS.md「审查要点」](../AGENTS.md#审查要点)）。
 
-写法：`worker 的 X` 指 `labmon/labmon_worker.py`，没写文件的 JS 名在括号里标页面（common.js、overview.html、page.html）；其余是 `labmon/<模块>.<名字>`。
+写法：`worker 的 X` 指 `labmon/worker/`（由 `labmon/worker/__init__.py` 统一导出，按职责分在 `common`、`queue`、`disk`、`measure`、`keepalive`、`deps`、`sched`、`forecast`、`offers`、`core`、`fit`、`cli`，入口脚本为 `labmon/labmon_worker.py`），没写文件的 JS 名在括号里标页面（common.js、overview.html、page.html）；其余是 `labmon/<模块>.<名字>`。
 表里每行只写“概念 → 唯一实现的位置”；口径与行为细节在下面[「各概念的口径」](#各概念的口径)，序号与表里相同。行为的完整说明以 `docs/` 各篇与代码为准。
 
 | # | 概念 | 唯一实现 |
 |---|---|---|
 | 1 | ssh 参数与执行 | `lan.ssh_argv`、`lan.ssh_run` |
-| 2 | 传到服务器上留着用的文件只取 main 上已提交的版本 | `workerctl.committed`（`DEPLOY_REF`） |
+| 2 | 传到服务器上留着用的文件只取 main 上已提交的版本 | `workerctl.committed`（`DEPLOY_REF`、`committed_tree`、`worker_bundle`） |
 | 3 | 本机在不在内网；按主机并行探测 | `lan.check`、`lan.gather` |
 | 4 | 整文件覆盖写 | `state.write_atomic`；`save_json`、`collect.write_page`、`users.json` 都经它 |
 | 5 | 本机状态根目录与其下的状态目录 `overview/` | `state.state_root`、`state.state_dir` |
@@ -181,7 +181,7 @@
 | 172 | 换地址与浏览器历史 | `nav`（overview.html），链接与行的点击都经它；例外是换人后抽屉跟到新的那台 `srvMoved`（`history.replaceState`） |
 | 173 | 测试里的多主机；不读本机 /proc 与 cgroup；不连 ssh；用闸门看运行中状态；git 不认继承的 `GIT_*` | `tests/fixtures.Hosts`（`Clock`）；`tests/fixtures.no_host`（`worker_env`、`worker_module`）；`tests/bin/ssh`（`fixtures.SSH_GUARD`）；`tests/fixtures.gate`、`release`（`WorkerBase.usage`）；`tests/fixtures.no_git_env`（`setUp`、`setUpModule`） |
 | 174 | 测试里起的看板服务要登录；离线预览按身份看 | `tests/fixtures.make_token`、`login`、`bearer_opener`；`tests/pages/preview.py --as`（`accounts`），页面测试的身份 `ADMIN_ME`（`tests/pages/dom.js`） |
-| 175 | 部署到看板；哪些改动不用重启；一次启动以来的 Traceback；页面文字漏 NaN/undefined/Infinity | `tools/deploy.py` 的 `deploy`（`_update_remote`、`make_bundle`、`wait_new`）；服务端与两种模式共用的判断在 `labmon/deploy.py`：`is_doc`、`log_text`、`tracebacks`、`apply`、`status`、在跑哪个提交 `RUNNING`；`leak`（`tests/pages/dom.js`、`check.js`、`smoke.js`） |
+| 175 | 部署到看板；哪些改动不用重启或要拉起 worker；一次启动以来的 Traceback；页面文字漏 NaN/undefined/Infinity | `tools/deploy.py` 的 `deploy`（`_update_remote`、`make_bundle`、`wait_new`）；服务端与两种模式共用的判断在 `labmon/deploy.py`：`is_doc`、`is_worker`、`has_worker`、`log_text`、`tracebacks`、`apply`、`status`、在跑哪个提交 `RUNNING`；`leak`（`tests/pages/dom.js`、`check.js`、`smoke.js`） |
 
 ## 现有的兼容代码
 
@@ -190,7 +190,7 @@
 - 11-13 借用样本缺 `ma` 的回退（borrow.py，`ma` 11-06 起才记，之前的只有偏大的 `mr`）。
 - 11-17 借用样本不带 `mk` 的回退（borrow.py `_ram_sample`，之前的 `ma` 按保活进程树的 RSS 扣、扣多了，取不扣保活的总 anon）。
 - 11-23 页面上内存估计来源没有 `ram_src` 的回退（overview.html `ramSrc`，#61 之前放行、被新 worker 接管的运行中任务沿用旧 `est`，跑完就没了）。
-- 11-23 用量行没有 `conc` 的回退（labmon_worker.py `rec_conc`，#67 之前的行：同卡没别的任务的当 1、其余不知道，推不出来）。
+- 11-23 用量行没有 `conc` 的回退（`labmon/worker/sched.py` `rec_conc`，#67 之前的行：同卡没别的任务的当 1、其余不知道，推不出来）。
 - #19 部署那次的迁移（`users.migrate_people` 与它用的旧对应规则 `users._legacy_people`、`serve.serve` 里调它的那几行：#70 之前的账号按主机清单 `[fleet.account_people]`、同名、快照历史认出的人写进账号库）：主与备用的看板服务各启动过一次就删。
 - #161 部署那次的迁移（把 launchd plist 里旧的 `-c` 登记进来：`projects.adopt`（连同 `OUT_NAMES`）、`serve.serve` 的 `legacy`、`service._read` 的 `legacy` 与 `service.install` 里迁移的几行、`__main__` 传 `legacy` 的那处）：部署后跑过一次 `labmon service install` 就删。
 - #147 部署那次的迁移（`collect._last_probe` 把旧探针缓存 `last_probe_*.json` 里单个对象的 `current` 迁成列表）：部署后各项目采过一轮就删。
@@ -201,8 +201,8 @@
 
 1. **ssh 参数与执行**：ssh 参数与执行（共用 ControlMaster 长连接）
    实现：`lan.ssh_argv`、`lan.ssh_run`
-2. **传到服务器上留着用的文件只取 main 上已提交的版本**：传到服务器上留着用的文件（worker 与随它发的 `ka.sh`、共享盘 README）只取 main 上已提交的版本（分支上没合并的、工作区没提交的都不带）
-   实现：`workerctl.committed`（`DEPLOY_REF`）
+2. **传到服务器上留着用的文件只取 main 上已提交的版本**：传到服务器上留着用的文件（`labmon_worker.py`、`worker/*.py` 与随它发的 `ka.sh`、共享盘 README）只取 main 上已提交的版本（分支上没合并的、工作区没提交的都不带）
+   实现：`workerctl.committed`（`DEPLOY_REF`、`committed_tree`、`worker_bundle`）
 3. **本机在不在内网；按主机并行探测**：本机在不在内网；按主机并行探测（一键一台，各走自己的长连接；有远程连不上时再查一次是不是刚离开内网）
    实现：`lan.check`、`lan.gather`
 4. **整文件覆盖写**：整文件覆盖写（写临时文件再改名；要 600 的传 `mode`，临时文件一建出来就是这个权限）
@@ -547,5 +547,5 @@
    实现：`tests/fixtures.Hosts`（时钟 `Clock`）；`tests/fixtures.no_host`（`worker_env`、`worker_module` 都经它）；`tests/bin/ssh`（`fixtures.SSH_GUARD` 放到 PATH 最前面）；`tests/fixtures.gate`、`release`（读用量行 `WorkerBase.usage`）；`tests/fixtures.no_git_env`（用例的 `setUp` 或模块的 `setUpModule` 调）
 174. **测试里起的看板服务要登录；离线预览按身份看**：测试里起的看板服务要登录（建账号与令牌不算 PBKDF2、不记进记录页；让用例里的 urlopen 都带令牌）；离线预览按身份看（管理员内网、管理员公网、普通用户）
    实现：`tests/fixtures.make_token`、`login`、`bearer_opener`；`tests/pages/preview.py --as`（`accounts`），页面测试的身份 `ADMIN_ME`（`tests/pages/dom.js`）
-175. **部署到看板；哪些改动不用重启；一次启动以来的 Traceback；页面文字漏 NaN/undefined/Infinity**：部署到看板（等平台操作、更新代码（本机 pull；远端打 git bundle 经 `POST /api/admin/deploy` 传过去，服务端快进、等平台操作做完再重启，#164）、按改动重启与拉起 worker、核对）；哪些改动不用重启；服务日志里一次启动以来的 Traceback；渲染出的页面文字里漏了 NaN/undefined/Infinity（页面测试与部署的冒烟检查共用）
-   实现：`tools/deploy.py` 的 `deploy`（远端模式 `_update_remote`、`make_bundle`、`wait_new`）；服务端与两种模式共用的判断在 `labmon/deploy.py`：`is_doc`、`log_text`、`tracebacks`、`apply`、`status`、在跑哪个提交 `RUNNING`；`leak`（`tests/pages/dom.js`，`check.js` 与 `smoke.js` 都取它）
+175. **部署到看板；哪些改动不用重启或要拉起 worker；一次启动以来的 Traceback；页面文字漏 NaN/undefined/Infinity**：部署到看板（等平台操作、更新代码（本机 pull；远端打 git bundle 经 `POST /api/admin/deploy` 传过去，服务端快进、等平台操作做完再重启，#164）、按改动重启与拉起 worker、核对）；哪些改动不用重启或要拉起 worker；服务日志里一次启动以来的 Traceback；渲染出的页面文字里漏了 NaN/undefined/Infinity（页面测试与部署的冒烟检查共用）
+   实现：`tools/deploy.py` 的 `deploy`（远端模式 `_update_remote`、`make_bundle`、`wait_new`）；服务端与两种模式共用的判断在 `labmon/deploy.py`：`is_doc`、`is_worker`、`has_worker`、`log_text`、`tracebacks`、`apply`、`status`、在跑哪个提交 `RUNNING`；`leak`（`tests/pages/dom.js`，`check.js` 与 `smoke.js` 都取它）

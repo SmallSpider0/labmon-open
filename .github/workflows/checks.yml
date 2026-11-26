@@ -55,7 +55,7 @@ jobs:
           python -m unittest discover -s tests -v
 
   worker-py38:
-    # labmon_worker.py 与 probe.py 在服务器上用系统自带的 Python 3.8 跑、不 import 本包：编译并单独导入一次，
+    # labmon_worker.py、worker/*.py 与 probe.py 在服务器上用系统自带的 Python 3.8 跑、不 import 本包：编译并单独导入一次，
     # 只抓得到编译期与导入时就求值的 3.9+ 写法（match 语句、导入时求值的 list[str] 注解等）；函数体里用到的新 API
     # （str.removeprefix 等）要执行到才报错，这里抓不到，写 worker 与探针时自己避开
     runs-on: ubuntu-latest
@@ -67,8 +67,8 @@ jobs:
         working-directory: labmon
         run: |
           python --version
-          python -m py_compile labmon_worker.py probe.py
-          python -c "import labmon_worker, probe"
+          python -m py_compile labmon_worker.py worker/*.py probe.py
+          python -c "import labmon_worker, worker, probe"
       # 总控后台挂的 tools/issue_watch.py 在本机的系统 Python（3.8）上跑，经 labmon.state 读写状态
       - name: Python 3.8 编译并跑 tools/issue_watch.py
         run: |

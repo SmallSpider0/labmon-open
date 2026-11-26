@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent      # 看板服务跑的那份 ch
 BRANCH = "main"
 DOCS = ("docs/", "skills/", ".github/", "tests/", "tools/", ".claude/")    # 加上 *.md：看板服务与 worker 都不 import 它们，改了不用重启
 WORKER = "labmon/labmon_worker.py"
+WORKER_DIR = "labmon/worker/"
 IDLE_MAX_S = 1800        # 部署后等平台操作做完再重启，最多等这么久
 IDLE_POLL_S = 5
 RUNNING: dict = {"commit": None, "started": None}
@@ -37,6 +38,14 @@ class Refused(Exception):
 
 def is_doc(f: str) -> bool:
     return f.endswith(".md") or f.startswith(DOCS)
+
+
+def is_worker(f: str) -> bool:
+    return f == WORKER or f.startswith(WORKER_DIR)
+
+
+def has_worker(files: list[str]) -> bool:
+    return any(is_worker(f) for f in files)
 
 
 def git(*args: str, timeout: float = 120) -> str:
@@ -141,7 +150,7 @@ def apply(b64: str) -> dict:
         threading.Thread(target=_restart, name="deploy-restart", daemon=True).start()
     msg = (f"快进到 {new[:7]}（{len(commits)} 个提交）" if new != old else
            f"checkout 已是 {new[:7]}，在跑的是 {base[:7]}（{len(commits)} 个提交没生效）" if base != new else "已是这个提交，没动")
-    return {"old": base, "new": new, "commits": commits, "files": files, "restart": restart, "worker": WORKER in files,
+    return {"old": base, "new": new, "commits": commits, "files": files, "restart": restart, "worker": has_worker(files),
             "msg": msg + ("，马上重启" if restart else "，不用重启" if commits else "")}
 
 

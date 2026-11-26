@@ -147,7 +147,7 @@ GPU 长时间没在用（没跑实验也没开保活）的服务器会被平台�
 
 ### ka.sh
 
-保活只经 `ka.sh` 停启（不直接 kill）。labmon 自己的那份是 [`labmon/ka.sh`](../labmon/ka.sh)（#105）：`labmon worker start` 时与 `labmon_worker.py` 同一条连接写到 `worker_home/ka.sh`，
+保活只经 `ka.sh` 停启（不直接 kill）。labmon 自己的那份是 [`labmon/ka.sh`](../labmon/ka.sh)（#105）：`labmon worker start` 时与 `labmon_worker.py`、`worker/` 包一起经同一条连接打包写到 `worker_home/ka.sh`，
 只取 main 上已提交的版本（`workerctl.committed`）；配置读主机 `ka_bin` 目录里原来的 `ka.env`（`AGRI_ROOT`、`AGRI_KA_DIR`、`AGRI_KA_SCRIPT`、`AGRI_KA_PY`，经 `KA_ENV` 传）。
 共享盘上原来那份 `ka.sh` 不动；组内服务器的守护与借前核对用的是 `[fleet] keepalive_cmd` 写的命令，要它们也用 labmon 这份，把它写成
 `KA_CALLER=labmon-fleet KA_ENV=<ka_bin>/ka.env bash <worker_home>/ka.sh`。
@@ -531,7 +531,7 @@ labmon 之外的按目录一段段斜纹，过门槛变紫），下面「本地�
 - **成员**：管理员，或账号对应的人（`users.person_of`）有一台开了入池的组内服务器或自用主机（`pool.member`，不看此刻在不在时段；自用主机要能入池，见下面「自用主机入池」）。成员才能往池里交清单（`users.may_host` 对 `pool` 问它）。
 - **交清单**：`labmon worker add pool ROOT JOBS --project P`。`pool` 是保留的主机 id（`config.POOL`，`[[hosts]]` 与组内服务器都不许叫它），
   登记落在自用主机那份 worker 目录（`config.pool_home`：借来的主机照抄的那台，`config.guest_host` 同一个模板）的 `hosts/pool/queues/`，
-  经与它共用 worker 目录的在用主机代办（`workerctl.via`）。池里的清单要停得下来、换得了台：不许 `--stop boundary`、`--gpus`、成组（`gang=`）与占位任务，停法缺省 `term`（`labmon_worker.pool_refuse`）。
+  经与它共用 worker 目录的在用主机代办（`workerctl.via`）。池里的清单要停得下来、换得了台：不许 `--stop boundary`、`--gpus`、成组（`gang=`）与占位任务，停法缺省 `term`（`worker.queue.pool_refuse`）。
   一条清单只归一台照旧：之后 `worker add <自用主机> …` 把它从池里搬回来。撤回 `labmon worker rm pool ROOT JOBS`（在清单此刻登记的地方撤，`pool.locate`）；`worker status|start|stop pool` 都不认。
 - **看得到**：全局快照的 `regs` 里 `host` 为 `pool`、`state` 为 `pool` 的一项（在用主机之后、已归还的之前；`added_t` 是登记文件的修改时刻）；
   项目页有池车道（`collect._lane` 标 `pool`，没有 worker 管：不报队列进程不在，等待原因“在算力池里等着放到某台”接上 `pool.lists` 的 `why`，`pool_since` 是开始等的时刻），车道经同一 worker 目录的在用主机代读，代读的那台不是本项目的主机时不进项目快照。

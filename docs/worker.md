@@ -1,7 +1,8 @@
 # 服务器端队列执行器（worker）
 
-[`labmon/labmon_worker.py`](../labmon/labmon_worker.py) 放在服务器上跑，取代各项目自带的 `gpu_queue.sh`。每台主机一个 worker，
-统一调度这台主机上登记的所有队列：准入、公平份额、独占、临时指令、保活。单文件，只用 Python 3.8 标准库，不 import 本包。
+[`labmon/worker/`](../labmon/worker/) 与入口脚本 [`labmon/labmon_worker.py`](../labmon/labmon_worker.py) 一起打包部署到服务器上跑（单条 ssh 传 `worker_home/labmon_worker.py` 与 `worker_home/worker/`），取代各项目自带的 `gpu_queue.sh`。每台主机一个 worker，
+统一调度这台主机上登记的所有队列：准入、公平份额、独占、临时指令、保活。只用 Python 3.8 标准库，不 import 本包。
+模块划分：`common`（常量、路径与基础读写）、`queue`（登记、清单与本地依赖）、`disk`（共享盘与本地盘扫描）、`measure`（主机与进程采样）、`keepalive`（保活、看门狗与借来主机）、`deps`（任务依赖与成组）、`sched`（估计、时长、记账与准入）、`forecast`（推演）、`offers`（挪法建议）、`core`（`Worker` 主类与主循环）、`fit`（开车道与选台评估）、`cli`（命令行入口）。
 设计与依据见 [scheduler.md](scheduler.md)；工作台怎么显示它见 [workbench.md](workbench.md)。
 
 ## 命令
