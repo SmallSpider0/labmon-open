@@ -181,7 +181,10 @@ class DepsMixin:
                 for q in queues:
                     if q.get("sleeping") and q["project"] in want_p and q["key"] not in smarks and q.get("_reg"):
                         full = _Q.load_queue(q["_reg"])
-                        sm = self._mark_snapshot(full["state"], _Q.list_jobs(full))
+                        rows = _Q.list_jobs(full)
+                        sm = self._mark_snapshot(full["state"], rows) if full.get("_env_ok", True) and full.get("_jobs_ok") else None
+                        if sm is None:
+                            continue                 # .env、清单正文或状态目录临时读取失败：不缓存空快照，下一轮重试
                         smarks[q["key"]] = sm
                         for n, v in sm.items():
                             mk = (q["project"], n)

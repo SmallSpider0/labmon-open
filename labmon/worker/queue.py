@@ -146,7 +146,9 @@ def load_queue(reg, *, read_env=True):
     project = reg["project"]
     if read_env:
         envf = env_path(root, jobs)
-        env_txt = _C.read(envf, "") or ""
+        env_raw = _C.read(envf, None)
+        env_ok = env_raw is not None or not os.path.exists(envf)
+        env_txt = env_raw or ""
 
         def env(key, default):
             m = re.search(r"^%s=(\S+)" % key, env_txt, re.M)
@@ -155,9 +157,9 @@ def load_queue(reg, *, read_env=True):
         ev = envf if os.path.exists(envf) else None
         st, lg = env("QUEUE_STATE", "results/_queue"), env("QUEUE_LOGS", "results/_logs")
     else:
-        ev, st, lg = None, None, None
+        ev, st, lg, env_ok = None, None, None, True
     return {"key": reg["_slug"], "root": root, "jobs": jobs, "jobs_path": os.path.join(root, jobs),
-            "env": ev, "gpus": reg.get("gpus"),
+            "env": ev, "_env_ok": env_ok, "gpus": reg.get("gpus"),
             # 项目 id 就是登记时写的 --project（add 必写）
             "project": project, "stop": reg.get("stop") or "boundary",
             "pool": bool(reg.get("pool")),        # 算力池放过来的（#79，worker add --pool）：看板认哪些清单是池放的（自用主机上与主人的清单分开），offers 不叫会话挪它

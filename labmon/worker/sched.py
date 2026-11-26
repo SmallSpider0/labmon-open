@@ -1162,7 +1162,7 @@ class SchedMixin:
                 if ent is None:
                     since = self._idle_start(q, now, False) if hasattr(self, "_idle_start") else now
                     ent = self.pool_idle[key] = {"since": since, "sig": None, "sleep": False}
-                if now - ent["since"] >= _P.IDLE_REG_S and jsig0 is not None and jsig == jsig0:
+                if now - ent["since"] >= _P.IDLE_REG_S and q.get("_env_ok", True) and (ms is not None or not os.path.exists(q["state"])) and jsig0 is not None and jsig == jsig0:
                     ent["sig"] = jsig0
                     ent["sleep"] = True
                     sleeping = True

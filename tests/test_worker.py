@@ -8291,6 +8291,46 @@ class IdleSleepTest(UnitBase):
                 except OSError:
                     pass
 
+    def test_lazy_sleep_marks_retries_after_transient_read_error(self):
+        # 第三轮主审意见：worker 重启后首次懒恢复休眠清单标记时，若清单正文读失败或状态目录 listdir 抛 OSError，
+        # 不得把空快照缓存进 sleep_marks，恢复后下一轮应重试并正确识别手工 A.done 放行 B。
+        qa, qb = self.hosts.queues({"s": ["A|true   # gpus=0"], "b": ["B|sleep 30   # gpus=0 after=A"]}, "pa")
+        for q in (qa, qb):
+            os.makedirs(q["state"], exist_ok=True)
+        Path(qa["state"], "A.done").write_text("")
+        self.assertEqual(self.add(qa, host="t")[0], 0)
+        self.w.tick(self.w.registry(), True)
+        self.hosts.advance(self.m.IDLE_REG_S + 10)
+        self.w.tick(self.w.registry(), False)
+        self.assertTrue(self.status()["queues"][0]["sleeping"])
+        self.assertEqual(self.add(qb, host="t")[0], 0)
+        w2 = self.hosts.worker("t")
+        w2.load_prev()
+        qs = w2.registry()
+        # 1) 模拟清单正文临时读失败：不得缓存空快照
+        real_read = self.m.common.read
+        with mock.patch.object(self.m.common, "read", side_effect=lambda p, default=None: default if str(p) == str(qa["jobs_path"]) else real_read(p, default)):
+            w2.tick(qs, True)
+        self.assertEqual(w2.sleep_marks, {})
+        self.assertIsNone(w2.dep_idx.get(("pa", "A")))
+        # 2) 模拟状态目录 listdir 临时 OSError：同样不得缓存空快照
+        real_ls = os.listdir
+        with mock.patch("os.listdir", side_effect=lambda p: (_ for _ in ()).throw(OSError("nfs timeout")) if str(p) == str(qa["state"]) else real_ls(p)):
+            w2.tick(qs, False)
+        self.assertEqual(w2.sleep_marks, {})
+        self.assertIsNone(w2.dep_idx.get(("pa", "A")))
+        # 3) 恢复正常后，下一轮重试成功恢复 A.done 并放行 B
+        w2.tick(qs, False)
+        try:
+            self.assertEqual(w2.dep_idx.get(("pa", "A")), "done")
+            self.assertTrue(any(j["name"] == "B" for j in w2.running.values()))
+        finally:
+            for j in list(w2.running.values()):
+                try:
+                    os.killpg(j["pid"], 9)
+                except OSError:
+                    pass
+
 
 class WorkerPackageTest(unittest.TestCase):
     """#168 第 1 步：worker 拆成 labmon/worker/ 子包后，默认路径、薄入口转发与模块级打桩透传均保持与原单文件一致。"""

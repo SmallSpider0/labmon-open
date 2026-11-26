@@ -969,11 +969,14 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
 
     @staticmethod
     def _mark_snapshot(state, rows):
-        """把状态目录里这条清单的 .done/.failed 标记拍成快照（转休眠时记一份，之后不读状态目录）。"""
+        """把状态目录里这条清单的 .done/.failed 标记拍成快照（转休眠时记一份，之后不读状态目录）。
+        目录不存在返回 {}；遇到其他临时 I/O 异常返回 None，避免把空快照永久缓存进 sleep_marks（#164）。"""
         try:
             ms = set(os.listdir(state))
-        except OSError:
+        except FileNotFoundError:
             return {}
+        except OSError:
+            return None
         out = {}
         for n, _ in rows:
             v = "done" if n + ".done" in ms else "failed" if n + ".failed" in ms else None
@@ -1057,12 +1060,14 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 else:
                     ent["rsig"] = q.get("_rsig")
                 q["empty_since"] = round(ent["since"])
-                if now - ent["since"] >= _P.IDLE_REG_S and jsig0 is not None and _P.file_sig(q["jobs_path"]) == jsig0:
-                    ent["sig"] = jsig0
-                    ent["sleep"] = True
-                    q["sleeping"] = True
-                    self.sleep_marks[q["key"]] = self._mark_snapshot(q["state"], rows)
-                    self.wlog("清单 %s/%s 空满 %d 天，转为休眠（仅监听清单文件变动）" % (q["root"], q["jobs"], _P.IDLE_REG_S // 86400))
+                if now - ent["since"] >= _P.IDLE_REG_S and q.get("_env_ok", True) and jsig0 is not None and _P.file_sig(q["jobs_path"]) == jsig0:
+                    sm = self._mark_snapshot(q["state"], rows)
+                    if sm is not None:
+                        ent["sig"] = jsig0
+                        ent["sleep"] = True
+                        q["sleeping"] = True
+                        self.sleep_marks[q["key"]] = sm
+                        self.wlog("清单 %s/%s 空满 %d 天，转为休眠（仅监听清单文件变动）" % (q["root"], q["jobs"], _P.IDLE_REG_S // 86400))
                 continue
             self.reg_idle.pop(q["key"], None)
             self.sleep_marks.pop(q["key"], None)
