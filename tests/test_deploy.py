@@ -214,6 +214,7 @@ class DeployTest(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertEqual([c for c in r.calls if c.startswith("start")], ["start a"])
         self.assertIn("worker：改了，拉起 a", "\n".join(out))
+        self.assertTrue(DP.D.has_worker(["labmon/worker/pure.py"]))
         self.assertTrue(DP.D.has_worker(["labmon/worker/sched.py"]))
         self.assertTrue(DP.D.has_worker(["labmon/labmon_worker.py"]))
         self.assertFalse(DP.D.has_worker(["labmon/serve.py"]))

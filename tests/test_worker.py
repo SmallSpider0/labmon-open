@@ -5312,11 +5312,6 @@ class DurationTest(unittest.TestCase):
         d = self.m.duration(hist[:3] + [self.rec("exp_z_s1", 20.0, 25), self.rec("exp_z_s2", 30.0, 25)], {"name": "exp_y_s0", "project": "bp", "est_min": 35, "tag": "old"})
         self.assertEqual(d["src"], "同前缀 exp_ 近 2 个 实际/估时 ×1.00")         # 同 tag 只有写错的：跳到同前缀里可信的
 
-    def test_group_regex_matches_board(self):
-        # worker 不 import 本包，前缀那一档用自己的一份正则，须与看板自动归组的 config.AUTO_GROUP_RE 同一条
-        from labmon import config
-        self.assertEqual(self.m.GROUP_RE.pattern, config.AUTO_GROUP_RE.pattern)
-
     def test_list_rows_pass_tag_and_list(self):
         # #113：清单任务经 Worker.dur_k 算时长，要把清单行的 tag 与所在清单传进 duration；别的主机的同 tag 记录一样借（多主机）
         h = Hosts(self.d / "hosts")

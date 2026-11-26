@@ -8,6 +8,7 @@ import shutil
 import subprocess
 
 from . import common as _C
+from . import pure as _P
 
 def qslug(root, jobs):
     """登记文件名：目录末级名 + 清单路径 + 完整目录的短哈希（两个项目的子目录同名、清单路径也相同时不撞）。"""
@@ -50,7 +51,7 @@ def matching_regs(qdir, root, jobs, *, aliases=False, by_file=False):
         r, j = reg.get("root"), reg.get("jobs")
         if os.path.normpath(r or "") == os.path.normpath(root) and j == jobs:
             return True
-        if by_file and r and j and os.path.normpath(os.path.join(r, j)) == os.path.normpath(os.path.join(root, jobs)):
+        if by_file and _P.same_list(reg, root, jobs):
             return True
         if aliases and r and j:
             try:

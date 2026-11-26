@@ -26,15 +26,15 @@ from . import lan as L
 from . import lease as LS
 from . import pool as PO
 from . import projects as PJ
-from .config import AUTO_GROUP_RE, GIB, HOLD_RE, POOL, POOL_LABEL, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
+from .config import AUTO_GROUP_RE, GIB, POOL, POOL_LABEL, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
 from .health import link_step
 from .state import load_json, load_rows, save_json, snapshot, usage_file, usage_hosts, write_atomic
+from .worker.pure import OVER_FRAC, OVER_MIN_S, is_hold, list_path, overrun_left  # noqa: F401 — 与 worker 共用唯一实现
 
 HERE = Path(__file__).resolve().parent
 SCHEMA = 2
 PROG_KEEP = 6 * 3600           # 运行中任务的进度采样保留时长
 RECENT = 30 * 60               # 按最近这么久的进度估速度
-OVER_FRAC, OVER_MIN_S = 0.2, 600   # 剩余说不准时按已用的这么多比例估、至少这么多秒（overrun_left）
 NOPROG_MIN_S = 30 * 60         # 一直没有进度行的任务（超估时）要已用这么久才报 noprogress（几分钟的短任务不打进度也无妨）
 IDLE_GRACE_S = 5 * 60         # 保活与任务都不在要连续这么久才报空闲关机风险（避开任务之间、拉起保活前的空档）
 # 告警给谁看（#142，维护者 11-10 定：很多告警是给实验会话的，不都在看板上显眼列）：
@@ -61,11 +61,6 @@ def probe_spec(cfg: dict, host: dict) -> dict:
             "host": host["id"]}                  # current 里放行的主机不是这台时探针不查 PID（清单刚搬来、那台还在跑，#95）
 
 
-def _qpath(root: str | None, jobs: str | None) -> str:
-    """认清单：目录 + 清单路径规整后拼起来（与探针 worker_view 同一口径）。"""
-    return os.path.normpath(os.path.join(root or "", jobs or ""))
-
-
 def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[dict], dict]:
     """项目的车道从哪来（#94）：monitor.toml 的 [[queues]] 加上本项目在各主机上的 worker 登记（全局快照的 regs，overview._regs 读的），返回 (队列, 新的 mem)。
     同一条清单（目录 + 清单）以登记为准：主机取登记所在的那台，id 与 label 沿用 monitor.toml 的；只在登记里有的成为新车道，
@@ -86,7 +81,7 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
                 continue
             # 新旧：在用主机的取状态里的 added_t（epoch 秒），已归还的取登记文件里的 added 文字；先比在不在用，两种不会互相比
             act = x.get("state") == "active"
-            k, rank = _qpath(q["root"], q["jobs"]), (True, q.get("added_t") or 0) if act else (False, q.get("added") or "")
+            k, rank = list_path(q["root"], q["jobs"]), (True, q.get("added_t") or 0) if act else (False, q.get("added") or "")
             if k not in found or rank > found[k][0]:
                 found[k] = (rank, x["host"], q)
     new = {k: {"id": (mem.get(k) or {}).get("id"), "host": hid, "root": q["root"], "jobs": q["jobs"], "first": (mem.get(k) or {}).get("first", t), "seen": t,
@@ -94,7 +89,7 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
     new.update({k: m for k, m in mem.items() if k not in new and t - m.get("seen", 0) <= REG_KEEP_S})
     out, used = [], set()
     for q in cfg["queues"]:
-        k = None if q["discover"] else _qpath(q.get("root"), q.get("jobs"))
+        k = None if q["discover"] else list_path(q.get("root"), q.get("jobs"))
         used.add(k)
         out.append(dict(q, host=new[k]["host"], reg_stop=new[k].get("reg_stop")) if k in new else q)
     extra = sorted((k for k in new if k not in used), key=lambda k: (new[k]["first"], k))
@@ -124,7 +119,7 @@ def reg_sig(regs: list | None) -> dict[str, frozenset]:
             continue
         for q in x["queues"]:
             if q.get("project") and q.get("root") and q.get("jobs"):
-                out.setdefault(q["project"], set()).add((x["host"], _qpath(q["root"], q["jobs"])))
+                out.setdefault(q["project"], set()).add((x["host"], list_path(q["root"], q["jobs"])))
     return {k: frozenset(v) for k, v in out.items()}
 
 
@@ -548,7 +543,7 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
         away = j.pop("where", None)                    # current 里放行的主机（#95）：清单搬走前那台放的，那台接着跑完手上这几格
         if j["status"] == "running" and away and away != q["host"]:
             j["host"] = away                           # 运行中的这一格在哪台跑（#100）：车道仍按登记，项目页把它画到那台、标「在 X 上跑完」
-        j["hold"] = bool(HOLD_RE.search(j["id"]))
+        j["hold"] = is_hold(j["id"])
         j["group"] = None if j["hold"] else _group_of(j["id"], cfg["groups"], cfg["auto_groups"])
         _job_times(j, q["id"], cfg["id"], cfg["alerts"], work, alerts, t, where, fresh=host_ok)
         if j["status"] == "failed":
@@ -816,11 +811,11 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
                                 "（OMP_NUM_THREADS 等、torch.set_num_threads、DataLoader num_workers、进程池；按 nproc 取的是宿主机的核数），改成按 $LABMON_CPUS；"
                                 "确实要更多核就在清单那一行写 cpus=，下次放行按它记账", say))
         # 开跑给的核数给少了、给多了（#46）：worker 判的（运行中任务的 cpu_fit，门槛只在 worker 的 cpu_fit），本项目的清单任务才报、只给会话；
-        # 车道按清单认（目录 + 清单，_qpath）：同一台上两条清单可以有同名任务。给少的加不了核（sug 为 None：已给到配额，或配额被同机别的任务与同类分完了，#112）不报。
+        # 车道按清单认（目录 + 清单，list_path）：同一台上两条清单可以有同名任务。给少的加不了核（sug 为 None：已给到配额，或配额被同机别的任务与同类分完了，#112）不报。
         # 按类（cpu_fit 的 cls：tag，否则去种子号同名）跨主机合并、循环后一起报（#91）
-        by_q = {_qpath(ln["root"], ln["queue"]): ln for ln in lanes if ln.get("root") and ln.get("queue")}
+        by_q = {list_path(ln["root"], ln["queue"]): ln for ln in lanes if ln.get("root") and ln.get("queue")}
         for r in (st or {}).get("running") or []:
-            f, lane = r.get("cpu_fit"), by_q.get(_qpath(r.get("root"), r.get("queue")))
+            f, lane = r.get("cpu_fit"), by_q.get(list_path(r.get("root"), r.get("queue")))
             if not f or not f.get("sug") or r.get("kind") != "queue" or r.get("project") != cfg["id"] or lane is None:
                 continue
             # 类连同来源（by：tag 还是去种子号的名字）认：tag 恰好等于另一类的名字时不合并（#99）。
@@ -955,7 +950,7 @@ def _idle_regs(cfg: dict, snap: dict, state: dict) -> None:
     出现没报过的清单才加一；会话删了一部分、留着长期清单时不变。清单又有活动就从报过的里去掉，再空满 IDLE_REG_S 算新的。"""
     st = state.setdefault("idle_regs", {"n": 0, "told": []})
     idle = [x for x in snap["quiet"] if x["idle"]]
-    cur = {f"{x['host']}|{_qpath(x['root'], x['queue'])}" for x in idle}
+    cur = {f"{x['host']}|{list_path(x['root'], x['queue'])}" for x in idle}
     if cur - set(st["told"]):
         st["n"] += 1
     st["told"] = sorted(cur)
@@ -1108,13 +1103,6 @@ def _attempts(snap: dict, pid: str, t: float) -> list[dict]:
         if j["status"] in ("done", "failed") and not j.get("host") and (j["lane"], j["id"]) in last:
             j["host"] = last[(j["lane"], j["id"])]
     return out
-
-
-def overrun_left(el: float) -> float:
-    """剩余时长说不准时的估计（秒）：已用 el 秒的 OVER_FRAC、至少 OVER_MIN_S。已超估时又看不出进度（没有进度行、进度停了）时，
-    以及第一段只有一个步数 > 0 的采样、又没有估时或已超估时时用它（_job_times、_segment_eta；#138 前前一种写 0）。与 worker 的 overrun_left（run_end：运行中任务超了预计）同一口径；worker 在服务器上跑、不 import 本包，
-    各一份，改一处要改另一处。"""
-    return max(OVER_MIN_S, OVER_FRAC * el)
 
 
 def _segment_eta(pr, samples: list, seg: dict | None, el: float, floor: float | None, is_multi: bool, t: float,

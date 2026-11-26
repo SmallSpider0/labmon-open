@@ -9,6 +9,7 @@ import subprocess
 
 from . import common as _C
 from . import measure as _M
+from .pure import script_arg
 
 def ka_log_time(ts):
     """ka.sh 日志行开头的时刻（date -Iseconds，带时区）换成 epoch 秒；不带时区的按本机时区；认不出为 None。"""
@@ -26,9 +27,6 @@ LOOP_RE = re.compile(r"\bwhile\b|\buntil\b|\bsleep\b|\bwatch\b|schedule\.every")
 
 
 GPU_RE = re.compile(r"nvidia-smi|pynvml|gpustat|nvitop")                   # 盯着 GPU
-
-
-INTERP = re.compile(r"^(?:ba|da|z|k)?sh$|^python[\d.]*$")                  # 只看 shell 与 python 跑的脚本（读得到内容）
 
 
 WATCH_SKIP = ("ka.sh", "gpu_queue.sh", "labmon_worker.py", "fleet_guard.sh")   # labmon 自己的：保活停启入口、旧队列、worker、保活守护
@@ -93,31 +91,6 @@ def refs(text, *dirs):
                 out.append(head(path))
                 break
     return "\n".join(out)
-
-
-def script_arg(args, cwd):
-    """shell 或 python 进程跑的脚本：(脚本路径（相对路径按工作目录 cwd 还原、normpath）、"-c"、"-s" 或 "-m 模块", 下一个参数的位置)；
-    不是这两种解释器、交互 shell 与 REPL 为 None。看门狗（script_of）与 ka.sh 认保活（ka_owned）共用。"""
-    if not args or not INTERP.match(os.path.basename(args[0])):
-        return None
-    py = os.path.basename(args[0]).startswith("python")
-    takes = ("-W", "-X") if py else ("-o", "-O")       # 带一个参数的选项
-    i = 1
-    while i < len(args) and args[i].startswith("-") and args[i] != "-":
-        a = args[i]
-        if a == "--":
-            i += 1
-            break
-        if not a.startswith("--") and a.endswith("c"):     # -c、bash -lc、python -uc：代码在下一个参数
-            return "-c", i + 1
-        if py and a == "-m":
-            return "-m " + (args[i + 1] if i + 1 < len(args) else ""), i + 2
-        if not py and a == "-s":                           # bash -s：脚本从标准输入来，只看得到命令行
-            return "-s", i + 1
-        i += 2 if a in takes else 1
-    if i >= len(args):
-        return None
-    return os.path.normpath(os.path.join(cwd, args[i])), i + 1
 
 
 def script_of(args, cwd, pid=None):

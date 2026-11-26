@@ -9,6 +9,19 @@ import subprocess
 import time
 from pathlib import PurePosixPath
 
+from . import pure as _P
+from .pure import (  # noqa: F401 — 经 common 与包顶层兼容导出
+    GIB,
+    GROUP_RE,
+    HOLD_RE,
+    OVER_FRAC,
+    OVER_MIN_S,
+    POOL,
+    STALE_S as STATUS_STALE_S,
+    is_hold,
+    overrun_left,
+)
+
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HOME = os.environ.get("LABMON_HOME") or BASE_DIR
 
@@ -35,15 +48,6 @@ CG = os.environ.get("LABMON_CGROUP", "/sys/fs/cgroup")
 
 
 NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
-
-
-HOLD_RE = re.compile(r"(?i)(?:^|[_.\-\d])(?:hold|pause)(?:$|[_.\-\d])")   # 只在 is_hold 里用
-
-
-GROUP_RE = re.compile(r"([^_-]+)[_-]")   # 名字前缀（第一个 _ 或 - 及之前）：与看板自动归组的 config.AUTO_GROUP_RE 同一条，duration 借同前缀的比例用（#113）
-
-
-GIB = 2 ** 30
 
 
 DATA_ROOT = os.path.dirname(HOME.rstrip("/"))          # 共享盘根（worker 装在 <data_root>/labmon）
@@ -73,13 +77,7 @@ ONCE_HOLD_S = 1800       # 不带 --host 的 pause --now 下的“只停一次�
 POLICY = {"cap": WAIT_CAP_S, "hl": HALF_LIFE_S, "w": {}, "own": {}}   # 调度设置的缺省（policy 读 sched.json 覆盖）：w 为各项目权重，不写为 1；own 为项目 → 人员键，没写的项目合起来算一个人
 
 
-POOL = "pool"            # 算力池的保留主机 id（#24，看板那边 config.POOL）：池里待放的清单登记在 hosts/pool/queues/，没有 worker；peers 读它认依赖
-
-
 PEER_EVERY = 60          # 别的主机在跑的任务（各自状态里的 share.run，公平份额要算上）多久重读一次
-
-
-STATUS_STALE_S = 180     # status.json 这么久没更新（按里面的 t）就算那台 worker 不在：别的主机（peers）与本机（fit）同一口径，与看板的 config.STALE_S 一样
 
 
 DEP_STALE_S = 86400      # 别的主机 worker 不在（状态没更新、也没 worker stop）这么久以内，它清单里没跑完的照样算还会跑：续租、重启时等它的不误报找不到
@@ -147,9 +145,6 @@ DUR_MARGIN = 1.2         # 回填与截止前（续租、约定归还）的准�
 
 
 CUT_EST_MARGIN = 1.5     # 截止前的准入：时长只来自清单估时或别的型号的记录时乘这么多（更没把握，#139）
-
-
-OVER_FRAC, OVER_MIN_S = 0.2, 600   # 剩余时长说不准时（超了预计；看板那边还有进度刚开始、没估时或已超估时）按已跑的这么多比例估、至少这么多秒（overrun_left）
 
 
 UTIL_WIN_S = 600         # 各卡利用率取近这么久的平均（状态的 util10，fit 列出来看；吃满程度 gpu_busy 的 m10 同一个长度）
@@ -348,18 +343,6 @@ def flock(path, *, required=False):
         yield
 
 
-def overrun_left(el):
-    """剩余时长说不准时的估计（秒）：已跑 el 秒的 OVER_FRAC、至少 OVER_MIN_S，不当“马上结束”（否则后面任务的预计开始永远是“现在”，每轮往后滑）。
-    run_end 用；看板 collect.overrun_left 同一口径（已超估时又看不出进度；进度刚开始、没估时或已超估时），worker 不 import 本包，各一份，改一处要改另一处。"""
-    return max(OVER_MIN_S, OVER_FRAC * el)
-
-
-def is_hold(name):
-    """占位任务（等条件再放行；不参与独占，不进时长与等待统计）：名字里按词认 hold / pause——开头、结尾，或被 _ . - 或数字隔开，
-    hold、hold_x、x_hold2、pause-1 算，threshold、household、unpaused 不算。看板那边是 config.HOLD_RE，同一条规则。"""
-    return bool(HOLD_RE.search(name or ""))
-
-
 def cmdline(pid):
     """进程命令行；不存在或已成僵尸返回 None。没有 /proc 时（本机测试）退回 ps。"""
     if not os.path.isdir("/proc"):
@@ -485,21 +468,13 @@ def started_at(pid):
 
 
 def fsig(path):
-    """文件变没变的签名 (inode, 修改时刻纳秒, 大小)，按文件缓存读出内容的都拿它比；读不到抛 OSError。只比 st_mtime 时同一个时间戳粒度里
-    连写两次第二次就漏读（共享盘上别的主机刚续写的用量记录要等下次再写才补上，#31）。看板那边是 state.file_sig，口径相同。"""
-    st = os.stat(path)
-    return st.st_ino, st.st_mtime_ns, st.st_size
+    """文件变没变的签名 (inode, 修改时刻纳秒, 大小)；读不到抛 OSError（唯一实现在 pure.file_sig）。"""
+    return _P.file_sig(path, strict=True)
 
 
 def load_jsonl(path):
-    """JSONL 的全部行（用量记录、事件、主机压力历史共用；写坏的行跳过）。"""
-    out = []
-    for l in (read(path, "") or "").splitlines():
-        try:
-            out.append(json.loads(l))
-        except ValueError:
-            pass
-    return out
+    """JSONL 的全部行（用量记录、事件、主机压力历史共用；写坏的行跳过，解析唯一实现在 pure.parse_jsonl）。"""
+    return _P.parse_jsonl(read(path, ""))
 
 
 def append_jsonl(path, row, keep_s=None):

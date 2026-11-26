@@ -39,6 +39,7 @@ from . import projects as PJ
 from .config import CLIENT_HEADER, COMMIT_RE, POOL, ConfigError, host_users, pause_by, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
 from .state import file_sig, snapshot, state_root, write_atomic
+from .worker.pure import same_list  # noqa: F401 — 与 worker 共用唯一实现
 
 CLIENT_RECENT_S = 30 * 86400
 
@@ -906,12 +907,6 @@ def need_pause(who: Ident, pid: str, host: str | None = None, snap: dict | None 
 
 def _nrm(root: str) -> str:
     return posixpath.normpath(str(root or ""))
-
-
-def same_list(q: dict, root: str, jobs: str) -> bool:
-    """全局快照 regs 里的一条登记 q 是不是这条清单（ROOT、JOBS）：拼起来规整后是同一个清单文件就算（./q.txt、a/../q.txt 与 q.txt 是同一条，#18；
-    ROOT/JOBS 从哪里断开都一样，#77：worker status 列的是拼起来的路径，worker rm 同样按文件认，labmon_worker.matching_regs 的 by_file）。"""
-    return bool(q.get("root") and q.get("jobs")) and _nrm(posixpath.join(q["root"], q["jobs"])) == _nrm(posixpath.join(root, jobs))
 
 
 def reg_projects(snap: dict, root: str, jobs: str, host: str | None = None) -> set:

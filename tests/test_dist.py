@@ -116,7 +116,7 @@ class ClientDistTest(unittest.TestCase):
             # #57：skill 与它链接到的文档照仓库的相对位置放进包目录（../../docs/… 打得开），别的 skill、网页、子目录不带
             names = set(z.namelist())
             self.assertLessEqual({"labmon/skills/lab-experiments/SKILL.md", "labmon/docs/api.md", "labmon/README.md",
-                                  "labmon/examples/monitor.toml", "labmon/worker/__init__.py", "labmon/worker/core.py"}, names)
+                                  "labmon/examples/monitor.toml", "labmon/worker/__init__.py", "labmon/worker/pure.py", "labmon/worker/core.py"}, names)
             self.assertFalse({"labmon/docs/intro.html", "labmon/docs/sub/deep.md", "labmon/skills/other/SKILL.md"} & names)
             self.assertEqual(SKILL_MD.encode(), z.read("labmon/skills/lab-experiments/SKILL.md"))
             self.assertIn("labmon/skills/lab-experiments/SKILL.md,sha256=", z.read(next(n for n in names if n.endswith("RECORD"))).decode())
