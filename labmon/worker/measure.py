@@ -89,7 +89,7 @@ def gpu_apps():
 
 # ---- 用量统计（只读 /proc 与 cgroup；读不到就留空，不影响调度）----
 def scan_procs():
-    """容器里的进程：{pid: {comm, ppid, sid, ticks（含已回收子进程的 CPU 时间）, hpid（宿主机 PID）}}。没有 /proc 时为空。"""
+    """容器里的进程：{pid: {comm, state, ppid, pgid, sid, ticks（含已回收子进程的 CPU 时间）, hpid（宿主机 PID）}}。没有 /proc 时为空。"""
     out = {}
     try:
         names = os.listdir(_C.PROC)
@@ -102,7 +102,7 @@ def scan_procs():
             with open(os.path.join(_C.PROC, n, "stat")) as f:
                 st = f.read()
             f = st.rsplit(")", 1)[1].split()
-            p = {"comm": st[st.find("(") + 1:st.rfind(")")], "state": f[0], "ppid": int(f[1]), "sid": int(f[3]), "ticks": sum(int(x) for x in f[11:15])}
+            p = {"comm": st[st.find("(") + 1:st.rfind(")")], "state": f[0], "ppid": int(f[1]), "pgid": int(f[2]), "sid": int(f[3]), "ticks": sum(int(x) for x in f[11:15])}
         except (OSError, IndexError, ValueError):
             continue
         try:
@@ -397,15 +397,44 @@ def cpu_since(ticks, prev):
     return max(0.0, (ticks - prev) / os.sysconf("SC_CLK_TCK")) if prev is not None else 0.0
 
 
-def job_procs(procs, jobs):
-    """各任务此刻的进程 {id(任务): [pid]}：单元（slot）按进程树认（申请方 exec 成原命令，它和它的子进程）；
-    清单任务按会话认，它起的单元（如登记成清单任务的监督进程）归单元，不重复记。"""
-    mine = {id(j): proc_tree(procs, [j["pid"]]) for j in jobs if j.get("kind") == "slot"}
-    in_slot = {pid for v in mine.values() for pid in v}
-    for j in jobs:
-        if j.get("kind") != "slot":
-            sid = procs[j["pid"]]["sid"] if j["pid"] in procs else j["pid"]
-            mine[id(j)] = [pid for pid, p in procs.items() if p["sid"] == sid and pid not in in_slot]
+def job_procs(procs, jobs, self_pid=None):
+    """各任务此刻的进程 {id(任务): [pid]}：统一经 proc_tree 归集，排除 worker 自身子树及其他运行中任务的根树。
+    - 单元（slot）先归集：按根进程 PPID 树认；当根拥有独立进程组（pgid == root_pid 且不同于 worker 自身 pgid）时，
+      并入同 pgid 进程及其子孙（脱壳/孤儿子进程不漏计；与其他进程共享 pgid 时不按 pgid 合并，避免误拉）。
+    - 清单任务（及旧 gpu_queue.sh 的 ext）后归集：按根进程 PPID 树认；根拥有独立会话（sid == root_pid 且不同于 worker 自身 sid）时
+      并入同 sid 进程，拥有独立进程组（pgid == root_pid 且不同于 worker 自身 pgid）时并入同 pgid 进程，再统一展开其子孙；
+      已归属单元（如登记成清单任务的监督进程所起的单元）或其他任务的进程不重复记。"""
+    wpid = os.getpid() if self_pid is None else self_pid
+    wp = procs.get(wpid) or {}
+    w_pgid, w_sid = wp.get("pgid"), wp.get("sid")
+    all_roots = {j["pid"] for j in jobs}
+    worker_pids = set(proc_tree(procs, [wpid], exclude=all_roots - {wpid})) | ({wpid} if wpid is not None else set())
+
+    def collect(j, claimed, use_sid):
+        rpid = j["pid"]
+        excl = worker_pids | claimed | (all_roots - {rpid})
+        p = procs.get(rpid)
+        roots, pgids = [rpid], ()
+        if p is not None:
+            if p.get("pgid") == rpid and rpid != w_pgid:
+                pgids = (rpid,)
+            if use_sid and p.get("sid") == rpid and rpid != w_sid:
+                roots += [pid for pid, x in procs.items() if x.get("sid") == rpid]
+        else:
+            if rpid != w_pgid:
+                pgids = (rpid,)
+            if use_sid and rpid != w_sid:
+                roots += [pid for pid, x in procs.items() if x.get("sid") == rpid]
+        return proc_tree(procs, roots, pgids=pgids, exclude=excl)
+
+    mine, claimed = {}, set()
+    for is_slot in (True, False):
+        for j in jobs:
+            if (j.get("kind") == "slot") != is_slot:
+                continue
+            pids = collect(j, claimed, use_sid=not is_slot)
+            mine[id(j)] = pids
+            claimed.update(pids)
     return mine
 
 
