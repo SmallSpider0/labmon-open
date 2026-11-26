@@ -1601,6 +1601,34 @@ class AdmissionUnitTest(UnitBase):
         self.assertEqual((h["deps"], h["deps_any"]), (["a", "pb/b", "d"], ["c"]))
         self.assertEqual(self.m.hints("python x.py after=3")["deps"], [])
 
+    def test_hints_vram0_implies_ngpu0_and_keeps_keepalive(self):
+        # 清单行未写 gpus= 且显式写了 vram=0 时自动按 ngpu=0 处理，不分配 GPU、不停保活；显式 gpus=1 vram=0 仍按 1 卡处理（#189）
+        self.assertEqual(self.m.hints("python audit.py   # vram=0 cpus=2")["ngpu"], 0)
+        self.assertEqual(self.m.hints("python audit.py   # vram=0.0")["ngpu"], 0)
+        self.assertEqual(self.m.hints("python audit.py   # gpus=1 vram=0")["ngpu"], 1)
+        self.assertEqual(self.m.hints("python audit.py   # gpus=2 vram=0")["ngpu"], 2)
+        self.assertEqual(self.m.hints("python audit.py   # vram=4")["ngpu"], 1)
+        self.assertEqual(self.m.hints("python audit.py --vram=0")["ngpu"], 1)          # 命令自己的 --vram=0 不算提示
+        qs = self.hosts.queues({"p": ["audit|sleep 5   # vram=0 cpus=2"]})
+        rec = []
+        self.w.keepalive = lambda need: rec.append(need)
+        os.environ["LABMON_GPUS"] = "GPU-aaa:40000"
+        try:
+            self.w.tick(qs, True)
+            self.assertEqual(len(self.w.running), 1)
+            j = next(iter(self.w.running.values()))
+            self.assertEqual((j["ngpu"], j["gpus"]), (0, []))
+            self.assertEqual(rec, [False])                                             # 纯 CPU 任务不为它停保活
+            # 显式 gpus=1 vram=0 仍分配 1 张卡并停保活
+            qs2 = self.hosts.queues({"p2": ["gpu_job|sleep 5   # gpus=1 vram=0"]})
+            self.w.tick(qs + qs2, False)
+            gjob = next(v for v in self.w.running.values() if v["name"] == "gpu_job")
+            self.assertEqual((gjob["ngpu"], gjob["gpus"]), (1, ["GPU-aaa"]))
+            self.assertEqual(rec[-1], True)
+        finally:
+            os.environ.pop("LABMON_GPUS")
+            self.kill_running()
+
     def test_prep_since_and_request_shape(self):
         # 请求由 new_req 拼、prep 补全：单元从申请时刻起算；被临时指令挡住的起点推到现在；同一个任务一直在等就沿用上一轮的起点，上一轮被挡着的重新起算
         now = time.time()

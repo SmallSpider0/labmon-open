@@ -38,7 +38,7 @@ worker 只认命令里对同一路径的 `[ -f … ] ||` 算能自己补；脚�
 
 - 每行 `名称|命令`，`#` 开头是注释；资源提示写在行尾 ` #` 之后（不然原样传给程序）：
   `x4_s20|{ [ -f $W/w0.pt ] || $PY cap.py --out $W/w0.pt; } && $PY e4.py --w0 $W/w0.pt   # est_min=216 vram=20 ram=30 tag=x4 needs=$W/w0.pt`
-- 提示键：`gpus=`（缺省 1，0 不用卡）、`vram=` 每张卡 GiB、`ram=` GiB、`est_min=`、`tag=`、`exclusive=gpu|host`（开销评估、计时测量用）、`needs=`、`after=`/`afterany=`、`gang=组名:人数`（成组，见下）、`cpus=`、`io=heavy|light`（只记录）。全表 `docs/worker.md`「资源提示」「独占」。
+- 提示键：`gpus=`（缺省 1，0 不用卡；纯 CPU 任务推荐写 `gpus=0`，未写 `gpus=` 但显式写 `vram=0` 也会自动按不用卡处理）、`vram=` 每张卡 GiB、`ram=` GiB、`est_min=`、`tag=`、`exclusive=gpu|host`（开销评估、计时测量用）、`needs=`、`after=`/`afterany=`、`gang=组名:人数`（成组，见下）、`cpus=`、`io=heavy|light`（只记录）。全表 `docs/worker.md`「资源提示」「独占」。
 - 同名 `.env` 设 `PY`、`QUEUE_STATE`、`QUEUE_LOGS` 与任务要的 `PYTHONPATH`（worker 清掉它）；两条清单的状态目录必须不同（`docs/worker.md`「清单与状态」）。
 
 ## 进度行（必须）
