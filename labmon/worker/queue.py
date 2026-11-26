@@ -168,7 +168,7 @@ def load_queue(reg, *, read_env=True):
 
 
 def hints(cmd):
-    """清单行尾（或单元申请）的资源提示：gpus= vram=（每张卡 GiB）ram=（GiB）tag= exclusive= est_min=，
+    """清单行尾（或单元申请）的资源提示：gpus=（缺省 1；未写 gpus= 且显式写 vram=0 时按 0 不用卡处理）vram=（每张卡 GiB）ram=（GiB）tag= exclusive= est_min=，
     以及 needs=（这格要用的本地文件，逗号分隔，可写变量与通配符；本地<共享盘主副本 的写了来源，见 check_needs）、
     after= / afterany=（依赖：等这些任务跑成功 / 结束才开始，逗号分隔，可带 项目/ 前缀，见 dep_keys；记在 deps、deps_any）。
     cpus=（要几个核：CPU 记账优先按它，没写按同类历史，见 estimate；也是开跑时导出的 LABMON_CPUS，开跑时给的核数）、io=heavy|light（读写重不重：只记录与显示，准入不看）。
@@ -180,7 +180,9 @@ def hints(cmd):
     io = re.search(r"(?<![\w-])io=(heavy|light)\b", cmd)
     tail = cmd[len(body(cmd)):]
     gg = re.search(r"(?<![\w-])gang=([\w.-]+)(?::(\d+))?", tail)
-    return {"ngpu": int(float(g.group(1))) if g else 1, "vram": float(v.group(1)) if v else 0.0, "ram": float(r.group(1)) if r else 0.0,
+    vram = float(v.group(1)) if v else 0.0
+    ngpu = int(float(g.group(1))) if g else (0 if v and vram == 0.0 else 1)
+    return {"ngpu": ngpu, "vram": vram, "ram": float(r.group(1)) if r else 0.0,
             "tag": t.group(1) if t else None, "excl": x.group(1) if x else None, "est_min": float(e.group(1)) if e else None,
             "cpus": float(c.group(1)) if c else None, "io": io.group(1) if io else None,
             "needs": [p for v in re.findall(r"\bneeds=(\S+)", tail) for p in v.split(",") if p],

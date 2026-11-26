@@ -98,7 +98,7 @@ worker 装在主机的 `worker_home`（缺省 `<data_root>/labmon`，`data_root`
 
 ### 资源提示
 
-行尾可写 `gpus=N`（缺省 1，0 表示不用 GPU）、`vram=X`（每张卡的显存 GiB）、`ram=X`（内存 GiB）、`tag=heavy`、`exclusive=gpu|host`、`est_min=N`、`needs=…`，
+行尾可写 `gpus=N`（缺省 1，0 表示不用 GPU；未写 `gpus=` 且显式写了 `vram=0` 时也自动按不用 GPU 处理，纯 CPU 任务仍推荐显式写 `gpus=0`；同时写 `gpus=1 vram=0` 仍按 1 张卡处理）、`vram=X`（每张卡的显存 GiB）、`ram=X`（内存 GiB）、`tag=heavy`、`exclusive=gpu|host`、`est_min=N`、`needs=…`，
 以及依赖 `after=…`、`afterany=…`（见[依赖](#依赖)）、成组 `gang=组名:人数`（见[成组](#成组)）。
 `cpus=N`（要几个核）进 CPU 记账（见[准入](#准入)）：没有同类历史、又确知要多核时才写；`io=heavy|light`（读写重不重）只记录、页面上显示，准入与推演都不看。
 开跑时导出的 `LABMON_CPUS` 是开跑时给这个任务记账的核数（之后 CPU 记账按近 10 分钟窗口核数回收，它不变；见“用量”）；没设的 `OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`OPENBLAS_NUM_THREADS` 缺省同它。
