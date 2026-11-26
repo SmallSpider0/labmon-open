@@ -399,6 +399,50 @@ class CmdWaitJobTest(_Base):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             M.main(["check", "-c", str(self.d / "m.toml"), "--take"])
 
+    def test_plain_wait_wid_stable_and_survives_update(self):
+        # 普通 wait 每轮（含断网重试、自动更新 exec）保持同一 wid，不自踢；wait --job 不带 wid（#165）
+        config = str(self.d / "m.toml")
+        polls = [{"new": {}}, M.client.Unreachable("断网"), {"new": {"a": "一"}}]
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), mock.patch.object(M.client, "call", side_effect=polls) as http, \
+             mock.patch.object(M.time, "sleep"), contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(M.cmd_wait(config), 1)
+        wids = [c.args[2]["wid"] for c in http.call_args_list]
+        self.assertTrue(all(isinstance(w, str) and len(w) == 16 for w in wids))
+        self.assertEqual(len(set(wids)), 1)
+        # wait --job 不带 wid
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+             mock.patch.object(M.client, "call", return_value={"done": True, "jobs": [{"name": "x", "st": "done", "text": "完成"}]}) as http, \
+             contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(M.cmd_wait(config, ["x"]), 0)
+        self.assertIsNone(http.call_args.args[2]["wid"])
+        # 自动更新 exec 经 WAIT_RESUME 保留同一 wid，exec 后的新进程继续带同一个 wid
+        commit = "b" * 40
+        bin_path = self.d / commit / "bin" / "labmon"
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+             mock.patch.object(M.client, "call", side_effect=[{"commit": commit, "client_status": "outdated"}, {"new": {"a": "一"}}]) as http, \
+             mock.patch.object(M.dist, "installed", return_value=True), \
+             mock.patch.object(M.client, "install_update", return_value=(commit, M.dist.Installed(bin_path, bin_path, None, []))), \
+             mock.patch.object(M.os, "execve", side_effect=InterruptedError) as execute, mock.patch.object(M.time, "sleep"), \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(M.cmd_wait(config), 1)
+        orig_wid = http.call_args_list[0].args[2]["wid"]
+        env = execute.call_args.args[2]
+        self.assertEqual(json.loads(env[M.WAIT_RESUME])["wid"], orig_wid)
+        with mock.patch.dict(os.environ, {M.WAIT_RESUME: env[M.WAIT_RESUME]}), mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+             mock.patch.object(M.client, "call", return_value={"new": {"a": "二"}}) as http2, contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(M.cmd_wait(config), 1)
+        self.assertEqual(http2.call_args.args[2]["wid"], orig_wid)
+        # 426 强制更新时同样保留 wid
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+             mock.patch.object(M.client, "call", side_effect=M.client.Failed(426, "跑 labmon update", {"commit": commit})) as http3, \
+             mock.patch.object(M.dist, "installed", return_value=True), \
+             mock.patch.object(M.client, "install_update", return_value=(commit, M.dist.Installed(bin_path, bin_path, None, []))), \
+             mock.patch.object(M.os, "execve", side_effect=RuntimeError("exec")) as execute3, \
+             contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(RuntimeError):
+                M.cmd_wait(config)
+        self.assertEqual(json.loads(execute3.call_args.args[2][M.WAIT_RESUME])["wid"], http3.call_args.args[2]["wid"])
+
     def test_cli(self):
         # --job 可重复、也认逗号分隔（同 after=）；只用于 wait
         got = []

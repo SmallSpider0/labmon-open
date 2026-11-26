@@ -325,6 +325,61 @@ class BoardTest(_Base):
         self.assertIsNone(W.dup_refused(out))                                    # 正在等的不在了：不再说“被拦下”
         self.assertEqual(go("C")["new"], {})
 
+    def test_wait_same_session_replaces_plain_wait(self):
+        # 同一会话只留一个普通 wait（#165）：新普通 wait 直接接替，旧的下一轮 409 退出、不领告警、不记 refused（不出 wait_dup）；
+        # wait --job 与旧客户端（不带 wid）可并存；跨会话仍按 #142 挡下
+        board(self)
+        go = lambda sess, **kw: client.call("POST", "/api/wait", {"project": "p1", "hold": 0, "session": sess, **kw}, idem=True)   # noqa: E731
+        out = PJ.out_dir("p1")
+        self.assertEqual(go("A", wid="w1")["new"], {})
+        # W1 长轮询挂着期间，同会话起了新普通 wait W2 接替；新告警出现时 W1 被 409 挡下且不领告警，告警留给 W2
+        res = {}
+        held = threading.Thread(target=lambda: res.update(r=self._catch(lambda: client.call(
+            "POST", "/api/wait", {"project": "p1", "hold": 10, "session": "A", "wid": "w1"}, timeout=30, idem=True))))
+        with mock.patch.object(W, "POLL_S", 0.5):
+            held.start()
+            time.sleep(0.3)
+            self.assertEqual(go("A", wid="w2")["new"], {})
+            self.snap([{"key": "a1", "msg": "一"}])
+            held.join()
+        self.assertEqual(res["r"].code, 409)
+        self.assertIn("已由本会话的新 wait 接替", res["r"].msg)
+        self.assertIsNone(W.dup_refused(out))                                    # 同会话接替不记 refused，不出 wait_dup
+        self.assertEqual(go("A", wid="w2")["new"], {"a1": "一"})                 # 被挡的 W1 没领走告警
+        with self.assertRaises(client.Failed) as e:
+            go("A", wid="w1")                                                    # W1 下一轮/重连再来仍被挡，不反踢 W2
+        self.assertEqual(e.exception.code, 409)
+        self.assertIn("已由本会话的新 wait 接替", e.exception.msg)
+        self.assertIsNone(W.dup_refused(out))
+        # 再来第三个普通 wait W3：W1 与 W2 再来均被挡
+        self.assertEqual(go("A", wid="w3")["new"], {})
+        for old_wid in ("w1", "w2"):
+            with self.assertRaises(client.Failed) as e:
+                go("A", wid=old_wid)
+            self.assertEqual(e.exception.code, 409)
+            self.assertIn("已由本会话的新 wait 接替", e.exception.msg)
+        # wait --job（即使带了 wid 也忽略）与旧客户端（不带 wid）均可与 W3 并存，且不覆盖 holder.w
+        self.assertEqual(go("A", jobs=["x"], wid="wj")["new"], {})
+        self.assertEqual(go("A")["new"], {})
+        self.assertEqual(W.load_json(W.state_file(out), {})["holder"]["w"], "w3")
+        self.assertEqual(go("A", wid="w3")["new"], {})
+        # 跨会话仍按 #142 挡下（普通 wait 与 wait --job 均挡），并记 refused
+        for extra in ({"wid": "wb1"}, {"jobs": ["x"]}):
+            with self.assertRaises(client.Failed) as e:
+                go("B", **extra)
+            self.assertEqual(e.exception.code, 409)
+            self.assertIn("已有另一个会话在挂 labmon wait", e.exception.msg)
+        self.assertEqual(W.dup_refused(out)["a"], "boss")
+        # 先挂 wait --job 再挂普通 wait：--take 接手后同会话普通 wait 照样互斥，wait --job 不受影响
+        self.assertEqual(go("C", jobs=["x"], take=True)["new"], {})
+        self.assertEqual(go("C", wid="wc1")["new"], {})
+        self.assertEqual(go("C", wid="wc2")["new"], {})
+        with self.assertRaises(client.Failed) as e:
+            go("C", wid="wc1")
+        self.assertEqual(e.exception.code, 409)
+        self.assertIn("已由本会话的新 wait 接替", e.exception.msg)
+        self.assertEqual(go("C", jobs=["x"])["new"], {})
+
     @staticmethod
     def _catch(f):
         try:

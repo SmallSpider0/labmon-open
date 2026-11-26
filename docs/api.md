@@ -270,7 +270,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 
 | 请求 | 回 |
 |---|---|
-| `POST /api/wait {"project", "jobs", "watch", "hold", "extra", "rid", "session", "take"}` | `{"new": {键: 文字}, "jobs": [{"name", "st", "text", "final"}], "watch", "done"}`（`waits.wait`） |
+| `POST /api/wait {"project", "jobs", "watch", "hold", "extra", "rid", "session", "wid", "take"}` | `{"new": {键: 文字}, "jobs": [{"name", "st", "text", "final"}], "watch", "done"}`（`waits.wait`） |
 | `POST /api/project/<id>/check {"text"}` | `{"rc", "out"（各主机的探针规格）, "err", "after"（同步状态那行之后的几行）}`；配置不对 400。普通用户看到的 `out` 里，没开给他的主机只有一行“没开给你用”，不列连接信息与探针规格（#16） |
 | `POST /api/project/init {"host", "name"}` | `{"rc", "out", "err"}`（`api.project_init`） |
 | `POST /api/worker/<动作> {"host", "args", "gpus", "project", "stop"}` | `{"rc", "out", "err"}`；`usage` 是参数错（如 `--project` 不是看板上的项目） |
@@ -314,6 +314,7 @@ labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # �
 - 一个项目只让一个会话等（#142，`waits._claim`）：命令行每轮带会话标识 `session`（`client.session_id`：`LABMON_SESSION`、`CLAUDE_CODE_SESSION_ID`，都没有时取跳过 shell 与包装后的第一个祖先进程，按主机名、PID、启动时刻算；只发 16 位哈希）。
   `wait_state.json` 的 `holder` 记着此刻等这个项目的会话；别的会话来回 409（判告警之前挡，不领告警），命令行打出原因、退出 3，并记进 `refused`，项目快照据此给用户一条 `wait_dup:`。
   同一会话重挂、自动更新后、同时挂的 `wait` 与 `wait --job` 都是同一个标识，不挡。正在等的满 15 分钟（`waits.WAIT_GONE_S`，与 `wait_gone:` 同一门槛）没来就让出。
+  同一会话内只留一个普通 `wait`（#165，不带 `--job`）：命令行启动时生成实例标识 `wid`（断网重试、自动更新 exec 经 `WAIT_RESUME` 保持不变），`holder` 另记当前普通 `wait` 与已接替的旧 `wid`（`w`、`wt`、`old`）；新普通 `wait` 直接接替，旧的下一轮回 409「已由本会话的新 wait 接替」、退出 3，不领告警、不记 `refused`（不出 `wait_dup:`）；`wait --job` 与不带 `wid` 的旧客户端不受影响、可并存。
   `labmon wait --take` 第一轮带 `take`，改由本会话等；原来那个正挂着的那次下一轮回 409「改由另一个会话等了」。不带 `session` 的（旧客户端）不挡也不占。
 
 ## 第一次用

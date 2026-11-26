@@ -349,9 +349,9 @@ def _wait_resume(cfg_path: str, jobs: list[str]) -> dict:
     return saved
 
 
-def _wait_update(commit: str | None, cfg_path: str, jobs: list[str], watch: dict | None, take: bool = False) -> str | None:
+def _wait_update(commit: str | None, cfg_path: str, jobs: list[str], watch: dict | None, take: bool = False, wid: str | None = None) -> str | None:
     """装好才 exec（不返回）。commit：要装的版本（刚收到的看板回话给的；None 时取看板发的那份）。take：--take 还没生效（还没收到过回话），新版本接着带上（#142）。
-    已是看板的版本返回 None；更新失败返回原因，由调用处决定继续等（可更新时）还是退出（426）。"""
+    wid：普通 wait 的实例标识，exec 后原样带回（#165）。已是看板的版本返回 None；更新失败返回原因，由调用处决定继续等（可更新时）还是退出（426）。"""
     try:
         got, inst = client.install_update(commit, auto=True)
         if inst is None:
@@ -361,6 +361,8 @@ def _wait_update(commit: str | None, cfg_path: str, jobs: list[str], watch: dict
             raise dist.Unavailable("另一条命令已换了客户端版本，等下一轮再试")
         env = dict(os.environ)
         resume = {"config": cfg_path, "jobs": jobs, "watch": watch}
+        if wid:
+            resume["wid"] = wid
         if (dist.skill_of(dist.HERE) / "SKILL.md").is_file():         # 新版本拿它与自己那份比，skill 改了就叫醒会话（_skill_woke，#57）
             resume["skill"] = [str(dist.skill_of(dist.HERE)), dist.version()]
         env[WAIT_RESUME] = json.dumps(resume, separators=(",", ":"))
@@ -385,11 +387,11 @@ def _skill_woke(saved: dict) -> str | None:
     return dist.skill_note(changes, old[1], dist.version(), "先重挂 labmon wait") if changes else None
 
 
-def _wait_outdated(msg: str, commit: str | None, cfg_path: str, jobs: list[str], watch: dict | None, take: bool = False) -> int:
+def _wait_outdated(msg: str, commit: str | None, cfg_path: str, jobs: list[str], watch: dict | None, take: bool = False, wid: str | None = None) -> int:
     """wait 被拦下（426，低于最低版本）：看板安装的客户端先自动更新一次（装好就 exec 接着等），装不成或不是看板装的以 5 退出（#17）。"""
     print(f"[labmon] [{client.CLIENT_OUTDATED_REASON}] {msg}", file=sys.stderr, flush=True)
     if dist.installed():
-        err = _wait_update(commit if isinstance(commit, str) else None, cfg_path, jobs, watch, take)
+        err = _wait_update(commit if isinstance(commit, str) else None, cfg_path, jobs, watch, take, wid)
         if err:
             print(f"[labmon] 自动更新不成：{err}；跑 labmon update 后再挂等待", file=sys.stderr, flush=True)
     return client.CLIENT_OUTDATED_RC
@@ -403,7 +405,8 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None, take: bool = False) -
     连不上看板退避重试，不退出（#154）：连续连不上超过 config.stale_limit（按本地 monitor.toml 的采集间隔与 stale_min，与 collector_stale 同一门槛）往 stderr 提示一次，
     连回来的那一轮多报一条 server_back（退出 1）；连着满 WAIT_OFFLINE_MAX_S 才以 server_unreachable 告警退出 1。
     回话丢在半路时带同一个请求号重试（看板回上次那份，已记成报过的告警不会漏）；等的任务的内部状态（watch）每轮带回看板。
-    每轮带会话标识（client.session_id）：一个项目只让一个会话等，别的会话已在等时看板回 409、以 3 退出；take（--take）只在第一轮带上，改由本会话等（#142）。"""
+    每轮带会话标识（client.session_id）：一个项目只让一个会话等，别的会话已在等时看板回 409、以 3 退出；take（--take）只在第一轮带上，改由本会话等（#142）。
+    普通 wait（无 --job）另带实例标识 wid（自动更新与重连保持不变）：同一会话新起的普通 wait 直接接替，旧的下一轮回 409、以 3 退出（#165）。"""
     try:
         b = brief(cfg_path)
     except ConfigError as e:
@@ -421,13 +424,14 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None, take: bool = False) -
     else:
         print(f"[labmon] 等告警：每轮先同步一次 {cfg_path}，再问看板 {b['id']} 有没有告警（看板那边最多挂 {HOLD_MAX}s）", flush=True)
     first, synced, watch = not saved, bool(saved), saved.get("watch")
+    wid = None if jobs else (saved.get("wid") if isinstance(saved.get("wid"), str) and saved.get("wid") else uuid.uuid4().hex[:16])
     rid, down, back, sess, told = uuid.uuid4().hex, None, 1.0, client.session_id(), False
     retry_commit, retry_at, hinted = None, 0.0, False
     while True:
         try:
             r = _sync(cfg_path)
             if r.get("code") == client.CLIENT_OUTDATED:
-                return _wait_outdated(r["msg"], None, cfg_path, jobs, watch, take)
+                return _wait_outdated(r["msg"], None, cfg_path, jobs, watch, take, wid)
             if r["act"] in ("unregistered", "denied"):
                 print(f"[labmon] {r['msg']}", file=sys.stderr)
                 return 3
@@ -441,10 +445,10 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None, take: bool = False) -
                 limit = stale_limit(b["interval"], b["stale_min"])
             extra = {r["key"]: r["msg"]} if r.get("key") else {}
             res = client.call("POST", "/api/wait", {"project": b["id"], "jobs": jobs or [], "watch": watch, "hold": 0 if first else HOLD_MAX,
-                                                    "extra": extra, "rid": rid, "session": sess, "take": take}, timeout=HOLD_MAX + 20, patience=0, idem=True)
+                                                    "extra": extra, "rid": rid, "session": sess, "wid": wid, "take": take}, timeout=HOLD_MAX + 20, patience=0, idem=True)
         except client.Failed as e:
             if e.code == client.CLIENT_OUTDATED:
-                return _wait_outdated(e.msg, e.data.get("commit"), cfg_path, jobs, watch, take)
+                return _wait_outdated(e.msg, e.data.get("commit"), cfg_path, jobs, watch, take, wid)
             print(f"[labmon] {e.msg}", file=sys.stderr)
             return 3
         except client.Unreachable as e:
@@ -480,7 +484,7 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None, take: bool = False) -
             commit = res.get("commit")
             if res.get("client_status") == "outdated" and isinstance(commit, str) and dist.installed():
                 if commit != retry_commit or time.monotonic() >= retry_at:
-                    if err := _wait_update(commit, cfg_path, jobs, watch):
+                    if err := _wait_update(commit, cfg_path, jobs, watch, wid=wid):
                         print(f"[labmon] 暂时更新不了，继续等待：{err}", file=sys.stderr, flush=True)
                     retry_commit, retry_at = commit, time.monotonic() + WAIT_UPDATE_RETRY_S
             time.sleep(GAP)
