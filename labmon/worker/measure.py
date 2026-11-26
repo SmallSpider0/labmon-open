@@ -102,7 +102,7 @@ def scan_procs():
             with open(os.path.join(_C.PROC, n, "stat")) as f:
                 st = f.read()
             f = st.rsplit(")", 1)[1].split()
-            p = {"comm": st[st.find("(") + 1:st.rfind(")")], "ppid": int(f[1]), "sid": int(f[3]), "ticks": sum(int(x) for x in f[11:15])}
+            p = {"comm": st[st.find("(") + 1:st.rfind(")")], "state": f[0], "ppid": int(f[1]), "sid": int(f[3]), "ticks": sum(int(x) for x in f[11:15])}
         except (OSError, IndexError, ValueError):
             continue
         try:
@@ -416,6 +416,13 @@ def win_mean(w, t, span, n=3):
     return round(sum(v) / len(v), 1) if len(v) >= n else None
 
 
+def job_sus(j, now):
+    """运行中或刚结束的任务累计被 SIGSTOP 挂起的秒数（measure 记在 use.sus_s，夹在 [0, now - t0] 内）。
+    Worker.usage_rec、Worker.finish、Worker.run_end 与 run_tot 共用（#149）。"""
+    wall = max(0.0, now - j["t0"])
+    return min(wall, max(0.0, float((j.get("use") or {}).get("sus_s") or 0.0)))
+
+
 def card_conc(j, on, jobs):
     """此刻任务 j 所用的卡 on（非空）上平均几条 labmon 任务（含自己；jobs 里的占位任务不算，按对象去重，多卡取各卡平均）。
     measure 按它累计按时间加权的 conc（用量行同名字段，duration 挑记录比的就是它），Worker.k_of 在还没量到 conc 时按它回退（#67、#86）。"""
@@ -564,7 +571,10 @@ class MeasureMixin:
         on = set(j["gpus"]) | set(vb)
         if any(ovram.get(x) for x in on):
             j["owner_gpu"] = True             # 运行期间所用的卡上有过 labmon 之外的进程（借来的主机上据此判断 CUDA OOM 是不是被挤的）
+        stopped = any(procs[p].get("state") == "T" for p in pids)
         if u.get("t") and t > u["t"]:
+            if stopped and u.get("sus_on") and t - u["t"] <= _C.STATUS_STALE_S:
+                u["sus_s"] = round(u.get("sus_s", 0.0) + t - u["t"], 1)
             dc = cpu_since(ticks, u.get("ticks"))
             u["cores"] = round(dc / (t - u["t"]), 2)
             u["cpu_s"], u["wall_s"] = u.get("cpu_s", 0) + dc, u.get("wall_s", 0) + t - u["t"]
@@ -589,6 +599,10 @@ class MeasureMixin:
                 u["util_s"], u["util_wall"] = u.get("util_s", 0) + sum(ut) / len(ut) * (t - u["t"]), u.get("util_wall", 0) + t - u["t"]
                 u["util_mean"] = round(u["util_s"] / u["util_wall"])
         u.setdefault("pk0", round(t))         # 从何时起量窗口核数（pks）：开跑的就是开跑时，接管旧 worker 的从接管起，满 CPU_WARM_S 才回收
+        if stopped:
+            u["sus_on"] = True
+        else:
+            u.pop("sus_on", None)
         u.update(t=t, ticks=ticks, rchar=rd, wchar=wr, nproc=len(pids), ram=round(ram, 2), ram_peak=round(max(ram, u.get("ram_peak") or 0), 2),
                  vram=vram, vram_peak=max(vram, u.get("vram_peak") or 0), vram_by=vb)
         card, host = (sum(_C.intruders(s, on, jobs, gp, None, j), []) for s in ("gpu", "host"))

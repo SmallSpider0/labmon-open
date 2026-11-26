@@ -542,7 +542,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
     </figure>
     <details><summary>细节：运行中任务的结束、何时重推、排不上的原因</summary><div class="in">
       <ul>
-        <li><b>运行中任务的预计结束</b>先取看板按进度算的（看板写回服务器的 <code>eta.json</code>，<a href="#a-eta">见下</a>），没有就按预计时长（<code>run_end</code>，按它自己的同卡并行数挑历史，看板拿到的也是这一份）。超过预计的剩余按已跑时长的 20%、至少 10 分钟（<code>overrun_left</code>；看板对超了估时又看不出进度的同样这么算），不当“马上结束”，否则后面任务的预计开始永远是“现在”、每轮往后滑。</li>
+        <li><b>运行中任务的预计结束</b>先取看板写回服务器的 <code>eta.json</code>（<a href="#a-eta">见下</a>），没有就按 <code>开始 + 累计挂起 + 预计时长</code>（<code>run_end</code>，按它自己的同卡并行数挑历史，看板拿到的也是这一份）。超过预计的剩余按已跑时长（不含挂起）的 20%、至少 10 分钟（<code>overrun_left</code>；看板对超了估时又看不出进度的同样这么算），不当“马上结束”，否则后面任务的预计开始永远是“现在”、每轮往后滑。</li>
         <li><b>时长不明</b>（没估时也没同类记录）的任务排上后不知道何时结束：它那条队列后面的、要等它腾资源的都不给预计开始，车道写 <code>stuck</code> 与原因（放不下、截止前跑不完、等的任务跑不成、前面的占位任务不知道何时放行、推演 7 天还没轮到）。</li>
         <li><b>结果</b>写在状态的 <code>plan</code>：每条车道的任务带开始、结束、要等谁腾资源（<code>after</code>）与写了的依赖（<code>deps</code>）。时间线上的淡色排队块、“让位 某项目”“等资源”的空档说明都从这里来。</li>
         <li>等待中、运行中的任务、临时指令或 eta 变了就重推，否则 2 分钟一次。</li>
@@ -786,9 +786,9 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <li>外推从最后一个进度采样的时刻起算：日志隔一阵才打一行时，两行之间看到的预计结束不变，不随刷新往后漂（#140）。</li>
         <li>进度停了一阵（不打进度的段）按估时，没有估时才按平均速度，起点同上；没有进度行时按预计时长减已用。</li>
         <li>多阶段任务最好打一个贯穿全程、只增不减的计数。各段各自从头数时，看板把回退或总步数变化当换段，按当前这段估速度，剩余至少按估时兜底。</li>
-        <li>算出的预计结束写进服务器上的 <code>eta.json</code>，worker 推演里在跑的任务取它（任务开始之后写的才用；占位任务不用）。工作台运行中任务的预计结束按“项目看板按进度算的 → 推演里的在跑条 → 清单估时”取（<code>etaOf</code>）。</li>
+        <li>算出的预计结束写进服务器上的 <code>eta.json</code>（<code>jobs</code> 给 <code>run_end</code> 用；另在 <code>prog</code> 里标出真正按日志进度外推的任务，worker 的 <code>run_tot</code> 只把这些算作“同类在跑按进度估”，无进度时不再形成估时回声），worker 推演里在跑的任务取它（任务开始之后写的才用；占位任务不用）。工作台运行中任务的预计结束按“项目看板按进度算的 → 推演里的在跑条 → 清单估时”取（<code>etaOf</code>）。</li>
         <li>推演用的是看板上一轮写的、整分钟取整的值，与这一轮按进度算的差一点。项目页同一车道上，推演里接着在跑任务开始的排队条跟着这一轮的预计结束挪，不是接着的（等资源、等依赖）只在会重叠时往后挪，免得前后两条叠在一起或留出假空档（<code>collect._queued_times</code>，#64）。</li>
-        <li>挂起（<code>kill -STOP</code>）的时长单独累计，从已用时间里扣除。</li>
+        <li>挂起（<code>kill -STOP</code>）的时长由看板与 worker 各自按进程树 <code>T</code> 状态单独累计，从已用时间、<code>run_end</code>/<code>run_tot</code> 与 <code>usage.jsonl</code> 的 <code>min</code> 中扣除（worker 另记 <code>sus</code> 秒，重启接管找回）。</li>
         <li>项目页时间线上运行中的条从开始画到预计结束，条上写的百分比就是红色现在线在条上的位置（开始到现在 ÷ 开始到预计结束），不是步数比例：步数只是当前这段的，开头加载不打进度、多段任务时与它差得远，写在悬停里，连同预计结束的依据（#33）。</li>
       </ul>
       <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/workbench.md#估时与-eta">workbench.md「估时与 ETA」</a></p>

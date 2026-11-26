@@ -263,6 +263,7 @@ class ContractTest(unittest.TestCase):
         self.assertEqual([r["id"] for r in pi[run["project"]]["running"]], [run["name"]])
         eta = json.loads((self.home / "eta.json").read_text())
         self.assertEqual(list(eta["jobs"]), [f"{run['project']}|{run['name']}"])
+        self.assertEqual(eta["prog"], [])
         self.assertAlmostEqual(eta["jobs"][f"{run['project']}|{run['name']}"], jobs[run["name"]]["eta_ts"], delta=60)
         sj = json.loads((self.home / "sched.json").read_text())
         self.assertEqual(sj, {"owner": {k: sj["owner"]["pa"] for k in ("pa", "pb")}})   # 没有 [sched]；两个项目都归管理员、算一个人（#23）

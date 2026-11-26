@@ -39,7 +39,7 @@ from . import pool as PO
 from . import rebalance as RB
 from . import renew as R
 from .projects import archived_rows, registered
-from .collect import write_page
+from .collect import eta_by_progress, write_page
 from .config import POOL, POOL_LABEL, STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, parse_time, pause_by, pick_color, sched, user_hosts
 from .health import container_step, lease_due, lease_end, link_step
 from .records import EVENT_CATS, EVENT_KINDS, log_events, told
@@ -339,8 +339,9 @@ def _to_worker(projects: list[dict], t: float, sw: dict):
     sched.json 是这一轮读的调度设置 sw（config.sched：权重与项目级的暂停、优先；collect 加上 owner：各项目算在谁名下，#23），各在用主机同一份，后加入的主机下一轮就有。"""
     prog = {(p["id"], j["id"]): j for p in projects for j in p.get("running") or []}
     jobs = {f"{p}|{j}": round(x["eta_ts"] / 60) * 60 for (p, j), x in prog.items() if x.get("eta_ts")}
+    by_prog = sorted(f"{p}|{j}" for (p, j), x in prog.items() if x.get("eta_ts") and eta_by_progress(x.get("eta_source")))
     gone = {"hosts": sorted({str(h["id"]) for h in user_hosts() if h.get("returned")})}
-    return prog, lambda h: {"eta.json": {"t": round(t + _CLOCK.get(h["id"], 0)), "jobs": jobs}, "sched.json": sw, "returned.json": gone}
+    return prog, lambda h: {"eta.json": {"t": round(t + _CLOCK.get(h["id"], 0)), "jobs": jobs, "prog": by_prog}, "sched.json": sw, "returned.json": gone}
 
 
 def _host_entry(h: dict, raw: str | None, err: str | None, lan_off: bool, prev: dict | None, sd: Path, t: float) -> dict:

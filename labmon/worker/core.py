@@ -71,7 +71,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.marks, self.todo = {}, []        # 本机各清单标完的 {(项目, 任务): done|failed} 与还会跑的（list_state；todo 写进状态给别的主机）
         self.dep_where, self.dep_lanes = {}, []   # 还会跑的任务在哪 {(项目, 任务): (主机（本机为 None）, 状态已多久没更新, 清单暂停的种类)}；清单项（dep_cycle 找环）
         self.dep_miss = {}                    # 依赖等的、哪里都找不到的任务 {(项目, 任务): 起算时刻}：满 DEP_MISS_S 才报找不到（dep_block；写进状态，接管时找回）
-        self.eta, self.eta_t, self.eta_m = {}, 0, None            # 看板写来的运行中任务预计结束（load_eta）
+        self.eta, self.eta_prog, self.eta_t, self.eta_m = {}, set(), 0, None   # 看板写来的运行中任务预计结束与其中按进度外推的（load_eta）
         self.hrows, self.hrows_v = [], -1     # 跑完的任务 [(项目, 卡数, 开始, 结束)]（share 按 hist 换算，hist 变了才重算）
         self.peer, self.peer_t = [], 0.0      # 别的主机在跑的任务（peers）
         self.peer_end = {}                    # 别的主机 plan 里各任务的预计结束 {(项目, 任务): 时刻}（peers 一起读）
@@ -396,7 +396,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         依赖（dep_state）、估时与看板都只认 rc "0" 为跑成功，别的主机按用量行认它失败。"""
         j = self.running.pop(key)
         name, rc, oom, sq, requeue, failed = j["name"], None, None, None, False, False
-        mins = round((_C.time.time() - j["t0"]) / 60, 1)
+        now = _C.time.time()
+        mins = round(max(0.0, now - j["t0"] - _M.job_sus(j, now)) / 60, 1)
         if j.get("kind") == "slot":
             requeue = bool(j.get("stopping"))     # 作废停下的单元由申请方重新申请
             for ext in (".req", ".ok", ".why"):
@@ -465,7 +466,9 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         """一个结束了的任务的用量行（usage.jsonl 的一行，finish 与没开跑就跟着记失败的成组成员 gang_fail_unstarted 共用）：
         rc 退出码（字符串；记失败而退出码为 0 的由调用方传 None）、oom 失败是不是 OOM、requeue 有没有重新排队。"""
         u = j.get("use") or {}
-        return {"t0": round(j["t0"]), "t1": round(_C.time.time()), "min": round((_C.time.time() - j["t0"]) / 60, 1), "kind": j.get("kind", "queue"),   # 起止时刻（epoch 秒）
+        now = _C.time.time()
+        sus = round(_M.job_sus(j, now))
+        return {"t0": round(j["t0"]), "t1": round(now), "min": round(max(0.0, now - j["t0"] - sus) / 60, 1), "sus": sus, "kind": j.get("kind", "queue"),   # 起止时刻（epoch 秒）；min 已扣 SIGSTOP 挂起，sus 另记挂起秒数（#149）
                "root": j["q"]["root"] if j.get("q") else None, "queue": j["q"]["jobs"] if j.get("q") else None,
                "project": j.get("project"), "name": j["name"], "tag": j.get("tag"), "rc": rc, "gpus": j["gpus"],
                "vram": j.get("vram"), "est": j.get("est"), "excl": j.get("excl"),
@@ -538,8 +541,10 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         if gpus is None:                          # 上一份状态里没有它（旧 worker 没写过状态）：从进程的 CUDA_VISIBLE_DEVICES 找回，只认此刻看得到的卡
             known = {g["uuid"] for g in _M.gpu_table()}
             gpus = [u for u in (_C.proc_env(pid, "CUDA_VISIBLE_DEVICES") or "").split(",") if u in known] if local else []
+        use = dict(old.get("use") or {})
+        use.pop("sus_on", None)               # 接管时保留已确认的 sus_s，重建挂起观测基线，不把停机未观测时段计为挂起（#149）
         job = dict(_Q.hints(cmd), name=name, cmd=cmd, kind="queue", pid=pid, t0=t0, q=q, project=q["project"], stop=q["stop"],
-                   gpus=gpus, use=old.get("use") or {}, oom0=old.get("oom0"), fc0=old.get("fc0"), owner_gpu=old.get("owner_gpu"), io_sus=old.get("io_sus"),
+                   gpus=gpus, use=use, oom0=old.get("oom0"), fc0=old.get("fc0"), owner_gpu=old.get("owner_gpu"), io_sus=old.get("io_sus"),
                    cpu_fit=old.get("cpu_fit"), gang_with=old.get("gang_with"), gang_stop=old.get("gang_stop"))
         job["excl"] = old.get("excl", job["excl"])
         if job["gang_stop"] and job["gang_stop"].get("sent"):   # 停止请求已发：收尾照原重排规则记
@@ -630,7 +635,9 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                     gpus = json.loads(ok).get("gpus", [])
                 except ValueError:
                     gpus = []
-                self.running[key] = dict(req, t0=os.path.getmtime(base + ".ok"), gpus=gpus, use=old.get("use") or {},
+                use = dict(old.get("use") or {})
+                use.pop("sus_on", None)
+                self.running[key] = dict(req, t0=os.path.getmtime(base + ".ok"), gpus=gpus, use=use,
                                          est=old.get("est") or _S.estimate(self.hist, req), pstart=_C.pstart(pid), io_sus=old.get("io_sus"),
                                          cpu_fit=old.get("cpu_fit"))
                 continue
