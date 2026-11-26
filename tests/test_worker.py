@@ -1063,6 +1063,75 @@ class AdmissionUnitTest(UnitBase):
         self.assertEqual(rc, 2)
         self.assertIn("还没登记：写 --project", out)
 
+    def test_fit_list_other_load_hint_and_prefer_less_crowded(self):
+        # #197：两台同空余主机（t 有他项长队、u 无他项），fit --list 仅报极短聚合提示且不含他人项目名/任务名，
+        # 贪心选主机在已分车道数相同时优先避开拥挤主机；占位任务与暂停清单不计入他项负载
+        now = self.hosts.now()
+        self.hosts.usage("t", [usage_row("j_s0", "bp", now - 3600, now - 1800, ram_peak=1.0, vram_peak=10000.0, cores_peak=1.0)])
+        q, = self.hosts.queues({"L": ["j_s1|true"]}, project="bp")
+        os.makedirs(q["state"])
+        self.hosts.register("t", "L", "bp")
+        t_until = now + 3600 * 2
+        other_runs = [
+            running_job("secret_run1", "secret_proj", gpus=["GPU-a"], root="/x/other", queue="jobs/o.txt"),
+            running_job("secret_run2", "secret_proj", gpus=["GPU-b"], root="/x/other", queue="jobs/o.txt"),
+            running_job("hold_secret", "secret_proj", gpus=[], root="/x/other", queue="jobs/h.txt"),
+        ]
+        other_todo = [
+            {"project": "secret_proj", "root": "/x/other", "queue": "jobs/o.txt",
+             "jobs": ["secret_run1", "secret_run2"] + ["secret_q%d" % i for i in range(1, 9)] + ["hold_wait"],
+             "deps": {}, "gang": {}, "held": None},
+            {"project": "secret_proj", "root": "/x/paused", "queue": "jobs/p.txt",
+             "jobs": ["paused_secret1", "paused_secret2"], "deps": {}, "gang": {}, "held": "pause"},
+        ]
+        other_plan = {
+            "t": now,
+            "lanes": [{"project": "secret_proj", "root": "/x/other", "queue": "jobs/o.txt", "kind": "queue",
+                       "jobs": [{"name": "secret_run1", "t0": now - 600, "t1": now + 1800, "gpus": [0], "run": True},
+                                {"name": "secret_q8", "t0": now + 1800, "t1": t_until, "gpus": [0]}]}],
+        }
+        self.fit_two_cards(host="t", running=other_runs, todo=other_todo, plan=other_plan,
+                           room={"gpus": {"GPU-a": 30000.0, "GPU-b": 30000.0}})
+        self.fit_two_cards(host="u", running=[], room={"gpus": {"GPU-a": 30000.0, "GPU-b": 30000.0}})
+        rc, out = self.fit_list_out(self.d / "L", hosts=("t", "u"))
+        self.assertEqual(rc, 0, out)
+        same_day = time.localtime(t_until)[:3] == time.localtime(now)[:3]
+        expect_ts = time.strftime("%H:%M" if same_day else "%m-%d %H:%M", time.localtime(t_until))
+        self.assertIn("== t（他项 2 跑/8 排，忙至 %s） ==" % expect_ts, out)
+        self.assertIn("== u ==", out)
+        self.assertNotIn("== u（", out)
+        # 卡行不泄露他人任务名
+        self.assertIn("（他项 1 跑）", out)
+        for secret in ("secret_proj", "secret_run1", "secret_run2", "secret_q1", "secret_q8", "paused_secret1", "hold_secret"):
+            self.assertNotIn(secret, out)
+        # t 在 hosts 里排前面但有他项长队，唯一一行 j_s1 优先分到无他项的 u
+        sec_t, sec_u = out.split("== u ==", 1)
+        self.assertNotIn("j_s1 ←", sec_t)
+        self.assertIn("可再开 1 条车道：\n    j_s1 ← 卡 0：", sec_u)
+        # other_load / other_load_text 边界：单跑、单排、过期 until 省略、简化状态仅含 waiting
+        self.assertEqual(self.m.other_load_text({"running": 2, "queued": 0, "until": None}), "他项 2 跑")
+        self.assertEqual(self.m.other_load_text({"running": 0, "queued": 3, "until": now - 60}, now=now, show_until=True), "他项 3 排")
+        w_only = self.m.other_load({"waiting": [{"project": "p2", "name": "a", "held": None}, {"project": "p2", "name": "b", "held": "pause"}]}, "bp")
+        self.assertEqual(w_only, {"running": 0, "queued": 1, "until": None})
+        # Codex 审查：目录 paused 文件暂停生成的 name=None、held=None 等待记录不计入他项排队
+        paused_dir_st = {
+            "todo": [{"project": "p2", "root": "/x/p", "queue": "jobs/p.txt", "jobs": ["p1"], "held": "paused"}],
+            "waiting": [
+                {"project": "p2", "root": "/x/p", "queue": "jobs/p.txt", "name": None, "held": None, "why": "队列暂停中"},
+                {"project": "p2", "root": "/x/p", "queue": "jobs/p.txt", "name": "p1", "held": None, "why": "队列暂停中"},
+            ],
+        }
+        self.assertEqual(self.m.other_load(paused_dir_st, "bp"), {"running": 0, "queued": 0, "until": None})
+        # Codex 审查：目录 paused 文件暂停但仍有任务在收尾时，plan 中未运行后续任务不计入排队与 until，保留收尾任务
+        paused_tail_st = {
+            "running": [{"project": "p2", "root": "/x/p", "queue": "jobs/p.txt", "name": "r1"}],
+            "todo": [{"project": "p2", "root": "/x/p", "queue": "jobs/p.txt", "jobs": ["r1", "p_later"], "held": "paused"}],
+            "plan": {"t": now, "lanes": [{"project": "p2", "root": "/x/p", "queue": "jobs/p.txt",
+                                          "jobs": [{"name": "r1", "t0": now - 600, "t1": now + 1200, "run": True},
+                                                   {"name": "p_later", "t0": now + 1200, "t1": now + 36000}]}]},
+        }
+        self.assertEqual(self.m.other_load(paused_tail_st, "bp"), {"running": 1, "queued": 0, "until": float(now + 1200)})
+
     def test_fit_list_deps_by_state(self):
         # #144：写了 after= 的行按前置此刻的状态（同真放行的 dep_block）分：前置已跑成功的、afterany= 等的已跑完（失败也算）的照常分；
         # 前置还会跑的、跑失败的留在原处并写是哪一个；有别的行写 after= 等着的那一行也留在原处（同 offers 的 cant_move）。

@@ -182,6 +182,7 @@
 | 173 | 测试里的多主机；不读本机 /proc 与 cgroup；不连 ssh；用闸门看运行中状态；git 不认继承的 `GIT_*` | `tests/fixtures.Hosts`（`Clock`）；`tests/fixtures.no_host`（`worker_env`、`worker_module`）；`tests/bin/ssh`（`fixtures.SSH_GUARD`）；`tests/fixtures.gate`、`release`（`WorkerBase.usage`）；`tests/fixtures.no_git_env`（`setUp`、`setUpModule`） |
 | 174 | 测试里起的看板服务要登录；离线预览按身份看 | `tests/fixtures.make_token`、`login`、`bearer_opener`；`tests/pages/preview.py --as`（`accounts`），页面测试的身份 `ADMIN_ME`（`tests/pages/dom.js`） |
 | 175 | 部署到看板；哪些改动不用重启、要拉起 worker 或要浏览器核对页面；一次启动以来的 Traceback；页面文字漏 NaN/undefined/Infinity | `tools/deploy.py` 的 `deploy`（`_update_remote`、`make_bundle`、`wait_new`）；服务端与两种模式共用的判断在 `labmon/deploy.py`：`is_doc`、`is_worker`、`has_worker`、`is_page`、`log_text`、`tracebacks`、`apply`、`status`、在跑哪个提交 `RUNNING`；`leak`（`tests/pages/dom.js`、`check.js`、`smoke.js`） |
+| 176 | 一台主机上除本项目外其他项目的聚合负载与提示（不含他人明细） | `worker.pure.other_load`、`worker.pure.other_load_text`（`fit.fit_list` 与 `api.status` 共用） |
 
 ## 现有的兼容代码
 
@@ -549,3 +550,5 @@
    实现：`tests/fixtures.make_token`、`login`、`bearer_opener`；`tests/pages/preview.py --as`（`accounts`），页面测试的身份 `ADMIN_ME`（`tests/pages/dom.js`）
 175. **部署到看板；哪些改动不用重启、要拉起 worker 或要浏览器核对页面；一次启动以来的 Traceback；页面文字漏 NaN/undefined/Infinity**：部署到看板（等平台操作、更新代码（本机 pull；远端打 git bundle 经 `POST /api/admin/deploy` 传过去，服务端快进、等平台操作做完再重启，#164）、按改动重启与拉起 worker、核对）；哪些改动不用重启、要拉起 worker 或要浏览器核对页面；服务日志里一次启动以来的 Traceback；渲染出的页面文字里漏了 NaN/undefined/Infinity（页面测试与部署的冒烟检查共用）
    实现：`tools/deploy.py` 的 `deploy`（远端模式 `_update_remote`、`make_bundle`、`wait_new`）；服务端与两种模式共用的判断在 `labmon/deploy.py`：`is_doc`、`is_worker`、`has_worker`、`is_page`、`log_text`、`tracebacks`、`apply`、`status`、在跑哪个提交 `RUNNING`；`leak`（`tests/pages/dom.js`，`check.js` 与 `smoke.js` 都取它）
+176. **一台主机上除本项目外其他项目的聚合负载与提示（不含他人明细）**：只读已有 worker `status.json` 的 `running`、`todo`、`waiting`、`plan`，统计除当前项目外其他项目的在跑数（不含占位）、排队数（不含占位与暂停清单）与预计最晚忙到时刻（`#197`），格式化成极短提示（如 `他项 2 跑/8 排`、`他项 2 跑/8 排，忙至 23:40`），绝不输出他人项目名或任务名
+   实现：`worker.pure.other_load`、`worker.pure.other_load_text`（worker 的 `fit.fit_list` 与看板的 `api.status` 共用）

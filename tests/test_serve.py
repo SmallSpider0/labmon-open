@@ -1213,6 +1213,58 @@ class AuthTest(unittest.TestCase):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             M.main(["wait", "-c", "m.toml", "--probe"])
 
+    def test_status_other_load_hint_and_user_isolation(self):
+        """#197：api.status 在主机摘要行附极短他项聚合数（仅在有他项且 worker_up 时显示），普通用户经 users.view 同样安全不泄露他人项目名/任务名。"""
+        from labmon import api as A, users as U
+        now = 1700000000.0
+        snap = {
+            "title": "演示", "generated": now,
+            "hosts": [
+                {"id": "h-busy", "label": "h-busy", "ok": True, "gpus": [{"index": 0, "util": 20, "mem_used": 1024, "mem_total": 49152}]},
+                {"id": "h-idle", "label": "h-idle", "ok": True, "gpus": [{"index": 0, "util": 0, "mem_used": 0, "mem_total": 49152}]},
+                {"id": "h-down", "label": "h-down", "ok": True, "gpus": [{"index": 0, "util": 0, "mem_used": 0, "mem_total": 49152}]},
+            ],
+            "lanes": [], "jobs": [], "groups": [], "alerts": [],
+        }
+        out_dir = PJ.out_dir("mine")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        save_json(out_dir / "snapshot.json", snap)
+        busy_st = {
+            "running": [
+                {"project": "secret_proj", "name": "secret_r1", "root": "/x", "queue": "q.txt"},
+                {"project": "secret_proj", "name": "secret_r2", "root": "/x", "queue": "q.txt"},
+                {"project": "secret_proj", "name": "hold_skip", "hold": True, "root": "/x", "queue": "h.txt"},
+                {"project": "mine", "name": "my_run", "root": "/m", "queue": "q.txt"},
+            ],
+            "todo": [
+                {"project": "secret_proj", "root": "/x", "queue": "q.txt",
+                 "jobs": ["secret_r1", "secret_r2"] + [f"secret_q{i}" for i in range(1, 9)], "held": None},
+                {"project": "secret_proj", "root": "/p", "queue": "p.txt", "jobs": ["paused_x"], "held": "pause"},
+            ],
+            "plan": {"t": now, "lanes": [{"project": "secret_proj", "jobs": [{"name": "secret_q8", "t0": now, "t1": now + 3600}]}]},
+        }
+        glob = {
+            "generated": now, "lan": {"ok": True},
+            "projects": [{"id": "mine", "lanes": [{"host": "h-busy"}, {"host": "h-idle"}, {"host": "h-down"}]}],
+            "hosts": [
+                {"id": "h-busy", "worker_up": True, "status": busy_st},
+                {"id": "h-idle", "worker_up": True, "status": {"running": [{"project": "mine", "name": "my_run"}], "todo": []}},
+                {"id": "h-down", "worker_up": False, "status": busy_st},
+            ],
+        }
+        # 管理员与普通用户（经 users.view）视角均只看到聚合数，绝不泄露他人明细
+        acc = U.Access(projects={"mine"}, allowed={"h-busy", "h-idle", "h-down"}, hosts={"h-busy", "h-idle", "h-down"})
+        who = U.Ident("amy", "user", frozenset({"read", "project"}), "token", "k")
+        for g in (glob, U.view(who, glob, acc=acc)):
+            res = A.status("mine", g, now=now + 10)
+            lines = {ln.strip().split("：", 1)[0]: ln for ln in res["out"].splitlines() if "：" in ln}
+            self.assertIn("；他项 2 跑/8 排", lines["h-busy"])
+            self.assertNotIn("忙至", lines["h-busy"])
+            self.assertNotIn("他项", lines["h-idle"])
+            self.assertNotIn("他项", lines["h-down"])
+            for secret in ("secret_proj", "secret_r1", "secret_r2", "secret_q1", "secret_q8", "paused_x", "hold_skip"):
+                self.assertNotIn(secret, res["out"])
+
     def test_wait_request_cache_isolated_by_account_and_project(self):
         amy = make_token("amy", role="user", scopes=("project",))
         bob = make_token("bob", role="user", scopes=("project",))
