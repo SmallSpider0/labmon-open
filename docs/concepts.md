@@ -183,6 +183,7 @@
 | 174 | 测试里起的看板服务要登录；离线预览按身份看 | `tests/fixtures.make_token`、`login`、`bearer_opener`；`tests/pages/preview.py --as`（`accounts`），页面测试的身份 `ADMIN_ME`（`tests/pages/dom.js`） |
 | 175 | 部署到看板；哪些改动不用重启、要拉起 worker 或要浏览器核对页面；一次启动以来的 Traceback；页面文字漏 NaN/undefined/Infinity | `tools/deploy.py` 的 `deploy`（`_update_remote`、`make_bundle`、`wait_new`）；服务端与两种模式共用的判断在 `labmon/deploy.py`：`is_doc`、`is_worker`、`has_worker`、`is_page`、`log_text`、`tracebacks`、`apply`、`status`、在跑哪个提交 `RUNNING`；`leak`（`tests/pages/dom.js`、`check.js`、`smoke.js`） |
 | 176 | 一台主机上除本项目外其他项目的聚合负载与提示（不含他人明细） | `worker.pure.other_load`、`worker.pure.other_load_text`（`fit.fit_list` 与 `api.status` 共用） |
+| 177 | 项目页主机的 CPU 实时占用与时间线同轴折线 | `collect._host_cpu`（`hosts[].cpu`、`history[].cpu_pct`）、`collect._add_hourly`（`util_hourly`、`cpu_hourly` 共用）；页面上 `cpuView`、`hostSeries`、`tlHostHover`（page.html） |
 
 ## 现有的兼容代码
 

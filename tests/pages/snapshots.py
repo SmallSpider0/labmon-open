@@ -655,14 +655,15 @@ def project() -> dict:
     gpu = lambda i, used, util: {"index": i, "name": "NVIDIA RTX A6000", "util": util, "mem_used": used, "mem_total": 46068.0, "temp": 51.0, "power": 87.5, "power_limit": 300.0}  # noqa: E731
     hosts = [{"id": "srv-a", "label": "srv-a（A6000）", "ok": True, "error": None, "borrow": None, "gpus": [gpu(0, 21000.0, 95.0), gpu(1, 900.0, 3.0)],
               "gpu_procs": [{"pid": 2001, "mem": 20500.0, "cmd": "python train.py"}], "cgroup": {"cpu_usage_ns": 1, "cpu_quota": 17.0, "mem_used": 2.8e10, "mem_limit": 1.3e11, "mem_rss": 1.1e9},
-              "loadavg": [18.8, 15.8, 14.8], "cpu_pct": 6.0,
+              "loadavg": [18.8, 15.8, 14.8], "cpu_pct": 72.9,
+              "cpu": {"used": 12.4, "quota": 17.0, "cpus": 144, "pct": 72.9, "thr": 28.5, "throttled": True, "throttle_alert": False, "throttle_for": 240},
               "mounts": [{"path": "/tmp", "label": "容器 /tmp", "total_gb": 805.3, "avail_gb": 787.6, "used_pct": 2.2, "min_gb": 50}],
               "checks": [{"id": "keepalive", "label": "GPU 保活在跑", "state": "fail", "out": "", "detail": ["STOPPED 进程组 55336"]}],
               # 吃满程度（工作台那一轮 overview.gpu_busy 算好的，#51）；srv-b 没有：退回探针此刻的值
               "busy": [{"i": 0, "now": 95.0, "m10": 88.4, "h1": 72.3, "cov": 3600, "d1": 64.0, "d1cov": 86000},
                        {"i": 1, "now": 0, "m10": 0.0, "h1": 4.2, "cov": 3600, "ka": 99.0, "d1": 1.5, "d1cov": 86000}]},
              {"id": "srv-b", "label": "srv-b", "ok": True, "error": None, "gpus": [gpu(0, 6754.0, 90.0)], "gpu_procs": [], "cgroup": {"cpu_quota": 7.0, "mem_used": 2e9, "mem_limit": 6.5e10, "mem_rss": 1e9},
-              "loadavg": [1.0, 1.0, 1.0], "cpu_pct": 2.0, "mounts": [], "checks": [],
+              "loadavg": [1.0, 1.0, 1.0], "cpu_pct": 6.9, "cpu": {"used": 1.1, "quota": None, "cpus": 16, "pct": 6.9}, "mounts": [], "checks": [],
               "borrow": {"holder": "OWNER", "since": NOW - 16 * H, "until": None, "for": ["proj-a"], "light": True, "cutoff": NOW + 6 * 86400, "why": "OWNER 的租期到期，提前 1 小时",
                          "returning": None, "now": False, "back": [], "tight": None, "overdue": False, "keep": {"vram": 2.0, "ram": 14.5, "cpu": 1.0, "bump": 1.0, "hold": False}, "swap": None}},
              # 算力池借来的（#25、#78）：池放过去的清单在这台上跑，项目「主机」里有它
@@ -674,9 +675,9 @@ def project() -> dict:
              {"id": "pool", "label": "算力池", "pool": True, "ok": True, "error": None}]        # 算力池（collect._hosts 的 pool，#24）：一张小卡
     hist = []
     for k in range(144):
-        t = NOW - (144 - k) * 600
-        hist.append({"t": t, "host": "srv-a", "ok": True, "util": [90.0 - k % 7, 3.0], **({"busy": [80.0 - k % 9, 0.0]} if k >= 72 else {}), "mem": [20000.0 + k, 900.0], "cpu_pct": 5.0 + k % 4, "ram": 1.1e9, "disk": {"/tmp": 787.6 - k * 0.01}})
-        hist.append({"t": t, "host": "srv-b", "ok": True, "util": [85.0], "mem": [6700.0], "cpu_pct": 2.0, "ram": 1e9})
+        t = NOW - (144 - k) * 300
+        hist.append({"t": t, "host": "srv-a", "ok": True, "util": [90.0 - k % 7, 3.0], **({"busy": [80.0 - k % 9, 0.0]} if k >= 72 else {}), "mem": [20000.0 + k, 900.0], "cpu_pct": 48.0 + (k * 7) % 31, "ram": 1.1e9, "disk": {"/tmp": 787.6 - k * 0.01}})
+        hist.append({"t": t, "host": "srv-b", "ok": True, "util": [85.0], "mem": [6700.0], "cpu_pct": 12.0 + k % 8, "ram": 1e9})
     groups = [{"id": "alpha_", "label": "alpha_*", "color": "#7F77DD", "status": "运行中", "auto": True, "done_when": None, "total": 4, "done": 1, "failed": 0, "running": 1, "queued": 2,
                "ratios": [{"cls": "alpha_train", "k": 0.9, "src": "同类近 3 次 实际/估时 ×0.90", "open": True}], "eta_ts": NOW + 7 * H},
               {"id": "probe_", "label": "probe_*", "color": "#D85A30", "status": "有失败", "auto": True, "done_when": None, "total": 2, "done": 0, "failed": 1, "running": 0, "queued": 1, "ratios": [], "eta_ts": None},
@@ -695,6 +696,7 @@ def project() -> dict:
                        {"key": REBAL["key"], "to": "agent", "msg": REBAL["text"]}],          # collect._rebalance 出的：整句只给实验会话（#40）
             "markers": [{"date": "2026-11-13 19:59", "label": "投稿截止", "ts": NOW + 3 * 86400}, {"date": "2026-11-01 10:00", "label": "开题", "ts": NOW - 6 * 86400}],
             "spans": [[NOW - 40 * H, NOW - 30 * H], [NOW - 29 * H, NOW]], "util_hourly": {"srv-a": [[NOW - k * 3600, 80.0 + k % 9] for k in range(30 * 24, 0, -1)], "srv-b": [[NOW - 3600, 85.0]]},
+            "cpu_hourly": {"srv-a": [[NOW - k * 3600, 52.0 + k % 17] for k in range(30 * 24, 0, -1)], "srv-b": [[NOW - 3600, 14.0]]},
             "history": hist, "all_done_ts": NOW + 7 * H, "gpu_mine": {"util": 63.2, "card_s": 52200, "n": 4},
             "attempts": [{"name": "alpha_probe_s9", "lane": la, "t0": NOW - 6.1 * H, "t1": NOW - 6 * H}, {"name": "alpha_probe_s9", "lane": la, "t0": NOW - 6.3 * H, "t1": NOW - 6.2 * H}],
             "no_work_since": None, "thresholds": {"stale_s": stale_limit(120, 5)}, "rebalance": dict(REBAL),

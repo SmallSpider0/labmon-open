@@ -32,7 +32,10 @@
                                                 // 各卡的吃满程度（#51），与 gpus 一一对应：全局快照主机项的 busy 照搬（见下文工作台快照）；worker 不在时没有，页面退回 gpus 的 util
     "gpu_procs": [{"pid": 92352, "mem": 21197, "cmd": "…"}],
     "cgroup": {"cpu_usage_ns": 0, "cpu_quota": 17, "mem_used": 0, "mem_limit": 0, "mem_rss": 0},
-    "cpu_pct": 12.3, "loadavg": [14.8, 15.4, 15.9],
+    "cpu": {"used": 12.4, "quota": 17.0, "cpus": 144, "pct": 72.9, "thr": 28.5, "throttled": true, "throttle_alert": false, "throttle_for": 240},
+                                                // 主机 CPU 实时占用摘要（collect._host_cpu，#208）：优先复用全局快照新鲜 worker 的 info.cpu_used/cpu_quota/nproc/press.thr 与 throttle，
+                                                // 无 worker 或过期时回退探针 cgroup 差分；pct 按 0–100% 封顶（有 quota 按 quota，无 quota 按 cpus 换算）；旧快照没有该字段
+    "cpu_pct": 72.9, "loadavg": [14.8, 15.4, 15.9],
     "mounts": [{"path": "/tmp", "label": "容器 /tmp", "total_gb": 1024.0, "avail_gb": 24.9, "used_pct": 97.6,
                 "min_gb": 10}],                 // 容量与 min_gb 都是 GiB（2^30）；disk_low 按 min_gb 与配置的 max_used_pct 判
     "checks": [{"id": "keepalive", "label": "GPU 保活在跑", "state": "ok|fail|na", "out": "…", "detail": ["…"]}]
@@ -112,6 +115,7 @@
   "spans": [[1793780000, 1793857000]],          // labmon 在采集的区间（断开超过 3 个采集间隔、至少 10 分钟另起一段），存 30 天
   "util_hourly": {"29": [[1793775600, 99.0]]}, // 各主机每小时的平均 GPU 利用率（整点时刻），存 30 天；逐次采样只在 history 里留 24 小时。
                                                // 按 history 的 busy 平均（只有保活时按 0，#51）；11-17 之前的行是探针瞬时值、含保活，存满 30 天自然滚出
+  "cpu_hourly": {"29": [[1793775600, 52.0]]},  // 各主机每小时的平均 CPU 占用百分比（整点时刻），存 30 天（collect._long_term，#208）；按 history 的 cpu_pct 平均，长窗口时间线同轴叠画用
   "gpu_mine": {"util": 63.2, "card_s": 52200, "n": 4},   // 本项目近 24 小时的平均 GPU 利用率（collect.gpu_mine，#51）：各任务所用卡的平均利用率（util_mean），
                                                // 按 卡数 × 落在窗口里的秒数 加权；card_s 卡·秒，n 任务数；窗口里没有用卡的任务为 null
   "attempts": [{"name": "x4_s20_seed1", "lane": "r9_a6000", "t0": 1793850748, "t1": 1793850780}],
