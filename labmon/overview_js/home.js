@@ -226,15 +226,16 @@ tlInit({get: (k, d) => ST.get("ov" + k, d), set: (k, v) => ST.set("ov" + k, v), 
   near: () => (TLH?.hs || []).flatMap(h => D.occ?.[h.id] || []).map(x => [x.t0, x.t1, x.st === "run" || x.st === "plan"])});
 function drawTimeline() {
   const box = document.getElementById("tlbox"); if (!box?.clientWidth || !TLH) return;
-  tlBind(box);
+  tlBind(box); tlFrame();
   const {t0, t1} = tlRange(), rows = [], used = new Set();
   const sep = TLH.hs.length > 1 && TLH.hs.some(h => (h.status?.info?.gpus || []).length > 1);     // 有主机不止一张卡时，每台的第一张卡上面画分隔线
   for (const h of TLH.hs) {
-    const oc = (D.occ?.[h.id] || []).filter(x => x.t1 > t0 && x.t0 < t1);
+    const oc = D.occ?.[h.id] || [];     // 按全量稳定分道（#143），画时再跳过视图外的条
     for (const [k, g] of (h.status?.info?.gpus || []).entries()) {
       const xs = oc.filter(x => x.g.includes(g.i)).map(x => ({...x}));     // 多卡任务每张卡各画一条，各自分道
-      xs.forEach(x => used.add(x.p));
-      rows.push({h: Math.min(40, 6 + 14 * tlPack(xs)), sep: sep && !k, draw: (y, hh, c) => cardRow(h, g, xs, y, hh, c)});
+      xs.forEach(x => { if (x.t1 > t0 && x.t0 < t1) used.add(x.p); });
+      const lay = tlRowLayout(tlPack(xs), OCC_CARD_LAY);
+      rows.push({key: `card:${h.id}:${g.i}`, h: lay.h, sep: sep && !k, draw: (y, hh, c) => cardRow(h, g, xs, lay, y, hh, c)});
     }
   }
   const marks = [...new Map(D.projects.flatMap(p => p.markers || []).map(m => [m.label + m.ts, m])).values()];
@@ -243,10 +244,10 @@ function drawTimeline() {
   const lg = document.getElementById("tllegend");
   if (lg) lg.innerHTML = [...used].map(p => projName(p, {always: true})).join(" &nbsp;");     // 只列这段时间图上有的
 }
-function cardRow(h, g, xs, y, hh, c) {
+function cardRow(h, g, xs, lay, y, hh, c) {
   let s = `<text x="0" y="${y + hh / 2 + 4}" ${tip(`${h.label} GPU ${g.i}：现在 ${mb2g(g.used)} / ${mb2g(g.total)} GiB`)}>${esc(fit((TLH.showHost ? hostShort(h) + " " : "") + "卡 " + g.i, c.L - 6))}</text>`;
   s += `<rect x="${c.L}" y="${y + hh / 2 - .5}" width="${c.PW}" height="1" fill="var(--line)"/>`;
-  s += occBars(xs, y, hh, c, {color, label: x => x.n,
+  s += occBars(xs, y, hh, c, {layout: lay, color, label: x => x.n,
     text: x => `${projName(x.p, {always: true, plain: true})}${x.lane ? x.lane + " · " : ""}${x.n}\n${occState(x)} · ${ts(x.t0)} → ${ts(x.t1)}（${dur(x.t1 - x.t0)}）· 卡 ${x.g.join(",")}`
       + (x.after ? `\n等 ${afterText(x.after)} 跑完才轮到` : "")});
   if (h.lease_end >= c.t0 && h.lease_end <= c.t1) {

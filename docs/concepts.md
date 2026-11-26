@@ -125,7 +125,7 @@
 | 116 | 工作台存的用量记录；存着记录的主机 | 路径 `state.usage_file`；`state.usage_hosts`（`waits.JobWatch.check`、`collect._attempts`）；项目页的失败尝试 `collect._attempts` |
 | 117 | 等待原因的结构化字段 | worker 等待项的 `miss`（`place`）、`local[].how`（`copy`、`redo`、`mixed`）；看板按字段认，不按 `why` 文字 |
 | 118 | 容量单位 | `worker.pure.GIB`（`config.GIB` 与 worker 共用）；页面上 `GIB`（common.js） |
-| 119 | 时间线 | common.js 的 `tlInit`、`tlRange`、`tlBind`、`tlSvg`、`tlShow`、`jobBar`、`tlPack`、`occBars`（`OCC_ST`、`occItems`）；「全部」要包住的区间 `tlSpan`；近景按现在前后的任务定宽 `tlFit`（`TL_FIT`、`near()`）；排在谁后面 `afterText` |
+| 119 | 时间线 | common.js 的 `tlInit`、`tlRange`、`tlBind`、`tlSvg`、`tlShow`、`jobBar`、`tlPack`、`tlRowLayout`、`tlOverflow`、`tlMoreBar`、`occBars`（`OCC_ST`、`OCC_CARD_LAY`、`OCC_OTHER_LAY`、`occItems`）；拖动布局锁 `tlFrame`、`tlLock`、`tlUnlock`、`tlLockFlag`、`tlLockRow`、`tlLockLw`；「全部」要包住的区间 `tlSpan`；近景按现在前后的任务定宽 `tlFit`（`TL_FIT`、`near()`）；排在谁后面 `afterText` |
 | 120 | 项目页时间线的依赖连线 | `depLines`（`depEdges`、`depRoute`、`depVia`）、`depChain`、`depOn`、悬停与点 `depHover`（`DEPH`）；条的位置、行号由 `laneRow` 记进 `c.pos`（page.html） |
 | 121 | 触屏上点一格：第一次只看，3 秒内再点同一格才动作 | `tapTwice`（page.html、`gsqClick`） |
 | 122 | 自动归组 | `worker.pure.GROUP_RE`（`config.AUTO_GROUP_RE` 用于 `collect._group_of`、`config.set_project`，worker `duration` 借同前缀估时比值共用） |
@@ -435,8 +435,8 @@
    实现：worker 等待项的 `miss`（`place` 定）、`local[].how`（`copy`/`redo`/`mixed`）；看板按字段认，不按 `why` 文字
 118. **容量单位**：容量单位（GiB = 2^30；挂载点、共享盘、内存）
    实现：`worker.pure.GIB`（`config.GIB` 与 worker 共用）；页面上 `GIB`（common.js）
-119. **时间线**：时间线（视图与拖动缩放、刻度、里程碑与现在线、按主机分组的分隔线（行的 `sep`）、任务条、占用条、图例、左栏按行名放宽（`lw`）；项目页与工作台共用）
-   实现：common.js 的 `tlInit`、`tlRange`、`tlBind`、`tlSvg`、`tlShow`、`jobBar`、`tlPack`、`occBars`（状态名 `OCC_ST`、图例 `occItems`）；「全部」要包住的区间 `tlSpan`；近景按现在前后的任务定宽 `tlFit`（参数 `TL_FIT`，两页的 `near()` 给任务）；排在谁后面 `afterText`
+119. **时间线**：时间线（视图与拖动缩放、刻度、里程碑与现在线、按主机分组的分隔线（行的 `sep`）、任务条、占用条、全量稳定分道（#143）、超 4 道压细与超上限最后一道「+N 个」聚合条（#178）、拖动/滚轮平移缩放布局锁（#143）、图例、左栏按行名放宽（`lw`）；项目页与工作台共用）
+   实现：common.js 的 `tlInit`、`tlRange`、`tlBind`、`tlSvg`、`tlShow`、`jobBar`、`tlPack`、`tlRowLayout`、`tlOverflow`、`tlMoreBar`、`occBars`（状态名 `OCC_ST`、行布局 `OCC_CARD_LAY`/`OCC_OTHER_LAY`、图例 `occItems`）；拖动布局锁 `tlFrame`、`tlLock`、`tlUnlock`、`tlLockFlag`、`tlLockRow`、`tlLockLw`；「全部」要包住的区间 `tlSpan`；近景按现在前后的任务定宽 `tlFit`（参数 `TL_FIT`，两页的 `near()` 给任务）；排在谁后面 `afterText`
 120. **项目页时间线的依赖连线**：项目页时间线的依赖连线（#111：边取本项目的 `deps`、两端都画在图上；平时只画关键的：同一车道的、能经别的依赖或车道顺序推出来的不画；悬停或触屏点一格高亮它的整条上下游（只沿依赖），链上不是传递边的线显出；线压在条下面（`tlSvg` 的 `o.under`），直角折线走行缝）
    实现：`depLines`（边 `depEdges`、走法 `depRoute`、传递判定 `depVia`）、`depChain`、`depOn`、悬停与点 `depHover`（状态 `DEPH`）；条的位置、行号由 `laneRow` 记进 `c.pos`（page.html）
 121. **触屏上点一格：第一次只看，3 秒内再点同一格才动作**：触屏上点一格：第一次只看（悬停文字），3 秒内再点同一格才动作（收起行小方块定位、任务条跳到任务明细）
