@@ -51,6 +51,7 @@ def probe_spec(cfg: dict, host: dict) -> dict:
             # 本机的队列，以及已归还主机上由本机经共享盘代读的队列（readonly：只读文件，PID 属于别的机器，不查进程；已确认全跑完的带 done_sig 短路，#164）；
             # 算力池里的（pool，#78）同样代读，但清单是刚从别处搬回池里的：那边手上在跑的还在跑，current 里放行的主机不是这台的照 #95 按在跑算
             "queues": [{k: v for k, v in q.items() if k not in ("label", "host", "read_via", "reg", "reg_t", "reg_live", "reg_sleeping", "reg_stop", "done_sig", "done_act")}
+                       | ({"sleep_skip": True} if q.get("reg") else {})
                        | ({"readonly": True, **({"done_sig": q["done_sig"], "done_act": q.get("done_act")} if q.get("done_sig") else {})} if q["read_via"] else {})
                        | ({"pool": True} if q["host"] == POOL else {})
                        for q in cfg["queues"] if (q["read_via"] or q["host"]) == host["id"]],

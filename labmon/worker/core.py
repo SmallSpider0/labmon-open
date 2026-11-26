@@ -733,27 +733,9 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         这台手上已在跑的照样盯到跑完（running 不靠登记）。第一轮也先读一次别的主机（peers）再定。
         跑空满 IDLE_REG_S（2 天，#164）转休眠的登记：每轮只对清单文件做一次 file_sig（复用登记文件的 stat 判重登记），
         不读 .env、状态目录与标记；清单文件或登记文件一变立即醒来照常排。"""
-        out, bad, seen_f = [], [], set()
+        out, bad = [], []
         prev_q = {(os.path.normpath(j.get("root") or ""), j.get("queue")) for j in getattr(self, "prev", {}).values() if j.get("kind") == "queue"}
-        for f in sorted(glob.glob(os.path.join(self.p.queues, "*.json"))):
-            try:
-                st = os.stat(f)
-            except OSError:                       # 这一轮刚被 rm、被 worker add 搬走
-                continue
-            seen_f.add(f)
-            rsig, mtime = (st.st_ino, st.st_mtime_ns, st.st_size), st.st_mtime
-            cached = self.reg_cache.get(f)
-            if cached and cached[0] == rsig:
-                reg, changed = cached[2], False
-            else:
-                changed = cached is not None
-                try:
-                    with open(f) as fh:
-                        reg = json.load(fh)
-                    reg["_slug"] = os.path.basename(f)[:-5]
-                except (OSError, ValueError, TypeError, AttributeError) as e:
-                    reg = e
-                self.reg_cache[f] = (rsig, mtime, reg)
+        for f, reg, rsig, mtime, changed in _Q.regs(self.p.queues, cache=self.reg_cache, with_meta=True):
             if isinstance(reg, Exception):
                 bad.append((f, reg))
                 continue
@@ -785,7 +767,6 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 bad.append((f, e))
                 continue
             out.append(q)
-        self.reg_cache = {f: v for f, v in self.reg_cache.items() if f in seen_f}
         for f, e in bad:
             if f not in self.bad_reg:
                 self.bad_reg.add(f)
@@ -1020,6 +1001,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 continue
             os.makedirs(q["state"], exist_ok=True)
             os.makedirs(q["logs"], exist_ok=True)
+            jsig0 = _P.file_sig(q["jobs_path"])      # 读清单前的签名：进休眠前复核一致，避免读后追加的新行被旧判定吞掉（#164）
             rows = _Q.list_jobs(q)                   # 清单（每轮重读）与并行数 q["par"]：换名、接管来的任务 key 照它定（run_key）
             self.rekey(q)
             mine = {(j["name"], j.get("pid")) for j in self.lane(q["key"])}
@@ -1073,8 +1055,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 else:
                     ent["rsig"] = q.get("_rsig")
                 q["empty_since"] = round(ent["since"])
-                if now - ent["since"] >= _P.IDLE_REG_S:
-                    ent["sig"] = _P.file_sig(q["jobs_path"])
+                if now - ent["since"] >= _P.IDLE_REG_S and jsig0 is not None and _P.file_sig(q["jobs_path"]) == jsig0:
+                    ent["sig"] = jsig0
                     ent["sleep"] = True
                     q["sleeping"] = True
                     self.sleep_marks[q["key"]] = self._mark_snapshot(q["state"], rows)

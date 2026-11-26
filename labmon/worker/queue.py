@@ -15,18 +15,52 @@ def qslug(root, jobs):
     return _C.NAME_RE.sub("_", os.path.basename(root.rstrip("/")) + "__" + jobs)[:110] + "__" + hashlib.sha1(root.encode()).hexdigest()[:6]
 
 
-def regs(qdir):
+def regs(qdir, *, cache=None, with_meta=False):
     """一台主机登记目录（Paths.queues）下的登记：[(文件, 登记内容（带 _slug）或读坏了时的异常)]，按登记文件名（qslug）的顺序，不是登记先后。
-    登记文件只在这里读：reg_files、registry（Worker.registry、worker add 查状态目录、fit 找清单行）都经它。"""
-    out = []
+    登记文件只在这里读：reg_files、registry（worker add 查状态目录、fit 找清单行）、Worker.registry、Worker.pool_todo 都经它（#164）。
+    cache：可选的 {文件: (rsig, st_mtime, reg)} 缓存；只缓存成功读到的 dict，临时读取失败或坏 JSON 不缓存，下一轮自动重试；已消失的文件一并清理。
+    with_meta=True 时返回 [(文件, 登记内容或异常, rsig, st_mtime, changed)]（rsig 为文件签名，changed 表示相较缓存有更新）。"""
+    out, seen = [], set()
     for f in sorted(glob.glob(os.path.join(qdir, "*.json"))):
-        try:
-            with open(f) as fh:
-                reg = json.load(fh)
-            reg["_slug"] = os.path.basename(f)[:-5]
-            out.append((f, reg))
-        except (OSError, ValueError, TypeError, AttributeError) as e:
-            out.append((f, e))
+        if cache is not None or with_meta:
+            try:
+                st = os.stat(f)
+            except OSError:                       # 这一轮刚被 rm、被 worker add 搬走
+                continue
+            seen.add(f)
+            rsig, mtime = (st.st_ino, st.st_mtime_ns, st.st_size), st.st_mtime
+            cached = cache.get(f) if cache is not None else None
+            if cached and cached[0] == rsig:
+                reg, changed = cached[2], False
+            else:
+                changed = cached is not None
+                try:
+                    with open(f) as fh:
+                        reg = json.load(fh)
+                    if not isinstance(reg, dict):
+                        raise TypeError("登记文件不是 JSON 对象")
+                    reg["_slug"] = os.path.basename(f)[:-5]
+                except (OSError, ValueError, TypeError, AttributeError) as e:
+                    reg = e
+                    if cache is not None:
+                        cache.pop(f, None)        # 不按文件签名永久缓存临时 I/O 异常或坏文件
+                else:
+                    if cache is not None:
+                        cache[f] = (rsig, mtime, reg)
+            out.append((f, reg, rsig, mtime, changed) if with_meta else (f, reg))
+        else:
+            try:
+                with open(f) as fh:
+                    reg = json.load(fh)
+                if not isinstance(reg, dict):
+                    raise TypeError("登记文件不是 JSON 对象")
+                reg["_slug"] = os.path.basename(f)[:-5]
+                out.append((f, reg))
+            except (OSError, ValueError, TypeError, AttributeError) as e:
+                out.append((f, e))
+    if cache is not None:
+        for k in [k for k in cache if k not in seen]:
+            cache.pop(k, None)
     return out
 
 

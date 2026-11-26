@@ -171,20 +171,23 @@ class DepsMixin:
         idx.update((k, "pending") for k in where)
         want = ({(p, x) for ln in self.todo for ds in ln["deps"].values() for p, x in ds} | {k[:2] for r in reqs for k in dep_keys(r)}
                 | {k[:2] for r in self.pool_heads for x in [r] + [dict(h, project=r["project"]) for _, h in r.get("win") or ()] for k in dep_keys(x)})
-        # 重启后恢复休眠态的队列尚未缓存 sleep_marks：仅当真有依赖找不到（手工 .done 不在 usage.jsonl 里）时按需懒读一次同项目休眠队列的状态目录
-        miss_p = {p for p, n in want if (p, n) not in idx}
-        if miss_p:
+        # 重启后恢复休眠态的队列尚未缓存 sleep_marks：当有同项目的依赖查询时按需懒读一次该休眠队列的状态目录，
+        # 无论 usage.jsonl 是否已有旧记录（如历史失败后手工 .done 或反之），都以本机标记为准并与非休眠队列同口径覆盖 idx（#164）
+        want_p = {p for p, _ in want}
+        if want_p:
             smarks = getattr(self, "sleep_marks", None)
             if smarks is not None:
+                hist_idx = {k: v for k, (v, _) in last.items()}
                 for q in queues:
-                    if q.get("sleeping") and q["project"] in miss_p and q["key"] not in smarks and q.get("_reg"):
+                    if q.get("sleeping") and q["project"] in want_p and q["key"] not in smarks and q.get("_reg"):
                         full = _Q.load_queue(q["_reg"])
                         sm = self._mark_snapshot(full["state"], _Q.list_jobs(full))
                         smarks[q["key"]] = sm
                         for n, v in sm.items():
-                            self.marks[(q["project"], n)] = v if self.marks.get((q["project"], n), v) == v else "?"
-                            if (q["project"], n) not in where:
-                                idx[(q["project"], n)] = self.marks[(q["project"], n)] if self.marks[(q["project"], n)] != "?" else idx.get((q["project"], n), "failed")
+                            mk = (q["project"], n)
+                            self.marks[mk] = v if self.marks.get(mk, v) == v else "?"
+                            if mk not in where:
+                                idx[mk] = self.marks[mk] if self.marks[mk] != "?" else hist_idx.get(mk, "failed")
         self.dep_idx, self.dead, self.dep_where, self.dep_lanes = idx, {k for k, v in idx.items() if v == "failed"}, where, lanes
         self.dep_miss = {k: t for k, t in self.dep_miss.items() if k in want and k not in idx}
 

@@ -8121,6 +8121,141 @@ class IdleSleepTest(UnitBase):
         self.assertIn("另有 4 条已休眠的登记", txt)
         self.assertNotIn("s3.txt", txt)
 
+    def test_reg_cache_retries_after_transient_io_error(self):
+        # 主审意见 #1 / #3：登记文件读取统一经 worker.queue.regs(cache=...)，临时读取 OSError 不得按文件签名永久缓存
+        q, = self.hosts.queues({"s": ["j1|sleep 30   # gpus=0"]}, "pa")
+        self.assertEqual(self.add(q)[0], 0)
+        rf = next((self.hosts.home / "hosts" / "t" / "queues").glob("*.json"))
+        real_open = open
+        boom = [True]
+
+        def flaky_open(path, *a, **k):
+            if boom[0] and str(path) == str(rf):
+                boom[0] = False
+                raise OSError("transient NFS read error")
+            return real_open(path, *a, **k)
+
+        with mock.patch("builtins.open", side_effect=flaky_open):
+            self.assertEqual(self.w.registry(), [])
+        # 文件签名（ino/mtime/size）未变，但下一轮能正常读回登记，不会被缓存的异常锁死
+        qs = self.w.registry()
+        self.assertEqual(len(qs), 1)
+        self.assertEqual(qs[0]["jobs"], q["jobs"])
+        # 池目录同理：临时 OSError 后下一轮恢复
+        self.assertEqual(self.add(q, host="pool")[0], 0)
+        pf = next((self.hosts.home / "hosts" / "pool" / "queues").glob("*.json"))
+        boom[0] = True
+
+        def flaky_pool_open(path, *a, **k):
+            if boom[0] and str(path) == str(pf):
+                boom[0] = False
+                raise OSError("transient NFS read error")
+            return real_open(path, *a, **k)
+
+        with mock.patch("builtins.open", side_effect=flaky_pool_open):
+            self.w.pool_todo(self.hosts.now())
+            self.assertEqual(self.w.pool_heads, [])
+        self.w.pool_todo(self.hosts.now())
+        self.assertEqual(len(self.w.pool_heads), 1)
+
+    def test_restart_restores_sleep_marks_over_hist(self):
+        # 主审意见 #2：休眠清单的 A 在 usage.jsonl 有历史失败记录，但状态目录里手工放了 A.done；
+        # worker 重启丢失 sleep_marks 后，同机 B after=A 仍应懒读恢复该休眠清单标记覆盖历史失败并正常放行。
+        qa, qb = self.hosts.queues({"s": ["A|true   # gpus=0"], "b": ["B|sleep 30   # gpus=0 after=A"]}, "pa")
+        for q in (qa, qb):
+            os.makedirs(q["state"], exist_ok=True)
+        self.hosts.usage("t", [{"name": "A", "project": "pa", "rc": "1",
+                                "t0": int(self.hosts.now() - 4 * 86400), "t1": int(self.hosts.now() - 4 * 86400 + 60)}])
+        Path(qa["state"], "A.done").write_text("")
+        self.assertEqual(self.add(qa, host="t")[0], 0)
+        self.w.reload_hist()
+        self.w.tick(self.w.registry(), True)
+        self.hosts.advance(self.m.IDLE_REG_S + 10)
+        self.w.tick(self.w.registry(), False)
+        self.assertTrue(self.status()["queues"][0]["sleeping"])
+        self.assertEqual(self.add(qb, host="t")[0], 0)
+        # 重启 worker（sleep_marks 为空，但 hist 里已有 ("pa", "A")="failed"）
+        w2 = self.hosts.worker("t")
+        w2.load_prev()
+        qs = w2.registry()
+        self.assertTrue(any(q["root"] == qa["root"] and q.get("sleeping") for q in qs))
+        w2.tick(qs, True)
+        try:
+            self.assertEqual(w2.dep_idx.get(("pa", "A")), "done")
+            self.assertTrue(any(j["name"] == "B" for j in w2.running.values()))
+        finally:
+            for j in list(w2.running.values()):
+                try:
+                    os.killpg(j["pid"], 9)
+                except OSError:
+                    pass
+
+    def test_sleep_race_append_after_read_not_missed(self):
+        # 主审意见 #5：worker 读完清单判定无待办后、存休眠签名之前，实验会话恰好追加新行 j2；
+        # 必须对比读前读后签名，内容已变则本轮不转休眠，下一轮立即读到并放行 j2（pool_todo 同理）。
+        q, = self.hosts.queues({"s": ["j1|true   # gpus=0"]}, "pa")
+        os.makedirs(q["state"], exist_ok=True)
+        Path(q["state"], "j1.done").write_text("")
+        self.assertEqual(self.add(q)[0], 0)
+        self.w.tick(self.w.registry(), True)
+        self.hosts.advance(self.m.IDLE_REG_S + 10)
+        real_next = self.m.queue.next_jobs
+        injected = [False]
+
+        def hook_next(*a, **k):
+            res = real_next(*a, **k)
+            if not injected[0]:
+                injected[0] = True
+                with Path(q["jobs_path"]).open("a") as f:
+                    f.write("j2|sleep 30   # gpus=0\n")
+            return res
+
+        with mock.patch.object(self.m.queue, "next_jobs", side_effect=hook_next):
+            self.w.tick(self.w.registry(), False)
+        # 读后追加了 j2：不能用新签名进入休眠
+        self.assertFalse(self.status()["queues"][0]["sleeping"])
+        qs2 = self.w.registry()
+        self.assertFalse(qs2[0].get("sleeping"))
+        self.w.tick(qs2, False)
+        try:
+            self.assertTrue(any(j["name"] == "j2" for j in self.w.running.values()))
+        finally:
+            for j in list(self.w.running.values()):
+                try:
+                    os.killpg(j["pid"], 9)
+                except OSError:
+                    pass
+
+    def test_pool_sleep_race_append_after_read_not_missed(self):
+        # 主审意见 #5（算力池 pool_todo 路径）：读完 rows 后、进入休眠前追加新行 p2，不能带着新签名进入休眠
+        qp, = self.hosts.queues({"p": ["p1|true   # gpus=0"]}, "pa")
+        os.makedirs(qp["state"], exist_ok=True)
+        Path(qp["state"], "p1.done").write_text("")
+        self.assertEqual(self.add(qp, host="pool")[0], 0)
+        self.w.pool_todo(self.hosts.now())
+        h0 = next(x for x in self.w.pool_heads if x["root"] == qp["root"])
+        self.assertFalse(h0.get("sleeping"))
+        self.hosts.advance(self.m.IDLE_REG_S + 10)
+        real_left = self.m.queue.rows_left
+        pinj = [False]
+
+        def hook_left(*a, **k):
+            res = real_left(*a, **k)
+            if not pinj[0]:
+                pinj[0] = True
+                with Path(qp["jobs_path"]).open("a") as f:
+                    f.write("p2|true   # gpus=0\n")
+            return res
+
+        with mock.patch.object(self.m.queue, "rows_left", side_effect=hook_left):
+            self.w.pool_todo(self.hosts.now())
+        self.assertTrue(pinj[0])
+        h1 = next(x for x in self.w.pool_heads if x["root"] == qp["root"])
+        self.assertFalse(h1.get("sleeping"))
+        self.w.pool_todo(self.hosts.now())
+        h2 = next(x for x in self.w.pool_heads if x["root"] == qp["root"])
+        self.assertEqual((h2["name"], h2["n"]), ("p2", 1))
+
 
 class WorkerPackageTest(unittest.TestCase):
     """#168 第 1 步：worker 拆成 labmon/worker/ 子包后，默认路径、薄入口转发与模块级打桩透传均保持与原单文件一致。"""

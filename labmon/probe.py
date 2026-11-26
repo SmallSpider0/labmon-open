@@ -219,7 +219,7 @@ def queue_gpu_queue(q):
     root = q["root"]
     jpath = os.path.join(root, q["jobs"])
     wk = q.get("worker") or {}
-    if wk.get("sleeping"):                       # worker 已休眠（空满 IDLE_REG_S，#164）：不读 .env、状态目录与清单
+    if q.get("sleep_skip") and wk.get("sleeping"):   # 仅只在登记里有的车道在 worker 休眠后短路（monitor.toml 显式配置的车道始终保留任务与统计，#164）
         return {"jobs": [], "marks": {}, "state_dir": None, "logs_dir": None, "worker": q.get("worker"),
                 "lock_pid": None, "lock_alive": False, "paused": None, "activity": wk.get("empty_since"),
                 "current": [], "log_tail": [], "sleeping": True}

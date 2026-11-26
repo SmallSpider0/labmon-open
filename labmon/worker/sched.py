@@ -1117,27 +1117,9 @@ class SchedMixin:
         if not hasattr(self, "pool_idle"):
             self.pool_idle, self.pool_reg_cache, self.opars = {}, {}, {}
         qdir = os.path.join(_C.HOME, "hosts", _C.POOL, "queues")
-        seen_f, seen_k = set(), set()
-        for f in sorted(glob.glob(os.path.join(qdir, "*.json"))):
-            try:
-                st = os.stat(f)
-            except OSError:
-                continue
-            seen_f.add(f)
-            rsig = (st.st_ino, st.st_mtime_ns, st.st_size)
-            cached = self.pool_reg_cache.get(f)
-            if cached and cached[0] == rsig:
-                reg, changed = cached[1], False
-            else:
-                changed = cached is not None
-                try:
-                    with open(f) as fh:
-                        reg = json.load(fh)
-                    reg["_slug"] = os.path.basename(f)[:-5]
-                except (OSError, ValueError, TypeError, AttributeError):
-                    reg = None
-                self.pool_reg_cache[f] = (rsig, reg)
-            if not isinstance(reg, dict) or not (reg.get("root") and reg.get("jobs") and reg.get("project")):
+        seen_k = set()
+        for f, reg, _rsig, _mtime, changed in _Q.regs(qdir, cache=self.pool_reg_cache, with_meta=True):
+            if isinstance(reg, Exception) or not (reg.get("root") and reg.get("jobs") and reg.get("project")):
                 continue
             key, root, jobs = reg["_slug"], reg["root"], reg["jobs"]
             seen_k.add(key)
@@ -1155,6 +1137,7 @@ class SchedMixin:
                 q = _Q.load_queue(reg)
             except (OSError, ValueError, KeyError, TypeError, AttributeError):
                 continue
+            jsig0 = _P.file_sig(q["jobs_path"])             # 读清单前的签名：进休眠前复核一致，避免读后追加的新行被吞（#164）
             rows = self.list_of(q["jobs_path"])
             if rows is None:                                # 这台读不到清单文件：照样列出来（带原因），看板取读得到的那台的（#86）
                 self.pool_idle.pop(key, None)
@@ -1177,13 +1160,10 @@ class SchedMixin:
             if not left and not away and not paused:
                 ent = self.pool_idle.get(key)
                 if ent is None:
-                    t_add = q.get("added_t") or 0
-                    rn = os.path.normpath(q["root"])
-                    t_hist = max((x.get("t1") or 0 for x in getattr(self, "hist", ()) if x.get("queue") == q["jobs"] and os.path.normpath(x.get("root") or "") == rn), default=0)
-                    since = min(now, max(t_add, t_hist)) if (t_add or t_hist) else now
+                    since = self._idle_start(q, now, False) if hasattr(self, "_idle_start") else now
                     ent = self.pool_idle[key] = {"since": since, "sig": None, "sleep": False}
-                if now - ent["since"] >= _P.IDLE_REG_S:
-                    ent["sig"] = jsig
+                if now - ent["since"] >= _P.IDLE_REG_S and jsig0 is not None and jsig == jsig0:
+                    ent["sig"] = jsig0
                     ent["sleep"] = True
                     sleeping = True
             else:
@@ -1198,7 +1178,6 @@ class SchedMixin:
                   "deps": {n: [[p, x] for p, x, _ in d] for n, h in left for d in [_DP.dep_keys(dict(h, project=q["project"]))] if d},
                   "held": paused, **({"par": par} if par > 1 else {})}
             out.append((_C.POOL, 0.0, now, ln))
-        self.pool_reg_cache = {f: v for f, v in self.pool_reg_cache.items() if f in seen_f}
         self.pool_idle = {k: v for k, v in self.pool_idle.items() if k in seen_k}
         return out
 

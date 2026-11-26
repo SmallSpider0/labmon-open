@@ -721,6 +721,30 @@ class RegLanesTest(Base):
         st_txt = A.status("p1", glob={}, now=now)["out"]
         self.assertIn("另有 2 条已跑完的车道（共 3 个任务，不占车道编号）", st_txt)
 
+    def test_explicit_monitor_lane_keeps_results_when_sleeping(self):
+        # 主审意见 #4：monitor.toml 显式配置的车道即使 worker 已休眠（sleeping=True），
+        # 因为该车道按约定始终显示，探针不能短路成空列表，需保留完成统计（2/2）与失败告警（failed:）。
+        from labmon.state import save_json, state_dir
+        (self.d / "hosts.toml").write_text(f'[[hosts]]\nid = "here"\ndata_root = "{self.d / "data"}"\nshared = ["{self.d}"]\n')
+        kept = self.done_list("kept", 3 * 86400)
+        (kept / "state" / "kept_1.done").unlink()
+        (kept / "state" / "kept_1.failed").write_text("")
+        now = time.time()
+        wst = self.d / "data" / "labmon" / "hosts" / "here" / "status.json"
+        wst.parent.mkdir(parents=True)
+        wst.write_text(json.dumps(fake_status(queues=[
+            {"root": str(kept), "jobs": "jobs/kept.txt", "project": "p1", "empty": True, "sleeping": True, "empty_since": int(now - 3 * 86400)},
+        ])))
+        save_json(state_dir() / "snapshot.json", {"regs": [
+            {"host": "here", "state": "active", "stale": False, "t": 0,
+             "queues": [{"root": str(kept), "jobs": "jobs/kept.txt", "project": "p1", "stop": None, "gpus": None, "empty": True, "sleeping": True, "added_t": now - 9 * 86400}]},
+        ]})
+        cfg = self.cfg(f'[[queues]]\nid = "kept"\nhost = "here"\nroot = "{kept}"\njobs = "jobs/kept.txt"\n')
+        snap = C.collect(cfg)
+        (ln,) = snap["lanes"]
+        self.assertEqual((ln["id"], ln["total"], ln["done"], ln["failed"]), ("kept", 2, 1, 1))
+        self.assertTrue(any(a["key"] == "failed:kept_1" for a in snap["alerts"]))
+
     def test_wait_targets_hosts_with_lanes(self):
         # labmon wait 的主机定向按项目快照的主机（登记带来的主机也算），不看 monitor.toml
         from labmon.waits import wait_check
