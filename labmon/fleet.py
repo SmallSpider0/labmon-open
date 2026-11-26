@@ -79,6 +79,7 @@ from .health import container_step, lease_due, link_step
 from .health import lease_end as _lease_end
 from .records import log_events
 from .state import append_row, load_json, save_json, state_dir as _state_dir
+from .worker.pure import mem_unevictable, proc_tree, script_arg
 
 HERE = Path(__file__).resolve().parent
 PROBE = HERE / "fleet_probe.sh"
@@ -345,9 +346,9 @@ def parse(raw: str) -> dict:
     smp["started"] = round(bt + p1 / tck) if bt and tck and p1 is not None else None
     smp["btime"], smp["tck"] = bt, tck              # 进程出生时钟换成墙上时刻（analyze 的 ka_group）
     lim, use, ina, act = (_num(info.get(k)) for k in ("memlim", "memuse", "inact", "actf"))
-    # 收不回的内存 = 用量 − 文件页：与 worker 的 mem_unevictable 同一口径（两份：探针在没有 Python 的镜像里跑，worker 不 import 本包）
+    # 收不回的内存 = 用量 − 文件页（与 worker 共用 pure.mem_unevictable）
     smp["mem"] = {"limit": lim / GIB, "used": (use - (ina or 0)) / GIB,
-                  "anon": max(0, use - ina - act) / GIB if ina is not None and act is not None else None} \
+                  "anon": mem_unevictable(use, act, ina) / GIB if ina is not None and act is not None else None} \
         if lim and use and lim < 2 ** 60 else None
     q = (info.get("cpuq") or "").split() or (info.get("cpumax") or "").split()
     smp["cpu_quota"] = round(int(q[0]) / int(q[1]), 2) if len(q) == 2 and q[0].isdigit() and q[1].isdigit() and int(q[0]) > 0 else None
@@ -534,18 +535,16 @@ def _script(args: str) -> tuple[str | None, list[str]]:
 
 def _abs_script(args: str, cwd: str | None) -> str | None:
     """python 跑的脚本写的是相对路径时，按进程工作目录还原的完整路径（只做 normpath：看板这边解不开对方的符号链接）；
-    不是 python、-m 或 -c、没有脚本、已是绝对路径、不知道工作目录的为 None。取第一个不以 - 开头的参数，同 ka.sh 认保活（#29）。
-    认保活与规则（classify 另拿它比一遍、mark_keepalive 写它）：相对路径起的与写完整路径起的同一脚本归类一样。
-    探针 fleet_probe.sh 的 script_abs 是同一条规则（探针在未必有 Python 的镜像里跑，各一份）。"""
+    不是 python、-m 或 -c、没有脚本、已是绝对路径、不知道工作目录的为 None。选项跳过与路径还原复用 pure.script_arg（与 worker 共用）。
+    探针 fleet_probe.sh 的 script_abs 是同一条规则（探针在未必有 Python 的镜像里跑）。"""
     t = args.split()
     if not cwd or not t or not re.fullmatch(r"python[\d.]*", _exe(args)):
         return None
-    i = 1
-    while i < len(t) and t[i].startswith("-"):
-        if t[i] == "-m" or re.fullmatch(r"-[^-]*c", t[i]):     # -m 模块、-c / -uc 代码：没有脚本
-            return None
-        i += 2 if t[i] in ("-W", "-X") else 1                 # 带一个参数的选项（同 worker 的 script_arg）
-    return os.path.normpath(os.path.join(cwd, t[i])) if i < len(t) and not t[i].startswith("/") else None
+    sa = script_arg(t, cwd)
+    if not sa or sa[0] == "-c" or sa[0].startswith("-m "):
+        return None
+    raw = t[sa[1] - 1]
+    return None if raw == "-" or raw.startswith("/") else sa[0]
 
 
 def brief(args: str) -> str:
@@ -566,19 +565,6 @@ def _chain(ps: dict, pid: int | None) -> list[int]:
     while pid in ps and pid not in out and pid > 1:
         out.append(pid)
         pid = ps[pid]["ppid"]
-    return out
-
-
-def _desc(ps: dict, tops: set[int]) -> set[int]:
-    kids = {}
-    for p, x in ps.items():
-        kids.setdefault(x["ppid"], []).append(p)
-    out, todo = set(), list(tops)
-    while todo:
-        p = todo.pop()
-        if p not in out:
-            out.add(p)
-            todo += kids.get(p, [])
     return out
 
 
@@ -683,7 +669,7 @@ def analyze(smp: dict, cfg: dict) -> dict:
     st = next((k for k in STATES if k in kinds), "idle")
     # 保活：GPU 上认作保活的进程整棵进程树（同 worker 的 proc_tree）。内存扣各进程 PSS（探针的 pss 段；按规则认作保活、探针没读的按 RSS），
     # 同 worker 扣保活的口径（#29：RSS 会把父子共享的页重复相加，扣多了）；CPU 扣 ps 的 %CPU（进程整个生命期的平均，worker 算的是这一段）
-    ka = {p for p in _desc(ps, ka_gpu) if p in ps}
+    ka = set(proc_tree(ps, ka_gpu))
     ka_cpu = sum(ps[p]["pcpu"] for p in ka) / 100
     ka_mem = sum(smp.get("pss", {}).get(p, ps[p]["rss"]) for p in ka) / GIB
     vt = sum(g["total"] for g in smp["gpus"]) or None

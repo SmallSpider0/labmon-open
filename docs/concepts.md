@@ -2,7 +2,7 @@
 
 [AGENTS.md「一个概念只有一处实现」](../AGENTS.md#一个概念只有一处实现硬约束)的那张表。动手前在这里搜要动的概念（中文说法、函数名、字段名都可以搜），表里有的只能调用表里的实现、不够用就扩展它；新增一个会被多处用到的概念时补进表里。审查清单第 2 条按这张表核对（[AGENTS.md「审查要点」](../AGENTS.md#审查要点)）。
 
-写法：`worker 的 X` 指 `labmon/worker/`（由 `labmon/worker/__init__.py` 统一导出，按职责分在 `common`、`queue`、`disk`、`measure`、`keepalive`、`deps`、`sched`、`forecast`、`offers`、`core`、`fit`、`cli`，入口脚本为 `labmon/labmon_worker.py`），没写文件的 JS 名在括号里标页面（common.js、overview.html、page.html）；其余是 `labmon/<模块>.<名字>`。
+写法：`worker 的 X` 指 `labmon/worker/`（由 `labmon/worker/__init__.py` 统一导出，按职责分在 `pure`、`common`、`queue`、`disk`、`measure`、`keepalive`、`deps`、`sched`、`forecast`、`offers`、`core`、`fit`、`cli`，入口脚本为 `labmon/labmon_worker.py`；其中 `worker.pure` 是看板与 worker 共用的 Python 3.8 纯模块），没写文件的 JS 名在括号里标页面（common.js、overview.html、page.html）；其余是 `labmon/<模块>.<名字>`。
 表里每行只写“概念 → 唯一实现的位置”；口径与行为细节在下面[「各概念的口径」](#各概念的口径)，序号与表里相同。行为的完整说明以 `docs/` 各篇与代码为准。
 
 | # | 概念 | 唯一实现 |
@@ -12,9 +12,9 @@
 | 3 | 本机在不在内网；按主机并行探测 | `lan.check`、`lan.gather` |
 | 4 | 整文件覆盖写 | `state.write_atomic`；`save_json`、`collect.write_page`、`users.json` 都经它 |
 | 5 | 本机状态根目录与其下的状态目录 `overview/` | `state.state_root`、`state.state_dir` |
-| 6 | 按文件缓存读出的内容时判文件变没变 | `state.file_sig`（`disk._rows`、`fleetview._hours`、`users._read`、`waits._sig`、`serve.Project._mtimes`）；worker 不 import 本包，另有一份 `fsig`（`load_hist`、`queue_durs`、`load_eta`、`list_of`、`list_env`、`qenv`），口径相同 |
+| 6 | 按文件缓存读出的内容时判文件变没变 | `worker.pure.file_sig`（看板 `state.file_sig` 直接复用：`disk._rows`、`fleetview._hours`、`users._read`、`waits._sig`、`serve.Project._mtimes`；worker `fsig` 传 `strict=True`：`load_hist`、`queue_durs`、`load_eta`、`list_of`、`list_env`、`qenv`） |
 | 7 | JSON 状态文件；工作台的全局快照 | `state.load_json`、`state.save_json`；`state.snapshot()` |
-| 8 | JSONL | `state.parse_rows`、`state.load_rows`、`state.append_row`（`_lock`）；worker 在服务器上跑、不 import 本包，另有一份 `load_jsonl`、`append_jsonl`（`flock`） |
+| 8 | JSONL | 逐行解析共用 `worker.pure.parse_jsonl`（看板 `state.parse_rows`、`load_rows`、`append_row`（`_lock`）；worker `load_jsonl`、`append_jsonl`（`flock`）） |
 | 9 | 组内服务器状态目录里一个 JSON 的读改写 | `fleet.edit_state` |
 | 10 | 时刻的文字与解析 | `config.fmt_time`、`config.parse_time`；命令行的相对写法与到期语义 `__main__.parse_until`；worker 与探针（`probe.py`）各自一份 |
 | 11 | 项目快照多久没更新算过期 | `config.stale_limit`（系数 `STALE_RUNS`、`STALE_PAD_S`；`waits.collector_stale` 调它；`labmon wait` 连不上看板多久提示一次、连回来报 `server_back` 也按它（`WAIT_OFFLINE_MAX_S`、`server_unreachable`），`__main__.cmd_wait` 用本地 monitor.toml 的 `config.brief`）；项目快照的 `thresholds.stale_s`、配置摘要的 `stale`（`serve.Overview.cfg_info`）下发；页面上 `cfAlerts`（overview.html、`stale.s`、`stale`） |
@@ -36,10 +36,10 @@
 | 27 | 告警给谁看与给谁的那份文字；页面上显眼列哪些；`labmon wait` 叫不叫醒会话 | `collect.alert`（`AUDIENCE`）、`collect.user_alerts`（`serve.proj_info`）；`waits.wait_check`、`waits._new_alerts`（`REWAKE_S`、`SAME_KIND`、`EACH_TIME`）；页面上 `forUser`、`forAgent`、`alertBox`（common.js）；工作台主机告警 `alertsOf` 返回 `{to, msg}`（overview.html） |
 | 28 | 问题报告与普通账号的每日份数 | `__main__.cmd_report`、`records.report`（`records.ReportQuota`）、`records.report_headers`、`tools/issue_watch.py` |
 | 29 | 记录；事件种类与分类表；从暂停与优先记录取项目 id | `records.log_events`、`records.records`（`records.EVENT_KINDS`、`records.EVENT_CATS`）、`records.schedule_project`；项目所用主机上哪些记录算它的（`serve.proj_events`、`labmon records`）`records.project_mine`、`labmon records` 取的 `records.project_rows`；项目要登记过`projects.require`；页面上 `recSlice`、`recList`（`recGroup`）、`logPage`（overview.html） |
-| 30 | 主机缺省值；缺省端口；worker 多久没写状态算不在 | `config.host_defaults`；`config.PORT`；`config.STALE_S`（`ka_bin`、`workerctl.worker_env`、`config.guest_host`） |
+| 30 | 主机缺省值；缺省端口；worker 多久没写状态算不在 | `config.host_defaults`；`config.PORT`；`worker.pure.STALE_S`（`config.STALE_S`、worker `STATUS_STALE_S` 共用；`ka_bin`、`workerctl.worker_env`、`config.guest_host`） |
 | 31 | 用户级主机清单里的主机；其中在用的 | `config.user_hosts`（`config.guest_host`）；`config.active_hosts`；在用的在前、已归还的在后的全部 `config.all_hosts` |
 | 32 | 项目 id | `config.load`（`cfg["id"]`）；看板只认 worker 状态里的 `project`；`projects.project_ids`；命令行核对 `api.unknown_project` |
-| 33 | 队列登记；撤登记与看板核登记归属按清单文件认；读一台的登记目录；各主机的登记目录 | worker 的 `qslug`、`reg_files`、`matching_regs`（`by_file`）；看板 `users.same_list`（`reg_projects`、`pool.locate`）；`regs`、`registry`（`Worker.registry`、`worker add`、`fit`）；`reg_dirs`、`queue_state_conflict`（`worker add`） |
+| 33 | 队列登记；撤登记与看板核登记归属按清单文件认；读一台的登记目录；各主机的登记目录 | `worker.pure.list_path`、`worker.pure.same_list`（worker `matching_regs(by_file=True)`、看板 `users.same_list`、`collect.reg_queues`、`reg_projects`、`pool.locate` 共用）；worker 的 `qslug`、`reg_files`、`regs`、`registry`（`Worker.registry`、`worker add`、`fit`）；`reg_dirs`、`queue_state_conflict`（`worker add`） |
 | 34 | 清单的停法与 ROOT 内的停止请求文件 | worker 的 `queue_stop_path`（`workerctl.run_out`）、`write_queue_stop`、`Worker.send_stop` |
 | 35 | 一条清单只归一台 | worker 的 `main` 的 add、`Worker.registry`（`peer_regs`、`peers`、`yielded`）、`Worker.adopt_left`（`Worker.load_prev`）、`Worker.start`；锁 `reg_lock`；旧名登记搬回来换了文件名时在跑的改记到新名下 `Worker.rekey` |
 | 36 | 清单登记的全局视图 | 全局快照的 `regs`：`overview._regs`（`config.home_host`、`overview.fetch` 的 `_reg_cmd`、`_parse_regs`、`REG_KEYS`；worker 另有一份）；页面上 `projRegSec`、`regRow`、`regQuiet`、`regTally`、`tallyBar`、`tallyHtml`、`REG_ST`（overview.html） |
@@ -56,10 +56,10 @@
 | 47 | 挡住一个请求的临时指令；其中持久的 | worker 的 `override_hit`（`lasting=True`） |
 | 48 | 项目暂时没实验 | worker 状态里队列的 `empty`（`requests`、`next_jobs`）；`collect._no_work` 算 `no_work_since` 与那条告警（`NO_WORK_WAKE_S`）；借来的主机 `borrow.check`（`IDLE_S`）；页面上 `NO_WORK`、`noWorkTip`、`noWorkBadge`（common.js） |
 | 49 | 改配置文件 | `config._blocks`、`config._set_keys`、`config._write_checked`（`check`、`config.load(path, text)`）；锁 `config.HOSTS_LOCK`（`hosts.lock`），改配置文件的函数都加 `config._hosts_edit` |
-| 50 | 占位任务的认定 | worker 的 `is_hold`（`HOLD_RE`）；看板 `config.HOLD_RE` |
+| 50 | 占位任务的认定 | `worker.pure.is_hold`、`worker.pure.HOLD_RE`（worker 与看板 `config.HOLD_RE`、`collect.is_hold` 共用） |
 | 51 | 登录账号在组内人员表里的名字、主机上的使用人；后台与历史记录按已登记的人员统计 | `users.person_of`、`users.people_of`、开通与补绑定前的核对 `users._check_bind`、开通时可选的人 `users.free_people`、`users.add`、`users.bind_person`、名册删人前 `users.removing_person`；删人时唯一的清理入口 `users.remove`；`fleet.host_holder`；旧数据 `fleet.legacy_person`；项目算在谁名下`fleet.project_people`，写进 `sched.json` 的人员键 `fleet.share_key`；登记人员 `fleet.registered_people`、`fleetboot.set_person`，人员卡与账号详情共用 `personCard`、`directoryDrawer`（overview.html） |
 | 52 | 组内服务器的状态文件；这一台正借着；借给了谁 | `fleet.state_file`；`fleet.borrowed`；`fleet.borrower` |
-| 53 | 算力池 | `config.POOL`（worker 的 `POOL`）、`config.pool_home`（`config._guest_tpl`）；`fleet.lend_span`、`fleet.lend_open`；`pool.set_lend`（`POST /api/pool/lend`、`config.set_fleet_holder`）、`pool.lend_view`（`me.servers`、`lend`）、`pool.member`（`users.may_host`）、`pool.need_holder`、`pool.locate`；哪些登记是池放的 `pool._ours`；worker 的 `pool_refuse`、`Worker.pool_todo`；`collect._lane` 的 `pool`；页面上 `lendPop`、`lendAct`、`lendBadge`、一台的那一句加时段 `lendSay`、能不能改 `lendCan`（`myServersSec`），概况 `poolStat`（`poolCount`、`poolLists`、`poolSelf`）与抽屉 `poolDrawer`（`#/fleet/pool`）（overview.html） |
+| 53 | 算力池 | `worker.pure.POOL`（`config.POOL` 与 worker 共用）、`config.pool_home`（`config._guest_tpl`）；`fleet.lend_span`、`fleet.lend_open`；`pool.set_lend`（`POST /api/pool/lend`、`config.set_fleet_holder`）、`pool.lend_view`（`me.servers`、`lend`）、`pool.member`（`users.may_host`）、`pool.need_holder`、`pool.locate`；哪些登记是池放的 `pool._ours`；worker 的 `pool_refuse`、`Worker.pool_todo`；`collect._lane` 的 `pool`；页面上 `lendPop`、`lendAct`、`lendBadge`、一台的那一句加时段 `lendSay`、能不能改 `lendCan`（`myServersSec`），概况 `poolStat`（`poolCount`、`poolLists`、`poolSelf`）与抽屉 `poolDrawer`（`#/fleet/pool`）（overview.html） |
 | 54 | 算力池 C | `pool.tick`（`_returns`、`_place`、`want_borrow`、`_stuck`、`pool`、`overview.collect`、`pool_tick`）、`pool.reclaim`（`POST /api/pool/reclaim`）、容器核对 `pool._box`、`pool.relaunch_ok`（`overview`）；`borrow.begin(pool=True)`、`borrow.finish(gone=True)`；worker 的 `guest.owner`（`Worker.guest_scan`、`keep.pool`、`guest_block`、`offers`）、状态的 `pool_heads`（`pool._heads`、`pool_t`）、`fit_head`（`fit --list --json`）；事件种类 `pool`；页面上 `reclaimPop`、`lendLent`（overview.html），`hostShort`、`borrowText`、`borrowBadge` 的池分支（common.js） |
 | 55 | 自用主机入池 | `pool._selfs`、`pool._self_bar`、`pool._self_in`；入池的各台 `pool._units`、`pool._unit`（`member`、`need_holder`、`set_lend`、`my_servers`、`reclaim`）；登记标记 worker `add --pool`（`load_queue`、`pool`、`proj_lanes`）、`serve.reg_move` 的 `pool`、`workerctl.run_out` 的 `pool`、全局视图 `overview._pool_mark`，各台数几条 `pool._placed`；校验 `fleet._lend_check`；页面上 `poolCard`、`lendTag`、`lendName`（overview.html） |
 | 56 | 租期到期时刻；租期提醒的档 | `health.lease_end`；`health.lease_due` |
@@ -95,7 +95,7 @@
 | 86 | 车道名与车道跑的计划项 | `collect._lane_specs`；页面上 `laneName(lane, hosts)`（`laneLabel`、`laneFit`、common.js）、`laneGroups`（page.html），工作台经快照取：worker 状态里的队列（`borrow.late`）按 host、root、queue 找快照车道 `laneOf`（overview.html） |
 | 87 | 运行中的那一格与交回算力池车道上的任务实际在哪台跑 | `probe.py` 的 `current.host`、`collect._lane`；`collect._attempts`；`waits.job_state`；页面上 `rowJobs`、`awayText`、`jobLane`（page.html） |
 | 88 | 给 labmon wait 的全局消息 | 全局快照的 `wake`（`borrow.check`、`overview.collect`），`waits.wait_check` 合并（`waits._wakes`、`labmon check`、`waits.check_told`、`api.check`） |
-| 89 | 看板侧按名字认一个任务此刻的状态与结果；任务名 `项目/任务` 的写法 | `waits.job_state`、`waits.JobWatch`（`JOB_CONFIRM`、`state`、`restore`）；名字 `waits.job_key`（`dep_keys`）；按 id 找项目的配置与输出目录 `projects.load_cfg`、`projects.out_dir`（`labmon project archive`） |
+| 89 | 看板侧按名字认一个任务此刻的状态与结果；任务名 `项目/任务` 的写法 | `waits.job_state`、`waits.JobWatch`（`JOB_CONFIRM`、`state`、`restore`）；名字 `worker.pure.job_key`（`waits.job_key` 与 worker `dep_keys` 共用）；按 id 找项目的配置与输出目录 `projects.load_cfg`、`projects.out_dir`（`labmon project archive`） |
 | 90 | 看板接口的客户端；连看板一律直连、不走环境变量与系统设置里的代理 | `client.call`（`servers`、`token`）、一条命令的回话打出与退出码 `client.run`；连不上时证书校验没过的那句 `client.ca_hint`；`client.login`、`client.urls`；直连的 opener `client.opener` |
 | 91 | 命令行的命令在看板那边的做法 | `api.host`、`api.borrow`、`api.override`（`OVR`）、`api.worker`、`api.project_init`、`api.check`、`api.hosts`（`GET /api/hosts`）；实验会话的只读命令 `api.status`、`api.disk`、`api.records`（`GET /api/project/<id>/status|disk|records`，回 `{rc, out, err, data}`，`--json` 打 `data`：`client.run` 的 `as_json`；借来的主机那一句 `api.borrow_text` |
 | 92 | `labmon wait` 的长轮询 | `waits.wait`（`POST /api/wait`）；命令行一轮 `__main__.cmd_wait` |
@@ -106,29 +106,29 @@
 | 97 | 任务依赖 | 解析 worker 的 `hints`（`deps`、`deps_any`）、`dep_keys`；本机清单的状态 `Worker.list_state`（`marks`、`todo`、`rows_left`）；状态 `Worker.dep_state`（`dep_idx`、`dead`、`dep_where`、`peers`、`peer_end`、`peer_todo`）；放行 `Worker.dep_block`（`prep`、`dep`、`dep_cycle`、`dep_note`、`Worker.dep_next`、`Worker.dep_reaches`）；谁写了依赖等着谁 `Worker.dep_waiters`（`cant_move`、`fit --list`）；`fit --list` 判前置经 `fit_deps`（`dep_state`、`dep_block`）；何时满足 `dep_end`（`simulate`、`req_dur`、`run_end`、`forecast`、`self.ends`），名字 `dep_names`；看板取 plan 的 `deps` 与等待项的 `dep`（`collect._job_times`、`dep:`）；页面上 `depLines`、`holdGuess`（page.html），工作台 `alertsOf`、`rankTip` |
 | 98 | 成组起跑 | 解析 worker 的 `hints`（`gang`、`gn`）；认组、读同伴 `Worker.gang_sync`（`gctx`、`gsim`、`gang_when`、`gang_bad`）；挡住 `Worker.gang_block`（`prep`、`dep`、`dep_cycle`）；留资源 `place`（`gholds`、`Worker.gang_hold`、`gang_until`、`acct_job`）；放掉这一轮没重新留的、放行后复核留着的 `Worker.gang_recheck`；一起放行 `Worker.gang_commit`，推演里 `simulate`（`gfirst`、`Worker.gang_eta`）；一起停 `Worker.gang_watch`（`gang_peer`、`gang_last`、`gang_when`）、`Worker.gang_stop`、结果 `Worker.gang_end`、收尾 `Worker.finish`；没开跑的跟着失败 `Worker.gang_lost`（`gang_known`、`gang.json`、`known`、`load_prev`）、`Worker.gang_doomed`；写、读 `gang.json` `Worker.gang_recs`、`gang_publish`、`gang_file`、`gang_cur`，主循环重读 `Worker.gang_poll`；时长 `Worker.gang_dur`（`req_dur`）；停不停保活 `Worker.gang_soon` |
 | 99 | 放不放一个请求；资源快照；各卡与全停时还能给的显存、内存与核数 | worker 的 `place(x, S, t, pre)`（`_place`）；`Worker.snapshot`、`sim_snapshot`；`card_free`、`ram_free`、`cpu_free`；`Worker.mem_room`、`Worker.cpu_room` |
-| 100 | 容器里收不回的内存 | worker 的 `mem_unevictable`（`host_info` 调）；组内服务器的 `fleet.parse`（探针 `fleet_probe.sh`） |
+| 100 | 容器里收不回的内存 | `worker.pure.mem_unevictable`（worker `host_info` 与组内服务器 `fleet.parse` 共用；探针 `fleet_probe.sh` 只送字段） |
 | 101 | 卡吃不满是不是真有余量；开跑给的核数给少、给多；建议核数封顶；按峰值估核数；`LABMON_CPUS` | worker 的 `gpu_slack`、`cpu_fit`（`gpu_slack`、`cpu_cls`、`cpu_budget`、`Worker.cpu_hints`）、`cpu_from_peak`（`estimate`、`cpu_fit`）；`cpus_export`（`Worker.cpus_for`、`cpu_fit`）；看板 `collect._host_alerts`（`collect._cpu_fit_alerts`、`collect._cpu_room_text`） |
 | 102 | 放不下的原因与原因代码；“CPU 不够”里核被谁记着；因 CPU 被挡多久才告警 | worker 的 `WHY`、`why_text`、`why_of`；`cpu_held`（`fit`、`cpu_warm`、`Worker.acct`）；放不下、tag 到上限的判定 `nofit`、`tag_full`；`Worker.note_waits`（`CPU_ALERT_S`）；看板 `collect._lane` 的 `cpu:` 告警、工作台 `alertsOf` |
 | 103 | 放行顺序 | worker 的 `fair_key`（`person_use`）、`admit`、`fits_before(t, dur_min, until)`、`shadow`、模块级 `hold_until` |
 | 104 | 等待中任务的排位与解释 | worker 的 `admit` 给的 `pos`、`forecast` 记的 `starts`（`pos`、`start`）；页面上 `rankTip`（overview.html） |
 | 105 | 放行前等了多久 | worker 的 `tick` 定 `since`、`launch` 记 `wait`（`usage.jsonl`）；调度卡的平均等待 `overview.sched_view` |
 | 106 | 调度卡 | `overview.sched_view`（`sched`、`person`、`pk`、`users.view`、`overview/usage/<主机>.jsonl`）；页面上 `schedCard`、`schedAct`，一个项目的权重胶囊 `schedW`（`W_STEPS`、`wStep`）与按钮 `schedBtns`（`schedFlag`），已用 / 应得条 `shareBar`（`schedOn`、`personBar`、`schedPeople`、`pkOf`、`who`）（`projSchedSec`、`SMSG`、overview.html）；`POST /sched/…`（`serve._sched`、`records.tell`） |
-| 107 | 公平份额 | worker 的 `usage`、`card_share`（`cards`）、`share`、`own_runs`、`peers`（`share`）；一个人名下各项目的合计 worker 的 `person_use`，调度卡上的 `puse` 由 `overview.sched_view` 按完整的 `share.use` 算 |
+| 107 | 公平份额 | worker 的 `usage`、`card_share`（`cards`）、`share`、`own_runs`、`peers`（`share`）；一个人名下各项目的合计 `worker.pure.person_use`（worker `fair_key`、`pool.py` 与看板调度卡 `overview.sched_view` 共用） |
 | 108 | 调度设置 | `config.sched` → 各主机的 `sched.json`（`overview.collect`、`owner`）→ worker 的 `policy`（`POLICY`）；改 `[sched.*]` 一行 `config._sched_set`，页面上改权重 `config.set_weight` |
 | 109 | 项目级的暂停、优先；`pause --now` 的“只停一次”；暂停是谁下的与普通用户能不能动它 | 改 `config.set_sched_ovr`（`cmd_override`、`POST /sched/pause…`、`by`、`[sched.pause_by]`、`config.pause_by`）；只给某几台的谁下的记在那台指令的 `by`（`workerctl.override_each`、`by`、`override add --by`），快照里找它们 `projects.host_ovr`；判断 `users.pause_ok`（`need_pause`），普通用户写那几台时另带 `expect_by`，worker 在 `overrides.json` 的锁里再核一次现状（`--expect-project`）；到期删行 `config.expire_sched`（`overview.collect`）；随 `config.sched` 下发，worker 的 `sched_ovr` 接进 `self.ovr`；“只停一次”是 worker 指令的 `once`（`load_overrides`、`ONCE_HOLD_S`）；调度卡上 `schedBtns`（`schedFlag`）、`flagTip`（overview.html），快照 `sched_view` 的 `focus`、`paused` |
 | 110 | 看板写给 worker 的文件 | `overview.fetch` 的 `h["put"]`（`overview.collect`） |
 | 111 | 推演 | worker 的 `simulate`、`forecast`（状态的 `plan`）、`run_end`（读看板写回的 `eta.json`）；`collect._queued_times`；页面上 `planLanes`、`planEnd`、`stuckWhy`（overview.html） |
 | 112 | 多主机负载均衡的提示 | worker 的 `offers`（`proj_lanes`、`move_cands`、`cant_move`、`try_move`、`Worker.idle`、`plan_lanes`、`list_of`、`list_env`、`peer_st`、`peer_todo`）、同机 `local_offers`（`Worker.lane_offer`、`Worker.local_moves`、`Worker.move_before`、`Worker.moved_past`、`Worker.local_cards`、`Worker.util10`）、`Worker.lane_room`；看板 `rebalance.suggest`（`rebalance.move_key`、`_text`、`_why`、`_est_text`、`_idle_gain`、`_live`、`_fresh`、`rebalance.log_text`）、`rebalance.keep_offers`、`rebalance._under`、`rebalance._room_text`、`rebalance._queued`、`collect._rebalance`；页面上 `rebalMark`、`rebalTip`（common.js） |
 | 113 | 工作台上运行中任务的预计结束 | `etaOf`（overview.html） |
-| 114 | 运行中任务剩余时长说不准时的估计 | worker 的 `overrun_left`（`OVER_FRAC`、`OVER_MIN_S`、`run_end`）；看板 `collect.overrun_left`（`_job_times`、`_segment_eta`） |
+| 114 | 运行中任务剩余时长说不准时的估计 | `worker.pure.overrun_left`（`OVER_FRAC`、`OVER_MIN_S`；worker `run_end` 与看板 `collect._job_times`、`_segment_eta` 共用） |
 | 115 | 各卡被谁占着 | `overview._keep_usage`、`overview.occupancy`（`/p/<id>/events.json`） |
 | 116 | 工作台存的用量记录；存着记录的主机 | 路径 `state.usage_file`；`state.usage_hosts`（`waits.JobWatch.check`、`collect._attempts`）；项目页的失败尝试 `collect._attempts` |
 | 117 | 等待原因的结构化字段 | worker 等待项的 `miss`（`place`）、`local[].how`（`copy`、`redo`、`mixed`）；看板按字段认，不按 `why` 文字 |
-| 118 | 容量单位 | `config.GIB`；页面上 `GIB`（common.js） |
+| 118 | 容量单位 | `worker.pure.GIB`（`config.GIB` 与 worker 共用）；页面上 `GIB`（common.js） |
 | 119 | 时间线 | common.js 的 `tlInit`、`tlRange`、`tlBind`、`tlSvg`、`tlShow`、`jobBar`、`tlPack`、`occBars`（`OCC_ST`、`occItems`）；「全部」要包住的区间 `tlSpan`；近景按现在前后的任务定宽 `tlFit`（`TL_FIT`、`near()`）；排在谁后面 `afterText` |
 | 120 | 项目页时间线的依赖连线 | `depLines`（`depEdges`、`depRoute`、`depVia`）、`depChain`、`depOn`、悬停与点 `depHover`（`DEPH`）；条的位置、行号由 `laneRow` 记进 `c.pos`（page.html） |
 | 121 | 触屏上点一格：第一次只看，3 秒内再点同一格才动作 | `tapTwice`（page.html、`gsqClick`） |
-| 122 | 自动归组 | `config.AUTO_GROUP_RE`（`collect._group_of`、`config.set_project`）；worker 借同前缀的估时比值用自己的一份 `GROUP_RE`（`test_group_regex_matches_board`） |
+| 122 | 自动归组 | `worker.pure.GROUP_RE`（`config.AUTO_GROUP_RE` 用于 `collect._group_of`、`config.set_project`，worker `duration` 借同前缀估时比值共用） |
 | 123 | 按估计字宽截断文字与同一估计下的字宽；项目页时间线条上的任务名 | `fit`、`textW`（common.js）；`barName`（page.html） |
 | 124 | 正在操作；点了不能打字的地方先让输入框失焦 | common.js 的 `editing`（`typingEl`）与它下面捕获阶段的 click 监听；工作台 `selecting`（overview.html），项目页 `redraw`（page.html） |
 | 125 | 拖动排顺序 | common.js 的 `sortBind`（`SORT`、`sortMove`、`sortEnd`）；计划项排顺序经它（overview.html） |
@@ -148,7 +148,7 @@
 | 139 | 对方轻用时能不能借、对方在用什么 | `borrow.can_borrow`、`borrow.using` |
 | 140 | 给对方留的量 | `borrow.reserve_for`、`borrow._keep`、`borrow.keep_text`；页面上 `keepText`（common.js） |
 | 141 | 借来的主机上对方的用量、超出预留、扣预留准入、说好不用的时段与作废、快撞上限、被挤掉、OOM 先杀我们 | worker 的 `other`（`sample`）、`guest_scan`（`cpu_hot`、`away_base`）、`guest_block`、`held`、`keep_left`、`away`、`end_away`（`away_state`）、`guest_tight`、`squeezed_by`（`oom_of`）、`oom_check`、`GUEST_ADJ`；看板写、清 `borrow_away` 在 `borrow.begin`、`borrow.check` |
-| 142 | labmon 之外的内存与 CPU 要扣掉的保活 | worker 的 `proc_tree`、`mem_of`、`Worker.ka_cores`（`ka_roots`）；组内服务器的 `fleet.analyze`（`mem_ka`）、`borrow._ram_sample`、`fleet._desc`、探针 `fleet_probe.sh` 的 `pss` 段（字样由 `fleet.fetch` 传） |
+| 142 | labmon 之外的内存与 CPU 要扣掉的保活 | `worker.pure.proc_tree`（worker 与 `fleet.analyze` 共用）；worker 的 `mem_of`、`Worker.ka_cores`（`ka_roots`）；组内服务器的 `fleet.analyze`（`mem_ka`）、`borrow._ram_sample`、探针 `fleet_probe.sh` 的 `pss` 段（字样由 `fleet.fetch` 传） |
 | 143 | 后台采集线程 | `serve._Collector` |
 | 144 | 页面连不上看板服务 | `api`（`NET_WAIT`）、`netText`、`pollNet`、`offBadge`（common.js） |
 | 145 | 看板服务接受哪些请求；页面上的写请求 | `serve.Handler._gate`（`serve.host_ok`、`hosts`、`serve.allowed_hosts`）；页面上 `postJSON`（common.js）；测试里 `tests/fixtures.post_req`；`tools/deploy.py` 的 `http` |
@@ -172,7 +172,7 @@
 | 163 | 进程出生时钟 | `fleet_guard.sh` 的 `proc_birth`；探针 `fleet_probe.sh` 的 `birth`（`p1`、`ka_groups`、`guard`）；比对在 `fleet.parse`（`guard.identity`）；worker 要 epoch 秒时用 `started_at` |
 | 164 | 所有卡利用率为零 | `fleet.parse` 的每卡 `zero`、`fleet.analyze` 的 `zero_cards`（`guard.zero_cards`、`manual_guard`）；远端动手前复核 `fleet_guard.sh` 的 `gpu_zero` |
 | 165 | 组内服务器 GPU 负载归类与按路径归人 | `fleet.classify`、`fleet.mark_keepalive`、`disk.whose`（`disk.owner_of`） |
-| 166 | 进程跑的是哪个脚本、相对路径按工作目录还原；ka.sh 管的保活；借用前逐个核对 | worker 的 `script_arg`（`script_of`、`ka_owned`）、`ka_owned`；`labmon/ka.sh` 的 `ka_procs`（`ka_owned`、`tests/test_ka.py`）；组内字样与规则比的命令行接上还原路径 `fleet._abs_script`，探针 `fleet_probe.sh` 的 `script_abs`；借用核对 `fleet_guard.sh` 的 `kacheck`（`ka.sh running`、`running_groups strict`），结果的话 `borrow._ka_miss` |
+| 166 | 进程跑的是哪个脚本、相对路径按工作目录还原；ka.sh 管的保活；借用前逐个核对 | `worker.pure.script_arg`（worker 的 `script_of`、`ka_owned` 与看板 `fleet._abs_script` 共用）；worker 的 `ka_owned`；`labmon/ka.sh` 的 `ka_procs`（`ka_owned`、`tests/test_ka.py`）；探针 `fleet_probe.sh` 的 `script_abs`；借用核对 `fleet_guard.sh` 的 `kacheck`（`ka.sh running`、`running_groups strict`），结果的话 `borrow._ka_miss` |
 | 167 | 固定配色 | `config.pick_color` |
 | 168 | 页面渲染；往页面里填一块数据 | `collect.render_page`、`collect.write_page`；`collect.fill` |
 | 169 | 页面上的租期文字 | `leaseLeft`、`leaseSoon`、`leaseRem`、`leaseText`、`leaseHtml`（overview.html） |
@@ -210,11 +210,11 @@
 5. **本机状态根目录与其下的状态目录 `overview/`**：本机状态根目录（`LABMON_STATE`，缺省 `~/.local/state/labmon`；`tools/issue_watch.py` 的已见列表也放这里）与其下的状态目录 `overview/`
    实现：`state.state_root`、`state.state_dir`
 6. **按文件缓存读出的内容时判文件变没变**：按文件缓存读出的内容时判文件变没变（(inode, 修改时刻纳秒, 大小)；只比 `st_mtime` 时同一时间戳粒度里连写两次会漏读第二次，#31）
-   实现：`state.file_sig`（`disk._rows`、`fleetview._hours`、`users._read`、`waits._sig`、`serve.Project._mtimes` 等）；worker 不 import 本包，另有一份 `fsig`（`load_hist`、`queue_durs`、`load_eta`、`list_of`、`list_env`、`qenv`），口径相同
+   实现：`worker.pure.file_sig`（看板 `state.file_sig` 直接复用：`disk._rows`、`fleetview._hours`、`users._read`、`waits._sig`、`serve.Project._mtimes` 等；worker `fsig` 传 `strict=True`：`load_hist`、`queue_durs`、`load_eta`、`list_of`、`list_env`、`qenv`）
 7. **JSON 状态文件；工作台的全局快照**：JSON 状态文件；工作台的全局快照（上一轮 `overview.collect` 写的）
    实现：`state.load_json`、`state.save_json`；`state.snapshot()`
 8. **JSONL**：JSONL（逐行记录、按保留期修剪；续写的互斥）
-   实现：`state.parse_rows`、`state.load_rows`、`state.append_row`（内有按文件的 `_lock`）；worker 在服务器上跑、不 import 本包，另有一份 `load_jsonl`、`append_jsonl`（用量记录、事件、主机压力历史共用；互斥由调用方加 `flock`）
+   实现：逐行解析共用 `worker.pure.parse_jsonl`（看板 `state.parse_rows`、`state.load_rows`、`state.append_row` 内有按文件的 `_lock`；worker `load_jsonl`、`append_jsonl` 用量记录、事件、主机压力历史共用，互斥由调用方加 `flock`）
 9. **组内服务器状态目录里一个 JSON 的读改写**：组内服务器状态目录里一个 JSON 的读改写（`op.json`、`boot.json`、`people.json`；平台操作线程、HTTP 线程与本机命令行都能改，读改写跨进程互斥）
    实现：`fleet.edit_state`
 10. **时刻的文字与解析**：时刻的文字与解析（页面文案、记录、通知、主机清单、命令行里的时刻；worker 写出的一律 epoch 秒）
@@ -258,13 +258,13 @@
 29. **记录；事件种类与分类表；从暂停与优先记录取项目 id**：记录（事件、平台操作、配置改动：写入与按条件读，页面经 `/records.json` 取）；事件种类与分类表；从暂停与优先记录取项目 id
    实现：`records.log_events`、`records.records`（`records.EVENT_KINDS`、`records.EVENT_CATS`）、`records.schedule_project`；项目所用主机上哪些记录算它的（项目页时间线 `serve.proj_events` 与 `labmon records` 共用）`records.project_mine`、`labmon records` 取的 `records.project_rows`；项目要登记过（没登记 404，取配置、wait、只读命令共用）`projects.require`；页面上 `recSlice`、`recList`（合成事：`recGroup`）、`logPage`（overview.html）
 30. **主机缺省值；缺省端口；worker 多久没写状态算不在**：主机缺省值；缺省端口；worker 多久没写状态算不在（工作台与项目页探针同一口径）
-   实现：`config.host_defaults`；`config.PORT`；`config.STALE_S`（部署路径 `ka_bin` 由 `workerctl.worker_env` 传给 worker，借来的主机经 `config.guest_host` 继承）
+   实现：`config.host_defaults`；`config.PORT`；`worker.pure.STALE_S`（`config.STALE_S` 与 worker `STATUS_STALE_S` 共用；部署路径 `ka_bin` 由 `workerctl.worker_env` 传给 worker，借来的主机经 `config.guest_host` 继承）
 31. **用户级主机清单里的主机；其中在用的**：用户级主机清单里的主机（自用的与借来的组内服务器）；其中在用的（去掉已归还的，已补缺省值）
    实现：`config.user_hosts`（借来的长什么样：`config.guest_host`）；`config.active_hosts`；在用的在前、已归还的在后的全部 `config.all_hosts`（自用主机都关了时取平台账号、自己的名字、开回来沿用的端口）
 32. **项目 id**：项目 id（看板地址，也是 worker 的项目名：`worker add --project` 必写，pause、focus、借卡的“只给谁用”、作废唤醒都按它认）
    实现：`config.load` 定下 `cfg["id"]`；看板只认 worker 状态里队列与任务的 `project`（来自 `worker add --project`），不按目录猜；链到项目页时只看它在不在 `projects.project_ids` 里（登记了、没归档的），命令行核对用 `api.unknown_project`（在看板那边）
 33. **队列登记；撤登记与看板核登记归属按清单文件认；读一台的登记目录；各主机的登记目录**：队列登记（按目录与清单认，文件名带目录哈希；不许两条共用状态目录，跨主机查）；撤登记与看板核登记归属按清单文件认（ROOT/JOBS 拼起来规整后相同就算，从哪里断开都行，#77）；读一台的登记目录（坏了的单列，worker 跳过并记事件）；各主机的登记目录
-   实现：worker 的 `qslug`、`reg_files`、`matching_regs`（`by_file`）；看板 `users.same_list`（`reg_projects`、`pool.locate`；worker 不 import 本包，各一份、口径相同）；`regs`、`registry`（`Worker.registry`、`worker add` 查状态目录、`fit` 找清单行都经它）；`reg_dirs`、`queue_state_conflict`（`worker add` 查状态目录有没有被别的登记用着）
+   实现：`worker.pure.list_path`、`worker.pure.same_list`（worker `matching_regs(by_file=True)`、看板 `users.same_list`、`collect.reg_queues`、`reg_projects`、`pool.locate` 共用）；worker 的 `qslug`、`reg_files`、`regs`、`registry`（`Worker.registry`、`worker add` 查状态目录、`fit` 找清单行都经它）；`reg_dirs`、`queue_state_conflict`（`worker add` 查状态目录有没有被别的登记用着）
 34. **清单的停法与 ROOT 内的停止请求文件**：清单的停法与 ROOT 内的停止请求文件（#237）
    实现：worker 的 `queue_stop_path`（HTTP 登记与搬移、本机 `workerctl.run_out` 和远端登记共用语法；远端另外检查实际路径）、`write_queue_stop`、`Worker.send_stop`
 35. **一条清单只归一台**：一条清单只归一台（`worker add` 搬来别的主机上比这次旧的登记、更晚的让给那边；两台都登记着时较旧的那台在较新的在用期间让路；搬走后原主机接管手上的到跑完；开跑前核登记还在；add 的查写比删与开跑的核归属到写 `current` 共用一把锁，#95）
@@ -298,13 +298,13 @@
 49. **改配置文件**：改配置文件（用户级主机清单与项目的 monitor.toml：只改相关行、改完校验再写；读 → 改 → 写整段互斥）
    实现：`config._blocks`、`config._set_keys`、`config._write_checked`（项目配置传 `check` 用 `config.load(path, text)` 整套校验）；锁 `config.HOSTS_LOCK`（线程之间 RLock，进程之间状态根 `hosts.lock` 上的 flock，同一线程可重入，#18），改配置文件的函数都加 `config._hosts_edit`
 50. **占位任务的认定**：占位任务的认定（名字里按词含 hold / pause）
-   实现：worker 的 `is_hold`（`HOLD_RE`）；看板 `config.HOLD_RE`（同一条正则；worker 在服务器上跑、不 import 本包，各自一份，项目不能另配）
+   实现：`worker.pure.is_hold`、`worker.pure.HOLD_RE`（worker 与看板 `config.HOLD_RE`、`collect.is_hold` 共用，项目不能另配）
 51. **登录账号在组内人员表里的名字、主机上的使用人；后台与历史记录按已登记的人员统计**：登录账号在组内人员表里的名字（只认账号库的显式绑定 `fleet_person`，#19：不读主机清单、不按同名猜）、主机上的使用人；后台与历史记录按已登记的人员统计（#70）
    实现：`users.person_of`、`users.people_of`（批量）、开通与补绑定前的核对 `users._check_bind`、开通时可选的人 `users.free_people`、`users.add`、`users.bind_person`、名册删人前 `users.removing_person`（账号库同一把锁）；删人时唯一的清理入口 `users.remove`；`fleet.host_holder`；旧数据 `fleet.legacy_person`；项目算在谁名下（按人的公平份额，#23）`fleet.project_people`，写进 `sched.json` 的人员键 `fleet.share_key`；登记人员 `fleet.registered_people`、`fleetboot.set_person`，人员卡与账号详情共用 `personCard`、`directoryDrawer`（overview.html）
 52. **组内服务器的状态文件；这一台正借着；借给了谁**：组内服务器的状态文件；这一台正借着；借给了谁（借用中的用量算给他）
    实现：`fleet.state_file`；`fleet.borrowed`；`fleet.borrower`
 53. **算力池**：算力池（#24：保留主机 id `pool` 与池登记的 worker_home；入池开关 `lend`、`lend_hours` 的解析、时段判断、读写与页面上那一句；池成员；池清单收不收、撤回在哪撤；池车道；别处 `after=` 等池里的；组内页的算力池概况，#76）
-   实现：`config.POOL`（worker 另有一份 `POOL`）、`config.pool_home`（模板同借用 `config._guest_tpl`）；`fleet.lend_span`、`fleet.lend_open`；`pool.set_lend`（`POST /api/pool/lend`，换人时 `config.set_fleet_holder` 去掉）、`pool.lend_view`（`me.servers`、组内服务器与自用主机的 `lend`、快照主机项的 `lend` 同一份）、`pool.member`（`users.may_host` 的 pool）、`pool.need_holder`、`pool.locate`；哪些登记是池放的 `pool._ours`（按停法，还掉时收回、不挡再借，#80；借来的池主机上等满挪走、要还时搬走、收回也只动它，#130）；worker 的 `pool_refuse`、`Worker.pool_todo`；`collect._lane` 的 `pool`；页面上 `lendPop`、`lendAct`、`lendBadge`、一台的那一句加时段 `lendSay`、能不能改 `lendCan`（服务器抽屉、算力池抽屉、`myServersSec` 共用），概况 `poolStat`（计数 `poolCount`、清单 `poolLists`、入池的自用主机 `poolSelf`）与抽屉 `poolDrawer`（`#/fleet/pool`）（overview.html）
+   实现：`worker.pure.POOL`（`config.POOL` 与 worker 共用）、`config.pool_home`（模板同借用 `config._guest_tpl`）；`fleet.lend_span`、`fleet.lend_open`；`pool.set_lend`（`POST /api/pool/lend`，换人时 `config.set_fleet_holder` 去掉）、`pool.lend_view`（`me.servers`、组内服务器与自用主机的 `lend`、快照主机项的 `lend` 同一份）、`pool.member`（`users.may_host` 的 pool）、`pool.need_holder`、`pool.locate`；哪些登记是池放的 `pool._ours`（按停法，还掉时收回、不挡再借，#80；借来的池主机上等满挪走、要还时搬走、收回也只动它，#130）；worker 的 `pool_refuse`、`Worker.pool_todo`；`collect._lane` 的 `pool`；页面上 `lendPop`、`lendAct`、`lendBadge`、一台的那一句加时段 `lendSay`、能不能改 `lendCan`（服务器抽屉、算力池抽屉、`myServersSec` 共用），概况 `poolStat`（计数 `poolCount`、清单 `poolLists`、入池的自用主机 `poolSelf`）与抽屉 `poolDrawer`（`#/fleet/pool`）（overview.html）
 54. **算力池 C**：算力池 C（#25：自动借、放、搬、还与收回；每轮工作台采集里、快照写盘前，只在主那台；还的理由 R1 主人回来、R2 时段与租期截止（`borrow.cutoff`）、R3 关了入池或出了时段、R4 `POOL_IDLE_S` 没有池任务、R5 换了容器；休息期、失败退避、nofit 记忆在 `borrow.json` 这台的 `pool` 子项；池清单队首被依赖挡住的由 worker 给；放之前问 `fit --list --json`；换了容器的池借主机不重新拉起 worker）
    实现：`pool.tick`（`_returns`、`_place`、`want_borrow`、在池主机上等太久的 `_stuck`；结果进全局快照的 `pool`，`overview.collect` 的 `pool_tick`）、`pool.reclaim`（`POST /api/pool/reclaim`）、容器核对 `pool._box`、`pool.relaunch_ok`（`overview` 的 relaunch 用）；`borrow.begin(pool=True)`、`borrow.finish(gone=True)`；worker 的 `guest.owner`（`Worker.guest_scan`；`keep.pool` 时 `guest_block` 整台不放、`offers` 为空）、状态的 `pool_heads`（每条池清单都列，跑完的 head 为 null、读不到的带 err；看板逐条合并各台的 `pool._heads`，读得到的优先、再按 `pool_t`，#86）、`fit_head`（`fit --list --json`）；事件种类 `pool`；页面上 `reclaimPop`、`lendLent`（overview.html），`hostShort`、`borrowText`、`borrowBadge` 的池分支（common.js）
 55. **自用主机入池**：自用主机入池（#79：`[[hosts]]` 的 `lend`、`lend_hours` 同一口径；哪些能入池（不是借来或换来的、不是看板本机、worker 目录与池相同）；池放过去的登记带 `pool` 标记（主人自己的清单没有，会话重新 `worker add` 就去掉）；此刻收不收池清单；关了入池、出了时段、休息期、归还时搬走池放的；收回只停池放的）
@@ -376,7 +376,7 @@
 88. **给 labmon wait 的全局消息**：给 labmon wait 的全局消息（借到卡、到约定时间、对方在用、已归还、作废、页面上动了这个项目）
    实现：全局快照的 `wake`（`borrow.check` 与 `overview.collect`），`waits.wait_check` 合并（按项目与主机挑 `waits._wakes`；`labmon check` 列出还没报过的页面改动 `waits.check_told`，经 `api.check`）
 89. **看板侧按名字认一个任务此刻的状态与结果；任务名 `项目/任务` 的写法**：看板侧按名字认一个任务此刻的状态与结果（`labmon wait --job`：看板那边读项目快照 `jobs[]`、`lanes[]`，快照里没有的看工作台存的用量记录；还会跑的优先、不会再跑的认定、作废按全局 `wake` 的 `void:` 的 `job`；开始等之前就已结束、找不到的要两份新快照确认）；任务名 `项目/任务` 的写法
-   实现：`waits.job_state`、`waits.JobWatch`（`JOB_CONFIRM`；内部状态经 `state`、`restore` 交给命令行、下次带回）；名字 `waits.job_key`（同 worker 的 `dep_keys`；worker 不 import 本包，各一份）；按 id 找项目的配置与输出目录 `projects.load_cfg`、`projects.out_dir`（`labmon project archive` 共用）
+   实现：`waits.job_state`、`waits.JobWatch`（`JOB_CONFIRM`；内部状态经 `state`、`restore` 交给命令行、下次带回）；名字 `worker.pure.job_key`（`waits.job_key` 与 worker `dep_keys` 共用）；按 id 找项目的配置与输出目录 `projects.load_cfg`、`projects.out_dir`（`labmon project archive` 共用）
 90. **看板接口的客户端；连看板一律直连、不走环境变量与系统设置里的代理**：看板接口的客户端（命令行会动东西的命令都经它：wait、check、collect、worker、pause 等、project、borrow、host；`client.toml` 的几个地址依次试、退避，会改东西的只在没送到时重试，备用的接着试下一个；令牌 `LABMON_TOKEN` › `admin.token`（要管理员的）› `client.token`；`labmon login` 换令牌，#162）；连看板一律直连、不走环境变量与系统设置里的代理（命令行、`tools/deploy.py`、`backup pull` 共用，#195）
    实现：`client.call`（`servers`、`token`）、一条命令的回话打出与退出码 `client.run`；连不上时证书校验没过的那句 `client.ca_hint`（call、login、取更新包共用，#96）；`client.login`、`client.urls`；直连的 opener `client.opener`
 91. **命令行的命令在看板那边的做法**：命令行的命令在看板那边的做法（回 `{rc, out, err}`，命令行原样打出、按 `rc` 退出；改主机清单、ssh 到服务器只在看板服务里；路由在 `serve.ROUTES`、分派 `serve.Handler._cli`）
@@ -398,7 +398,7 @@
 99. **放不放一个请求；资源快照；各卡与全停时还能给的显存、内存与核数**：放不放一个请求（按资源快照定：卡、内存、CPU、tag、独占，外面一层是成组的留资源；真放行与推演同一份）；快照（真放行从实时采样拼，推演换成推演口径）；各卡此刻还能给新任务的显存、还能给的内存与核数；labmon 全停时还能给的内存（收不回的 `mem.anon` 算别人的，页缓存不算）与核数（旧 `gpu_queue.sh` 的任务按实测算别人的）
    实现：worker 的 `place(x, S, t, pre)`（核心 `_place` 只经它调）；`Worker.snapshot`、`sim_snapshot`；`card_free`、`ram_free`、`cpu_free`；`Worker.mem_room`、`Worker.cpu_room`
 100. **容器里收不回的内存**：容器里收不回的内存（cgroup 用量 − 文件页：v1 `usage − total_active_file − total_inactive_file`，v2 `memory.current − active_file − inactive_file`；含 shmem 与内核占用）
-   实现：两份、口径相同：worker 的 `mem_unevictable`（`host_info` 调）；组内服务器的 `fleet.parse`（探针 `fleet_probe.sh` 只送 `memuse`、`inact`、`actf`）。探针在别人的、未必有 Python 的镜像里跑，worker 在服务器上跑、不 import 本包，合不成一份
+   实现：`worker.pure.mem_unevictable`（worker `host_info` 与组内服务器 `fleet.parse` 共用；探针 `fleet_probe.sh` 只送 `memuse`、`inact`、`actf` 字段）
 101. **卡吃不满是不是真有余量；开跑给的核数给少、给多；建议核数封顶；按峰值估核数；`LABMON_CPUS`**：卡吃不满是不是真有余量（容器在限流（只读状态的 `throttle`，门槛在 `thr_step`）、利用率低于 `UTIL_LOW` 的卡上在跑的被 CPU 卡住；fit 开车道与同机多开车道的提示共用，#35、#37）；开跑给的核数给少了、给多了（满 `CPU_WARM_S` 才判：给少 = `use.pks` 平均 ≥ 给的 × `CPU_BOUND_FRAC` 且所用卡有利用率低于 `UTIL_LOW` 的，给多 = 写了 `cpus=`、`cores_peak` ≤ 给的 × `CPU_SPARE_FRAC` 且少 `CPU_SPARE_MIN` 核；状态里运行中任务的 `cpu_fit`（写状态时补上类 `by`、`cls`：来源与类一起认，#99），看板只读它出只给会话的 `cpu_low:`、`cpu_high:`，同类跨主机合成一条，#46、#91）；给少了的建议核数封顶到这一类每条最多能给的（labmon 全停时能给的减同机别的任务已记的，按本项目同类同时在跑的条数均分，#112）；按峰值估几个核（×1.1 取整至少 1）；开跑时导出的 `LABMON_CPUS`
    实现：worker 的 `gpu_slack`、`cpu_fit`（`gpu_slack` 只取它的 low；类 `cpu_cls`；每条最多能给的 `cpu_budget`，`Worker.cpu_hints` 按快照算）、`cpu_from_peak`（`estimate` 与 `cpu_fit` 共用）；`cpus_export`（`Worker.cpus_for` 与 `cpu_fit` 共用）；看板 `collect._host_alerts`（合并同类 `collect._cpu_fit_alerts`，各台核预算那一句 `collect._cpu_room_text`）
 102. **放不下的原因与原因代码；“CPU 不够”里核被谁记着；因 CPU 被挡多久才告警**：放不下的原因（短句与整句一处列全）与原因代码（快照的 `code`，`note_waits` 按 `CPU_CODES` 认因 CPU 被挡）；“CPU 不够”里核被谁记着、是不是记账比实测多挡住的（`cpu_est` 还是 `cpu`）；因 CPU 被挡满 10 分钟才告警（只认 `CPU_ALERT_CODES`，核真被自己的任务用着的不报；等待项的 `cpu_wait`，看板只认这个字段）
@@ -412,7 +412,7 @@
 106. **调度卡**：调度卡（规则一句话、各项目已用 / 应得、占卡、排队、平均等待；按人分组；改权重、优先）
    实现：`overview.sched_view`（快照的 `sched`；各项目的 `person`、`pk`，普通用户看别人的去掉 `person`：`users.view`；平均等待从本机存的用量记录 `overview/usage/<主机>.jsonl` 按 24 小时窗口算，在跑的取状态）；页面上 `schedCard`、`schedAct`，一个项目的权重胶囊 `schedW`（「权重 − ×1 +」，档 `W_STEPS`、`wStep`，#143）与按钮 `schedBtns`（优先、暂停各一个 `schedFlag`），已用 / 应得条 `shareBar`（近期在用的项目、用量和与人数 `schedOn`，按人分组时人那一行 `personBar`，几个人在用 `schedPeople`，人员键 `pkOf`、名字 `who`）（项目「管理」抽屉的 `projSchedSec` 共用，回执 `SMSG`；overview.html）；`POST /sched/…`（`serve._sched`；暂停、恢复经 `records.tell` 告诉会话）
 107. **公平份额**：公平份额（各项目衰减的 GPU 卡·时，跨主机：各主机 `usage.jsonl` + 别的主机状态里的 `share.run` + 本机在跑的；占几张卡；按人合起来的见「放行顺序」）
-   实现：worker 的 `usage`、`card_share`（`cards`）、`share`、`own_runs`、`peers`（状态里的 `share`）；一个人名下各项目的合计 worker 的 `person_use`，调度卡上的 `puse` 由 `overview.sched_view` 按完整的 `share.use` 算（worker 不 import 本包，各一份、口径相同）
+   实现：worker 的 `usage`、`card_share`（`cards`）、`share`、`own_runs`、`peers`（状态里的 `share`）；一个人名下各项目的合计共用 `worker.pure.person_use`（worker `fair_key`、`pool.py` 与调度卡 `overview.sched_view` 按完整的 `share.use` 算 `puse`）
 108. **调度设置**：调度设置（hosts.toml 的 `[sched]`：半衰期、等待上限、权重；缺省值只在 worker）
    实现：`config.sched` → 各主机的 `sched.json`（`overview.collect` 另加各项目算在谁名下的 `owner`，#23）→ worker 的 `policy`（缺省 `POLICY`）；改 `[sched.*]` 一行 `config._sched_set`，页面上改权重 `config.set_weight`
 109. **项目级的暂停、优先；`pause --now` 的“只停一次”；暂停是谁下的与普通用户能不能动它**：项目级的暂停、优先（所有主机，含之后加入的：hosts.toml 的 `[sched.pause]`、`[sched.focus]`，#96；只给某台的 `--host` 仍是那台的临时指令）；不带 `--host` 的 `pause --now` 给各台的“只停一次”；暂停是谁下的与普通用户能不能动它（项目级的与只给某几台的同一条；优先只给管理员，路由表管；#16、#27）
@@ -426,7 +426,7 @@
 113. **工作台上运行中任务的预计结束**：工作台上运行中任务的预计结束（退路顺序：项目看板按进度算的 → plan 里的 run 条 → worker 给这条清单行的时长 `queues[].dur` → 清单估时）
    实现：`etaOf`（overview.html）
 114. **运行中任务剩余时长说不准时的估计**：运行中任务剩余时长说不准时的估计（已用的 20%、至少 10 分钟：worker 估超了预计的，看板估超了估时又看不出进度的（没有进度行、进度停了，#138）与第一段只有一个步数 > 0 的采样、又没有估时或已超估时的）
-   实现：worker 的 `overrun_left`（`OVER_FRAC`、`OVER_MIN_S`，`run_end` 用）；看板 `collect.overrun_left`（`_job_times`、`_segment_eta` 用；worker 在服务器上跑、不 import 本包，各自一份，常数一起改）
+   实现：`worker.pure.overrun_left`（`OVER_FRAC`、`OVER_MIN_S`；worker `run_end` 与看板 `collect._job_times`、`_segment_eta` 共用）
 115. **各卡被谁占着**：各卡被谁占着（已跑的用量记录存在本机，加推演）
    实现：`overview._keep_usage`、`overview.occupancy`（项目页经 `/p/<id>/events.json` 取）
 116. **工作台存的用量记录；存着记录的主机**：工作台存的用量记录（各主机 worker 跑完的任务，30 天；时间线已跑占用、调度卡平均等待、项目页失败的尝试都读它）；存着记录的主机（不知道在哪台跑时各台都看）
@@ -434,7 +434,7 @@
 117. **等待原因的结构化字段**：等待原因的结构化字段（缺本地文件又补不了；本地依赖怎么补）
    实现：worker 等待项的 `miss`（`place` 定）、`local[].how`（`copy`/`redo`/`mixed`）；看板按字段认，不按 `why` 文字
 118. **容量单位**：容量单位（GiB = 2^30；挂载点、共享盘、内存）
-   实现：`config.GIB`；页面上 `GIB`（common.js）
+   实现：`worker.pure.GIB`（`config.GIB` 与 worker 共用）；页面上 `GIB`（common.js）
 119. **时间线**：时间线（视图与拖动缩放、刻度、里程碑与现在线、按主机分组的分隔线（行的 `sep`）、任务条、占用条、图例、左栏按行名放宽（`lw`）；项目页与工作台共用）
    实现：common.js 的 `tlInit`、`tlRange`、`tlBind`、`tlSvg`、`tlShow`、`jobBar`、`tlPack`、`occBars`（状态名 `OCC_ST`、图例 `occItems`）；「全部」要包住的区间 `tlSpan`；近景按现在前后的任务定宽 `tlFit`（参数 `TL_FIT`，两页的 `near()` 给任务）；排在谁后面 `afterText`
 120. **项目页时间线的依赖连线**：项目页时间线的依赖连线（#111：边取本项目的 `deps`、两端都画在图上；平时只画关键的：同一车道的、能经别的依赖或车道顺序推出来的不画；悬停或触屏点一格高亮它的整条上下游（只沿依赖），链上不是传递边的线显出；线压在条下面（`tlSvg` 的 `o.under`），直角折线走行缝）
@@ -442,7 +442,7 @@
 121. **触屏上点一格：第一次只看，3 秒内再点同一格才动作**：触屏上点一格：第一次只看（悬停文字），3 秒内再点同一格才动作（收起行小方块定位、任务条跳到任务明细）
    实现：`tapTwice`（page.html；`gsqClick` 与任务条的点击共用）
 122. **自动归组**：自动归组（不属于任何 `[[groups]]` 的任务按名字前缀成组，id 即前缀：归组与页面上把自动组写成 `[[groups]]` 时认 id 同一条正则）
-   实现：`config.AUTO_GROUP_RE`（`collect._group_of`、`config.set_project` 用）；worker 借同前缀的估时比值用自己的一份 `GROUP_RE`（不 import 本包，同一条正则，`test_group_regex_matches_board` 核对）
+   实现：`worker.pure.GROUP_RE`（看板导出为 `config.AUTO_GROUP_RE` 给 `collect._group_of`、`config.set_project` 用，worker `duration` 借同前缀估时比值直接共用）
 123. **按估计字宽截断文字与同一估计下的字宽；项目页时间线条上的任务名**：按估计字宽截断文字（缺省截尾；条上的任务名省略中间，可原样留一段前缀）与同一估计下的字宽；项目页时间线条上的任务名（去掉自动分组前缀与 `hold_`）
    实现：`fit`、`textW`（common.js）；`barName`（page.html）
 124. **正在操作；点了不能打字的地方先让输入框失焦**：正在操作（正拖着排顺序，焦点在可打字的输入框或下拉框里（勾选框、按钮类不算），或在正文、抽屉里选着文字且 1 分钟内动过选区；定时刷新先不重画，免得冲掉输入）；点了不能打字的地方（按钮、勾选框、文字）先让输入框失焦（Safari 点按钮不挪焦点，#131：按钮不再各自 blur）
@@ -482,7 +482,7 @@
 141. **借来的主机上对方的用量、超出预留、扣预留准入、说好不用的时段与作废、快撞上限、被挤掉、OOM 先杀我们**：借来的主机上对方的用量（内存按不算页缓存的 `mem.anon`；内存与 CPU 都不含任何保活的进程树，与预留同口径；`ka.sh` 停不了的保活占的核 `other.ka_cpu` 另由 `cpu_room` 扣）、超出预留（CPU 连着两轮才算）、扣预留准入（要不要预先留）、对方说好不用的时段与作废、快撞上限、被挤掉（失败是不是 OOM 的判定与 finish 记用量行的 `oom` 共用）、OOM 先杀我们
    实现：worker 的 `other`（`sample` 里量）、`guest_scan`（`cpu_hot`；说好不用开始时对方已有的 GPU 进程 `away_base`）、`guest_block`、`held`、`keep_left`、`away`、`end_away`（状态的 `away_state`）、`guest_tight`、`squeezed_by`（判定 `oom_of`）、`oom_check`、`GUEST_ADJ`；看板写、清 `borrow_away` 在 `borrow.begin`、`borrow.check`
 142. **labmon 之外的内存与 CPU 要扣掉的保活**：labmon 之外的内存与 CPU 要扣掉的保活（GPU 上认作保活的进程整棵进程树，含借来主机上对方另起、`ka.sh` 停不了的；上一轮认过、这一轮漏认但 PID 与启动时刻没变的照样算，停不了的照样算停不了的）：内存扣各进程 PSS 之和（借用的预留与 worker 判超出靠它同口径）；CPU worker 扣这一段的核数，组内探针只有 `ps` 的 %CPU（生命期平均，口径不同）
-   实现：worker 的 `proc_tree`（单元的进程也用它）、`mem_of`、`Worker.ka_cores`（`ka_roots`，`sample` 里扣；上一轮的累计记两种：所有保活合起来、各棵保活树分开，停不了的核数按后者求和）；组内服务器的 `fleet.analyze`（`mem_ka`，序列行记 `mk`，`borrow._ram_sample` 按它认新旧样本），探针 `fleet_probe.sh` 的 `pss` 段只送命令行带保活字样的 GPU 进程与其子孙的 PSS（字样由 `fleet.fetch` 传）。“进程树的子孙”因此有三份：worker 的 `proc_tree`、`fleet._desc`、探针里的 awk（worker 不 import 本包，探针在未必有 Python 的镜像里跑）
+   实现：`worker.pure.proc_tree`（worker 单元/保活与组内服务器 `fleet.analyze` 共用）；worker 的 `mem_of`、`Worker.ka_cores`（`ka_roots`，`sample` 里扣；上一轮的累计记两种：所有保活合起来、各棵保活树分开，停不了的核数按后者求和）；组内服务器的 `fleet.analyze`（`mem_ka`，序列行记 `mk`，`borrow._ram_sample` 按它认新旧样本），探针 `fleet_probe.sh` 的 `pss` 段只送命令行带保活字样的 GPU 进程与其子孙的 PSS（字样由 `fleet.fetch` 传；探针在未必有 Python 的镜像里跑，另留 awk 一份）
 143. **后台采集线程**：后台采集线程
    实现：`serve._Collector`
 144. **页面连不上看板服务**：页面连不上看板服务（服务重启的那几秒：fetch 抛 TypeError；页面上的请求都经它，不露浏览器原始报错；只有做两遍也没事的——读数据、立即采集、立即探测——自动重试，别的写请求只提示再点；定时取数顶栏标连不上、提早再取；那几句话、顶栏那一处，#177）
@@ -530,7 +530,7 @@
 165. **组内服务器 GPU 负载归类与按路径归人**：组内服务器 GPU 负载归类（只认保活，其余算实验）与按路径归人
    实现：`fleet.classify`、`fleet.mark_keepalive`、`disk.whose`（归属表同 `disk.owner_of`）
 166. **进程跑的是哪个脚本、相对路径按工作目录还原；ka.sh 管的保活；借用前逐个核对**：进程跑的是哪个脚本、相对路径按工作目录还原（#29：认保活时相对路径起的同一脚本与写完整路径起的一样）；ka.sh 管的保活（python 跑 `AGRI_KA_DIR/AGRI_KA_SCRIPT`：命令行写完整路径，或相对路径还原、解开符号链接后是它）；借用前逐个核对
-   实现：worker 的 `script_arg`（看门狗 `script_of` 与 `ka_owned` 共用）、`ka_owned`；`labmon/ka.sh` 的 `ka_procs`（running 与 stop 发信号共用，#105；规则与 `ka_owned` 同一条，`tests/test_ka.py` 对同一组起法核对两边一致）；组内字样与规则比的命令行接上还原路径 `fleet._abs_script`，探针 `fleet_probe.sh` 的 `script_abs`（只规整路径；探针在未必有 Python 的镜像里跑、worker 不 import 本包，所以三份）；借用核对 `fleet_guard.sh` 的 `kacheck`（读 `ka.sh running` 只经 `running_groups strict`），结果的话 `borrow._ka_miss`
+   实现：`worker.pure.script_arg`（worker 的看门狗 `script_of`、`ka_owned` 与看板 `fleet._abs_script` 共用）；worker 的 `ka_owned`；`labmon/ka.sh` 的 `ka_procs`（running 与 stop 发信号共用，#105；规则与 `ka_owned` 同一条，`tests/test_ka.py` 对同一组起法核对两边一致）；探针 `fleet_probe.sh` 的 `script_abs`（只规整路径；探针在未必有 Python 的镜像里跑，另留 shell 一份）；借用核对 `fleet_guard.sh` 的 `kacheck`（读 `ka.sh running` 只经 `running_groups strict`），结果的话 `borrow._ka_miss`
 167. **固定配色**：固定配色（项目、计划项、共享盘上的人）
    实现：`config.pick_color`
 168. **页面渲染；往页面里填一块数据**：页面渲染（模板 + common.js + 数据；写盘的原子写入）；往页面里填一块数据（`/*__DATA__*/null`、`/*__ME__*/null`，`<` 写成 `\u003c`）

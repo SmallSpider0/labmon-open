@@ -6,6 +6,7 @@ import subprocess
 
 from . import common as _C
 from . import queue as _Q
+from .pure import mem_unevictable, proc_tree
 
 def oom_of(j, rc):
     """一次失败的清单任务是不是 OOM（#62）：finish 记进用量行的 oom（estimate 据此抬高同类的估计），squeezed_by 据此判借来的主机上是不是被对方挤掉。
@@ -311,14 +312,6 @@ def job_cpus(v):
     return 0 if v == 0 else max(1, int(v + 0.5))
 
 
-def mem_unevictable(use, active_file, inactive_file):
-    """容器里收不回的内存（字节）：cgroup 用量 − 文件页（活跃 + 不活跃页缓存）。v1 是 memory.usage_in_bytes − total_active_file − total_inactive_file，
-    v2 是 memory.current − active_file − inactive_file。含匿名页、shmem（/dev/shm、tmpfs、SysV 共享内存：没有 swap 时收不回，挂在匿名页的 LRU 上，
-    不在 *_file 里）与记到 cgroup 的内核内存。不取 rss + shmem：3.10 内核的 v1 没有 total_shmem，只剩 rss 会把 shmem 当成能回收的页缓存。
-    组内服务器的探针（fleet_probe.sh 只送字段，fleet.parse 算）是同一个口径的另一份：探针在没有 Python 的镜像里跑，worker 不 import 本包。"""
-    return max(0, use - active_file - inactive_file)
-
-
 def cpu_cap(quota):
     """记账用的 CPU 上限：容器配额向下取整（7.5 核按 7）；没设上限为 None（不记 CPU）。"""
     return max(1, int(quota)) if quota else None
@@ -394,20 +387,6 @@ def rootfs_info():
             out["shm"] = round((d.f_blocks - d.f_bfree) * d.f_frsize / _C.GIB, 3)
         except OSError:
             pass
-    return out
-
-
-def proc_tree(procs, roots):
-    """roots 里的进程与它们的子孙（scan_procs 的进程表里有的；不在表里的根不算）。单元的进程、保活的进程树（sample 扣保活的内存）共用。"""
-    kids = {}
-    for pid, p in procs.items():
-        kids.setdefault(p["ppid"], []).append(pid)
-    out, todo = [], [pid for pid in roots if pid in procs]
-    while todo:
-        x = todo.pop()
-        if x not in out:
-            out.append(x)
-            todo += kids.get(x, [])
     return out
 
 

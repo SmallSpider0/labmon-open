@@ -19,6 +19,7 @@ from . import projects as PJ
 from .config import ConfigError, fmt_dur, fmt_time, stale_limit
 from .overview import USAGE_KEEP_S
 from .state import file_sig, load_json, load_rows, save_json, snapshot, state_dir, usage_file, usage_hosts
+from .worker.pure import job_key  # noqa: F401 — 与 worker 共用唯一实现
 
 JOB_CONFIRM = 2       # wait --job：没见过它在跑、排队就已结束、找不到、不会再跑的，要连着这么多份开始等之后写出的快照都这样才报（#135）
 JOB_BAD_RC = 4        # wait --job 都有了结果、但不全是成功（失败、作废、找不到、不会再跑）的退出码；1 是新告警，2、3 已被参数错、配置错占着
@@ -157,12 +158,6 @@ def wait_check(cfg: dict, out: Path, sf: Path, overview: Path | None = None, ext
     if stale:
         current["collector_stale"] = stale
     return {k: current[k] for k in _new_alerts(sf, current)}
-
-
-def job_key(name: str, pid: str) -> tuple[str, str]:
-    """--job 的名字 → (项目, 任务)：与清单 after= 同一套写法（worker 的 dep_keys；worker 不 import 本包，各一份），不带 项目/ 前缀的是本项目。"""
-    p, n = name.split("/", 1) if "/" in name else (pid, name)
-    return p, n
 
 
 def job_state(snap: dict | None, name: str, rows: list[tuple[str, dict]]) -> dict:

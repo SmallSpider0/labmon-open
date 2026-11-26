@@ -1,13 +1,13 @@
-"""本机状态目录与状态文件的底层读写：别的模块都建在它上面，它不 import 本包的其它模块。
+"""本机状态目录与状态文件的底层读写：别的模块都建在它上面（只复用 worker.pure 的纯函数，支持 Python 3.8）。
 
     状态根目录：$LABMON_STATE（缺省 ~/.local/state/labmon）（state_root；tools/issue_watch.py 的已见列表直接放这里）
     状态目录：<状态根目录>/overview/（state_dir）
         snapshot.json   工作台最近一次的全局快照（overview.collect 写，各处经 snapshot() 读）
         其余文件见 overview.py、fleet.py、records.py 的说明
 
-- 按文件缓存读出的内容：file_sig 判文件变没变；
+- 按文件缓存读出的内容：file_sig 判文件变没变（来自 worker.pure）；
 - JSON 状态文件：load_json、save_json（原子写入 write_atomic：先写临时文件再改名，读的一方不会读到半截）；
-- JSONL（逐行记录）：parse_rows、load_rows、append_row（按保留期修剪；续写的进程内互斥按路径）。
+- JSONL（逐行记录）：parse_rows（来自 worker.pure.parse_jsonl）、load_rows、append_row（按保留期修剪；续写的进程内互斥按路径）。
 """
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ import os
 import secrets
 import threading
 from pathlib import Path
+
+from .worker.pure import file_sig, parse_jsonl as parse_rows  # noqa: F401 — 与 worker 共用唯一实现
 
 
 def state_root() -> Path:
@@ -37,17 +39,6 @@ def usage_hosts() -> list[str]:
     """存着用量记录的主机（usage_file 的那些文件）：不知道任务在哪台跑的时候各台都看（labmon wait --job、项目页池车道跑过的任务）。"""
     d = state_dir() / "usage"
     return sorted(f.stem for f in d.glob("*.jsonl")) if d.exists() else []
-
-
-def file_sig(path) -> tuple | None:
-    """文件变没变的签名 (inode, 修改时刻纳秒, 大小)；没有或读不到为 None。按文件缓存读出内容的都拿它比：只比 st_mtime 时，
-    同一个时间戳粒度里连写两次（Linux 上约 4 ms，共享盘更粗）第二次就漏读，要等下次再写才补上（#31）。
-    worker 在服务器上跑、不 import 本包，另有一份 labmon_worker.fsig，口径相同。"""
-    try:
-        st = os.stat(path)
-    except OSError:
-        return None
-    return st.st_ino, st.st_mtime_ns, st.st_size
 
 
 def load_json(path: Path, default):
@@ -92,17 +83,6 @@ _LOCKS_GUARD = threading.Lock()
 def _lock(path: Path) -> threading.Lock:
     with _LOCKS_GUARD:
         return _LOCKS.setdefault(str(path), threading.Lock())
-
-
-def parse_rows(text: str) -> list[dict]:
-    """JSONL 文本逐行解析，坏行跳过（写到一半被打断的那行）。"""
-    rows = []
-    for l in text.splitlines():
-        try:
-            rows.append(json.loads(l))
-        except ValueError:
-            continue
-    return rows
 
 
 def load_rows(path: Path) -> list[dict]:

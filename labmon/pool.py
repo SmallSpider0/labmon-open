@@ -28,7 +28,8 @@ from . import fleetops as FO
 from . import lease as LS
 from . import users as U
 from .config import HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, fmt_dur, fmt_time, home_host, home_peers, pool_home, set_fleet_keys, share_host, user_hosts
-from .worker import fair_key, person_use
+from .worker import fair_key
+from .worker.pure import person_use
 from .records import log_events
 from .service import log, notify
 from .state import load_json, snapshot, state_dir

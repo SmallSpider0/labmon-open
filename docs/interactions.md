@@ -156,7 +156,7 @@
   事件（`records.EVENT_KINDS`）、看板写给 worker 的 `eta.json` / `sched.json` / `returned.json`（`overview.fetch` 的 `put`）、用户级主机清单（`config._set_keys`）：
   加了什么字段、谁写谁读。
 - 旧 worker 写的状态没有新字段时看板怎样；共享盘上的旧数据：能一次迁完就迁、删兼容代码，迁不了的留兼容并写明何时可删（AGENTS.md 硬约束第 3 条）。
-- `labmon/labmon_worker.py`、`labmon/worker/*.py` 与 `probe.py` 在服务器上用 Python 3.8 跑、不 import 本包（CI 有一项专门查）。
+- `labmon/labmon_worker.py`、`labmon/worker/*.py`（含看板直接复用的共用纯模块 `labmon/worker/pure.py`）与 `probe.py` 在服务器上用 Python 3.8 跑、不 import 本包其余模块（CI 有一项专门查）。
 
 相关代码：`write_status`、`usage`；`collect.build`、`overview.collect`、`probe.worker_view`、`records.py`、`state.py`。
 

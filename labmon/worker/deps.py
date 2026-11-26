@@ -3,6 +3,7 @@ import json
 import os
 
 from . import common as _C
+from . import pure as _P
 from . import queue as _Q
 
 def gang_file(host):
@@ -64,8 +65,7 @@ def gang_until(S, x, t):
 
 def dep_keys(r):
     """一行的依赖（hints 的 deps、deps_any，可带 项目/ 前缀）→ [(项目, 任务, 失败也算)]：不带前缀的是这一行自己的项目（r["project"]）。"""
-    k = lambda a: tuple(a.split("/", 1)) if "/" in a else (r["project"], a)
-    return [k(a) + (False,) for a in r.get("deps") or []] + [k(a) + (True,) for a in r.get("deps_any") or []]
+    return [_P.job_key(a, r["project"]) + (False,) for a in r.get("deps") or []] + [_P.job_key(a, r["project"]) + (True,) for a in r.get("deps_any") or []]
 
 
 def dep_end(keys, t0, ends, dead=()):

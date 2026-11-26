@@ -20,16 +20,11 @@ from pathlib import Path, PurePosixPath
 
 from .records import log_events
 from .state import state_root, write_atomic
+from .worker.pure import GIB, GROUP_RE as AUTO_GROUP_RE, HOLD_RE, POOL, STALE_S  # noqa: F401 — 与 worker 共用唯一实现
 
 # 计划项（分组）、项目、共享盘上各人的配色顺序；配置里写 color 可覆盖
 PALETTE = ["#7F77DD", "#1D9E75", "#D85A30", "#378ADD", "#D4537E", "#BA7517", "#639922", "#888780"]
 PORT = 8765                    # 看板服务的缺省端口（labmon serve / service install --port）
-STALE_S = 180                  # worker 每 10 秒写一次状态，这么久没更新就算不在（工作台与项目页的探针同一口径）
-GIB = 2 ** 30                  # 页面与告警里的容量一律 GiB（探针、statvfs 给的是字节）
-# 占位任务（清单里插的“等条件再放行”的 hold / pause）按名字里的词认：不计入计划项与项目的 实际/估时 比值，页面画成暂停块。
-# 与 worker 的 HOLD_RE 同一条规则（worker 在服务器上跑、不 import 本包，各自一份）；不再许项目另配，免得两边认的不一样
-HOLD_RE = re.compile(r"(?i)(?:^|[_.\-\d])(?:hold|pause)(?:$|[_.\-\d])")
-POOL = "pool"                  # 算力池的保留主机 id（#24）：池里待放的清单登记在共享盘 hosts/pool/queues/（worker 那边另有一份 POOL）；主机与组内服务器都不许叫它
 POOL_LABEL = "算力池"
 
 
@@ -853,7 +848,6 @@ TITLE_MAX, LABEL_MAX = 60, 40          # 标题、计划项与里程碑名字的
 COLOR_RE = re.compile(r"#[0-9a-fA-F]{6}")
 # 自动归组（auto_groups）：不属于任何 [[groups]] 的任务按名字前缀（第一个 _ 或 - 及之前，如 x5_）成组，组 id 就是这个前缀。
 # collect._group_of 按它归组；set_project 把自动组写成 [[groups]] 时按它认 id（#150）
-AUTO_GROUP_RE = re.compile(r"([^_-]+)[_-]")
 
 
 def cfg_spec() -> dict:

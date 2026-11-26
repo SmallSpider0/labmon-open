@@ -9,6 +9,7 @@ from . import common as _C
 from . import queue as _Q
 from . import measure as _M
 from . import deps as _DP
+from .pure import person_use
 
 def card_share(ngpu, vram, excl, card, ncards):
     """一个任务占几张卡（公平份额按它记 GPU 用量）：独占卡算整卡，独占整机算这台全部的卡，同卡并行的按显存估计值（GiB）
@@ -390,14 +391,6 @@ def _place(x, S, t, pre=None):
     return None, w("vram", vram=x["vram"], src=x["src"], kept=kept, held="；有卡留给独占任务" if blocked - S["owner"] else "",
                    ka="；卡 %s 上有对方另起、ka.sh 停不了的保活，不放（要停请对方停）" % ka if ka else "", ka_s="（卡 %s 有停不了的保活）" % ka if ka else "",
                    owner="；对方在用卡 %s（超出预留或刚回落，%d 分钟内不放）" % (owner, _C.GUEST_QUIET_S / 60) if owner else ""), True
-
-
-def person_use(pol, use):
-    """各人员键（pol["own"]）名下几个项目的用量之和 {人员键: 卡·时}（fair_key 的第一项）；没写人员键的项目合在键 None 下。"""
-    own, out = pol.get("own") or {}, {}
-    for q, v in use.items():
-        out[own.get(q)] = out.get(own.get(q), 0.0) + v
-    return out
 
 
 def fair_key(r, focus, pol, use, tot=None):
