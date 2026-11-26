@@ -13,7 +13,7 @@ dependencies = []
 labmon = "labmon.__main__:main"
 
 [tool.setuptools]
-packages = ["labmon"]
+packages = ["labmon", "labmon.worker"]
 
 [tool.setuptools.package-data]
 labmon = ["page.html", "overview.html", "common.js", "data_root_readme.md", "labmon_worker.py", "fleet_probe.sh", "fleet_guard.sh", "ka.sh"]

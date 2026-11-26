@@ -15,7 +15,7 @@
 3. 改的文件不全在文档、测试、工具里（labmon.deploy.is_doc）就重启服务（本机：重启前再等一次平台操作做完，再 kickstart；远端由服务端做），
    等服务答得上、报出新提交；
 4. POST /collect?fresh 两次（fresh：不受节流，等请求之后开始的那一轮做完）；
-5. 改了 labmon_worker.py 的，各台没 stop 过、连得上的主机拉起 worker，再采集；
+5. 改了 worker（labmon_worker.py 或 labmon/worker/）的，各台没 stop 过、连得上的主机拉起 worker，再采集；
    第 4、5 步的最后一次采集后，快照不晚于采集请求、拉起成了的主机状态不晚于拉起的（新 worker 还没写出第一份状态），
    每 SETTLE_POLL_S 秒再采一次，最多等 SETTLE_S 秒（#70），等不到照样往下核对、由核对报没过；
 7. 核对：没有进行中的平台操作；服务日志重启以来（没重启就是最后一次「服务启动」以来）没有 Traceback；
@@ -460,9 +460,10 @@ def deploy(wait_min: float) -> tuple[int, list[str]]:
     # 2–3. 更新代码、重启
     u = (_update_remote if remote() else _update_local)(wait_min, checks)
     files, restart = u["files"], u["restart"]
-    wk = D.WORKER in files and restart
+    wk_changed = D.has_worker(files)
+    wk = wk_changed and restart
     pend = set(pending()) - ({"*"} if wk else set())          # 上次改了 worker、却没拉起成的主机：这次补上（看板与提交都对上了也照样补）
-    if D.WORKER in files:                     # 先记下全部要补：没重启（平台操作在做）、采集没完成、拉起断在哪一步，下次跑都补；拉起完换成没成的那几台
+    if wk_changed:                            # 先记下全部要补：没重启（平台操作在做）、采集没完成、拉起断在哪一步，下次跑都补；拉起完换成没成的那几台
         set_pending(["*"])
     started: dict[str, float] = {}
     mark = clock() if restart or pend else None
@@ -497,7 +498,7 @@ def deploy(wait_min: float) -> tuple[int, list[str]]:
     n_doc = sum(map(D.is_doc, files))
     out.append("重启看板：" + ("没重启（平台操作在做）" if u["held"] else "是" if restart else "否") + (f"（改了 {len(files) - n_doc} 个代码文件）" if restart or u["held"] else f"（只改了文档、测试或工具，{len(files)} 个文件）" if files else "（没有新提交）")
                + "｜worker：" + ("改了，拉起 " + ("、".join(started) or "没有主机") if wk else "补拉起上次没成的 " + ("、".join(started) or "（都连不上）") if pend
-                          else "改了，没拉起" if D.WORKER in files else "没改，不拉起"))
+                          else "改了，没拉起" if wk_changed else "没改，不拉起"))
     # 7. 核对
     st = server_status() if remote() else None
     b = (st or {}).get("busy") if remote() else busy()

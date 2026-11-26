@@ -4,7 +4,7 @@
 
 - **项目看板**（`/p/<id>/`）：本机定时经 ssh 在服务器上跑只读探针，汇成统一快照，渲染成一张数据内联的页面；一个项目一份 `monitor.toml`，服务器上不用装任何东西。
 - **工作台**（`/`）：各主机的资源、每个任务的用量、跨项目的放行顺序与推演、租期与续租、记录。
-- **服务器端 worker**（`labmon_worker.py`，单文件、只用 Python 3.8 标准库）：每台主机一个，统一调度这台上各项目的队列：准入、公平份额、独占、临时指令、保活。
+- **服务器端 worker**（`labmon/worker/` 与入口 `labmon_worker.py`，只用 Python 3.8 标准库）：每台主机一个，统一调度这台上各项目的队列：准入、公平份额、独占、临时指令、保活。
 - **组内服务器管理**：组里别人的服务器只读轮探，平台续租、开关机、换人，借来用与归还，共享盘按人统计。
 
 看板服务可常驻在 Linux（含 WSL2，systemd 用户单元）或 macOS（launchd）。命令行通过看板接口工作；远端部署、HTTPS、公网反代及冷备见 [部署文档](docs/deploy.md)。仓库中的主机、人员、地址和项目均为示例。
@@ -145,7 +145,8 @@ labmon/waits.py         labmon wait 在看板这边：新告警与全局消息�
 labmon/lease.py         服务租约：每个 worker_home 下一份，只有主动 worker 的输入、平台与组内服务器、发通知；备用只读租约（labmon server lease）
 labmon/backup.py        冷备与恢复：打包状态根与主机清单（不含秘密），笔记本经 API 取、留 14 份，labmon server restore 恢复
 labmon/hostcheck.py     看板服务跑在 WSL 里时体检所在的 Windows 机（待装更新、待重启、开机时长、内存、隧道），到时推提醒；总览的「看板服务」小卡（labmon hostcheck）
-labmon/labmon_worker.py 服务器端的队列执行器（见 docs/worker.md）
+labmon/labmon_worker.py 服务器端队列执行器的入口脚本（调用同目录的 worker/ 包，见 docs/worker.md）
+labmon/worker/          服务器端队列执行器子包（只用 Python 3.8 标准库、不 import 本包）：common / queue / disk / measure / keepalive / deps / sched / forecast / offers / core / fit / cli
 labmon/workerctl.py     在看板服务那台上部署、拉起、停止 worker，登记队列，下临时指令（每条命令一次 ssh，复用看板的连接）
 labmon/renew.py         自用主机的预备续租，以及续租后拉起 worker、放行；运行中任务的预计结束 eta_of（续租与借用的截止判断共用）
 labmon/rebalance.py     多主机负载均衡的提示：把各主机 worker 算的 offers 汇成每个项目一条挪法建议（rebalance: 告警），不改清单与放行

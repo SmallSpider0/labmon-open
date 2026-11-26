@@ -6,7 +6,7 @@
 （[AGENTS.md「事先同意的事与要等维护者的事」](../AGENTS.md#事先同意的事与要等维护者的事)）。审查按同一张清单核对（[AGENTS.md「审查要点」](../AGENTS.md#审查要点)）。
 模板在[文末](#设计说明模板)。
 
-每个维度列：要问的问题（用 labmon 自己的概念与函数名）、相关代码、历史上漏过的例子。函数名后面不写文件的是 `labmon_worker.py` 里的，
+每个维度列：要问的问题（用 labmon 自己的概念与函数名）、相关代码、历史上漏过的例子。函数名后面不写文件的是 `labmon/worker/` 里的（由 `labmon/worker/__init__.py` 统一导出，入口脚本 `labmon/labmon_worker.py`），
 其余写 `模块.函数`；概念的唯一实现以 [唯一实现表](concepts.md) 为准。
 
 ## 1. 多主机
@@ -156,7 +156,7 @@
   事件（`records.EVENT_KINDS`）、看板写给 worker 的 `eta.json` / `sched.json` / `returned.json`（`overview.fetch` 的 `put`）、用户级主机清单（`config._set_keys`）：
   加了什么字段、谁写谁读。
 - 旧 worker 写的状态没有新字段时看板怎样；共享盘上的旧数据：能一次迁完就迁、删兼容代码，迁不了的留兼容并写明何时可删（AGENTS.md 硬约束第 3 条）。
-- `labmon_worker.py` 与 `probe.py` 在服务器上用 Python 3.8 跑、不 import 本包（CI 有一项专门查）。
+- `labmon/labmon_worker.py`、`labmon/worker/*.py` 与 `probe.py` 在服务器上用 Python 3.8 跑、不 import 本包（CI 有一项专门查）。
 
 相关代码：`write_status`、`usage`；`collect.build`、`overview.collect`、`probe.worker_view`、`records.py`、`state.py`。
 
@@ -190,7 +190,7 @@
 - 实验会话会怎么读这件事：`worker status`、项目页的文字会不会让它误判（以为别人在抢卡、以为任务卡死）；
   被挡住时它会不会想绕开（改任务名、换 tag、改清单），报问题用 `labmon report`，由总控评估，值得跟进的开成 `from-experiment` Issue（[SKILL「发现 labmon 的问题」](../skills/lab-experiments/SKILL.md#发现-labmon-的问题)）。
 
-相关代码：`waits.wait_check`、`collect.build`（告警）、`labmon_worker.py` 的 `status` 命令文字；`skills/lab-experiments/SKILL.md`。
+相关代码：`waits.wait_check`、`collect.build`（告警）、`worker/cli.py` 的 `status` 命令文字；`skills/lab-experiments/SKILL.md`。
 
 漏过的：
 - 借卡的要还、已还、对方在用以前叫醒所有项目的会话（1f0eb51 改成只报给在那台主机上有车道的项目）。

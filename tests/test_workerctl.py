@@ -51,9 +51,13 @@ class StartTest(unittest.TestCase):
             self.assertIn("KeyError: 'stop'", out)
             # worker 照样写进去了，是 main 上已提交的版本（工作区里改了一半的不传）
             sent = dict(sent)
-            self.assertEqual(sorted(sent), ["ka.sh", "labmon_worker.py"])
+            self.assertIn("ka.sh", sent)
+            self.assertIn("labmon_worker.py", sent)
             self.assertEqual((d / "alice" / "labmon" / "labmon_worker.py").read_text(), sent["labmon_worker.py"])
             self.assertEqual((d / "alice" / "labmon" / "ka.sh").read_text(), sent["ka.sh"])   # 停启保活的脚本与 worker 一起写到 worker_home
+            for rel, body in sent.items():
+                if rel.startswith("worker/"):
+                    self.assertEqual((d / "alice" / "labmon" / rel).read_text(), body)
 
     def test_worker_environment_uses_explicit_host_paths(self):
         """路径可含空格或 shell 字符，按 shell 参数转义。"""
@@ -159,6 +163,68 @@ class CommittedTest(unittest.TestCase):
             (pkg / "labmon_worker.py").write_text("工作区改了一半的\n")
             with mock.patch.object(workerctl, "HERE", pkg):
                 self.assertEqual(workerctl.committed("labmon_worker.py"), "main 上的\n")
+
+    def test_start_deploys_worker_package_from_main_and_prunes_stale(self):
+        """#168：worker start 单条连接只打包部署 main 上已提交的 labmon_worker.py、worker/*.py 与 ka.sh；
+        忽略分支提交与未提交改动，清理远端已删的旧模块与 __pycache__，脏工作区对 worker/*.py 有提示；解包失败不破坏已有文件。"""
+        no_git_env(self)
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td).resolve()
+            repo = d / "repo"
+            pkg = repo / "labmon"
+            (pkg / "worker").mkdir(parents=True)
+            git = lambda *a: subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@t", *a],   # noqa: E731
+                                            capture_output=True, text=True, check=True)
+            git("init", "-q", "-b", "main")
+            (pkg / "labmon_worker.py").write_text("#!/usr/bin/env python3\n# main 入口\n")
+            (pkg / "ka.sh").write_text("#!/bin/sh\n# main ka\n")
+            (pkg / "worker" / "__init__.py").write_text("# main init\n")
+            (pkg / "worker" / "sched.py").write_text("# main sched\n")
+            git("add", "-A")
+            git("commit", "-q", "-m", "main")
+            git("checkout", "-q", "-b", "feat")
+            (pkg / "worker" / "sched.py").write_text("# 分支 sched\n")
+            (pkg / "worker" / "extra.py").write_text("# 分支新增\n")
+            git("add", "-A")
+            git("commit", "-q", "-m", "feat")
+            (pkg / "worker" / "sched.py").write_text("# 未提交 sched\n")
+
+            wh = d / "alice" / "labmon"
+            (wh / "worker" / "__pycache__").mkdir(parents=True)
+            (wh / "worker" / "obsolete.py").write_text("# 旧模块\n")
+            (wh / "worker" / "__pycache__" / "sched.cpython-38.pyc").write_bytes(b"stale")
+            py = d / "py"
+            py.write_text('#!/bin/sh\n[ "$2" = ls ] && echo "worker：运行中 PID 1"\nexit 0\n')
+            py.chmod(0o755)
+            h = {"id": "here", "worker_home": str(wh), "python": str(py), "shared": []}
+            ssh_calls = []
+            real_ssh = workerctl.ssh
+            with mock.patch.object(workerctl, "HERE", pkg), \
+                    mock.patch.object(workerctl, "host_conf", return_value=h), \
+                    mock.patch.object(workerctl.LS, "need"), \
+                    mock.patch.object(workerctl, "START_CHECK_S", 0.05), \
+                    mock.patch.object(workerctl, "ssh", lambda hh, cmd, stdin="", timeout=None: (ssh_calls.append(cmd), real_ssh(hh, cmd, stdin, timeout))[1]):
+                rc, out = workerctl.run_out("start", "here", [])
+            self.assertEqual(rc, 0, out)
+            self.assertEqual(len(ssh_calls), 1)
+            self.assertIn("工作区的 labmon_worker.py、worker/ 或 ka.sh 与 main 上的不同", out)
+            self.assertEqual((wh / "labmon_worker.py").read_text(), "#!/usr/bin/env python3\n# main 入口\n")
+            self.assertEqual((wh / "ka.sh").read_text(), "#!/bin/sh\n# main ka\n")
+            self.assertEqual(sorted(p.name for p in (wh / "worker").glob("*.py")), ["__init__.py", "sched.py"])
+            self.assertEqual((wh / "worker" / "sched.py").read_text(), "# main sched\n")
+            self.assertFalse((wh / "worker" / "obsolete.py").exists())
+            self.assertFalse((wh / "worker" / "__pycache__").exists())
+            self.assertEqual(list(wh.glob(".deploy.*")), [])
+
+            # 解包失败（传输截断/坏数据）：不覆盖已有文件，不留临时目录
+            with mock.patch.object(workerctl, "HERE", pkg), \
+                    mock.patch.object(workerctl, "host_conf", return_value=h), \
+                    mock.patch.object(workerctl.LS, "need"), \
+                    mock.patch.object(workerctl, "worker_bundle", return_value=("not-valid-gzip", ["__init__.py", "sched.py"])):
+                rc_bad, _ = workerctl.run_out("start", "here", [])
+            self.assertNotEqual(rc_bad, 0)
+            self.assertEqual((wh / "worker" / "sched.py").read_text(), "# main sched\n")
+            self.assertEqual(list(wh.glob(".deploy.*")), [])
 
 
 if __name__ == "__main__":

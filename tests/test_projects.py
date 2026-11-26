@@ -22,7 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fixtures import NO_HOSTS, WORKER, board, fake_status, login, post_req, register, running_job, waiting_job, write_config  # noqa: E402
+from fixtures import NO_HOSTS, board, copy_worker, fake_status, login, post_req, register, running_job, waiting_job, write_config  # noqa: E402
 
 from labmon import config as K  # noqa: E402
 from labmon import projects as PJ  # noqa: E402
@@ -36,7 +36,7 @@ class ArchiveTest(unittest.TestCase):
         d = self.d = Path(self.tmp.name).resolve()
         self.wh = d / "alice" / "labmon"                           # 三台共用的 worker_home（共享盘）
         self.wh.mkdir(parents=True)
-        shutil.copy(WORKER, self.wh / "labmon_worker.py")
+        copy_worker(self.wh)
         self.hf = d / "hosts.toml"
         self.hosts_toml()
         self.env = mock.patch.dict(os.environ, {"LABMON_HOSTS": str(self.hf), "LABMON_STATE": str(d / "state"), "LABMON_LAN": "on"})

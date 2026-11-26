@@ -122,7 +122,7 @@ from . import renew as R
 from . import users as U
 from . import waits as WT
 from . import workerctl as W
-from .labmon_worker import queue_stop_path
+from .worker import queue_stop_path
 from . import api as A
 from . import client as CL
 from .config import CLIENT_HEADER, server as server_conf

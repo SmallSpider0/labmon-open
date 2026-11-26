@@ -27,6 +27,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import signal
 import subprocess
 import sys
@@ -35,6 +36,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKER = ROOT / "labmon" / "labmon_worker.py"
+WORKER_PKG = ROOT / "labmon" / "worker"
+_WORKER_SEQ = 0
 NO_HOSTS = str(ROOT / "tests" / "_no_user_hosts.toml")       # 不存在的用户级主机清单：测试不受本机清单影响
 
 if str(ROOT) not in sys.path:
@@ -333,19 +336,39 @@ def release(d: Path, name: str = "go") -> None:
     (d / "gates" / name).touch()
 
 
+def copy_worker(dst: Path) -> None:
+    """把 worker 入口与 worker/ 包目录拷到临时 worker_home（同 workerctl 部署到服务器上的布局）。"""
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copy(WORKER, dst / "labmon_worker.py")
+    pkg = dst / "worker"
+    if pkg.exists():
+        shutil.rmtree(pkg)
+    shutil.copytree(WORKER_PKG, pkg, ignore=shutil.ignore_patterns("__pycache__"))
+
+
 def load_worker(env: dict):
-    """按给定环境变量（LABMON_PROC 等在导入时读）载入一份独立的 worker 模块。"""
+    """按给定环境变量（LABMON_PROC 等在导入时读）载入一份独立的 worker 包实例。"""
+    global _WORKER_SEQ
     import importlib.util
     if "LABMON_HOME" in env:                       # 本地目录跟着测试的临时目录走，不写真的 /tmp/labmon
         env = dict({"LABMON_LOCAL": str(Path(env["LABMON_HOME"]) / "local")}, **env)
     old = {k: os.environ.get(k) for k in env}
     os.environ.update(env)
+    _WORKER_SEQ += 1
+    pkg_name = f"_labmon_worker_t_{_WORKER_SEQ}"
     try:
-        spec = importlib.util.spec_from_file_location("labmon_worker_t", WORKER)
+        spec = importlib.util.spec_from_file_location(
+            pkg_name, WORKER_PKG / "__init__.py",
+            submodule_search_locations=[str(WORKER_PKG)],
+        )
         m = importlib.util.module_from_spec(spec)
+        sys.modules[pkg_name] = m
         spec.loader.exec_module(m)
         return m
     finally:
+        for k in list(sys.modules):
+            if k == pkg_name or k.startswith(pkg_name + "."):
+                sys.modules.pop(k, None)
         for k, v in old.items():
             if v is None:
                 os.environ.pop(k)

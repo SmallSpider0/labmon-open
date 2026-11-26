@@ -207,6 +207,17 @@ class DeployTest(unittest.TestCase):
         self.assertIn("a 在写状态（3 秒前，晚于拉起）", text)
         self.assertIn("b stop 过、不查", text)
 
+    def test_worker_pkg_change_also_starts_hosts(self):
+        """#168：只改 labmon/worker/ 下的子模块（不动入口 labmon_worker.py）也要触发拉起 worker。"""
+        r = self.rig(files=["labmon/worker/sched.py"])
+        rc, out = r.run()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual([c for c in r.calls if c.startswith("start")], ["start a"])
+        self.assertIn("worker：改了，拉起 a", "\n".join(out))
+        self.assertTrue(DP.D.has_worker(["labmon/worker/sched.py"]))
+        self.assertTrue(DP.D.has_worker(["labmon/labmon_worker.py"]))
+        self.assertFalse(DP.D.has_worker(["labmon/serve.py"]))
+
     def test_worker_status_older_than_start_fails(self):
         """拉起之后 worker 状态的时刻（generated − age）早于拉起时刻：新 worker 没写状态，不过。"""
         r = self.rig(files=["labmon/labmon_worker.py"])

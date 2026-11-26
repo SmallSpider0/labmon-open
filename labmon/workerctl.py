@@ -21,16 +21,19 @@ worker 装在 worker_home（缺省 <data_root>/labmon，共享盘上一份供各
 from __future__ import annotations
 
 import base64
+import io
 import json
 import shlex
 import subprocess
+import tarfile
+import time
 from pathlib import Path
 
 from . import lan as L
 from . import lease as LS
 from .config import POOL, ConfigError, active_hosts, all_hosts, home_host, host_defaults, hosts_file, pool_home, user_hosts
 
-from .labmon_worker import queue_stop_path
+from .worker import queue_stop_path
 
 HERE = Path(__file__).resolve().parent
 
@@ -73,6 +76,32 @@ def committed(name: str) -> str:
     """本包里一个文件在 main 上已提交的版本：部署到服务器上的只取它，改了要先合进 main（本地的 main，合并后先 pull）。
     路径相对本包目录（./），仓库根在哪都一样。"""
     return subprocess.run(["git", "-C", str(HERE), "show", f"{DEPLOY_REF}:./{name}"], capture_output=True, text=True, check=True).stdout
+
+
+def committed_tree(subdir: str) -> list[str]:
+    """本包里一个子目录在 main 上已提交的所有 .py 文件路径（相对本包目录，按字母序）。目录在 DEPLOY_REF 上还不存在时返回空表。"""
+    r = subprocess.run(["git", "-C", str(HERE), "ls-tree", "-r", "--name-only", DEPLOY_REF, "--", subdir], capture_output=True, text=True)
+    if r.returncode != 0 or not isinstance(r.stdout, str):
+        return []
+    return sorted(p for p in r.stdout.splitlines() if p.endswith(".py"))
+
+
+def worker_bundle() -> tuple[str, list[str]]:
+    """把 main 上已提交的 labmon_worker.py、worker/*.py 与 ka.sh 打成 tar.gz 再 base64，经一条 ssh 的 stdin 送出。
+    返回 (base64 文字, worker/*.py 的文件名列表)；全部文件内容仍只经 committed() 读取。"""
+    now = int(time.time())
+    pkg = committed_tree("worker")
+    items = [("labmon_worker.py", 0o755), ("ka.sh", 0o755)] + [(p, 0o644) for p in pkg]
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tf:
+        for name, mode in items:
+            data = committed(name).encode("utf-8")
+            ti = tarfile.TarInfo(name)
+            ti.size = len(data)
+            ti.mode = mode
+            ti.mtime = now
+            tf.addfile(ti, io.BytesIO(data))
+    return base64.b64encode(buf.getvalue()).decode("ascii"), [p.split("/", 1)[1] for p in pkg]
 
 
 def ssh(h: dict, remote: str, stdin: str = "", timeout: float | None = None) -> tuple[int, str]:
@@ -141,20 +170,36 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
     if sub == "start":
         guest = h.get("borrow") and not h["borrow"].get("swap")                  # 直接借来的：不在对方的容器里扫共享盘
         sh = f" --shared {shlex.quote(h['shared'][0])}" if h["shared"] and not guest else ""      # 共享盘用量由这台的 worker 统计
-        # 一条连接：写入 main 上已提交的 worker 与停启保活的 ka.sh（#105：ka.sh 经命令行里的 base64 带去，worker 经标准输入），再后台拉起（--replace 让旧 worker 退出、由新进程接管任务）。
-        # 后台那句单独写、不接在 cd 或 && 后面，否则 ssh 会挂到进程结束。
+        # 一条连接：把 main 上已提交的 labmon_worker.py、worker/*.py 与停启保活的 ka.sh 打成 tar.gz 经标准输入送出，
+        # 先在 worker_home 下建临时目录解包（失败则清理退出、不破坏现有文件），再替换 worker/*.py、清掉已删模块与旧 __pycache__、替换 ka.sh 与入口脚本，
+        # 最后后台拉起（--replace 让旧 worker 退出、由新进程接管任务）。后台那句单独写、不接在 cd 或 && 后面，否则 ssh 会挂到进程结束。
         # START_CHECK_S 秒后看它还在不在：启动即崩的（输出接的是 /dev/null）带上 worker.log 末尾、退出码 3，调用方报“拉起失败”而不是“已拉起”
         log = shlex.quote(f"{home.rstrip('/')}/hosts/{hid}/worker.log")
-        ka = shlex.quote(home + "/ka.sh")
-        remote = (f"mkdir -p {shlex.quote(home)} && cat > {shlex.quote(home + '/labmon_worker.py')}.new && "
-                  f"echo {base64.b64encode(committed('ka.sh').encode()).decode()} | base64 -d > {ka}.new && mv {ka}.new {ka} && "
-                  f"mv {shlex.quote(home + '/labmon_worker.py')}.new {shlex.quote(home + '/labmon_worker.py')}\n"
-                  f"setsid nohup {w} run --host {hq} --replace{sh} > /dev/null 2>&1 < /dev/null &\n"
-                  f"sleep {START_CHECK_S}; o=$({w} ls --host {hq}); echo \"$o\"\n"
-                  f"case \"$o\" in worker：运行中*) ;; *) echo '---- worker.log 末尾'; tail -n 12 {log}; exit 3;; esac")
-        rc, out = ssh(h, remote, committed("labmon_worker.py"))
-        dirty = subprocess.run(["git", "-C", str(HERE), "diff", "--quiet", DEPLOY_REF, "--", "labmon_worker.py", "ka.sh"]).returncode
-        return rc, (f"（工作区的 labmon_worker.py 或 ka.sh 与 {DEPLOY_REF} 上的不同，部署的是 {DEPLOY_REF} 上已提交的版本）\n" if dirty else "") + out
+        hq_home = shlex.quote(home)
+        b64, pkg_names = worker_bundle()
+        if pkg_names:
+            keep = " " + " ".join(pkg_names) + " "
+            sync_pkg = (
+                f"mkdir -p {hq_home}/worker && "
+                f'for f in "$d"/worker/*.py; do [ -f "$f" ] || continue; mv "$f" {hq_home}/worker/ || exit 1; done && '
+                f'for f in {hq_home}/worker/*.py; do [ -f "$f" ] || continue; case {shlex.quote(keep)} in *" $(basename "$f") "*) ;; *) rm -f "$f";; esac; done && '
+                f"rm -rf {hq_home}/worker/__pycache__ && "
+            )
+        else:
+            sync_pkg = ""
+        remote = (
+            f"mkdir -p {hq_home} && d=$(mktemp -d {hq_home}/.deploy.XXXXXX) || exit 1\n"
+            f'if ! (base64 -d > "$d/.pkg.tgz" && tar -xzf "$d/.pkg.tgz" -C "$d" && {sync_pkg}'
+            f'mv "$d/ka.sh" {shlex.quote(home + "/ka.sh")} && '
+            f'mv "$d/labmon_worker.py" {shlex.quote(home + "/labmon_worker.py")}); then rm -rf "$d"; exit 1; fi\n'
+            f'rm -rf "$d"\n'
+            f"setsid nohup {w} run --host {hq} --replace{sh} > /dev/null 2>&1 < /dev/null &\n"
+            f"sleep {START_CHECK_S}; o=$({w} ls --host {hq}); echo \"$o\"\n"
+            f"case \"$o\" in worker：运行中*) ;; *) echo '---- worker.log 末尾'; tail -n 12 {log}; exit 3;; esac"
+        )
+        rc, out = ssh(h, remote, b64)
+        dirty = subprocess.run(["git", "-C", str(HERE), "diff", "--quiet", DEPLOY_REF, "--", "labmon_worker.py", "worker", "ka.sh"]).returncode
+        return rc, (f"（工作区的 labmon_worker.py、worker/ 或 ka.sh 与 {DEPLOY_REF} 上的不同，部署的是 {DEPLOY_REF} 上已提交的版本）\n" if dirty else "") + out
     extra = " ".join(shlex.quote(a) for a in args) + (f" --gpus {shlex.quote(gpus)}" if gpus else "")
     extra += " --idle" if opts.pop("idle", False) else ""
     extra += " --list" if opts.pop("list", False) else ""    # fit --list（#35 B）：位置参数是 ROOT JOBS，hosts 是看哪几台

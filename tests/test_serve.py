@@ -1605,11 +1605,10 @@ class RegsTest(unittest.TestCase):
         self.assertEqual([(q["id"], q["host"]) for q in qs], [("p/jobs/q.txt", "a")])
 
     def _worker_home(self):
-        """各主机共用的 worker_home 里放上这份 labmon_worker.py（没有 ssh 的主机在本机跑 worker add / rm），再建一条清单。"""
-        import shutil
-        from fixtures import WORKER
+        """各主机共用的 worker_home 里放上这份 worker（没有 ssh 的主机在本机跑 worker add / rm），再建一条清单。"""
+        from fixtures import copy_worker
         self.home.mkdir(parents=True, exist_ok=True)
-        shutil.copy(WORKER, self.home.parent / "labmon_worker.py")
+        copy_worker(self.home.parent)
         root = self.d / "proj"
         (root / "jobs").mkdir(parents=True)
         (root / "jobs" / "q.txt").write_text("x1|echo 1\n")

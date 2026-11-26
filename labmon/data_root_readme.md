@@ -3,7 +3,7 @@
 本目录是主机清单中配置的 `data_root`；只在获授权的目录内写入。临时文件、缓存、中间产物放容器 `/tmp`。
 
 ```
-labmon/              服务器端队列执行器 labmon_worker.py 与各主机的队列登记、状态、日志（labmon worker …）
+labmon/              服务器端队列执行器（labmon_worker.py 与 worker/）及各主机的队列登记、状态、日志（labmon worker …）
 envs/<名称>/         共享 Python 环境，按版本命名，如 py311-torch2.4-cu124；建好后不改，要新版本就另建一个新名字
 datasets/<名称>/     共享数据集（cifar10、cifar100、cifar10c…），各项目只读引用，不另存副本
 weights/<名称>/      共享预训练权重与 torch / HuggingFace 缓存（TORCH_HOME、HF_HOME 指到这里）

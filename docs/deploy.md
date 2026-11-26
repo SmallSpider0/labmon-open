@@ -82,8 +82,8 @@ C=(--cacert ~/.config/labmon/ca.crt -H "Authorization: Bearer $(cat ~/.config/la
    这时第 3、4 步跳过，第 1、6、7 步照做（核对清单里“快照时刻晚于第 4、5 步”这条不用看），在部署报告里写明。
    远端模式由服务端自己重启（等平台操作做完再交给 systemd）：等 `curl -s "${C[@]}" "$URL/api/me"` 的 `commit` 是新提交、`started` 变了。本机模式：`git diff --stat ORIG_HEAD HEAD` 看改了哪些文件，要重启的 `labmon service restart`。
 4. `curl -s "${C[@]}" -X POST -H 'Content-Type: application/json' -d '{}' "$URL/collect?fresh"` 两次（看板只认带 JSON 类型的 POST，#158；要登录，#160）。页面在采集时才按模板重新生成；带 `fresh` 才不被 10 秒的节流挡掉，等请求之后开始的那一轮做完。
-5. 改了 `labmon_worker.py` 的，各在用主机（没 `worker stop` 过、连得上的）`LABMON_TOKEN=$(cat ~/.config/labmon/deploy.token) labmon worker start <主机>`（接管任务、不中断；命令行按 `~/.config/labmon/client.toml` 连看板、经 `POST /api/worker/start`，#162），然后再 `POST /collect?fresh` 一次，下面的核对才读得到拉起之后的状态。
-   部署的是看板那份 checkout 里 main 上已提交的版本（`workerctl.committed`），分支上没合并的、工作区里没提交的都不会带上去。
+5. 改了 worker（`labmon/labmon_worker.py` 或 `labmon/worker/`，`deploy.has_worker`）的，各在用主机（没 `worker stop` 过、连得上的）`LABMON_TOKEN=$(cat ~/.config/labmon/deploy.token) labmon worker start <主机>`（单条 ssh 打包部署入口与 `worker/` 包并接管任务、不中断；命令行按 `~/.config/labmon/client.toml` 连看板、经 `POST /api/worker/start`，#162），然后再 `POST /collect?fresh` 一次，下面的核对才读得到拉起之后的状态。
+   部署的是看板那份 checkout 里 main 上已提交的版本（`workerctl.committed` / `worker_bundle`），分支上没合并的、工作区里没提交的都不会带上去。
 6. 这次带上去的提交改了 `docs/workflow.html` 或 `docs/intro.html` 的，按[流程总览](../AGENTS.md#流程总览)、[项目介绍页](../AGENTS.md#项目介绍页)核对随源码分发的 HTML 文档（脚本不做，结论里点名）。
 7. 按下面的清单核对。
 
