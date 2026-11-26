@@ -4442,6 +4442,67 @@ class OffersTest(UnitBase):
         self.assertIn("新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add t %s 新清单 --project pa" % (self.d / "a"), s["text"])
         self.assertTrue(s["text"].endswith("；按 %s 的推演" % fmt_time(self.now, date=False)), s["text"])
 
+    def test_needs_miss_heal_hint(self):
+        # #190：目标主机缺 needs= 本地缓存但可自补（redo / copy）时，offers 记录缺失摘要，rebalance 建议句提醒先单行预建并用 after= 串起
+        from labmon.config import fmt_time
+        cache_dir = Path(self.m.cache_dir("pa"))
+        redo_done = cache_dir / "ds-cache" / "DONE"
+        master = self.d / "shared_w0.pt"
+        master.write_text("weights")
+        copy_dst = cache_dir / "w0.pt"
+        # 1) redo 自补缺失：多行缺同一路径去重，建议句含缺文件与并发预建提醒，且推演时刻仍在句尾（log_text 可正常去尾）
+        self.origin(
+            ["a%d|[ -f $LABMON_CACHE/ds-cache/DONE ] || true   # est_min=120 vram=20 needs=$LABMON_CACHE/ds-cache/DONE" % i for i in range(6)],
+            run=1,
+        )
+        o = self.offer()["pa"]
+        self.assertEqual([j.get("needs_miss") for j in o["jobs"]], [[str(redo_done)]] * 3)
+        s = self.suggest()["pa"]
+        self.assertEqual(s.get("needs_miss"), [str(redo_done)])
+        self.assertIn("目标主机当前缺本地文件 %s，首次运行会现场重建/拷贝；多车道并行前请先单行预建并用 after= 串起" % redo_done, s["text"])
+        self.assertEqual(s["text"].count(str(redo_done)), 1)
+        self.assertTrue(s["text"].endswith("；按 %s 的推演" % fmt_time(self.now, date=False)))
+        self.assertNotIn("；按 ", RB.log_text(s["text"]))
+        # 2) copy 自补缺失（共享盘主副本存在、目标主机本地缺失）：同样带提醒
+        self.origin(
+            ["b%d|true   # est_min=120 vram=20 needs=$LABMON_CACHE/w0.pt<%s" % (i, master) for i in range(6)],
+            run=1,
+            name="b",
+        )
+        o2 = self.offer()["pa"]
+        self.assertEqual([j.get("needs_miss") for j in o2["jobs"]], [[str(copy_dst)]] * 3)
+        s2 = self.suggest()["pa"]
+        self.assertEqual(s2.get("needs_miss"), [str(copy_dst)])
+        self.assertIn("目标主机当前缺本地文件 %s" % copy_dst, s2["text"])
+        # 3) _fresh 截断后，仅被截掉的那一行缺缓存时，最终建议不误报
+        q = self.origin(
+            ["c%d|true   # est_min=120 vram=20" % i for i in range(3)]
+            + ["c3|[ -f $LABMON_CACHE/ds-cache/DONE ] || true   # est_min=120 vram=20 needs=$LABMON_CACHE/ds-cache/DONE"]
+            + ["c%d|true   # est_min=120 vram=20" % i for i in (4, 5)],
+            run=1,
+            name="c",
+        )
+        self.offer()
+        st = json.loads((self.hosts.home / "hosts" / "o" / "status.json").read_text())
+        run_c3 = [{"root": q["root"], "queue": q["jobs"], "name": "c3", "project": "pa"}]
+        s3 = self.suggest(extra=[{"id": "o", "label": "o", "worker_up": True, "status": dict(st, running=run_c3)}])["pa"]
+        self.assertEqual([j["name"] for j in s3["jobs"]], ["c5", "c4"])
+        self.assertNotIn("needs_miss", s3)
+        self.assertNotIn("目标主机当前缺本地文件", s3["text"])
+        # 4) 目标主机本地缓存已存在：不带 needs_miss，也不出缺缓存提醒
+        redo_done.parent.mkdir(parents=True, exist_ok=True)
+        redo_done.write_text("ok")
+        self.origin(
+            ["d%d|[ -f $LABMON_CACHE/ds-cache/DONE ] || true   # est_min=120 vram=20 needs=$LABMON_CACHE/ds-cache/DONE" % i for i in range(6)],
+            run=1,
+            name="d",
+        )
+        o4 = self.offer()["pa"]
+        self.assertTrue(all("needs_miss" not in j for j in o4["jobs"]))
+        s4 = self.suggest()["pa"]
+        self.assertNotIn("needs_miss", s4)
+        self.assertNotIn("目标主机当前缺本地文件", s4["text"])
+
     def test_target_lane_same_root_and_env(self):
         # #25 D：只接到与挪来的行目录相同、.env 一样的清单后面（任务在清单的目录下跑、读那条清单的 .env）；不同目录的当新的一条
         self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)

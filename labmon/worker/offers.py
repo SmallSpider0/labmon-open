@@ -297,7 +297,7 @@ class OffersMixin:
                 if end[i] is None:
                     return out, "%s 上 %s 在原处跑不了的超过 %d 行，一次只挑这么多" % (ln["host"], ln["queue"], _C.MOVE_MAX)
                 break
-            stop = self.cant_move(ln, n, h, t0, out, now, waiters)
+            stop, nmiss = self.cant_move(ln, n, h, t0, out, now, waiters)
             if stop:
                 if not skip:
                     return out, stop
@@ -306,33 +306,40 @@ class OffersMixin:
             left[i].pop()
             ts = [ln["run"]] + [x[3] for x in left[i]]   # 剩下的与在跑的里最晚的（并行清单先开跑的长任务可能比后面的行晚跑完，#147）
             end[i] = None if None in ts else max(ts)
-            out.append({"host": ln["host"], "root": ln["root"], "queue": ln["queue"], "name": n, "there": t1 and round(t1),
-                        "rest": end[i] and round(end[i]), "h": h, "i": len(left[i]), "lane": i})
+            cand = {"host": ln["host"], "root": ln["root"], "queue": ln["queue"], "name": n, "there": t1 and round(t1),
+                    "rest": end[i] and round(end[i]), "h": h, "i": len(left[i]), "lane": i}
+            if nmiss:
+                cand["needs_miss"] = nmiss
+            out.append(cand)
         return out, why
 
     def cant_move(self, ln, n, h, t0, out, now, waiters):
-        """清单 ln 的队尾 n（资源提示 h、原处推演的开始 t0）为什么不挪到这批 out 里（move_cands 用）；能挪为 None。"""
+        """清单 ln 的队尾 n（资源提示 h、原处推演的开始 t0）为什么不挪到这批 out 里（move_cands 用）：
+        返回 (不能挪的原因（能挪为 None）, 目标主机当前缺失但可自补（redo/copy）的 needs= 路径摘要（去重、至多 3 个）)。"""
         if out and self.list_env(ln["root"], ln["queue"]) != self.list_env(out[0]["root"], out[0]["queue"]):
-            return "再往前是 %s 上另一个目录或环境（.env）的清单 %s，一次只挪一种" % (ln["host"], ln["queue"])
+            return "再往前是 %s 上另一个目录或环境（.env）的清单 %s，一次只挪一种" % (ln["host"], ln["queue"]), []
         if _C.is_hold(n):
-            return "%s 上 %s 的队尾 %s 是占位任务，不挪" % (ln["host"], ln["queue"], n)
+            return "%s 上 %s 的队尾 %s 是占位任务，不挪" % (ln["host"], ln["queue"], n), []
         if h is None:
             return ("这台读不到 %s 上的 %s，不挪" % (ln["host"], os.path.join(ln["root"], ln["queue"])) if ln["unread"]
-                    else "%s 不在 %s 里（刚剪过？），不挪" % (n, os.path.join(ln["root"], ln["queue"])))
+                    else "%s 不在 %s 里（刚剪过？），不挪" % (n, os.path.join(ln["root"], ln["queue"]))), []
         if h.get("gang"):
-            return "%s 上 %s 的队尾 %s 是成组的（gang=%s），挪了要连同组的一起看，不挪" % (ln["host"], ln["queue"], n, h["gang"])
+            return "%s 上 %s 的队尾 %s 是成组的（gang=%s），挪了要连同组的一起看，不挪" % (ln["host"], ln["queue"], n, h["gang"]), []
         if t0 is not None and t0 - now < _C.MOVE_LEAD_S:
-            return "%s 上的 %s %d 分钟内就开跑，不挪" % (ln["host"], n, _C.MOVE_LEAD_S / 60)
+            return "%s 上的 %s %d 分钟内就开跑，不挪" % (ln["host"], n, _C.MOVE_LEAD_S / 60), []
         ws = waiters.get((ln["project"], n), set()) - {(ln["project"], x["name"]) for x in out}
         if ws:
-            return "%s 有 %s 写了 after= 等着它，不挪" % (n, "、".join(sorted(x for _, x in ws))[:200])
+            return "%s 有 %s 写了 after= 等着它，不挪" % (n, "、".join(sorted(x for _, x in ws))[:200]), []
         if h["needs"]:
             q = _Q.load_queue({"_slug": _Q.qslug(ln["root"], ln["queue"]), "root": ln["root"], "jobs": ln["queue"], "project": ln["project"]})
             job = dict(h, name=n, project=ln["project"], cmd=_Q.job_cmd(q, n) or "")
-            miss = [c["pat"] for c in _Q.check_needs(job, self.qenv(q)) if not c["files"] and not c["heal"]]
+            chk = _Q.check_needs(job, self.qenv(q))
+            miss = [c["pat"] for c in chk if not c["files"] and not c["heal"]]
             if miss:
-                return "%s 缺本地文件：%s（这台上没有，也补不了）" % (n, "、".join(miss[:3]))
-        return None
+                return "%s 缺本地文件：%s（这台上没有，也补不了）" % (n, "、".join(miss[:3])), []
+            heal = list(dict.fromkeys(c["pat"] for c in chk if c["heal"] and (not c["files"] or c["copy"])))
+            return None, heal[:3]
+        return None, []
 
     def try_move(self, p, cs, tgt, cx, local=False, before=None):
         """假设把项目 p 的候选 cs 挪到这台推演一遍（同一份 simulate，本机的快照、截止、公平份额与依赖都照真推演）：

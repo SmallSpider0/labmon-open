@@ -65,9 +65,19 @@ def _need(f: float, t: float) -> float:
     return max(GAIN_MIN_S, min(GAIN_S, GAIN_SHORT_FRAC * left), GAIN_FRAC * left)
 
 
+def _needs_miss(jobs: list) -> list[str]:
+    """挪来的几行在目标主机上当前缺失但可自补（redo / copy）的 needs= 路径（按原清单顺序去重，#190）。"""
+    seen: dict = {}
+    for j in reversed(jobs):
+        for p in j.get("needs_miss") or ():
+            seen.setdefault(p, None)
+    return list(seen)
+
+
 def _text(p: dict, proj: str, label: dict, t: float) -> str:
     """建议的一句话（告警与两个页面都用它）：把哪台哪条清单（写全目录：同项目几个目录下常有同名清单）的哪几行挪到哪台、接在哪
-    （要新建的写出原清单的目录与项目 id：任务在清单的目录下跑、读这条清单的 .env，挪来的一批同一种环境）、整批从何时提前到何时、按几点的推演。"""
+    （要新建的写出原清单的目录与项目 id：任务在清单的目录下跑、读这条清单的 .env，挪来的一批同一种环境）、整批从何时提前到何时、
+    目标主机缺可自补本地文件时的并发预建提醒（#190）、按几点的推演。"""
     src: dict = {}
     for j in reversed(p["jobs"]):      # 挪的顺序是从队尾往前，写的时候照原清单的先后
         src.setdefault((j["host"], j["root"], j["queue"]), []).append(j["name"])
@@ -82,22 +92,29 @@ def _text(p: dict, proj: str, label: dict, t: float) -> str:
         when = f"整批预计从 {fmt_time(p['from'])} 提前到 {fmt_time(p['to'])}（早 {fmt_dur(p['from'] - p['to'])}）"
     else:
         when = f"整批预计 {fmt_time(p['to'])} 跑完（现在有任务在原处跑不了，整批何时跑完推不出）"
+    miss = p.get("needs_miss") or _needs_miss(p.get("jobs") or [])
+    if miss:
+        shown = "、".join(miss[:3]) + (f" 等 {len(miss)} 个" if len(miss) > 3 else "")
+        who = "本机" if p.get("local") else "目标主机"
+        cache = f"；{who}当前缺本地文件 {shown}，首次运行会现场重建/拷贝；多车道并行前请先单行预建并用 after= 串起"
+    else:
+        cache = ""
     dep = [j["name"] for j in p["jobs"] if j.get("dep")]
     tail = f"；写了 after= 的 {'、'.join(dep)} 排在挪来的几行最后（等别的任务的行在前会堵住后面的）" if dep and len(dep) < len(p["jobs"]) else ""
     lane = p.get("lane") and f"{p['lane'][0].rstrip('/')}/{p['lane'][1]}"
     where = (f"插在 {lane} 里 {p['before']} 前面（它写了 after=，要等别的任务；接在它后面会被它堵住）" if lane and p.get("before")
              else f"接在 {lane} 后面" if lane else None)
     if p.get("local") and lane:        # 同机挪到另一条早跑完的清单（#110）：车道数不变，原清单在同一台排到别的清单跑完后才跑完
-        return f"把 {what} 挪到同一台上另一条早跑完的清单（{where}{tail}）：{when}{TAIL % fmt_time(t, date=False)}"
+        return f"把 {what} 挪到同一台上另一条早跑完的清单（{where}{tail}）：{when}{cache}{TAIL % fmt_time(t, date=False)}"
     if p.get("local"):                 # 同机多开一条车道（#43）：剪到新的长期清单，与原清单同目录、同环境
         # 推演只在没吃满的卡上排（offer 的 gpus）：登记时照样限卡，否则真放行可能放到吃满的卡上（Codex 审 #63）
         gp = f" --gpus {','.join(map(str, p['gpus']))}（只用这几张卡：别的卡已吃满）" if p.get("gpus") else ""
         return (f"在 {label.get(tid, tid)} 上多开一条车道：把 {what} 剪到一条新的长期清单（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；"
                 f"原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}{gp}，以后同类任务也往这条追加{tail}："
-                f"{when}{TAIL % fmt_time(t, date=False)}")
+                f"{when}{cache}{TAIL % fmt_time(t, date=False)}")
     where = where or (f"这台还没有本项目同一种环境的清单：新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；"
                       f"原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}")
-    return f"把 {what} 挪到 {label.get(tid, tid)}（{where}{tail}）：{when}{TAIL % fmt_time(t, date=False)}"
+    return f"把 {what} 挪到 {label.get(tid, tid)}（{where}{tail}）：{when}{cache}{TAIL % fmt_time(t, date=False)}"
 
 
 def log_text(msg: str) -> str:
@@ -223,6 +240,9 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
             best = dict(min(same or [best], key=rank))
             best["key"] = move_key(proj, best)
             best["cut"] = sorted({_lane(j) for j in best["jobs"]} & late)
+            miss = _needs_miss(best["jobs"])
+            if miss:
+                best["needs_miss"] = miss
             best["text"] = _text(best, proj, label, t)
             if under:                  # 有吃不满的主机（#145）：句首写合计还能开几条、还有多少行排队；不是按整批门槛收下的，key 按吃不满的那几台
                 best["room"] = {"hosts": {h: r["lanes"] for h, r in sorted(under.items())}, "busy": {h: r["busy"] for h, r in sorted(under.items())},
