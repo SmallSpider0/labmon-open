@@ -30,28 +30,22 @@ ACCOUNT_SLOTS = 8     # 一个普通账号同时最多挂几个（#18）：一�
 RID_KEEP_S = 120      # 请求号记多久
 REWAKE_S = 6 * 3600   # 报过的告警消失后这么久内再出现不再叫醒（#88：门槛两侧来回、清单回池重新计时、主机掉线又回来，会话不用再读一遍）；
                       # 同一处的第二件事靠 key 带“这一次”（开跑时刻、PID、归还时刻、借用起点、指令时刻、这一段的起点，#129）分开，不在这里另判
-SAME_KIND = ("idle_regs:",)   # key 末段是代数（条数变了加一）的告警：去掉末段比，代数变了不算新告警（#88）
 EACH_TIME = ("failed:",)      # 每次出现都是新的一次、不受 REWAKE_S 挡：删了 .failed 重跑又失败，会话要再处理
 WAIT_GONE_S = 15 * 60         # 项目还有活、这么久没有 wait 来等：会话的 wait 断了，告诉用户（#141）；等这个项目的会话这么久没来就让出（#142）
 DUP_SHOW_S = 3600             # 别的会话被拦下后，这么久内给用户一条 wait_dup（#142）
 
 
-def _kind(k: str) -> str:
-    """比“报没报过”用的 key：SAME_KIND 的去掉末段（代数），其余原样。"""
-    return k.rsplit(":", 1)[0] if k.startswith(SAME_KIND) else k
-
-
 def _new_alerts(sf: Path, current: dict, t: float | None = None) -> list[str]:
-    """与已报的告警比，返回新出现的 key 并记账（wait_state.json：reported 是此刻还在、报过的；last 是报过的各 key（按 _kind）最后一次在场的时刻）。
+    """与已报的告警比，返回新出现的 key 并记账（wait_state.json：reported 是此刻还在、报过的；last 是报过的各 key 最后一次在场的时刻）。
     条件消失的告警从 reported 去掉，REWAKE_S 内再出现（last 里还在）不再报、照样记成报过；过了 REWAKE_S 再出现才再报（#88）。EACH_TIME 的消失再出现照报。"""
     t = time.time() if t is None else t
     st = load_json(sf, {})
     last = {k: v for k, v in (st.get("last") or {}).items() if t - v < REWAKE_S}
     reported = set(st.get("reported", [])) & set(current)
-    seen = {_kind(k) for k in reported} | set(last)
-    new = [k for k in current if k not in reported and (_kind(k) not in seen or k.startswith(EACH_TIME))]
+    seen = reported | set(last)
+    new = [k for k in current if k not in reported and (k not in seen or k.startswith(EACH_TIME))]
     keep = reported | set(current)                    # 此刻在场的都算报过：新报的与 REWAKE_S 内再出现的
-    last.update({_kind(k): t for k in keep})
+    last.update({k: t for k in keep})
     save_json(sf, {**st, "reported": sorted(keep), "last": last, "t": t, "wait_t": t})     # wait_t 只在这里写（wait_check 判一次）：gone_since 看它；holder、refused（_claim）照留
     return new
 

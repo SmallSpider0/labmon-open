@@ -29,7 +29,7 @@ from . import projects as PJ
 from .config import AUTO_GROUP_RE, GIB, POOL, POOL_LABEL, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
 from .health import link_step
 from .state import load_json, load_rows, save_json, snapshot, usage_file, usage_hosts, write_atomic
-from .worker.pure import OVER_FRAC, OVER_MIN_S, is_hold, list_path, overrun_left  # noqa: F401 — 与 worker 共用唯一实现
+from .worker.pure import IDLE_REG_S, OVER_FRAC, OVER_MIN_S, is_hold, list_path, overrun_left  # noqa: F401 — 与 worker 共用唯一实现
 
 HERE = Path(__file__).resolve().parent
 SCHEMA = 2
@@ -41,17 +41,18 @@ IDLE_GRACE_S = 5 * 60         # 保活与任务都不在要连续这么久才报
 # user 要用户处理（只有用户能做，或机器出了要人看的事）；agent 只给实验会话（会话自己能处理）；both 两边都要（page 给用户写人话，msg 给会话写操作）
 AUDIENCE = ("user", "agent", "both")
 POOL_WAIT = "在算力池里等着放到某台"   # 池车道的等待原因（#24；放到哪台由看板定，C 之后会写具体原因）
-REG_KEEP_S = 24 * 3600        # 登记没了（worker rm、快照里这轮没有）的车道再按上次见到的主机留这么久（同自动发现的 hide_done_hours 缺省）
-IDLE_REG_S = 2 * 86400        # 收起的登记车道空了这么久，提示实验会话不再用的 worker rm（_idle_regs，#47）
+REG_KEEP_S = 24 * 3600        # 登记没了（worker rm、快照里这轮没有）的车道再按上次见到的主机留这么久（有在跑任务的防闪丢，monitor.toml 写的到期回原主机；跑完的已摘登记立即收起，#164）
 
 
 # ---------------- 探针 ----------------
 def probe_spec(cfg: dict, host: dict) -> dict:
     return {"mounts": [m["path"] for m in host["mounts"]],
             "checks": [{k: c[k] for k in ("id", "if", "cmd", "detail", "timeout") if k in c} for c in host["checks"]],
-            # 本机的队列，以及已归还主机上由本机经共享盘代读的队列（readonly：只读文件，PID 属于别的机器，不查进程）；
+            # 本机的队列，以及已归还主机上由本机经共享盘代读的队列（readonly：只读文件，PID 属于别的机器，不查进程；已确认全跑完的带 done_sig 短路，#164）；
             # 算力池里的（pool，#78）同样代读，但清单是刚从别处搬回池里的：那边手上在跑的还在跑，current 里放行的主机不是这台的照 #95 按在跑算
-            "queues": [{k: v for k, v in q.items() if k not in ("label", "host", "read_via", "reg", "reg_t", "reg_live")} | ({"readonly": True} if q["read_via"] else {})
+            "queues": [{k: v for k, v in q.items() if k not in ("label", "host", "read_via", "reg", "reg_t", "reg_live", "reg_sleeping", "reg_stop", "done_sig", "done_act")}
+                       | ({"sleep_skip": True} if q.get("reg") else {})
+                       | ({"readonly": True, **({"done_sig": q["done_sig"], "done_act": q.get("done_act")} if q.get("done_sig") else {})} if q["read_via"] else {})
                        | ({"pool": True} if q["host"] == POOL else {})
                        for q in cfg["queues"] if (q["read_via"] or q["host"]) == host["id"]],
             # 所有主机上显式登记的清单：共享盘上别的主机登记过的，自动发现时也要跳过
@@ -83,10 +84,17 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
             act = x.get("state") == "active"
             k, rank = list_path(q["root"], q["jobs"]), (True, q.get("added_t") or 0) if act else (False, q.get("added") or "")
             if k not in found or rank > found[k][0]:
-                found[k] = (rank, x["host"], q)
-    new = {k: {"id": (mem.get(k) or {}).get("id"), "host": hid, "root": q["root"], "jobs": q["jobs"], "first": (mem.get(k) or {}).get("first", t), "seen": t,
-               "reg_t": q.get("added_t"), "reg_stop": q.get("stop")} for k, (_, hid, q) in found.items()}
+                found[k] = (rank, x["host"], x.get("state"), q)
+    new = {}
+    for k, (_, hid, st, q) in found.items():
+        om = mem.get(k) or {}
+        # done_sig 仅对同一台仍处于已归还状态且同一份登记的清单有效；主机恢复使用（active）或重新登记后立即失效（#164）
+        keep_done = st == "returned" and om.get("host") == hid and om.get("done_sig") is not None and om.get("reg_added") == q.get("added")
+        new[k] = {"id": om.get("id"), "host": hid, "root": q["root"], "jobs": q["jobs"], "first": om.get("first", t), "seen": t,
+                  "reg_t": q.get("added_t"), "reg_added": q.get("added"), "reg_stop": q.get("stop"), "sleeping": bool(q.get("sleeping")),
+                  **({"done_sig": om["done_sig"], "done_act": om.get("done_act")} if keep_done else {})}
     new.update({k: m for k, m in mem.items() if k not in new and t - m.get("seen", 0) <= REG_KEEP_S})
+    unread = {x.get("host") for x in regs or [] if x.get("queues") is None}
     out, used = [], set()
     for q in cfg["queues"]:
         k = None if q["discover"] else list_path(q.get("root"), q.get("jobs"))
@@ -103,10 +111,12 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
                 lid += "@" + hashlib.sha1(os.path.normpath(m["root"]).encode()).hexdigest()[:6]
             ids.add(lid)
             new[k] = m = dict(m, id=lid)
-        # reg：只在登记里有的车道，跑完久了收起（_quiet）；reg_t：登记时刻（在用主机上的，刚登记的空清单不马上收）；
-        # reg_live：这一轮登记还在（登记没了、按 REG_KEEP_S 留着的为 False：已经 worker rm 了，_idle_regs 不再提示）
-        out.append({"id": m["id"], "host": m["host"], "root": m["root"], "jobs": m["jobs"], "reg": True, "reg_t": m.get("reg_t"), "reg_live": k in found,
-                    "reg_stop": m.get("reg_stop")})
+        # reg：只在登记里有的车道，收起由 _quiet 判；reg_live：这一轮登记还在（登记没了、已 worker rm 为 False，跑完立即收起，#164；
+        # 全局快照缺 regs 或该主机没读到时不误标为已摘）；reg_sleeping：worker 已将该登记转休眠
+        live = k in found or regs is None or m["host"] in unread
+        out.append({"id": m["id"], "host": m["host"], "root": m["root"], "jobs": m["jobs"], "reg": True, "reg_t": m.get("reg_t"), "reg_live": live,
+                    "reg_sleeping": bool(m.get("sleeping")) if k in found else False, "reg_stop": m.get("reg_stop"),
+                    **({"done_sig": m["done_sig"], "done_act": m.get("done_act")} if m.get("done_sig") else {})})
     return out, new
 
 
@@ -227,56 +237,138 @@ def _group_of(name: str, groups: list[dict], auto: bool = False) -> str | None:
 
 
 def _last_act(q: dict, raw: dict) -> float:
-    """车道最后一次活动（日志、锁、完成标记；只在登记里有的再取登记时刻 reg_t）：收起判定与“暂时没实验”的起点同一口径。没有为 0。"""
-    return max(raw.get("activity") or 0, q.get("reg_t") or 0)
+    """车道最后一次活动（日志、锁、完成标记；没有为 0，0 任务未启动清单不取登记时刻，避免误触 no_work:）：收起判定与“暂时没实验”起点同一口径。"""
+    return float(raw.get("activity") or max((raw.get("marks") or {}).values(), default=0) or 0)
 
 
-def _quiet(q: dict, raw: dict | None, returned: bool, t: float) -> bool:
-    """不是 monitor.toml 写明的车道（只在登记里有的、通配符自动发现的）收不收起（#117）：清单里没有在跑与排队的任务、队列进程不在、
-    最后一次活动（只在登记里有的再取登记时刻 reg_t）早于 hide_done_hours 的收起。worker 在管不单独算“在”：登记过的清单它都管着，跑完的也是；
-    空着等资源的有排队任务，照样显示。这一轮没有这条清单的数据（刚登记、探针还没读到）不收。已归还主机上没有代读的，锁不算活着。"""
+def _sleeping_of(q: dict, raw: dict | None, pool: dict | None = None) -> bool:
+    """这条队列此刻是不是已休眠（#164）：在用主机有探针现场结果时只认现场（raw.sleeping / raw.worker.sleeping），
+    不因 worker 状态过期（raw.worker 为 None）误回退旧快照的 reg_sleeping；算力池看 pool.lists[].sleeping；其余才退回 reg_sleeping。"""
+    if q.get("host") == POOL:
+        if pool and (pool.get(PO.key(q.get("root"), q.get("jobs"))) or {}).get("sleeping"):
+            return True
+        return bool(raw.get("sleeping")) if raw is not None else bool(q.get("reg_sleeping"))
+    if raw is not None:
+        return bool(raw.get("sleeping") or (raw.get("worker") or {}).get("sleeping"))
+    return bool(q.get("reg_sleeping"))
+
+
+def _quiet(q: dict, raw: dict | None, returned: bool, t: float, pool: dict | None = None) -> bool:
+    """不是 monitor.toml 写明的车道（只在登记里有的、通配符自动发现的）收不收起（#117、#164）：
+    - 这一轮没有这条清单的数据（刚登记、探针还没读到）：不收；
+    - 探针已确认休眠短路（raw.sleeping）或已归还且确认全跑完短路（readonly_done）：立即收起；
+    - 队列进程还在跑（已归还无代读除外）：不收；
+    - 清单里还有在跑或排队的任务（现场读到的待办优先于任何旧休眠标记）：不收；
+    - 其余情况下若已休眠（含算力池休眠）：立即收起；
+    - 探针正文读取失败（jobs_err）：不误判为空清单或已跑完而收起；
+    - 0 个任务的空清单：不出车道，立即收起；
+    - 已摘登记（worker rm，reg_live 为 False）且无未完成任务：立即收起；
+    - 已归还主机上没有未完成也没有失败任务：立即收起；
+    - 其余（在用主机上登记还在、有任务的，或有失败任务的，或自动发现的）：最后一次活动早于 hide_done_hours 的收起。"""
     if raw is None:
         return False
+    if raw.get("sleeping") or raw.get("readonly_done"):
+        return True
     if raw.get("lock_alive") and not (returned and not q.get("read_via")):
         return False
-    if any(j["status"] in ("running", "queued") for j in QUEUE_PARSERS[q["type"]](raw, t)[1]):
+    jobs = QUEUE_PARSERS[q["type"]](raw, t)[1]
+    if any(j["status"] in ("running", "queued") for j in jobs):
         return False
+    if _sleeping_of(q, raw, pool):
+        return True
+    if raw.get("jobs_err"):
+        return False
+    if "jobs" in raw and not jobs:
+        return True
+    if q.get("reg") and not q.get("reg_live", True):
+        return True
+    if returned and "jobs" in raw and not any(j["status"] == "failed" for j in jobs):
+        return True
     act = _last_act(q, raw)
     return not act or t - act > q["hide_done_hours"] * 3600
 
 
-def _lane_specs(cfg: dict, raw_by_host: dict, t: float) -> tuple[list[dict], float, list[dict]]:
-    """配置里的队列 → 车道规格、收起的车道里最晚的一次活动（_no_work 用；没有收起的为 0）、收起的只在登记里有的车道 [{host, root, queue, last, idle}]
-    （快照的 quiet：项目「管理」抽屉逐条清单里不列这些，#121；last 是最后一次活动，没有为 0；idle：登记还在、空了 IDLE_REG_S 以上，_idle_regs 提示 worker rm，#47）。
-    通配符队列按探针发现的清单展开；展开出的与只在登记里有的车道跑完久了收起（_quiet），monitor.toml 写明的一直显示。
+def _is_done_lane(q: dict, raw: dict | None, returned: bool, t: float) -> bool:
+    """不是 monitor.toml 写明的车道是否已全成功跑完（无在跑、排队、失败，锁不在）：不占“车道 N”编号并在项目页折起（#164）。"""
+    if not (q.get("reg") or q.get("discover")) or raw is None:
+        return False
+    if raw.get("lock_alive") and not (returned and not q.get("read_via")):
+        return False
+    jobs = QUEUE_PARSERS[q["type"]](raw, t)[1]
+    return bool(jobs) and all(j["status"] == "done" for j in jobs)
+
+
+def _lane_specs(cfg: dict, raw_by_host: dict, t: float, pool: dict | None = None) -> tuple[list[dict], float, list[dict]]:
+    """配置里的队列 → 车道规格、收起的车道里最晚的一次活动（_no_work 用；没有收起的为 0）、收起的只在登记里有的车道 [{host, root, queue, last, sleeping}]
+    （快照的 quiet：项目「管理」抽屉逐条清单里不列这些，#121、#164；last 是最后一次活动，没有为 0；sleeping：worker 已转休眠）。
+    通配符队列按探针发现的清单展开；展开出的与只在登记里有的车道按 _quiet 收起，monitor.toml 写明的一直显示。
     车道是一台主机上的一条队列（一次一行；清单写了 `# labmon: par=N` 的同时跑至多 N 行，#147），不绑定实验（跑什么看任务归的计划项）。车道名在这里定：
-    同一台主机上照配置顺序叫“车道 1”“车道 2”，写了 label（用途）的接在后面，收起的不占号。页面、告警都用它。"""
+    同一台主机上照配置顺序叫“车道 1”“车道 2”，写了 label（用途）的接在后面；收起的不占号，24 小时内全成功跑完的登记/自动发现车道标 done_lane 也不占号（叫“已跑完”）。页面、告警都用它。"""
     returned = {h["id"]: h["returned"] for h in cfg["hosts"]}
     out, last, hid = [], 0.0, []
 
     def keep(q: dict, raw: dict | None) -> None:
         nonlocal last
-        if _quiet(q, raw, bool(returned[q["host"]]), t):
-            act = _last_act(q, raw)
+        ret = bool(returned[q["host"]])
+        if _quiet(q, raw, ret, t, pool):
+            act = _last_act(q, raw) if raw else 0.0
             last = max(last, act)
             if q.get("reg"):
-                hid.append({"host": q["host"], "root": q["root"], "queue": q["jobs"], "last": round(act), "idle": bool(q.get("reg_live")) and t - act >= IDLE_REG_S})
+                hid.append({"host": q["host"], "root": q["root"], "queue": q["jobs"], "last": round(act), "sleeping": _sleeping_of(q, raw, pool)})
         else:
-            out.append(q)
+            out.append((q, _is_done_lane(q, raw, ret, t)))
     for q in cfg["queues"]:
         found = ((raw_by_host.get(q.get("read_via") or q["host"]) or {}).get("queues") or {})
         if q.get("reg"):
             keep(q, found.get(q["id"]))
         elif not q["discover"]:
-            out.append(q)
+            out.append((q, False))
         else:
             for qid in sorted(k for k in found if k.startswith(q["id"] + ":")):
                 keep(dict(q, id=qid), found[qid])
     n: dict = {}
-    for i, q in enumerate(out):
-        n[q["host"]] = n.get(q["host"], 0) + 1
-        out[i] = dict(q, name=f"车道 {n[q['host']]}" + (f" {q['label']}" if q.get("label") else ""))
-    return out, last, hid
+    res = []
+    for q, done_lane in out:
+        if done_lane:
+            res.append(dict(q, name="已跑完" + (f" {q['label']}" if q.get("label") else ""), done_lane=True))
+        else:
+            n[q["host"]] = n.get(q["host"], 0) + 1
+            res.append(dict(q, name=f"车道 {n[q['host']]}" + (f" {q['label']}" if q.get("label") else "")))
+    return res, last, hid
+
+
+def _sync_returned_done(cfg: dict, raw_by_host: dict, sd: Path, t: float) -> None:
+    """已归还主机经在用主机代读（read_via）的登记队列：全量读到后若确认无未完成无失败（立即收起），把清单 file_sig 与活动时刻记进 reg_lanes.json，
+    后续探针只 stat 清单文件短路；若清单变动有了新行则清除 done_sig，及时报 returned_unfinished（#164）。"""
+    f = sd / "reg_lanes.json"
+    if not f.exists():
+        return
+    mem = load_json(f, {}) or {}
+    returned = {h["id"]: bool(h["returned"]) for h in cfg["hosts"]}
+    changed = False
+    for q in cfg["queues"]:
+        if not (q.get("reg") and q.get("read_via") and returned.get(q["host"])):
+            continue
+        k = list_path(q.get("root"), q.get("jobs"))
+        m = mem.get(k)
+        if not isinstance(m, dict) or m.get("host") != q["host"]:
+            continue
+        raw = ((raw_by_host.get(q["read_via"]) or {}).get("queues") or {}).get(q["id"])
+        if raw is None or raw.get("readonly_done") or raw.get("jobs_err"):
+            continue
+        sig = raw.get("jobs_sig")
+        jobs = QUEUE_PARSERS[q["type"]](raw, t)[1]
+        done = not any(j["status"] in ("running", "queued", "failed") for j in jobs)
+        if done and sig:
+            act = round(_last_act(q, raw))
+            if m.get("done_sig") != sig or m.get("done_act") != act:
+                mem[k] = dict(m, done_sig=sig, done_act=act)
+                changed = True
+        elif not done and "done_sig" in m:
+            mem[k] = {kk: vv for kk, vv in m.items() if kk not in ("done_sig", "done_act")}
+            changed = True
+    if changed:
+        save_json(f, mem)
 
 
 KEEP_LONG_S = 30 * 86400
@@ -348,10 +440,11 @@ def build(cfg: dict, probes: dict, out_dir: Path, lan: dict | None = None, glob_
     # 算力池里这个项目待放的清单为什么还没放、从何时起等（pool.tick 在工作台那一轮写的，#25）：池车道的等待原因与 pool_wait 告警用
     snap["pool"] = {k: v for k, v in ((glob_snap.get("pool") or {}).get("lists") or {}).items() if v.get("project") == cfg["id"]}
     ratios, quiet = _lanes(cfg, snap, state, raw_by_host, t)
+    _sync_returned_done(cfg, raw_by_host, sd, t)
     _groups(cfg, snap, state, ratios)
     _host_alerts(cfg, snap, state, hist, glob_snap, t)
     _no_work(cfg, snap, glob_snap, quiet, t)
-    _idle_regs(cfg, snap, state)
+    state.pop("idle_regs", None)                     # #164 已改由 worker 自动休眠，删除旧 idle_regs: 状态字段
     _storage(cfg, snap, glob_snap, t)
     _rebalance(snap)
     _wait_gone(cfg, snap, out_dir, t)
@@ -479,7 +572,7 @@ def _lanes(cfg: dict, snap: dict, state: dict, raw_by_host: dict, t: float) -> t
             "ratios": {},                                            # 计划项 → {同类名: 实际/估时}，任务里汇，计划项里取
             "running": set(),                                        # 运行中任务的 车道/任务 键
             "hcfg": {h["id"]: h for h in cfg["hosts"]}}
-    specs, quiet, snap["quiet"] = _lane_specs(cfg, raw_by_host, t)
+    specs, quiet, snap["quiet"] = _lane_specs(cfg, raw_by_host, t, snap.get("pool"))
     for q in specs:
         _lane(q, cfg, snap, raw_by_host, work, t)
     for k in list(work["prog"]):                       # 只为运行中的任务保留进度采样
@@ -505,7 +598,8 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     host_ok = next((x["ok"] for x in snap["hosts"] if x["id"] in (src, q["host"])), False)     # 只替池代读的主机不在快照里：看池那张卡
     returned = hcfg[q["host"]]["returned"]
     where = f"{hcfg[q['host']]['label']} {q['name']}"     # 告警里指明车道：主机名 + 车道名
-    lane = {"id": q["id"], "label": q["name"], "host": q["host"], "type": q["type"], "stale": not host_ok and not returned}
+    lane = {"id": q["id"], "label": q["name"], "host": q["host"], "type": q["type"], "stale": not host_ok and not returned,
+            **({"done_lane": True} if q.get("done_lane") else {})}
     if not q["discover"]:                                  # 页面按 root、queue 认 worker 事件（等待原因、队列结束）属于哪条车道
         lane.update(root=q.get("root"), queue=q.get("jobs"))
     if returned:
@@ -941,29 +1035,6 @@ def _no_work(cfg: dict, snap: dict, glob_snap: dict, quiet: float, t: float) -> 
             snap["alerts"].append(alert(f"no_work:{round(since)}", "agent",
                                         f"项目从 {fmt_time(since)} 起没有活了：各车道跑空，也没有在等的任务。要接着跑就把下一批追加到各台的长期清单"
                                         f"（先 labmon worker fit <主机> <目录> <清单> --list --project {cfg['id']} 看能开几条车道）；确实做完了不用管"))
-
-
-def _idle_regs(cfg: dict, snap: dict, state: dict) -> None:
-    """空了很久的登记（#47）：收起的只在登记里有的车道（快照的 quiet）里标了 idle 的（登记还在、最后一次活动早于 IDLE_REG_S，_lane_specs 定），出一条只给实验会话的 idle_regs:，
-    列出这些清单、写 worker rm 的写法。只提示、不删：自动删了，会话以后再往旧清单追加，任务会悄悄不跑。
-    monitor.toml 写明的与自动发现的车道不收进 quiet，也就不列。同一批只叫醒一次：key 带代数，代数与报过的清单记在项目状态的 idle_regs，
-    出现没报过的清单才加一；会话删了一部分、留着长期清单时不变。清单又有活动就从报过的里去掉，再空满 IDLE_REG_S 算新的。"""
-    st = state.setdefault("idle_regs", {"n": 0, "told": []})
-    idle = [x for x in snap["quiet"] if x["idle"]]
-    cur = {f"{x['host']}|{list_path(x['root'], x['queue'])}" for x in idle}
-    if cur - set(st["told"]):
-        st["n"] += 1
-    st["told"] = sorted(cur)
-    if not idle:
-        return
-    by: dict = {}
-    for x in sorted(idle, key=lambda x: (x["host"], x["root"], x["queue"])):
-        by.setdefault(x["host"], {}).setdefault(x["root"], []).append(x["queue"])
-    where = "；".join(f"{h} 上 " + "；".join(f"{r}：{'、'.join(js)}" for r, js in rs.items()) for h, rs in by.items())
-    snap["alerts"].append(alert(f"idle_regs:{cfg['id']}:{st['n']}", "agent",
-                                f"有 {len(idle)} 条清单空了 {IDLE_REG_S // 86400} 天以上（没有在跑与排队的任务、也没有新的活动），登记还留着：{where}。"
-                                "worker 每轮都要在共享盘上查一遍每条登记：不再用的逐条 labmon worker rm <主机> <目录> <清单> 摘掉（只摘登记，不删文件）；"
-                                "以后还要往里追加的长期清单留着就行，再有新的空清单才会再提示。新任务追加到项目固定目录下的长期清单，不按批、不按代码版本新开"))
 
 
 def dir_name(name: str) -> str:

@@ -499,6 +499,8 @@ class MeasureMixin:
         """旧 gpu_queue.sh 正在跑的任务（状态目录的 current 指着、lock 是 gpu_queue 的）：只统计用量，不管；沿用上一轮的记录（用量累计在里面）。"""
         ext = {}
         for q in queues:
+            if q.get("sleeping"):
+                continue
             cur = None if self.lane(q["key"]) else (_Q.read_current(q["state"]) or [None])[0]   # 旧 gpu_queue.sh 一次只跑一个
             if not cur or not cur[1] or not _C.alive(_C.read_pid(os.path.join(q["state"], "lock")), ("gpu_queue",)):
                 continue

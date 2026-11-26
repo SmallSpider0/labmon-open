@@ -14,6 +14,7 @@ from .pure import (  # noqa: F401 — 经 common 与包顶层兼容导出
     GIB,
     GROUP_RE,
     HOLD_RE,
+    IDLE_REG_S,
     OVER_FRAC,
     OVER_MIN_S,
     POOL,

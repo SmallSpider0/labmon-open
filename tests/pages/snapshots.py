@@ -362,11 +362,11 @@ REBAL = {"key": "rebalance:proj-a:srv-b:srv-a/jobs/q1.txt/alpha_train_s3", "targ
 
 # 登记的全局视图（overview._regs）：在用的取状态里的 queues，已归还的（代读的那台这轮没连上：stale）、主机清单里没有的取登记文件
 def _regs(a: dict, b: dict) -> list[dict]:
-    st = lambda h: [{k: q[k] for k in ("root", "jobs", "project", "stop", "gpus", "empty")} for q in h["status"]["queues"]]   # noqa: E731
+    st = lambda h: [{k: q[k] for k in ("root", "jobs", "project", "stop", "gpus", "empty", "sleeping") if k in q} for q in h["status"]["queues"]]   # noqa: E731
     # 在用主机带资源池与上一台 prev（同池最近归还的自用主机，接上卡排第一，#95）
-    # srv-a 上 proj-b 的 jobs/bd.txt 跑完久了：项目页已收起（项目摘要的 quiet），管理抽屉数进“跑完”、逐条里不列（#121）
+    # srv-a 上 proj-b 的 jobs/bd.txt 跑空满 2 天已休眠：项目页已收起（项目摘要的 quiet），管理抽屉数进“跑完”、逐条里不列并标含已休眠（#121、#164）
     return [{"host": "srv-a", "label": a["label"], "state": "active", "returned": None, "home": "/data/me/labmon", "stale": False, "t": NOW - 4,
-             "queues": st(a) + [{"root": "/data/me/proj-b/qd", "jobs": "jobs/bd.txt", "project": "proj-b", "stop": None, "gpus": None, "empty": True}],
+             "queues": st(a) + [{"root": "/data/me/proj-b/qd", "jobs": "jobs/bd.txt", "project": "proj-b", "stop": None, "gpus": None, "empty": True, "sleeping": True}],
              "pool": "pool-mine", "prev": "srv-old3"},
             {"host": "srv-b", "label": b["label"], "state": "active", "returned": None, "home": "/data/me/labmon", "stale": False, "t": NOW - 6, "pool": None, "prev": None,
              # jobs/b4.txt 刚登记、项目快照里还没有这条车道：抽屉里写“下一轮采集后显示”；proj-b 的 jobs/b3.txt 反过来，monitor.toml 写了、没登记：“只显示”
@@ -444,7 +444,7 @@ def overview() -> dict:
                            {"host": "srv-old2", "root": "/data/me/proj-b/q9", "queue": "jobs/b9.txt", "label": "车道 1", "unfinished": 3, "run": 0, "returned": NOW - 30 * H},
                            {"host": "srv-old3", "root": "/data/me/proj-b/q8", "queue": "jobs/b8.txt", "label": "车道 1", "unfinished": 0, "run": 0, "returned": NOW - 50 * H},
                            {"host": "srv-gone", "root": "/data/me/proj-b/q7", "queue": "jobs/b7.txt", "label": "车道 1", "unfinished": 0, "run": 0, "returned": NOW - 90 * H}],
-                 "markers": [{"label": "组会", "ts": NOW + 86400}], "quiet": [{"host": "srv-a", "root": "/data/me/proj-b/qd", "queue": "jobs/bd.txt", "last": NOW - 3 * 86400, "idle": True}],
+                 "markers": [{"label": "组会", "ts": NOW + 86400}], "quiet": [{"host": "srv-a", "root": "/data/me/proj-b/qd", "queue": "jobs/bd.txt", "last": NOW - 3 * 86400, "sleeping": True}],
                  "cfg": CFG_B, "groups": [], "ungrouped": 0, "archive_block": None}],
             # 已归档的项目（projects.json，#97）：侧栏「已归档 N 个」与它的抽屉
             "archived": [{"id": "proj-old", "title": "Gamma 旧实验", "t": NOW - 3 * 86400, "revision": "demo-archive-100",

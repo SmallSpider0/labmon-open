@@ -217,8 +217,28 @@ def queue_gpu_queue(q):
     - 日志目录：<名称>.log，进度行形如 `PROGRESS i/N`。
     """
     root = q["root"]
+    jpath = os.path.join(root, q["jobs"])
+    wk = q.get("worker") or {}
+    if q.get("sleep_skip") and wk.get("sleeping"):   # 仅只在登记里有的车道在 worker 休眠后短路（monitor.toml 显式配置的车道始终保留任务与统计，#164）
+        return {"jobs": [], "marks": {}, "state_dir": None, "logs_dir": None, "worker": q.get("worker"),
+                "lock_pid": None, "lock_alive": False, "paused": None, "activity": wk.get("empty_since"),
+                "current": [], "log_tail": [], "sleeping": True}
+    ro = q.get("readonly")                       # 队列在已归还的机器上：PID 属于那台机器，在这里查进程没有意义
+    jsig = None
+    if ro:
+        try:
+            st = os.stat(jpath)
+            jsig = [st.st_ino, st.st_mtime_ns, st.st_size]
+        except OSError:
+            jsig = None
+        if q.get("done_sig") and jsig == q["done_sig"]:   # 已归还且已确认全跑完的清单没变动：省掉状态目录与 .env 读取（#164）
+            return {"jobs": [], "marks": {}, "state_dir": None, "logs_dir": None, "worker": None,
+                    "lock_pid": None, "lock_alive": False, "paused": None, "activity": q.get("done_act"),
+                    "current": [], "log_tail": [], "readonly_done": True}
     envf = os.path.join(root, re.sub(r"\.txt$", ".env", q["jobs"]))
-    env_txt = read(envf, "") or ""
+    env_raw = read(envf, None)
+    env_ok = env_raw is not None or not os.path.exists(envf)
+    env_txt = env_raw or ""
 
     def env(key, default):
         m = re.search(r"^%s=(\S+)" % key, env_txt, re.M)
@@ -233,7 +253,6 @@ def queue_gpu_queue(q):
     def mtime(f):                                # 文件修改时间换算成本机时钟
         return os.path.getmtime(f) - skew
 
-    ro = q.get("readonly")                       # 队列在已归还的机器上：PID 属于那台机器，在这里查进程没有意义
     lock = read(os.path.join(state, "lock"))
     out["lock_pid"] = int(lock) if lock and lock.isdigit() else None
     out["lock_alive"] = False if ro else any(_pid_alive(out["lock_pid"], m) for m in (
@@ -282,12 +301,23 @@ def queue_gpu_queue(q):
         c["log_mtime"] = mtime(lf) if os.path.exists(lf) else None
         out["current"].append(c)
     est_re = re.compile(q.get("est_re", r"est_min=(\d+(?:\.\d+)?)"))
-    for line in (read(os.path.join(root, q["jobs"]), "") or "").splitlines():
-        if not line.strip() or line.lstrip().startswith("#") or "|" not in line:
-            continue
-        name, cmd = line.split("|", 1)
-        m = est_re.search(cmd)
-        out["jobs"].append({"name": name.strip(), "est_min": float(m.group(1)) if m else None})
+    jtxt = read(jpath, None)
+    if jtxt is None:
+        out["jobs_err"] = True                   # 清单正文读失败：不缓存 done_sig，看板不按空清单收起（#164）
+    else:
+        for line in jtxt.splitlines():
+            if not line.strip() or line.lstrip().startswith("#") or "|" not in line:
+                continue
+            name, cmd = line.split("|", 1)
+            m = est_re.search(cmd)
+            out["jobs"].append({"name": name.strip(), "est_min": float(m.group(1)) if m else None})
+        if ro and jsig is not None and env_ok:
+            try:
+                st2 = os.stat(jpath)
+                if [st2.st_ino, st2.st_mtime_ns, st2.st_size] == jsig:
+                    out["jobs_sig"] = jsig       # 仅在正文与 .env 均成功读取且读前后签名一致时输出 jobs_sig
+            except OSError:
+                pass
     out["log_tail"] = (read(os.path.join(state, "queue.log"), "") or "").splitlines()[-400:]
     return out
 
@@ -343,7 +373,8 @@ def worker_view(path, stale):
     def key(root, jobs):
         return os.path.normpath(os.path.join(root or "", jobs or ""))
     out = {key(q.get("root"), q.get("jobs")): {"wait": None, "held": None, "held_t": None, "dep": None, "head": None, "cpu": None,
-                                               "dur": q.get("dur") or {}, "plan": {}, "stuck": None, "par": q.get("par") or 1}
+                                               "dur": q.get("dur") or {}, "plan": {}, "stuck": None, "par": q.get("par") or 1,
+                                               "sleeping": bool(q.get("sleeping")), "empty_since": q.get("empty_since")}
            for q in st.get("queues", [])}
     ovt = {}                                    # 各种临时指令最晚下的时刻：告警 key 带它（drain:，#129），同种同目标再下一次就是新的
     for o in st.get("overrides") or []:

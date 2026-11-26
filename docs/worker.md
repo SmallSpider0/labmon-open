@@ -18,7 +18,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj [--gpu
                                                           # “只给谁用”、作废的唤醒都按它认，看板不按目录猜；--gpus 限定只用某些卡
 labmon worker add pool /root/data1/alice/proj jobs/p.txt --project proj    # 交给算力池（成员才能交；不许 --gpus、--stop boundary、gang=、占位任务），见 fleet.md「算力池」
 labmon worker limit 29 heavy=2                           # 同 tag 同时运行数的上限（heavy= 删掉）：整台主机共用，各项目同名的 tag 合并计数
-labmon worker status 29                                  # 这台的 CPU 配额与已记的核、登记的队列（清单跑空的标“空着”）、运行中（各记几核）与等待中的任务（等待行带排第几、是不是屏障、预计开始）；末尾一句与哪几台共用 worker 目录（看板按主机清单补）
+labmon worker status 29                                  # 这台的 CPU 配额与已记的核、登记的队列（清单跑空的标“空着”，空满 2 天自动休眠的标“已休眠”，休眠超过 3 条合并汇总）、运行中（各记几核）与等待中的任务（等待行带排第几、是不是屏障、预计开始）；末尾一句与哪几台共用 worker 目录（看板按主机清单补）
 labmon worker fit 29 x4_s110_seed2 [--project a1]        # 开并行车道前：与真放行同一份准入放不放得下，同卡并行时同类约要多久、卡吃不满是不是 CPU 受限（见“资源估计”）
 labmon worker fit 29 ROOT JOBS --list --project a1      # 这条清单还会跑的行此刻能在共用 worker 目录的几台上再开几条车道
 labmon worker rm 29 /root/data1/alice/proj jobs/a6000.txt  # 按清单文件认登记：ROOT 与 JOBS 拼起来是同一个文件就算（status 列的 ROOT/JOBS 从哪里断开都行，目录已删也撤得掉），只删这一条；已归还的主机经与它共用 worker_home 的在用主机代办（不连已归还的那台）
@@ -68,6 +68,7 @@ worker 装在主机的 `worker_home`（缺省 `<data_root>/labmon`，`data_root`
   两台都登记着（旧版留下的）时，较旧的那台在较新的那台在用（worker 在、没 stop 过）期间不碰这条清单，状态里也不列，事件记一次；要在这台跑就再 `worker add` 一次。
   开跑前再核一次登记文件还在，这一轮刚被搬走的不放。`--pool`（看板的算力池搬清单时带，#79）在登记里记 `pool: 1`：看板据此认哪些是池放的（入池的自用主机上与主人的清单分开），状态的 `queues[]`、`todo[]` 带上它，`offers` 不叫会话挪这些清单；会话自己再 `worker add` 同一条清单就没有它了。看板上的「换到其他主机」就是逐条在目标主机上 `worker add`（[workbench.md「搬、移除队列登记」](workbench.md#搬移除队列登记)）。
 - 任务在自己的会话里运行，退出码写进 `<名称>.rc`。完成留 `.done`；失败或被终止（退出码 130 / 137 / 143）留 `.failed` 并跳过，修好后删 `.failed` 即重跑。
+- **跑空登记自动休眠**（#164）：清单连续跑空满 `IDLE_REG_S`（2 天，无在跑与待办、未暂停）后，worker 将该登记转为休眠（不摘登记，状态 `queues[]` 标 `sleeping: true`、`empty_since`，顶层 `reg_idle` 记空置起点与休眠时的文件签名供重启恢复）。休眠期间每轮只用 `file_sig` 检查清单文件是否变动，不再读 `.env`、状态目录与标记；清单文件一变（如追加新行）或重新 `worker add` 自动醒来照常排（若仅删除 `.done`/`.failed` 重跑旧行而未改清单文件，需 `touch` 清单文件或重新 `worker add` 唤醒）。算力池待放目录（`hosts/pool/queues/`）里的空清单由 `pool_todo` 按同样 2 天规则休眠与唤醒。休眠队列作为 `after=` 被等方时，已跑完任务由全量 `usage.jsonl` 与休眠前缓存的标记快照（`sleep_marks`）覆盖，文件一变醒来即重新进入 `todo`。
 - 日志 `<名称>.log` 追加写，每次开跑先写一行 `===== 时刻 labmon 开始（GPU …）=====`。看板的最后一行与进度、状态里的日志末尾、OOM 判断（`oom_of`）都只看最后一行分隔之后的（这一次的；`START_RE`）。
   这一次里逐字出现过的行算套话（库每次加载模型都打印的提示之类）：最后一行跳过它们，日志末尾把连着的折成一行「…（N 行与前面重复，略）」，OOM 判断看原文；数字在变的行（进度、loss）每行都不一样，不受影响。不按任务、不按关键词配置。
 - 用 `CUDA_VISIBLE_DEVICES=<UUID>` 固定到选中的卡，`queue.log` 的“开始”行记下卡号和 UUID。各队列内部一次一个任务（[并行清单](#并行清单)同时至多 N 个），不同队列（以及单元申请）在余量够时并行。

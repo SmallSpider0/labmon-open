@@ -330,8 +330,11 @@ function kpis() {
   const n = s => real.filter(j => j.status === s).length, total = real.length;
   if (total) {
     const seg = (k, c) => n(k) ? `<i style="width:${n(k) / total * 100}%;background:${c}"></i>` : "";
-    const lt2 = D.lanes.map(l => `${laneName(l, D.hosts)}：完成 ${l.done ?? 0}/${l.total ?? 0} · ${laneState(l)}`).join("\n");
-    out.push(`<div class="kpi" ${tip(lt2)}><div class="k">任务 · ${D.lanes.length} 条车道</div><div class="v">${n("done")}<small> / ${total} 完成</small></div>
+    const actL = D.lanes.filter(l => !l.done_lane), doneL = D.lanes.filter(l => l.done_lane);
+    const listL = actL.length || doneL.length > 6 ? actL : D.lanes;
+    const lt2 = [...listL.map(l => `${laneName(l, D.hosts)}：完成 ${l.done ?? 0}/${l.total ?? 0} · ${laneState(l)}`),
+      ...(doneL.length && listL.length < D.lanes.length ? [`另有 ${doneL.length} 条已跑完的车道（共 ${sum(doneL.map(l => l.total || 0))} 个任务，不占车道编号）`] : [])].join("\n");
+    out.push(`<div class="kpi" ${tip(lt2)}><div class="k">任务 · ${actL.length || D.lanes.length} 条车道${actL.length && doneL.length ? ` · ${doneL.length} 已跑完` : ""}</div><div class="v">${n("done")}<small> / ${total} 完成</small></div>
       <div class="meter">${seg("done", "var(--ok)")}${seg("running", "var(--accent)")}${seg("failed", "var(--bad)")}</div>
       <div class="s">运行 ${n("running")} · 排队 ${n("queued")}${n("failed") ? ` · <span style="color:var(--bad)">失败 ${n("failed")}</span>` : ""}</div></div>`);
   }
@@ -495,15 +498,23 @@ function drawTimeline() {
   DEPH.ch = depChain(DEPH.id); box.classList.toggle("dh", !!DEPH.ch);     // 悬停着的那格的上下游：重画时照样高亮（laneRow、depLines 读 DEPH.ch）
   const {t0, t1} = tlRange(), win = (a, b) => a != null && b != null && b > t0 && a < t1;
   const showAll = LS.get("tlall", false), rows = [], used = new Set();
-  let hidden = 0;
+  const foldDone = D.lanes.some(l => !l.done_lane && l.unfinished) || D.lanes.filter(l => l.done_lane).length > 6;   // 有未完成车道或已跑完超过 6 条时默认折起已跑完的无编号车道（#164）
+  let hidden = 0, hiddenDone = 0;
   const att = D.attempts || [], extra = [...new Set([...D.jobs, ...att].map(j => j.host).filter(id => id && !D.hosts.some(h => h.id === id)))].map(hostOf);
   const shown = [...D.hosts.filter(h => !h.pool), ...extra].map(h => {
     const lanes = D.lanes.filter(l => l.host === h.id && !l.missing), ran = (l, hid) => att.some(x => x.lane === l.id && (x.host || l.host) === hid && win(x.t0, x.t1));
-    const vis = lanes.filter(l => showAll || l.unfinished || rowJobs(l, h.id).some(j => win(jobT0(j), jobT1(j))) || ran(l, h.id));
+    const vis = [];
+    for (const l of lanes) {
+      const inWin = l.unfinished || rowJobs(l, h.id).some(j => win(jobT0(j), jobT1(j))) || ran(l, h.id);
+      if (showAll) vis.push(l);
+      else if (foldDone && l.done_lane) hiddenDone++;
+      else if (inWin) vis.push(l);
+      else hidden++;
+    }
     // 清单已搬到别的主机、这台还在跑完手上那一格（#100），或交回算力池的清单在这台跑过、在跑的（#99）：照这条车道另起一行挂在这台下面，只画这台的那几格
     const left = D.lanes.filter(l => l.host !== h.id && (rowJobs(l, h.id).length || att.some(x => x.lane === l.id && x.host === h.id)));
     const away = left.filter(l => showAll || rowJobs(l, h.id).some(j => j.status === "running" || win(jobT0(j), jobT1(j))) || ran(l, h.id));
-    hidden += lanes.length - vis.length + left.length - away.length;
+    hidden += left.length - away.length;
     return [h, [...vis, ...away.map(l => ({...l, away: h.id}))]];
   }).filter(([, vis]) => vis.length);
   // 车道名右边用计划项配色的圆点标出这段时间里它跑的计划项：图上不止一个计划项时才画（只有一个时标题旁已列出）
@@ -520,7 +531,9 @@ function drawTimeline() {
   // 池里待放的（#89）：一条清单一行，写原因与已等多久
   const left = l => jobsOf(l.id).filter(j => inPool(j) && (j.status === "queued" || j.status === "running")).length;     // 跑过、在跑的已画在那台下（#99）
   const pool = poolLanes().filter(left).map(l => `<div class="sm mut" style="margin-top:2px" ${tip("交给算力池、还没放到哪台：放到某台后这条车道跟到那台画；已经跑过的按实际跑的主机画")}>${esc(laneName(l, D.hosts))}（${left(l)} 个任务）不在图上：${esc(laneState(l))}</div>`).join("");
-  const more = pool + (hidden || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? "收起这段时间没有任务的车道" : `另有 ${hidden} 条车道这段时间没有任务，显示`}</span></div>` : "");
+  const hideMsg = [hiddenDone ? `${hiddenDone} 条已跑完` : "", hidden ? `${hidden} 条这段时间没有任务` : ""].filter(Boolean).join("、");
+  const hasDone = foldDone && D.lanes.some(l => l.done_lane);
+  const more = pool + (hideMsg || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? (hasDone ? "收起已跑完与这段时间没有任务的车道" : "收起这段时间没有任务的车道") : `另有 ${hideMsg}的车道，显示`}</span></div>` : "");
   // 左栏要多宽（#108）：主机短名、车道名（从 x=18 起，右边留计划项圆点）都写得下；tlSvg 再按上限截
   const lw = Math.max(...shown.flatMap(([h, vis]) => [textW(hostShort(h)) + 8,
     ...vis.map(l => 26 + 7 * Math.min(4, multi ? gsOf(l).length : 0) + textW(laneLabel(l) + laneTail(l, parPack(l, rowJobs(l, l.away || l.host)).n > 1)))]));
@@ -941,11 +954,11 @@ function jobDetails() {
     `<button data-f="${k}" class="${k === filt ? "on" : ""}">${v}</button>`).join("")}</div>
     ${D.groups.length ? `<div class="seg"><button data-g="" class="${gf ? "" : "on"}">全部计划项</button>${D.groups.map(g => `<button data-g="${esc(g.id)}" class="${gf === g.id ? "on" : ""}"><span class="dot" style="background:${g.color}"></span> ${esc(g.label)}</button>`).join("")}</div>` : ""}</div>`;
   const order = {running: 0, failed: 1, queued: 2, done: 3};
-  for (const l of D.lanes) {
+  const laneBlock = l => {
     let js = jobsOf(l.id).filter(j => (!gf || j.group === gf) && (filt === "all" || (filt === "failed" ? j.status === "failed" : j.status !== "done")));
     js.sort((a, b) => order[a.status] - order[b.status] || (a.status === "done" ? (b.end_ts || 0) - (a.end_ts || 0) : 0));
     const lim = more[l.id] ? 1e9 : 12, hidden = Math.max(0, js.length - lim);
-    s += `<details class="lane" data-lane="${esc(l.id)}" ${opened ? (opened.includes(l.id) ? "open" : "") : "open"}><summary><b>${esc(laneName(l, D.hosts))}</b> <span class="sm mut">${esc(laneGroups(jobsOf(l.id)).map(gshort).map(g => g + " · ").join(""))}完成 ${l.done ?? 0}/${l.total ?? 0}</span></summary>
+    return `<details class="lane" data-lane="${esc(l.id)}" ${opened ? (opened.includes(l.id) ? "open" : "") : "open"}><summary><b>${esc(laneName(l, D.hosts))}</b> <span class="sm mut">${esc(laneGroups(jobsOf(l.id)).map(gshort).map(g => g + " · ").join(""))}完成 ${l.done ?? 0}/${l.total ?? 0}</span></summary>
       <div class="scroll"><table><tr><th>任务</th><th>状态</th><th class="r">预计时长</th><th class="r">已用 / 实际</th><th class="r hide-sm">开始</th><th class="r">结束 / 预计</th><th class="hide-sm">最近输出</th></tr>
       ${js.slice(0, lim).map(j => {
         const est = j.dur_min == null ? "—" : j.est_min == null || Math.abs(j.dur_min - j.est_min) > .5
@@ -955,7 +968,11 @@ function jobDetails() {
         <td class="r hide-sm">${tsNear(jobT0(j))}</td><td class="r">${tsNear(jobT1(j))}</td><td class="mono mut ell hide-sm" style="max-width:340px" ${j.last_line ? tip(j.last_line) : ""}>${esc(j.last_line || "")}</td></tr>`; }).join("")}
       ${hidden ? `<tr><td colspan="7"><span class="more" data-more="${esc(l.id)}">还有 ${hidden} 个，全部显示</span></td></tr>` : ""}
       ${!js.length ? `<tr><td colspan="7" class="mut">没有符合条件的任务</td></tr>` : ""}</table></div></details>`;
-  }
+  };
+  const actL = D.lanes.filter(l => !l.done_lane), doneL = D.lanes.filter(l => l.done_lane);
+  const foldDone = doneL.length && (actL.length || doneL.length > 3);
+  for (const l of foldDone ? actL : D.lanes) s += laneBlock(l);
+  if (foldDone) s += `<details class="dlane-more" ${SS.get("dlaneOpen", false) ? "open" : ""} style="margin-top:6px"><summary class="sm mut" style="cursor:pointer;padding:4px 0">另有 ${doneL.length} 条已跑完的车道（${sum(doneL.map(l => l.total || 0))} 个任务）</summary>${doneL.map(laneBlock).join("")}</details>`;
   return `<details class="jobs" ${SS.get("jobsOpen", false) ? "open" : ""}><summary>任务明细（${D.jobs.length}）</summary>${s}</details>`;
 }
 
@@ -989,6 +1006,7 @@ tipBind({
 function saveView() {
   SS.set("scroll", window.scrollY);
   const j = document.querySelector("details.jobs"); if (j) SS.set("jobsOpen", j.open);
+  const dl = document.querySelector("details.dlane-more"); if (dl) SS.set("dlaneOpen", dl.open);
   const r = document.querySelector("details.res"); if (r) SS.set("resOpen", r.open);
   const gd = document.querySelector("details.gdone"); if (gd) SS.set("gdone", gd.open);
   const ag = document.querySelector("details.agal"); if (ag) SS.set("agal", ag.open);
@@ -1023,9 +1041,13 @@ document.addEventListener("click", e => {
     LS.set("gfilter", "");
     const m = SS.get("more", {}); m[j.lane] = 1; SS.set("more", m);
     const o = new Set(SS.get("open", D.lanes.map(l => l.id))); o.add(j.lane); SS.set("open", [...o]);
+    if (D.lanes.find(l => l.id === j.lane)?.done_lane) SS.set("dlaneOpen", true);
     SS.set("jobsOpen", true); render();
     const row = document.getElementById("job-" + id);
-    if (row) { row.classList.add("hl"); row.scrollIntoView({block: "center"}); setTimeout(() => row.classList.remove("hl"), 2500); }
+    if (row) {
+      for (let p = row.closest?.("details"); p; p = p.parentElement?.closest?.("details")) p.open = true;
+      row.classList.add("hl"); row.scrollIntoView({block: "center"}); setTimeout(() => row.classList.remove("hl"), 2500);
+    }
   }
 });
 document.addEventListener("toggle", e => { if (e.target.matches?.("details")) saveView(); }, true);

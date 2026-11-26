@@ -7,6 +7,7 @@ import signal
 import sys
 
 from . import common as _C
+from . import pure as _P
 from . import queue as _Q
 from . import measure as _M
 from . import keepalive as _K
@@ -328,9 +329,19 @@ def main(argv=None):
                                                     "；超核：" + "、".join("%s/%s %.1f 核（给 %d）" % (o["project"], o["name"], o["cores"], o["give"]) for o in th["over"]) if th["over"] else ""))
     if (st.get("limits") or {}).get("tags"):
         print("  tag 限额 " + "，".join("%s=%d" % kv_ for kv_ in sorted(st["limits"]["tags"].items())))
-    for q in st.get("queues", []):
+    qs = st.get("queues", [])
+    awake, asleep = [q for q in qs if not q.get("sleeping")], [q for q in qs if q.get("sleeping")]
+    days = _P.IDLE_REG_S // 86400
+    for q in awake + (asleep if len(asleep) <= 3 else []):
         print("  队列 %s %s/%s%s%s" % (q.get("project"), q["root"], q["jobs"], "（卡 %s）" % q["gpus"] if q.get("gpus") else "",
-                                     "（空着：清单里没有待办，不占卡）" if q.get("empty") else ""))
+                                     "（已休眠：空满 %d 天，清单变动自动唤醒）" % days if q.get("sleeping")
+                                     else "（空着：清单里没有待办，不占卡）" if q.get("empty") else ""))
+    if len(asleep) > 3:
+        by_p = {}
+        for q in asleep:
+            by_p[q.get("project") or "?"] = by_p.get(q.get("project") or "?", 0) + 1
+        print("  另有 %d 条已休眠的登记（空满 %d 天，清单变动自动唤醒：%s）" % (
+            len(asleep), days, "、".join("%s %d 条" % kv for kv in sorted(by_p.items()))))
     for j in st.get("running", []):
         gang = "，成组 %s（与 %s 一起开跑）" % (j["gang"], "、".join("%s（%s）" % (w[1], w[0]) for w in j.get("gang_with") or []) or "—") if j.get("gang") else ""
         cores = (j.get("acct") or {}).get("cpu")

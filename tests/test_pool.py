@@ -1032,6 +1032,44 @@ class PoolHeadsTest(TickBase):
         out = self.board(self.m)
         self.assertEqual(out["lists"][self.k]["why"], "m 上读不到清单 x")
 
+    def test_pool_list_sleeps_and_wakes(self):
+        # #164：算力池里跑空的待放清单满 IDLE_REG_S 自动休眠（只 stat 清单文件、不读 .env），board 写入 sleeping=True；
+        # 往清单追加新行后自动醒来并放到入池主机
+        self.add("pool")
+        Path(self.q["state"]).mkdir(parents=True, exist_ok=True)
+        for n in ("a1", "a2", "a3"):
+            Path(self.q["state"], n + ".done").write_text("")
+        self.here.tick(self.here.registry(), True)
+        self.assertFalse(self.status(self.here)["pool_heads"][self.k].get("sleeping"))
+        self.hosts.advance(self.hosts.m.IDLE_REG_S + 10)
+        self.here.peer_t = 0
+        self.here.tick(self.here.registry(), False)
+        self.assertTrue(self.status(self.here)["pool_heads"][self.k].get("sleeping"))
+        out = self.board(self.here)
+        self.assertTrue(out["lists"][self.k].get("sleeping"))
+        self.assertEqual(out["lists"][self.k]["why"], P.POOL_DONE)
+        # 休眠期间不读 .env
+        envf = Path(self.q["jobs_path"]).with_suffix(".env")
+        real_env = self.hosts.m.queue.env_path
+        env_calls = []
+        with mock.patch.object(self.hosts.m.queue, "env_path", side_effect=lambda *a, **k: (env_calls.append(a), real_env(*a, **k))[1]):
+            self.here.peer_t = 0
+            self.here.tick(self.here.registry(), False)
+        self.assertEqual(env_calls, [])
+        self.assertTrue(self.status(self.here)["pool_heads"][self.k].get("sleeping"))
+        # 追加新行 a4：file_sig 变化立刻醒来，board 把清单放到入池主机 m
+        with Path(self.q["jobs_path"]).open("a") as f:
+            f.write("a4|true   # gpus=0\n")
+        self.here.peer_t = 0
+        self.here.tick(self.here.registry(), False)
+        h = self.status(self.here)["pool_heads"][self.k]
+        self.assertFalse(h.get("sleeping"))
+        self.assertEqual((h["head"], h["n"]), ("a4", 1))
+        P._FIT.clear()
+        self.m.tick(self.m.registry(), True)
+        self.board(self.here, self.m)
+        self.assertEqual([m[0] for m in self.moves], ["m"])
+
 
 class PoolGuardTest(Base):
     """手动借与池借互斥、按人统计不把「算力池」当人、借着期间 last_job 不刷新、路由与权限、拒往池借的主机上直接加清单。"""

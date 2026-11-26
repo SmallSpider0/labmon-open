@@ -443,7 +443,7 @@ def _shift(snap: dict, it: dict, to: str, t: float) -> None:
             return
         dst = {"host": POOL, "label": POOL_LABEL, "state": "pool", "returned": None, "home": pool_home(), "stale": False, "t": t, "queues": []}
         regs.insert(next((i for i, x in enumerate(regs) if x.get("state") != "active"), len(regs)), dst)
-    q = {kk: v for kk, v in q.items() if kk != "pool"}
+    q = {kk: v for kk, v in q.items() if kk not in ("pool", "sleeping")}
     if to != POOL:                                    # 池放出去的登记带池标记（#79，同 worker add --pool），回池里的不带
         q["pool"] = True
     dst["queues"] = [y for y in dst.get("queues") or [] if key(y.get("root"), y.get("jobs")) != k] + [dict(q, added_t=round(t))]
@@ -595,6 +595,8 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
         lists[it["key"]] = {k: it[k] for k in ("project", "root", "jobs", "host", "since")}
         if it["why"] == POOL_DONE:
             lists[it["key"]]["done"] = True             # 跑完了：页面上不算在等（poolCount），收在后面
+            if hd and hd.get("sleeping"):
+                lists[it["key"]]["sleeping"] = True     # 空满 IDLE_REG_S 已休眠（#164）
         if it["why"] is None:
             pending.append(it)
         else:

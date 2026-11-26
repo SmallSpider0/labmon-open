@@ -15,29 +15,64 @@ def qslug(root, jobs):
     return _C.NAME_RE.sub("_", os.path.basename(root.rstrip("/")) + "__" + jobs)[:110] + "__" + hashlib.sha1(root.encode()).hexdigest()[:6]
 
 
-def regs(qdir):
+def regs(qdir, *, cache=None, with_meta=False):
     """一台主机登记目录（Paths.queues）下的登记：[(文件, 登记内容（带 _slug）或读坏了时的异常)]，按登记文件名（qslug）的顺序，不是登记先后。
-    登记文件只在这里读：reg_files、registry（Worker.registry、worker add 查状态目录、fit 找清单行）都经它。"""
-    out = []
+    登记文件只在这里读：reg_files、registry（worker add 查状态目录、fit 找清单行）、Worker.registry、Worker.pool_todo 都经它（#164）。
+    cache：可选的 {文件: (rsig, st_mtime, reg)} 缓存；只缓存成功读到的 dict，临时读取失败或坏 JSON 不缓存，下一轮自动重试；已消失的文件一并清理。
+    with_meta=True 时返回 [(文件, 登记内容或异常, rsig, st_mtime, changed)]（rsig 为文件签名，changed 表示相较缓存有更新）。"""
+    out, seen = [], set()
     for f in sorted(glob.glob(os.path.join(qdir, "*.json"))):
-        try:
-            with open(f) as fh:
-                reg = json.load(fh)
-            reg["_slug"] = os.path.basename(f)[:-5]
-            out.append((f, reg))
-        except (OSError, ValueError, TypeError, AttributeError) as e:
-            out.append((f, e))
+        if cache is not None or with_meta:
+            try:
+                st = os.stat(f)
+            except OSError:                       # 这一轮刚被 rm、被 worker add 搬走
+                continue
+            seen.add(f)
+            rsig, mtime = (st.st_ino, st.st_mtime_ns, st.st_size), st.st_mtime
+            cached = cache.get(f) if cache is not None else None
+            if cached and cached[0] == rsig:
+                reg, changed = cached[2], False
+            else:
+                changed = cached is not None
+                try:
+                    with open(f) as fh:
+                        reg = json.load(fh)
+                    if not isinstance(reg, dict):
+                        raise TypeError("登记文件不是 JSON 对象")
+                    reg["_slug"] = os.path.basename(f)[:-5]
+                except (OSError, ValueError, TypeError, AttributeError) as e:
+                    reg = e
+                    if cache is not None:
+                        cache.pop(f, None)        # 不按文件签名永久缓存临时 I/O 异常或坏文件
+                else:
+                    if cache is not None:
+                        cache[f] = (rsig, mtime, reg)
+            out.append((f, reg, rsig, mtime, changed) if with_meta else (f, reg))
+        else:
+            try:
+                with open(f) as fh:
+                    reg = json.load(fh)
+                if not isinstance(reg, dict):
+                    raise TypeError("登记文件不是 JSON 对象")
+                reg["_slug"] = os.path.basename(f)[:-5]
+                out.append((f, reg))
+            except (OSError, ValueError, TypeError, AttributeError) as e:
+                out.append((f, e))
+    if cache is not None:
+        for k in [k for k in cache if k not in seen]:
+            cache.pop(k, None)
     return out
 
 
-def registry(qdir):
-    """登记的队列（load_queue 载入，带登记文件 file）与坏了的登记 [(文件, 异常)]（不是 JSON、缺 root / jobs / project）。"""
+def registry(qdir, *, read_env=True):
+    """登记的队列（load_queue 载入，带登记文件 file）与坏了的登记 [(文件, 异常)]（不是 JSON、缺 root / jobs / project）。
+    read_env=False 时不读 .env、不查其存在（peers 认归属、休眠登记用，省掉共享盘 I/O）。"""
     qs, bad = [], []
     for f, reg in regs(qdir):
         try:
             if isinstance(reg, Exception):
                 raise reg
-            qs.append(dict(load_queue(reg), file=f))
+            qs.append(dict(load_queue(reg, read_env=read_env), file=f))
         except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
             bad.append((f, e))
     return qs, bad
@@ -104,23 +139,32 @@ def env_path(root, jobs):
     return os.path.join(root, re.sub(r"\.txt$", ".env", jobs))
 
 
-def load_queue(reg):
-    """登记文件 → 队列：清单路径、.env、状态与日志目录（解析方式与看板探针相同）。"""
+def load_queue(reg, *, read_env=True):
+    """登记文件 → 队列：清单路径、.env、状态与日志目录（解析方式与看板探针相同）。
+    read_env=False 时跳过读 .env（休眠登记与 peers 认归属用，不碰清单目录里的 .env）。"""
     root, jobs = reg["root"], reg["jobs"]
-    envf = env_path(root, jobs)
-    env_txt = _C.read(envf, "") or ""
+    project = reg["project"]
+    if read_env:
+        envf = env_path(root, jobs)
+        env_raw = _C.read(envf, None)
+        env_ok = env_raw is not None or not os.path.exists(envf)
+        env_txt = env_raw or ""
 
-    def env(key, default):
-        m = re.search(r"^%s=(\S+)" % key, env_txt, re.M)
-        return os.path.join(root, (m.group(1) if m else default).strip("\"'"))
+        def env(key, default):
+            m = re.search(r"^%s=(\S+)" % key, env_txt, re.M)
+            return os.path.join(root, (m.group(1) if m else default).strip("\"'"))
 
+        ev = envf if os.path.exists(envf) else None
+        st, lg = env("QUEUE_STATE", "results/_queue"), env("QUEUE_LOGS", "results/_logs")
+    else:
+        ev, st, lg, env_ok = None, None, None, True
     return {"key": reg["_slug"], "root": root, "jobs": jobs, "jobs_path": os.path.join(root, jobs),
-            "env": envf if os.path.exists(envf) else None, "gpus": reg.get("gpus"),
+            "env": ev, "_env_ok": env_ok, "gpus": reg.get("gpus"),
             # 项目 id 就是登记时写的 --project（add 必写）
-            "project": reg["project"], "stop": reg.get("stop") or "boundary",
+            "project": project, "stop": reg.get("stop") or "boundary",
             "pool": bool(reg.get("pool")),        # 算力池放过来的（#79，worker add --pool）：看板认哪些清单是池放的（自用主机上与主人的清单分开），offers 不叫会话挪它
             "added_t": reg_added(reg),            # 登记时刻（epoch 秒）：状态里带出去，看板在同一清单登记在两台在用主机上时取晚的（collect.reg_queues）
-            "state": env("QUEUE_STATE", "results/_queue"), "logs": env("QUEUE_LOGS", "results/_logs")}
+            "state": st, "logs": lg}
 
 
 def hints(cmd):
@@ -166,10 +210,12 @@ def first_rows(rows):
 
 
 def list_jobs(q):
-    """清单里的任务 [(名称, 命令)]：跳过空行、# 注释与没有 | 的行。顺带把清单声明的并行数记进 q["par"]（list_par；读不到清单为 1）。"""
-    text = _C.read(q["jobs_path"], "") or ""
-    q["par"] = list_par(text)
-    return parse_jobs(text)
+    """清单里的任务 [(名称, 命令)]：跳过空行、# 注释与没有 | 的行。顺带把清单声明的并行数记进 q["par"]（list_par；读不到清单为 1），
+    并把正文是否读成功记进 q["_jobs_ok"]（用于休眠判定：临时读取失败不能当成空清单进休眠，#164）。"""
+    text = _C.read(q["jobs_path"], None)
+    q["_jobs_ok"] = text is not None
+    q["par"] = list_par(text or "")
+    return parse_jobs(text or "")
 
 
 def list_par(text):

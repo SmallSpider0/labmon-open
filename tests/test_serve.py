@@ -1564,7 +1564,7 @@ class RegsTest(unittest.TestCase):
         self.assertIsNone(dict(calls)["b"])
         a = regs["a"]
         self.assertEqual((a["state"], a["stale"], a["queues"]),
-                         ("active", False, [{"root": "/r/p1", "jobs": "jobs/a.txt", "project": "p1", "stop": "boundary", "gpus": [0], "empty": True, "added_t": None}]))
+                         ("active", False, [{"root": "/r/p1", "jobs": "jobs/a.txt", "project": "p1", "stop": "boundary", "gpus": [0], "empty": True, "sleeping": False, "added_t": None}]))
         self.assertEqual([(q["jobs"], q["added"], q["key"]) for q in regs["b"]["queues"]], [("jobs/b.txt", "2026-11-10 09:00", "b1")])
         self.assertEqual(regs["c"]["queues"], [])                          # c 的 worker_home 读到了、没有登记
         g = regs["gone"]
@@ -2193,8 +2193,8 @@ class WaitTest(unittest.TestCase):
             self.assertEqual(list(wait()), ["collector_stale"])            # 过了 6 小时再出现照报
 
     def test_user_only_and_rewake(self):
-        """#88：只给用户的告警（ssh_fail:）不叫醒会话；报过的消失后 REWAKE_S 内再出现不叫醒、过了再报；带代数的 idle_regs: 代数变了不算新告警；
-        failed: 每次出现都报（删了 .failed 重跑又失败）。旧代码：ssh_fail 照报，消失再出现、代数变了都再叫醒。"""
+        """#88：只给用户的告警（ssh_fail:）不叫醒会话；报过的消失后 REWAKE_S 内再出现不叫醒、过了再报；
+        failed: 每次出现都报（删了 .failed 重跑又失败）。旧代码：ssh_fail 照报，消失再出现都再叫醒。"""
         with tempfile.TemporaryDirectory() as d:
             d = Path(d)
             (d / "m.toml").write_text(f'out_dir = "{d}"\n')
@@ -2204,15 +2204,15 @@ class WaitTest(unittest.TestCase):
             def wait(*alerts):
                 save_json(d / "snapshot.json", {"generated": time.time(), "alerts": [{"key": k, "to": to, "msg": k} for k, to in alerts]})
                 return sorted(wait_check(cfg, d, sf, d / "overview.json"))
-            self.assertEqual(wait(("ssh_fail:a", "user"), ("disk:x", "both"), ("idle_regs:p:1", "agent"), ("failed:j", "agent")),
-                             ["disk:x", "failed:j", "idle_regs:p:1"])
-            self.assertEqual(wait(("ssh_fail:a", "user"), ("idle_regs:p:2", "agent")), [])          # 代数变了；disk、failed 消失
-            self.assertEqual(wait(("disk:x", "both"), ("idle_regs:p:2", "agent"), ("failed:j", "agent")), ["failed:j"])   # disk 6 小时内回来：不报
+            self.assertEqual(wait(("ssh_fail:a", "user"), ("disk:x", "both"), ("no_work", "agent"), ("failed:j", "agent")),
+                             ["disk:x", "failed:j", "no_work"])
+            self.assertEqual(wait(("ssh_fail:a", "user"), ("no_work", "agent")), [])               # disk、failed 消失；no_work 还在
+            self.assertEqual(wait(("disk:x", "both"), ("no_work", "agent"), ("failed:j", "agent")), ["failed:j"])   # disk 6 小时内回来：不报
             st = json.loads(sf.read_text())
             self.assertNotIn("ssh_fail:a", st["reported"])
             old = {k: v - W.REWAKE_S - 1 for k, v in st["last"].items()}
             sf.write_text(json.dumps(dict(st, reported=[], last=old)))
-            self.assertEqual(wait(("disk:x", "both"), ("idle_regs:p:3", "agent")), ["disk:x", "idle_regs:p:3"])    # 过了 REWAKE_S：照报
+            self.assertEqual(wait(("disk:x", "both"), ("no_work", "agent")), ["disk:x", "no_work"])    # 过了 REWAKE_S：照报
 
     def test_stale_limit(self):
         """collector_stale 的门槛 max(3×interval, stale_min) + 1 分钟（config.stale_limit；项目页标红、配置抽屉的说法同一个，#141）。"""

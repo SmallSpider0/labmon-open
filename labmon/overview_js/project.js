@@ -11,14 +11,16 @@ function regLeft(x, q, p) {
   const h = x.state === "active" && D.hosts.find(e => e.id === x.host), st = h?.status;
   const td = st && (st.todo || []).find(l => l.root != null && sameQ(l, q.root, q.jobs));
   const run = ln && ln.run != null ? ln.run : st ? (st.running || []).filter(j => sameQ(j, q.root, q.jobs)).length : null;
-  const left = ln && ln.unfinished != null ? ln.unfinished : td ? (td.jobs || []).length : q.empty ? 0 : null;
-  return {ln, run, left, idle: !run && (left === 0 || !!q.empty)};
+  const left = ln && ln.unfinished != null ? ln.unfinished : td ? (td.jobs || []).length : (q.empty || q.sleeping) ? 0 : null;
+  return {ln, run, left, sleeping: !!q.sleeping, idle: !run && (left === 0 || !!q.empty || !!q.sleeping)};
 }
-// 状态一格：运行中 N 个（还有 M 个没跑）、还有 N 个没跑、空着、—
+// 状态一格：运行中 N 个（还有 M 个没跑）、还有 N 个没跑、已休眠、空着、—
 function regState(L) {
-  const {run, left, idle} = L;
+  const {run, left, idle, sleeping} = L;
   return run ? `<span class="badge b-ok">运行中 ${run} 个</span>${left > run ? ` <span class="sm">还有 ${left - run} 个没跑</span>` : ""}`
-    : left ? `<span class="badge b-warn">还有 ${left} 个没跑</span>` : idle ? `<span class="badge b-mute" ${tip("清单里没有待办：不占卡，往清单里加任务就接着跑")}>空着</span>`
+    : left ? `<span class="badge b-warn">还有 ${left} 个没跑</span>`
+    : sleeping ? `<span class="badge b-mute" ${tip("空满 2 天已自动休眠：不占卡也不读状态目录，往清单里加任务自动唤醒")}>已休眠</span>`
+    : idle ? `<span class="badge b-mute" ${tip("清单里没有待办：不占卡，往清单里加任务就接着跑")}>空着</span>`
     : `<span class="sm mut" ${tip("这条清单的进度没读到")}>—</span>`;
 }
 const regGpus = q => q.gpus == null || q.gpus === "" ? "" : [].concat(q.gpus).join(",");
@@ -188,9 +190,9 @@ function projRegSec(p) {
       : off ? `<span class="badge b-mute">已归还${x.returned ? " " + esc(ts(x.returned)) : ""}</span>` : "",
       x.stale ? `<span class="badge b-warn" ${tip(off ? "代读它的那台在用主机这一轮没连上，或本机不在内网" : "这台这一轮没读到状态")}>这轮没读到，用的是 ${x.t ? esc(ts(x.t)) : "上一轮"} 的</span>` : ""].filter(Boolean);
     const shown = qs.filter(q => !regQuiet(p, x, q)), hid = qs.length - shown.length;
-    const idle = (p?.quiet || []).filter(l => l.idle && l.host === x.host && qs.some(q => sameQ(l, q.root, q.jobs))).length;   // 空了 IDLE_REG_S 以上的：已提示实验会话不再用的摘掉（collect._idle_regs，#47）
-    const hidNote = hid ? `<div class="sm mut rg-hid" ${tip("项目页已收起这几条车道：清单里没有在跑与排队的，最后一次活动早于 hide_done_hours（缺省一天）。往清单里加任务就接着跑、重新显示"
-      + (idle ? `\n其中 ${idle} 条空得更久，已提示实验会话：不再用的摘掉登记（worker rm），还要追加的长期清单留着` : ""))}>另有 ${hid} 条跑完、久没动，不列</div>` : "";
+    const sleepN = qs.filter(q => regQuiet(p, x, q) && (q.sleeping || (p?.quiet || []).some(l => l.sleeping && l.host === x.host && sameQ(l, q.root, q.jobs)))).length;   // 空满 2 天已自动休眠（#164）
+    const hidNote = hid ? `<div class="sm mut rg-hid" ${tip("项目页已收起这几条车道：空清单、已休眠、已摘登记或已归还无未完成，或最后一次活动早于 hide_done_hours（缺省一天）。往清单里加任务自动唤醒、重新显示"
+      + (sleepN ? `\n其中 ${sleepN} 条空满 2 天已自动休眠：worker 只检查清单文件是否变动，不读状态目录；不再用的可用 labmon worker rm 摘掉` : ""))}>另有 ${hid} 条已收起，不列${sleepN ? `（含 ${sleepN} 条已休眠）` : ""}</div>` : "";
     const body = shown.length ? `<details class="dfold rg-q"><summary class="sm">展开 ${shown.length} 条</summary>${shown.map(q => regRow(x, q, p)).join("")}${hidNote}</details>` : hidNote;
     return `<div class="rg${off ? " rg-off" : ""}"><div class="rg-i"><div class="rg-nm">${name} ${tags.join(" ")}</div><div class="rg-tl">${tallyBar(n, qs.length)}${tallyHtml(n, qs.length)}</div></div>`
       + `${regHostBtns(x, qs, p)}${body ? `<div class="rg-x">${body}</div>` : ""}</div>`;

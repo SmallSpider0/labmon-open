@@ -6,6 +6,7 @@ import os
 import statistics
 
 from . import common as _C
+from . import pure as _P
 from . import queue as _Q
 from . import measure as _M
 from . import deps as _DP
@@ -917,6 +918,8 @@ class SchedMixin:
         （它是开跑时从清单行读的，不更新就要等 worker 重启接管）。"""
         lists = {}
         for q in queues:
+            if q.get("sleeping"):                 # 休眠队列不读清单与不重算估时（#164）
+                continue
             try:
                 m = _C.fsig(q["jobs_path"])
             except OSError:
@@ -939,6 +942,8 @@ class SchedMixin:
         self.durs_key = key
         self.durs, self.qest, self.durk, memo = {}, {}, {}, {}
         for q in queues:
+            if q.get("sleeping"):
+                continue
             out = self.durs[q["key"]] = {}
             est = self.qest[q["key"]] = {}
             mine = {j["name"]: (j, rk[k]) for k, j in self.running.items() if k in rk and _C.lane_key(j) == q["key"]}   # 这条清单在跑的（并行清单有几行，#147）
@@ -1095,7 +1100,7 @@ class SchedMixin:
             self.peer_todo += self.pool_todo(now)
             self.peer_regs = {}
             for h in self.peer_st:
-                for o in _Q.registry(os.path.join(_C.HOME, "hosts", h, "queues"))[0]:   # 只认那台自己也会跑的：坏了的登记（缺 project 等）那台跳过，这里也不算
+                for o in _Q.registry(os.path.join(_C.HOME, "hosts", h, "queues"), read_env=False)[0]:   # 只认那台自己也会跑的：坏了的登记（缺 project 等）那台跳过，不读 .env
                     try:
                         self.peer_regs.setdefault((os.path.normpath(o["root"]), o["jobs"]), []).append((os.stat(o["file"]).st_mtime, h))
                     except OSError:                   # 刚被删掉的
@@ -1106,11 +1111,36 @@ class SchedMixin:
         """算力池里待放的清单还会跑的行（#24）：peers 一起读，按别的主机的 todo 的样子 [("pool", 0, now, 清单项)] 记进 peer_todo，
         别处 after= 等它时算还会跑（不报找不到，dep_note 写在池里等）。池目录没有 worker、没有状态，按登记与清单的状态目录现读（清单按修改时间缓存）。
         交给池之前在别的主机上放行、还没收尾的那一格（状态目录的 current，run_elsewhere 认：放它的主机没归还）不算池里的：它在那台跑着
-        （那台状态 todo 里列着），这条清单在它跑完之前放到哪台都一行开不了，队首取它后面那行、记 elsewhere [主机, 任务]，看板等它跑完再放（#80）。"""
+        （那台状态 todo 里列着），这条清单在它跑完之前放到哪台都一行开不了，队首取它后面那行、记 elsewhere [主机, 任务]，看板等它跑完再放（#80）。
+        跑空满 IDLE_REG_S（2 天，#164）的池清单同样自动休眠：之后每轮只用 file_sig 看清单文件变没变，不读 .env 与状态目录，文件一变自动醒来。"""
         out, self.pool_heads = [], []
-        for q in _Q.registry(os.path.join(_C.HOME, "hosts", _C.POOL, "queues"))[0]:
+        if not hasattr(self, "pool_idle"):
+            self.pool_idle, self.pool_reg_cache, self.opars = {}, {}, {}
+        qdir = os.path.join(_C.HOME, "hosts", _C.POOL, "queues")
+        seen_k = set()
+        for f, reg, _rsig, _mtime, changed in _Q.regs(qdir, cache=self.pool_reg_cache, with_meta=True):
+            if isinstance(reg, Exception) or not (reg.get("root") and reg.get("jobs") and reg.get("project")):
+                continue
+            key, root, jobs = reg["_slug"], reg["root"], reg["jobs"]
+            seen_k.add(key)
+            if changed:
+                self.pool_idle.pop(key, None)
+            idle = self.pool_idle.get(key)
+            jpath = os.path.join(root, jobs)
+            if idle and idle.get("sleep"):
+                if _P.file_sig(jpath) == idle.get("sig"):
+                    self.pool_heads.append({"project": reg["project"], "root": root, "queue": jobs, "name": None, "n": 0,
+                                            "held": None, "elsewhere": None, "sleeping": True})
+                    continue
+                self.pool_idle.pop(key, None)
+            try:
+                q = _Q.load_queue(reg)
+            except (OSError, ValueError, KeyError, TypeError, AttributeError):
+                continue
+            jsig0 = _P.file_sig(q["jobs_path"])             # 读清单前的签名：进休眠前复核一致，避免读后追加的新行被吞（#164）
             rows = self.list_of(q["jobs_path"])
             if rows is None:                                # 这台读不到清单文件：照样列出来（带原因），看板取读得到的那台的（#86）
+                self.pool_idle.pop(key, None)
                 self.pool_heads.append({"project": q["project"], "root": q["root"], "queue": q["jobs"], "name": None, "n": 0, "held": None,
                                         "elsewhere": None, "err": "%s 上读不到清单 %s" % (self.host, q["jobs_path"])})
                 continue
@@ -1118,16 +1148,41 @@ class SchedMixin:
             cur, other = away[0] if away else (None, None)
             ms, left = _Q.rows_left(q["state"], rows, {c[0] for c, _ in away})
             n, h = left[0] if left else (None, {})          # 队首：看板放之前看它还有没有、依赖满足没有（pool_view）；都跑完了的也列（n 为 0）
-            par = _Q.list_par(_C.read(q["jobs_path"], "") or "")  # 并行清单（#147）：窗口里前 par 行哪一行依赖满足都能放
+            jsig = _P.file_sig(q["jobs_path"])
+            cp = self.opars.get(q["jobs_path"])
+            par_ok = True
+            if cp and cp[0] == jsig:
+                par = cp[1]
+            else:
+                ptxt = _C.read(q["jobs_path"], None)
+                par_ok = ptxt is not None
+                par = _Q.list_par(ptxt or "")   # 并行清单（#147）：窗口里前 par 行哪一行依赖满足都能放
+                if par_ok and jsig is not None and _P.file_sig(q["jobs_path"]) == jsig:
+                    self.opars[q["jobs_path"]] = (jsig, par)
+            paused = "paused" if ms and "paused" in ms else None
+            sleeping = False
+            if not left and not away and not paused:
+                ent = self.pool_idle.get(key)
+                if ent is None:
+                    since = self._idle_start(q, now, False) if hasattr(self, "_idle_start") else now
+                    ent = self.pool_idle[key] = {"since": since, "sig": None, "sleep": False}
+                if now - ent["since"] >= _P.IDLE_REG_S and par_ok and q.get("_env_ok", True) and (ms is not None or not os.path.exists(q["state"])) and jsig0 is not None and jsig == jsig0:
+                    ent["sig"] = jsig0
+                    ent["sleep"] = True
+                    sleeping = True
+            else:
+                self.pool_idle.pop(key, None)
             self.pool_heads.append({"project": q["project"], "root": q["root"], "queue": q["jobs"], "name": n, "n": len(left),
-                                    "deps": h.get("deps"), "deps_any": h.get("deps_any"), "held": "paused" if ms and "paused" in ms else None,
-                                    "elsewhere": [other, cur[0]] if other else None, "win": left[:par] if par > 1 else None})
+                                    "deps": h.get("deps"), "deps_any": h.get("deps_any"), "held": paused,
+                                    "elsewhere": [other, cur[0]] if other else None, "win": left[:par] if par > 1 else None,
+                                    **({"sleeping": True} if sleeping else {})})
             if not left:
                 continue
             ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [n for n, _ in left], "gang": {},
                   "deps": {n: [[p, x] for p, x, _ in d] for n, h in left for d in [_DP.dep_keys(dict(h, project=q["project"]))] if d},
-                  "held": "paused" if ms and "paused" in ms else None, **({"par": par} if par > 1 else {})}
+                  "held": paused, **({"par": par} if par > 1 else {})}
             out.append((_C.POOL, 0.0, now, ln))
+        self.pool_idle = {k: v for k, v in self.pool_idle.items() if k in seen_k}
         return out
 
     def cpu_hints(self, S, util):
