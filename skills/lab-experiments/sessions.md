@@ -30,6 +30,8 @@
   确认那边是本会话续接前挂的（已经停了）、或用户要本会话接手实验时，才用 `labmon wait -c monitor.toml --take` 接手。
 - **5：客户端需更新。** 按提示更新后恢复原等待。
 
+> 不要把 `labmon wait`（含带 `--job`）的输出接管道过滤（例如 `2>&1 | grep -v ...` 或 `grep -m 1`）：在没有 `set -o pipefail` 的 shell 下，管道右侧进程（如 `grep`）以 0 退出会掩盖 `labmon wait` 实际抛出的新告警（退出码 1）、配置/会话冲突（退出码 3）或任务失败（退出码 4），导致会话误判为“全部成功退出 0”；若 `grep` 提前退出还会向 `labmon wait` 产生 SIGPIPE 导致异常中断。需要读输出请直连 stdout/stderr 或重定向到日志文件读取。
+
 项目还有活、15 分钟没有会话来等时，看板上提醒用户（`wait_gone:`，[alerts.md](alerts.md)「看板自己」），所以处理告警前先重挂。
 
 断网时 wait 不退出，自己退避重试，连回来报 `server_back`；连着 1 小时连不上才以 `server_unreachable` 退出，这时告诉用户并马上重挂。
