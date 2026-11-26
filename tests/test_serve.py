@@ -864,6 +864,19 @@ class AuthTest(unittest.TestCase):
         with mock.patch("labmon.serve.FB.preview", return_value={}) as plan:
             self.assertEqual(self.call(self.lan + "/fleet/plan.json?person=somebody", tok=second)[0], 200)
             self.assertEqual(plan.call_args.kwargs["account"], "other")
+            self.assertIsNone(plan.call_args.kwargs["spec"])
+            self.assertEqual(self.call(self.lan + "/fleet/plan.json?kind=move&sid=b&spec=sB", tok=second)[0], 200)
+            self.assertEqual(plan.call_args.args[1:3], ("move", "b"))
+            self.assertEqual(plan.call_args.kwargs["spec"], "sB")
+        with mock.patch.object(S.F, "conf", return_value={"servers": []}), mock.patch.object(S.L, "check", return_value={"ok": True}), \
+                mock.patch.object(S.FO, "start") as start, mock.patch.object(S.FO, "view", return_value={"ok": True}):
+            self.assertEqual(self.call(self.lan + "/fleet/op/move", {"ids": ["b"], "spec": "sB", "ack": ["b"]}, tok=second)[0], 200)
+            self.assertEqual((start.call_args.args[0], start.call_args.kwargs["ids"], start.call_args.kwargs["spec"],
+                              start.call_args.kwargs["ack"], start.call_args.kwargs["account"]),
+                             ("move", ["b"], "sB", ["b"], "other"))
+            self.assertEqual(self.call(self.lan + "/fleet/op/swap", {"ids": ["b"], "person": "DD", "spec": "sB"}, tok=second)[0], 200)
+            self.assertEqual((start.call_args.args[0], start.call_args.kwargs["spec"]), ("swap", "sB"))
+            self.assertEqual(self.call(self.wan + "/fleet/op/move", {"ids": ["b"], "spec": "sB"}, tok=second)[0], 403)
         with mock.patch("labmon.serve.A.borrow", return_value={"rc": 0}) as borrow:
             self.assertEqual(self.call(self.lan + "/api/borrow", {"id": "s", "account": "boss"}, tok=second)[0], 200)
             self.assertEqual(borrow.call_args.kwargs["account"], "other")

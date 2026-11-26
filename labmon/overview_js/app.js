@@ -356,6 +356,8 @@ document.addEventListener("click", e => {
   }
   const wp = e.target.closest?.("[data-wp]");
   if (wp && FWIZ) { FWIZ = {...FWIZ, person: wp.dataset.wp, err: null}; wizPreview(); return; }
+  const ws = e.target.closest?.("[data-ws]");
+  if (ws && FWIZ && !ws.disabled) { FWIZ = {...FWIZ, spec: ws.dataset.ws, err: null}; wizPreview(); return; }
   const ld = e.target.closest?.("[data-lend]");
   if (ld) { if (!ld.disabled) lendAct(ld.dataset.lend, ld.dataset); return; }
   const ac = e.target.closest?.("[data-acc]");

@@ -2895,5 +2895,40 @@ t("project", "项目页的算力池（#24）：顶栏一个「算力池」，车
   ok(!rc.includes("</span> 算力池</b>"), "资源小图不该画算力池"); has(rc, "srv-h（池 · PERSON7）", "池借来的主机照常画（#78）");
   ok(run(C, 'hostShort(D.hosts.find(h => h.pool))') === "算力池", "短名");
 });
+t("overview", "选规格与同池换节点（#172）：多规格池分组显示各规格空位、换节点按钮按池规格显隐、开机/换人/换节点向导选规格与空位拦截、进度条新连接命令", () => {
+  const C = ovCtx(OV, RR, "#/fleet");
+  const fl = page(C, "#/fleet");
+  has(fl, "各规格空：nodeA-1GPU 2/4 · nodeB-1GPU 0/4");
+  has(fl, "平台上这种规格空 2 / 4");
+  // 多规格池（pool-public）显示可用「换节点」按钮；单规格池（pool-private）不显示；未核对过规格时置灰提示先核对
+  const bd = run(C, 'srvBtns(srvById("srv-d"))');
+  has(bd, 'data-kind="move"'); ok(!/data-kind="move"[^>]*disabled/.test(bd), "多规格池的换节点按钮不该灰着");
+  ok(!run(C, 'srvBtns(srvById("srv-a"))').includes('data-kind="move"'), "单规格池不该显示换节点");
+  const bNoSpecs = run(C, '(() => { const p = D.fleet.ops.pools["pool-public"], old = p.specs; p.specs = []; const h = srvBtns(srvById("srv-d")); p.specs = old; return h; })()');
+  has(bNoSpecs, 'data-kind="move"'); ok(/data-kind="move"[^>]*disabled/.test(bNoSpecs), "还没读规格列表时换节点该置灰");
+  has(tips(bNoSpecs), "先点「与平台核对」");
+  // 服务器抽屉开机参数显示规格
+  has(run(C, 'srvDrawer("srv-d")'), "<span>规格</span><span>nodeA-1GPU</span>");
+  // 换人向导：同时列选人与各规格空位，缺省原规格，改选无空位规格时标错禁用
+  const pvBad = {kind: "swap", pool: "pool-public", person: "PERSON5", job: "PERSON5", name: "PERSON5", spec: "s2b", orig_spec: "s2a", spec_name: "nodeB-1GPU",
+    port: "15003", image: "registry.local/lab/ubuntu:base", image_src: "这人的设置", run_cmd: "sleep infinity", nodes: ["root@192.0.2.9", "root@192.0.2.10"],
+    specs: OV.fleet.ops.pools["pool-public"].specs,
+    items: [{item: "作业名", ok: true, note: "PERSON5"}, {item: "端口", ok: true, note: "15003（沿用原端口）"}, {item: "镜像", ok: true, note: "img"},
+      {item: "配额", ok: true, note: "公用池开完 2 台"}, {item: "规格", ok: false, note: "nodeB-1GPU，上次核对时空 0 / 4"}]};
+  const sw = run(C, `FWIZ = {kind: "swap", sid: "srv-d", pool: "pool-public", person: "PERSON5", spec: "s2b", ack: true, newp: "", adv: true, pv: ${JSON.stringify(pvBad)}}; wizForm()`);
+  has(sw, 'data-ws="s2a"'); has(sw, 'data-ws="s2b"'); has(sw, "原规格 · 空 2/4"); has(sw, "空 0/4");
+  has(sw, "规格不对，改好才能开始"); has(sw, "<span>规格</span><span>nodeB-1GPU</span>");
+  ok(/data-fop="wizgo" disabled/.test(sw), "无空位规格不该允许提交");
+  // 换节点向导：无选人区、当前规格禁用标「当前」、未选目标规格提示先选、带本地盘风险确认、换节点标题与进度条
+  const mv0 = run(C, 'FWIZ = {kind: "move", sid: "srv-d", pool: "pool-public", person: "PERSON3", spec: null, ack: false, newp: "", adv: false, pv: {orig_spec: "s2a", specs: D.fleet.ops.pools["pool-public"].specs, items: [{item: "规格", ok: false, note: "要选目标规格"}]}}; wizForm()');
+  has(mv0, "换到哪个节点（规格）？"); ok(!mv0.includes('data-wp='), "换节点不该出现选人按钮");
+  ok(/data-ws="s2a" disabled/.test(mv0), "换节点里当前规格必须禁用"); has(mv0, "当前 · 空 2/4");
+  has(mv0, "先选一个目标规格"); has(mv0, "换节点会清空"); has(mv0, "已和 PERSON3 说好，本地盘可以清空");
+  has(run(C, 'opStrip(fPanel(), DH.srv("srv-d"))'), "换节点向导开着");
+  // 换节点完成进度条：显示新规格与新连接命令
+  const prog = run(C, 'opProgress({kind: "move", t0: D.generated - 60, active: false, error: null, ids: ["srv-d"], spec: "s2b", spec_name: "nodeB-1GPU", steps: [{name: "登录", state: "ok", note: "u"}], conn: {sid: "10-15003", holder: "PERSON3", cmd: "ssh -p 15003 root@192.0.2.10", spec: "nodeB-1GPU", mine: false}})');
+  has(prog, "换节点（→ nodeB-1GPU）完成"); has(prog, "ssh -p 15003 root@192.0.2.10");
+  run(C, "FWIZ = null");
+});
 
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));

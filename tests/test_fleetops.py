@@ -68,6 +68,7 @@ class FleetPlat:
         self.codes, self.tokens, self.calls, self.page, self.lag = {}, set(), [], page, lag
         self.pending, self.n_new, self.on = [], 0, {}      # pending：[列表还要查几次, 作业, 改成的 runningCount]；on：接口 → 钩子
         self.fail, self.avail = {}, {}                    # fail：接口 → 报错信息；avail：池 → 空卡数
+        self.specs, self.spec_ip = {}, {}                 # specs：池 id → 规格列表（不设时单规格 "s"）；spec_ip：规格 id → 节点 IP
         self.tags = {"grp/ubuntu": ["aa", "bb", "zz", "dd"], "grp/pt": ["1"]}
         self.jobs = [
             {"id": "j1", "taskName": "AA", "poolName": PRIV, "createTime": "2026-11-05 10:00:00", "runningCount": 1, "port": "15001", "image": REG + "ubuntu:aa"},
@@ -135,7 +136,7 @@ class FleetPlat:
             return ok({"token": tok, "userId": "u1"})
         if hdr.get("Authorization") not in self.tokens:
             return {"code": "-2", "msg": "令牌失效"}
-        pub = lambda j: {k: v for k, v in j.items() if k not in ("port", "image")}  # noqa: E731
+        pub = lambda j: {k: v for k, v in j.items() if k not in ("port", "image", "spec", "ip")}  # noqa: E731
         if path == "/workManage/list":
             for x in self.pending:
                 x[0] -= 1
@@ -146,12 +147,25 @@ class FleetPlat:
             return ok({"workManageVOList": [pub(j) for j in js]})
         if path.startswith("/workManage/getWorkTaskInfo/"):
             j = next(j for j in self.jobs if j["id"] == path.rsplit("/", 1)[1])
-            return ok({"workTaskRoleVOList": [{"id": "r-" + j["id"], "imageName": j["image"], "ipAddress": IP[j["poolName"]], "portMap": {"22": j["port"]},
+            ip = j.get("ip") or self.spec_ip.get(j.get("spec")) or IP[j["poolName"]]
+            return ok({"workTaskRoleVOList": [{"id": "r-" + j["id"], "imageName": j["image"], "ipAddress": ip, "portMap": {"22": j["port"]},
                                                "port": "8081", "cpuCoreNumber": 17, "memory": 122, "hardDisk": 750, "gpuTotal": 1, "containerId": "c-" + j["id"]}]})
         if path == "/submitWork/getResourcePool/1":
-            return ok([{"poolId": PID[p], "poolName": p, "host": IP[p], "specificationId": "s", "specificationName": "1 卡", "quantityAvailable": 1} for p in IP])
+            rows = []
+            for p in IP:
+                pid = PID[p]
+                if pid in self.specs:
+                    for sp in self.specs[pid]:
+                        rows.append({"poolId": pid, "poolName": p, "host": self.spec_ip.get(sp["specificationId"], IP[p]),
+                                     "specificationId": sp["specificationId"], "specificationName": sp["specificationName"],
+                                     "quantityAvailable": sp["quantityAvailable"]})
+                else:
+                    rows.append({"poolId": pid, "poolName": p, "host": IP[p], "specificationId": "s", "specificationName": "1 卡", "quantityAvailable": 1})
+            return ok(rows)
         if path.startswith("/submitWork/getResourceSpecification/"):
             pid = path.rsplit("/", 1)[1]
+            if pid in self.specs:
+                return ok([{**sp, "poolId": pid} for sp in self.specs[pid]])
             return ok([{"specificationId": "s", "specificationName": "1 卡", "poolId": pid, "quantityAvailable": self.avail.get(pid, 1),
                         "specificationAmount": 4, "isSchedule": 0, "queueNum": 0}])
         if path == "/dataManage/volumeByUserList/u1":
@@ -168,15 +182,18 @@ class FleetPlat:
         if path == "/submitWork/addWorkTask":
             role = body["taskRoleAddDTOList"][0]
             self.n_new += 1
-            new = {"id": f"n{self.n_new}", "taskName": body["taskName"], "poolName": next(k for k, v in PID.items() if v == body["poolId"]), "createTime": f"2026-11-06 0{self.n_new}:00:00",
-                   "runningCount": 0, "port": role["taskHostPortAddDTOList"][0]["hostPort"], "image": role["imageName"]}
+            pool_name = next(k for k, v in PID.items() if v == body["poolId"])
+            spec_id = role.get("specificationId") or "s"
+            new = {"id": f"n{self.n_new}", "taskName": body["taskName"], "poolName": pool_name, "createTime": f"2026-11-06 0{self.n_new}:00:00",
+                   "runningCount": 0, "port": role["taskHostPortAddDTOList"][0]["hostPort"], "image": role["imageName"],
+                   "spec": spec_id, "ip": self.spec_ip.get(spec_id, IP[pool_name])}
             self.jobs.insert(0, new)
             self.pending.append([self.lag + 1, new, 1])
             return ok()
         if path == "/workManage/clone":
             return ok({"taskName": j["taskName"], "poolId": PID[j["poolName"]], "machineAmount": 1, "envMap": {}, "minFail": None, "minSuccess": None,
                        "cloneStorageVolumeVOList": [{"mountPath": "/root/data1", "perm": "rw", "storagePath": "/nfs/x"}],
-                       "cloneTaskRoleVOList": [{"taskRoleName": "taskRole1", "specificationId": "s", "imageName": j["image"],
+                       "cloneTaskRoleVOList": [{"taskRoleName": "taskRole1", "specificationId": j.get("spec") or "s", "imageName": j["image"],
                                                 "runCmd": "/etc/init.d/ssh restart && sleep infinity",
                                                 "cloneTaskHostPortDTOList": [{"containerPort": "22", "hostPort": j["port"]}]}]})
         return {"code": "-1", "msg": "未知接口 " + path}
@@ -416,9 +433,9 @@ class FleetOpsTest(unittest.TestCase):
             base.update(ssh_fn=self.remote.ssh, forget_fn=self.remote.forget, ssh_poll=0.01)
         if kind != "ka":
             base.update(password=lambda u: "pw", pace=0, poll=0.01)
-        if kind in ("renew", "off", "swap"):
+        if kind in ("renew", "off", "swap", "move"):
             base["ack"] = list(ack)
-        if kind in ("off", "swap", "open"):
+        if kind in ("off", "swap", "move", "open"):
             self.hosts = []
             base.update(fast=0.01, tcp=lambda n, p: (n, p) in self.busy, hosts=self.fake_hosts())
         kw = {**base, **kw}
@@ -1268,6 +1285,292 @@ class FleetOpsTest(unittest.TestCase):
         self.assertEqual([x["holder"] for x in F.conf(hf)["servers"]], ["AA", "DD"])
         with self.assertRaises(C.ConfigError):
             C.set_fleet_holder("zz", "DD")
+
+    def _multi_spec_pub(self, avail_a=1, avail_b=2):
+        """公用池配两个物理节点规格（nodeA→.27，nodeB→.28），BB 的作业在 nodeA 上。"""
+        self.plat.specs[PID[PUB]] = [
+            {"specificationId": "sA", "specificationName": "nodeA-1GPU", "quantityAvailable": avail_a, "specificationAmount": 4, "isSchedule": 0, "queueNum": 0},
+            {"specificationId": "sB", "specificationName": "nodeB-1GPU", "quantityAvailable": avail_b, "specificationAmount": 4, "isSchedule": 0, "queueNum": 0},
+        ]
+        self.plat.spec_ip = {"sA": "192.0.2.27", "sB": "192.0.2.28"}
+        next(j for j in self.plat.jobs if j["id"] == "j2")["spec"] = "sA"
+        next(j for j in self.plat.jobs if j["id"] == "jz")["spec"] = "sA"
+
+    def test_open_and_swap_choose_spec(self):
+        """开机（开新的、重开已关机）与换人可选规格：缺省沿用原规格，改选后提交带新的 specificationId 并落到新节点。"""
+        self._multi_spec_pub(avail_a=1, avail_b=2)
+        self.sync()
+        c = cfg(self.plat.url)
+        c["public_max"] = 4
+        v = FO.view(c)
+        self.assertEqual(v["boot"]["b"]["spec"], "sA")
+        self.assertEqual([x["specificationId"] for x in v["pools"][PUB]["specs"]], ["sA", "sB"])
+        FB.set_defaults(REG + "ubuntu:bb", RUN)
+        # 预览：默认原规格 sA，可改选 sB
+        pv_def = FB.preview(c, "open", None, "EE", PUB, tcp=lambda n, p: False)
+        self.assertEqual((pv_def["spec"], pv_def["orig_spec"], pv_def["spec_name"]), ("sA", "sA", "nodeA-1GPU"))
+        pv_b = FB.preview(c, "open", None, "EE", PUB, tcp=lambda n, p: False, spec="sB")
+        self.assertEqual((pv_b["spec"], pv_b["orig_spec"], pv_b["spec_name"], pv_b["sid"]), ("sB", "sA", "nodeB-1GPU", None))
+        self.assertTrue(all(x["ok"] for x in pv_b["items"]), pv_b["items"])
+        # 开新的选 sB：提交带 sB，落到 192.0.2.28 → 新 id 28-15151
+        self.remote = Remote()
+        n = len(self.plat.calls)
+        self.hosts = []
+        FO.start("open", c, None, ids=[], person="EE", pool=PUB, spec="sB", probe=self.remote.probe, ssh_fn=self.remote.ssh,
+                 forget_fn=self.remote.forget, ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01,
+                 tcp=lambda nd, p: False, hosts=self.fake_hosts())
+        for t in threading.enumerate():
+            if t.name == "fleet-open":
+                t.join(10)
+        op = FO.op()
+        self.assertIsNone(op["error"], op)
+        self.assertEqual(self.submits(n)[0]["taskRoleAddDTOList"][0]["specificationId"], "sB")
+        self.assertEqual(self.hosts, [("add", "28-15151", "EE", "root@198.51.100.28", 15151, PUB, "EE")])
+        self.assertEqual((op["conn"]["sid"], op["conn"]["cmd"], op["conn"]["spec"]), ("28-15151", "ssh -p 15151 root@198.51.100.28", "nodeB-1GPU"))
+        self.assertEqual(FO.view(c)["boot"]["28-15151"]["spec"], "sB")
+        # 换人改选 sB：停 b（sA）后按 sB 开给 DD，主机清单新加 28-15002、删旧 b
+        FB.set_person("DD", REG + "ubuntu:dd", RUN, cfg=c)
+        n = len(self.plat.calls)
+        self.hosts = []
+        FO.start("swap", c, None, ids=["b"], person="DD", spec="sB", ack=[], probe=self.remote.probe, ssh_fn=self.remote.ssh,
+                 forget_fn=self.remote.forget, ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01,
+                 tcp=lambda nd, p: False, hosts=self.fake_hosts())
+        for t in threading.enumerate():
+            if t.name == "fleet-swap":
+                t.join(10)
+        op = FO.op()
+        self.assertIsNone(op["error"], op)
+        self.assertEqual(self.submits(n)[0]["taskRoleAddDTOList"][0]["specificationId"], "sB")
+        self.assertEqual(self.hosts, [("add", "28-15002", "DD", "root@198.51.100.28", 15002, PUB, "DD"), ("remove", "b")])
+        self.assertNotIn("b", FO.boot())
+        self.assertEqual(FO.view(c)["boot"]["28-15002"]["spec"], "sB")
+        # 关机后重开改选 sA：停掉 n2 并用旧 id 重开（这里直接测试对已关机的 b 重开选 sB）
+        F.edit_state("boot.json", lambda b: b.update({"c": {**b["28-15002"], "off": {"t": 1, "holder": "CC"}, "holder": "CC"}}))
+        n = len(self.plat.calls)
+        self.hosts = []
+        FO.start("open", c, None, ids=["c"], person="CC", spec="sA", probe=self.remote.probe, ssh_fn=self.remote.ssh,
+                 forget_fn=self.remote.forget, ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01,
+                 tcp=lambda nd, p: False, hosts=self.fake_hosts())
+        for t in threading.enumerate():
+            if t.name == "fleet-open":
+                t.join(10)
+        op = FO.op()
+        self.assertIsNone(op["error"], op)
+        self.assertEqual(self.submits(n)[0]["taskRoleAddDTOList"][0]["specificationId"], "sA")
+
+    def test_spec_unavailable_blocks_and_same_spec_freed(self):
+        """目标规格无空位时（开新的、换人改选规格、换节点）预览与提交前均拦截、平台上什么都不动；换人沿用原规格空位 0 仍放行（freed=True）。"""
+        self._multi_spec_pub(avail_a=0, avail_b=0)
+        self.sync()
+        c = cfg(self.plat.url)
+        c["public_max"] = 4
+        FB.set_person("DD", REG + "ubuntu:dd", RUN, cfg=c)
+        # 预览：换人改选无空位的 sB → 规格 ok=False；沿用原规格 sA → freed=True，规格 ok=True；换节点选 sB → ok=False；未知规格 → ok=False
+        pv_swap_b = FB.preview(c, "swap", "b", "DD", tcp=lambda n, p: False, spec="sB")
+        self.assertFalse(next(x for x in pv_swap_b["items"] if x["item"] == "规格")["ok"])
+        pv_swap_a = FB.preview(c, "swap", "b", "DD", tcp=lambda n, p: False)
+        self.assertTrue(next(x for x in pv_swap_a["items"] if x["item"] == "规格")["ok"])
+        pv_move_b = FB.preview(c, "move", "b", tcp=lambda n, p: False, spec="sB")
+        self.assertFalse(next(x for x in pv_move_b["items"] if x["item"] == "规格")["ok"])
+        pv_bad = FB.preview(c, "open", None, "DD", PUB, tcp=lambda n, p: False, spec="nope")
+        bad_item = next(x for x in pv_bad["items"] if x["item"] == "规格")
+        self.assertFalse(bad_item["ok"])
+        self.assertIn("池里没有规格 nope", bad_item["note"])
+        # 提交前实时核对：swap 改选 sB（空 0）与 move 选 sB（空 0）均拒绝，平台上什么都不动
+        self.remote = Remote()
+        for kind, kw in (("swap", {"person": "DD", "spec": "sB"}), ("move", {"spec": "sB"})):
+            n = len(self.plat.calls)
+            self.hosts = []
+            FO.start(kind, c, None, ids=["b"], ack=[], probe=self.remote.probe, ssh_fn=self.remote.ssh, forget_fn=self.remote.forget,
+                     ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01, tcp=lambda nd, p: False, hosts=self.fake_hosts(), **kw)
+            for t in threading.enumerate():
+                if t.name == f"fleet-{kind}":
+                    t.join(10)
+            op = FO.op()
+            self.assertIn("规格：nodeB-1GPU", op["error"])
+            self.assertIn("什么都没动", op["error"])
+            self.assertEqual(self.paths(n), [])
+        # swap 沿用原规格 sA（空 0，但停旧释放同规格）：照常放行
+        n = len(self.plat.calls)
+        self.hosts = []
+        FO.start("swap", c, None, ids=["b"], person="DD", ack=[], probe=self.remote.probe, ssh_fn=self.remote.ssh, forget_fn=self.remote.forget,
+                 ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01, tcp=lambda nd, p: False, hosts=self.fake_hosts())
+        for t in threading.enumerate():
+            if t.name == "fleet-swap":
+                t.join(10)
+        op = FO.op()
+        self.assertIsNone(op["error"], op)
+        self.assertEqual(self.paths(n), [("/workManage/stop", "j2"), ("/submitWork/addWorkTask", "DD")])
+
+    def test_move_server_changes_id_port_and_drops_lend(self):
+        """组内服务器同池换节点：先停后开换规格，主机清单新加删旧、不带原 lend，原端口空闲时沿用、目标节点被占时改挑空闲端口，给新连接命令。"""
+        hf = Path(os.environ["LABMON_HOSTS"])
+        hf.write_text(
+            f'[[hosts]]\nid = "29"\nssh = "root@198.51.100.29"\nport = 15155\nplatform_job = "ALICE"\nplatform_pool = "{PRIV}"\n\n'
+            f'[fleet]\nprivate_pools = ["{PRIV}"]\npublic_max = 4\nplatform = "{self.plat.url}"\nplatform_user = "u"\n'
+            f'keepalive_cmd = "KA_CALLER=labmon-fleet bash /x/ka.sh"\n\n'
+            f'[[fleet.servers]]\nid = "a"\nholder = "AA"\nssh = "root@198.51.100.29"\nport = 15001\npool = "{PRIV}"\n\n'
+            f'[[fleet.servers]]\nid = "27-15002"\nholder = "BB"\nssh = "root@198.51.100.27"\nport = 15002\npool = "{PUB}"\nlend = true\nlend_hours = "22:00-09:00"\n'
+        )
+        self._multi_spec_pub(avail_a=1, avail_b=2)
+        c = F.conf()
+        FO.captcha(c)
+        FO.SESS["captcha_at"] = 0
+        FO.start("sync", c, "q7Wz", password=lambda u: "pw", pace=0)
+        for t in threading.enumerate():
+            if t.name == "fleet-sync":
+                t.join(10)
+        self.assertIsNone(FO.op()["error"])
+        # 第一次换节点：27-15002 → sB（28），原端口 15002 在 28 空闲 → 28-15002，lend 不带过去
+        self.remote = Remote()
+        n = len(self.plat.calls)
+        FO.start("move", F.conf(), None, ids=["27-15002"], spec="sB", ack=[], probe=self.remote.probe, ssh_fn=self.remote.ssh,
+                 forget_fn=self.remote.forget, ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01, tcp=lambda nd, p: False)
+        for t in threading.enumerate():
+            if t.name == "fleet-move":
+                t.join(10)
+        op = FO.op()
+        self.assertIsNone(op["error"], op)
+        self.assertEqual([x["name"] for x in op["steps"]], ["登录", "核对", "BB：停止作业", "BB：提交新作业、等运行", "BB：等 ssh、开保活"])
+        self.assertEqual(self.paths(n), [("/workManage/stop", "j2"), ("/submitWork/addWorkTask", "BB")])
+        self.assertEqual(self.submits(n)[0]["taskRoleAddDTOList"][0]["specificationId"], "sB")
+        srvs = {s["id"]: s for s in F.conf()["servers"]}
+        self.assertNotIn("27-15002", srvs)
+        self.assertIn("28-15002", srvs)
+        self.assertEqual((srvs["28-15002"]["holder"], srvs["28-15002"]["ssh"], srvs["28-15002"]["port"], srvs["28-15002"].get("lend")),
+                         ("BB", "root@198.51.100.28", 15002, None))
+        self.assertNotIn("27-15002", FO.boot())
+        self.assertEqual((FO.boot()["28-15002"]["src"], FO.view()["boot"]["28-15002"]["spec"]), ("换节点", "sB"))
+        self.assertEqual((op["conn"]["sid"], op["conn"]["cmd"], op["conn"]["spec"]), ("28-15002", "ssh -p 15002 root@198.51.100.28", "nodeB-1GPU"))
+        evs = records(who="BB")
+        self.assertTrue(any(e["kind"] == "fleet_boot" and "换节点" in e["msg"] and "原节点 27-15002" in e["msg"] for e in evs), evs)
+        # 第二次换节点：28-15002 → sA（27），但 27 上 15002 被占 → 自动挑 15151，id 变 27-15151
+        n = len(self.plat.calls)
+        FO.start("move", F.conf(), None, ids=["28-15002"], spec="sA", ack=[], probe=self.remote.probe, ssh_fn=self.remote.ssh,
+                 forget_fn=self.remote.forget, ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01,
+                 tcp=lambda nd, p: (nd, p) == ("root@198.51.100.27", 15002))
+        for t in threading.enumerate():
+            if t.name == "fleet-move":
+                t.join(10)
+        op = FO.op()
+        self.assertIsNone(op["error"], op)
+        self.assertEqual(self.submits(n)[0]["taskRoleAddDTOList"][0]["taskHostPortAddDTOList"][0]["hostPort"], "15151")
+        srvs = {s["id"]: s for s in F.conf()["servers"]}
+        self.assertNotIn("28-15002", srvs)
+        self.assertIn("27-15151", srvs)
+        self.assertEqual(op["conn"]["cmd"], "ssh -p 15151 root@198.51.100.27")
+
+    def test_move_mine_host_by_other_admin_keeps_mine_and_drops_lend(self):
+        """自用主机换节点（哪怕由另一管理员操作）：仍保持原持有人的自用主机；旧台标归还、新台不自动入池、last_mine 指向旧台；worker 在跑时拒绝。"""
+        hf = Path(os.environ["LABMON_HOSTS"])
+        hf.write_text(
+            f'[[hosts]]\nid = "27-15155"\nssh = "root@198.51.100.27"\nport = 15155\nworker = "auto"\n'
+            f'platform_holder = "ALICE"\nplatform_job = "ALICE"\nplatform_pool = "{PUB}"\nlend = true\nlend_hours = "22:00-09:00"\n\n'
+            f'[fleet]\nprivate_pools = ["{PRIV}"]\npublic_max = 4\nplatform = "{self.plat.url}"\nplatform_user = "u"\n'
+            f'keepalive_cmd = "KA_CALLER=labmon-fleet bash /x/ka.sh"\n\n'
+            f'[[fleet.servers]]\nid = "b"\nholder = "BB"\nssh = "root@198.51.100.27"\nport = 15002\npool = "{PUB}"\n'
+        )
+        next(j for j in self.plat.jobs if j["id"] == "jx").update(poolName=PUB, spec="sA")
+        self._multi_spec_pub(avail_a=1, avail_b=2)
+        bob = self.me("bob", "BOB")
+        c = F.conf()
+        FO.captcha(c)
+        FO.SESS["captcha_at"] = 0
+        FO.start("sync", c, "q7Wz", password=lambda u: "pw", pace=0)
+        for t in threading.enumerate():
+            if t.name == "fleet-sync":
+                t.join(10)
+        # 另一管理员 bob 预览 ALICE 的自用主机换节点：mine 仍为 True
+        pv = FB.preview(F.conf(), "move", "27-15155", tcp=lambda n, p: False, account=bob, spec="sB")
+        self.assertTrue(pv["mine"])
+        self.assertEqual((pv["person"], pv["spec"], pv["orig_spec"]), ("ALICE", "sB", "sA"))
+        # worker 有任务在跑：即使勾 ack 也拒绝
+        self.remote = Remote()
+        FO.start("move", F.conf(), None, ids=["27-15155"], spec="sB", ack=["27-15155"], account=bob,
+                 probe_mine=lambda h: ("job", "exp1"), ssh_fn=self.remote.ssh, forget_fn=self.remote.forget,
+                 ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01, tcp=lambda nd, p: False)
+        for t in threading.enumerate():
+            if t.name == "fleet-move":
+                t.join(10)
+        self.assertIn("先在主机页暂停队列", FO.op()["error"])
+        # 空闲时由 bob 触发换节点：旧 27-15155 标归还，新 28-15155 仍归 ALICE 为自用主机、不带 lend，last_mine 指向 27-15155
+        n = len(self.plat.calls)
+        FO.start("move", F.conf(), None, ids=["27-15155"], spec="sB", ack=[], account=bob,
+                 probe_mine=lambda h: ("keepalive", ""), ssh_fn=self.remote.ssh, forget_fn=self.remote.forget,
+                 ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01, tcp=lambda nd, p: False)
+        for t in threading.enumerate():
+            if t.name == "fleet-move":
+                t.join(10)
+        op = FO.op()
+        self.assertIsNone(op["error"], op)
+        self.assertEqual(self.paths(n), [("/workManage/stop", "jx"), ("/submitWork/addWorkTask", "ALICE")])
+        self.assertEqual(self.submits(n)[0]["taskRoleAddDTOList"][0]["specificationId"], "sB")
+        hs = {h["id"]: h for h in C.all_hosts()}
+        self.assertTrue(hs["27-15155"].get("returned"))
+        self.assertFalse(hs["28-15155"].get("returned"))
+        self.assertEqual((hs["28-15155"]["platform_holder"], hs["28-15155"]["ssh"], hs["28-15155"]["port"], hs["28-15155"].get("lend")),
+                         ("ALICE", "root@198.51.100.28", 15155, None))
+        self.assertEqual(FB.last_mine(PUB, skip="28-15155", cfg=F.conf(), holder="ALICE")["id"], "27-15155")
+        self.assertTrue(op["conn"]["mine"])
+        self.assertEqual(op["conn"]["cmd"], "ssh -p 15155 root@198.51.100.28")
+
+    def test_move_guards_and_errors(self):
+        """换节点的各种前置拦截、风险确认、同规格拒绝、提交失败说明，以及未知节点 IP 不误落旧节点。"""
+        self._multi_spec_pub(avail_a=1, avail_b=2)
+        self.sync()
+        c = cfg(self.plat.url)
+        c["public_max"] = 4
+        # 缺 spec / 换人 / 借用中 / 已关机
+        with self.assertRaises(P.PlatformError) as cm:
+            FO.start("move", c, ids=["b"])
+        self.assertIn("目标规格", str(cm.exception))
+        with self.assertRaises(P.PlatformError) as cm:
+            FO.start("move", c, ids=["b"], spec="sB", person="DD")
+        self.assertIn("不换使用人", str(cm.exception))
+        c_bor = cfg(self.plat.url)
+        c_bor["servers"][1]["borrow_since"] = "2026-11-06 10:00"
+        with self.assertRaises(P.PlatformError) as cm:
+            FO.start("move", c_bor, ids=["b"], spec="sB")
+        self.assertIn("先在它的「借用」里还掉", str(cm.exception))
+        self.assertIn("再换节点", str(cm.exception))
+        # 预览：未选规格 / 选了当前规格
+        pv0 = FB.preview(c, "move", "b", tcp=lambda n, p: False)
+        self.assertFalse(next(x for x in pv0["items"] if x["item"] == "规格")["ok"])
+        pv_same = FB.preview(c, "move", "b", tcp=lambda n, p: False, spec="sA")
+        self.assertIn("续租", next(x for x in pv_same["items"] if x["item"] == "规格")["note"])
+        # 后端选了当前规格：拒绝且什么都不动
+        n = len(self.plat.calls)
+        op = self.renew(["b"], code=None, kind="move", spec="sA")
+        self.assertIn("续租", op["error"])
+        self.assertEqual(self.paths(n), [])
+        # 在跑实验 / 本地盘写超 1 GiB 没勾确认：拒绝
+        n = len(self.plat.calls)
+        op = self.renew(["b"], Remote(states={"b": ("job", "train")}), code=None, kind="move", spec="sB")
+        self.assertIn("没确认", op["error"])
+        self.assertEqual(self.paths(n), [])
+        self.local_disk("b")
+        n = len(self.plat.calls)
+        op = self.renew(["b"], code=None, kind="move", spec="sB")
+        self.assertIn("换节点会清空", op["error"])
+        self.assertEqual(self.paths(n), [])
+        self.local_disk("b", 0.2)
+        # 停旧后提交被拒：_note 给续开指引
+        self.assertIn("点「开机」", FO._note("move", c["servers"][1], "BB", {"stopped": True}))
+        self.assertIn("点「+ 开新的」", FO._note("move", {"id": "29", "label": "29", "holder": "ALICE", "mine": True}, "ALICE", {"stopped": True}))
+        # 新容器落在未知网段的不同 IP（ext_host 换算不出）：不误落回旧节点
+        Path(os.environ["LABMON_HOSTS"]).write_text("")
+        c_odd = fleet_cfg(private_pools=[PRIV], public_max=4, platform=self.plat.url, platform_user="u",
+                          servers=[{"id": "b", "holder": "BB", "job": "BB", "ssh": "root@node-a", "port": 15002, "pool": PUB}])
+        self.plat.spec_ip["sB"] = "10.99.0.50"
+        self.remote = Remote()
+        self.hosts = []
+        FO.start("move", c_odd, None, ids=["b"], spec="sB", ack=[], probe=self.remote.probe, ssh_fn=self.remote.ssh,
+                 forget_fn=self.remote.forget, ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01,
+                 tcp=lambda nd, p: False, hosts=self.fake_hosts())
+        for t in threading.enumerate():
+            if t.name == "fleet-move":
+                t.join(10)
+        self.assertIn("不知道本机怎么连它", FO.op()["error"])
 
 
 if __name__ == "__main__":

@@ -57,7 +57,7 @@
     /fleet/person/<名字>.json  人员详情：近 30 天逐日各状态的小时数、实验时利用率，按服务器的统计（打开这人的详情时取）
     POST /fleet/probe/<id>  立即探一次这一台（管理员、内网入口），返回新的组内服务器数据
     /fleet/op.json          组内服务器的平台操作：开机参数、上次核对结果、当前操作进度、人与池（操作时页面每 2 秒取一次）
-    /fleet/plan.json?kind=&sid=&person=&pool=   开机向导的预览：要提交的参数、挑出的端口、本地能核对的各项（不连平台）
+    /fleet/plan.json?kind=&sid=&person=&pool=&spec= 开机/换人/换节点向导的预览：要提交的参数、挑出的端口、规格与本地能核对的各项（不连平台）
     POST /fleet/op/<动作>   平台操作（见 fleetops.py；管理员、入口获准）：captcha（取一张验证码，返回 {"code", "tok"}；要验证码的请求把输入的
                             code 与这张的 tok 一起带回，两个页面先后取过的不拿先取的那张去登录）、sync {"code", "tok"}、renew {"ids", "ack", "code", "tok"}、
                             ka {"ids"}（开保活，不碰平台）、off {"ids", "ack", "code", "tok"}（关机，可选自用主机）、
@@ -935,7 +935,7 @@ class Handler(BaseHTTPRequestHandler):
                 cfg = F.conf()
                 if not cfg:
                     return self._send(404, "{}", "application/json")
-                out = FB.preview(cfg, q.get("kind", "open"), q.get("sid") or None, q.get("person"), q.get("pool"), account=who.name)
+                out = FB.preview(cfg, q.get("kind", "open"), q.get("sid") or None, q.get("person"), q.get("pool"), account=who.name, spec=q.get("spec") or None)
             except (ConfigError, PF.PlatformError) as x:
                 return self._json(409, {"error": str(x)})
             return self._json(200, out)
@@ -1291,10 +1291,12 @@ class Handler(BaseHTTPRequestHandler):
                 kw = {}
                 if act != "sync":
                     kw["ids"] = [str(x) for x in body.get("ids") or []]
-                if act in ("renew", "off", "swap"):        # 页面上确认过“会中断在跑的实验”的服务器
+                if act in ("renew", "off", "swap", "move"):  # 页面上确认过“会中断在跑的实验”的服务器
                     kw["ack"] = [str(x) for x in body.get("ack") or []]
                 if act in ("swap", "open"):                # 新的使用人（镜像与启动命令按这人的设置）
                     kw["person"] = body.get("person")
+                if act in ("swap", "move", "open"):        # 规格（物理节点）：换人、开机可省（沿用原规格），换节点必选
+                    kw["spec"] = body.get("spec")
                 if act == "open":
                     kw["pool"] = body.get("pool")
                 FO.start(act, cfg, str(body.get("code") or "").strip() or None, tok=body.get("tok") or None, account=who.name, **kw)

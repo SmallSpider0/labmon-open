@@ -2,7 +2,7 @@
 let OPS = null, OPOLL = null, FCAP = null, FERR = null;   // OPS：每 2 秒取的操作进度；FCAP：正在输验证码 {code, input, t, err, next}
 let FSCROLL = null;        // 打开操作面板后，重画完把它滚到眼前（元素 id）
 let FFOCUS = null;         // 重画完把光标放进这个输入框（验证码）
-let FWIZ = null;           // 换人、开机向导：{kind: swap | open, sid, pool, person, image, ack, newp, adv: 展开镜像与参数, pv: 预览, err, busy}
+let FWIZ = null;           // 换人、换节点、开机向导：{kind: swap | move | open, sid, pool, person, spec, ack, newp, adv: 展开镜像与参数, pv: 预览, err, busy}
 let FPED = null;           // 添加组内人员的独立抽屉草稿
 const NAME_RE = /^[0-9A-Za-z_~-]{1,32}$/;      // 与 platform.py 一致
 async function startOp(act, body, pop = false) {          // 已登录就直接开始，否则先取验证码（pop：验证码出在发起处，true 是按钮旁的弹窗，"renew" 是批量续租抽屉的底部）
@@ -47,6 +47,7 @@ async function wizPreview() {
   if (!W) return;
   const q = new URLSearchParams({kind: W.kind, person: W.person || ""});
   if (W.sid) q.set("sid", W.sid); else q.set("pool", W.pool);
+  if (W.spec) q.set("spec", W.spec);
   const n = ++WSEQ;
   W.busy = true; render(false);
   try {
@@ -103,11 +104,12 @@ async function fopAct(act, body) {
     }
     else if (act === "offpick") popToggle("off", body.ids[0]);
     else if (act === "offgo") { await dismissDone(); await startOp("off", {ids: [POP.id], ack: POP.ack ? [POP.id] : []}, true); }
-    else if (act === "wiz") {                         // 换人：沿用这台的池；开机：已关机的服务器缺省还给原来的人；开新的：选了池
-      const x = body.ids ? srvById(body.ids[0]) : null;
+    else if (act === "wiz") {                         // 换人/换节点：沿用这台的池；开机：已关机的服务器缺省还给原来的人；开新的：选了池
+      const x = body.ids ? srvById(body.ids[0]) : null, move = body.kind === "move";
       await panel();
-      FWIZ = {kind: body.kind, sid: x?.id || null, pool: x?.pool || body.pool, person: body.name || (body.kind === "open" && x ? x.off?.holder || x.holder : null),
-              ack: false, newp: "", adv: false};
+      FWIZ = {kind: body.kind, sid: x?.id || null, pool: x?.pool || body.pool,
+              person: move ? x?.holder || null : body.name || (body.kind === "open" && x ? x.off?.holder || x.holder : null),
+              spec: null, ack: false, newp: "", adv: false};
       wizPreview(); toPanel();          // 从人员抽屉、卡片墙点的：打开那一台（或那个池「开新的」）的抽屉，向导在里面
     } else if (act === "wizcancel") FWIZ = null;
     else if (act === "wizadv") FWIZ.adv = !FWIZ.adv;
@@ -117,7 +119,8 @@ async function fopAct(act, body) {
       FWIZ = {...FWIZ, person: n, newp: "", err: null}; wizPreview();
     } else if (act === "wizgo") {
       const W = FWIZ;
-      await startOp(W.kind, {ids: W.sid ? [W.sid] : [], person: W.person, pool: W.pool, ack: W.ack && W.sid ? [W.sid] : []});
+      await startOp(W.kind, {ids: W.sid ? [W.sid] : [], ...(W.kind === "move" ? {} : {person: W.person}), pool: W.pool,
+        ...(W.spec ? {spec: W.spec} : {}), ack: W.ack && W.sid ? [W.sid] : []});
     } else if (act === "pgive") {
       if (popIs("pgive", body.name) && POP.place !== body.place) popClose();
       popToggle("pgive", body.name, {route: location.hash, place: body.place, trigger: personTrigger(act, body.name, body.place)});
@@ -248,56 +251,80 @@ function offAsk(x) {
       + (down && !x.mine ? `<div class="pop-w">现在连不上：平台上要是已经没有它运行中的作业，就只在看板上标为已关机。</div>` : ""));
 }
 const offGo = x => `<button class="btn pri dz" data-fop="offgo" data-id="${esc(x.id)}" ${x.mine && x.state === "job" || FRISKY(x) && !POP.ack || fops().op?.active ? "disabled" : ""}>关机</button>`;
-// 换人、开机向导：点一个人 → 一句话核对 → 一个按钮。镜像与参数收在「高级」里
+// 换人、换节点、开机向导：选人（换节点同人免选）与规格 → 一句话核对 → 一个按钮。镜像与参数收在「高级」里
 const PGN = {me: "我", team: "工作台"};
 function wizForm() {
-  const W = FWIZ, o = fops(), x = W.sid ? srvById(W.sid) : null, pv = W.pv || {}, ppl = o.people || {}, swap = W.kind === "swap";
-  if (ME?.fleet_person_error) return `<div class="rn-err">${esc(ME.fleet_person_error)}</div><div class="rn">${fopBtn("wizcancel", "关掉")}</div>`;
+  const W = FWIZ, o = fops(), x = W.sid ? srvById(W.sid) : null, pv = W.pv || {}, ppl = o.people || {};
+  const swap = W.kind === "swap", move = W.kind === "move", stopping = swap || move;
+  if (!move && ME?.fleet_person_error) return `<div class="rn-err">${esc(ME.fleet_person_error)}</div><div class="rn">${fopBtn("wizcancel", "关掉")}</div>`;
   if (W.sid && !x) return `<div class="rn-note">组内服务器里已经没有 ${esc(W.sid)}。</div><div class="rn">${fopBtn("wizcancel", "关掉")}</div>`;
-  const q = swap ? `把这台换给谁？<span class="sm mut">停掉 ${esc(x.holder)} 的作业后立刻开新的，沿用端口，空档十几秒</span>`
+  const q = move ? `换到哪个节点（规格）？<span class="sm mut">同一个人（${esc(x.holder)}）、同一个池：停掉旧作业后立刻按新规格开，空档十几秒</span>`
+    : swap ? `把这台换给谁？<span class="sm mut">停掉 ${esc(x.holder)} 的作业后立刻开新的，沿用端口，空档十几秒</span>`
     : x ? `重开这一台给谁用？` : `在这个池开一台给谁用？<span class="sm mut">端口自动挑</span>`;
-  const names = Object.keys(ppl).sort(byName).filter(n => !(swap && n === x.holder));     // 选人只按首字母：要分给的多半是还没服务器的
-  if (W.person && !ppl[W.person]) names.push(W.person);                     // 刚输的新名字
-  const chip = n => { const p = ppl[n], sl = p?.slots || [];
-    const sub = !p ? "新的人" : n === ME?.fleet_person ? (sl.length ? `我 · 占 ${sl.length} 台` : "我") : sl.length ? `占 ${sl.length} 台` : "没占服务器";
-    return `<button class="pchip${W.person === n ? " on" : ""}" data-wp="${esc(n)}" ${tip(p ? [p.image ? `镜像 ${p.image}（${SRCN[p.src] || ""}）` : "还没读到镜像", p.run_cmd ? "启动命令 " + p.run_cmd : "", p.note || "", sl.length ? "占着 " + sl.join("、") : ""].filter(Boolean).join("\n") : "新的人：按新的人默认的镜像与启动命令开")}>
-      ${pfav(n, "", "fav sm")}<span class="pc-t"><b>${esc(n)}</b><span>${esc(sub)}</span></span></button>`; };
-  const grp = g => names.filter(n => (n === ME?.fleet_person ? "me" : "team") === g);
-  const rows = ["me", "team"].map(g => grp(g).length ? `<div class="pg-row"><span class="k">${PGN[g]}</span><div class="pchips">${grp(g).map(chip).join("")}</div></div>` : "").join("");
-  const items = (pv.items || []).filter(i => W.person || i.item !== "作业名"), bad = items.filter(i => i.ok === false), unk = items.filter(i => i.ok === null);
-  const busyMine = swap && x.mine && x.state === "job", risky = swap && FRISKY(x) && !busyMine;   // 自用主机上 labmon 之外的 GPU 进程、本地盘写得多也要勾
-  const ready = W.person && items.length && !bad.length && !W.busy && !(risky && !W.ack) && !busyMine && !o.op?.active;
+  let ppHtml = "";
+  if (!move) {
+    const names = Object.keys(ppl).sort(byName).filter(n => !(swap && n === x.holder));     // 选人只按首字母：要分给的多半是还没服务器的
+    if (W.person && !ppl[W.person]) names.push(W.person);                     // 刚输的新名字
+    const chip = n => { const p = ppl[n], sl = p?.slots || [];
+      const sub = !p ? "新的人" : n === ME?.fleet_person ? (sl.length ? `我 · 占 ${sl.length} 台` : "我") : sl.length ? `占 ${sl.length} 台` : "没占服务器";
+      return `<button class="pchip${W.person === n ? " on" : ""}" data-wp="${esc(n)}" ${tip(p ? [p.image ? `镜像 ${p.image}（${SRCN[p.src] || ""}）` : "还没读到镜像", p.run_cmd ? "启动命令 " + p.run_cmd : "", p.note || "", sl.length ? "占着 " + sl.join("、") : ""].filter(Boolean).join("\n") : "新的人：按新的人默认的镜像与启动命令开")}>
+        ${pfav(n, "", "fav sm")}<span class="pc-t"><b>${esc(n)}</b><span>${esc(sub)}</span></span></button>`; };
+    const grp = g => names.filter(n => (n === ME?.fleet_person ? "me" : "team") === g);
+    const rows = ["me", "team"].map(g => grp(g).length ? `<div class="pg-row"><span class="k">${PGN[g]}</span><div class="pchips">${grp(g).map(chip).join("")}</div></div>` : "").join("");
+    ppHtml = `<div class="wz-pp">${rows}<div class="pg-row"><span class="k">新的人</span><span class="pnew"><input id="fwnew" class="cap-in" placeholder="名字（也是平台作业名）" value="${esc(W.newp)}" autocomplete="off" spellcheck="false">${fopBtn("wiznew", "用这个名字")}</span></div></div>`;
+  }
+  const specs = (pv.specs?.length ? pv.specs : poolSpecs(W.pool)) || [];
+  const origSpec = pv.orig_spec || (x && o.boot?.[x.id]?.spec) || o.pools?.[W.pool]?.spec || null;
+  const curSpec = W.spec || (move ? null : origSpec);
+  const spChip = s => {
+    const id = s.specificationId, nm = s.specificationName || id, avail = s.quantityAvailable, tot = s.specificationAmount;
+    const isOrig = !!origSpec && id === origSpec, on = curSpec === id, dis = move && isOrig ? "disabled" : "";
+    const zero = avail != null && Number(avail) < 1 && !(swap && isOrig);
+    const sub = [isOrig ? (move ? "当前" : "原规格") : "", avail != null ? `空 ${avail}/${tot ?? "—"}` : ""].filter(Boolean).join(" · ");
+    const h = isOrig && move ? "已在当前规格上：原地重启请用「续租」"
+      : `${nm}${avail != null ? `\n上次核对时空 ${avail} / ${tot ?? "—"}` : ""}${String(s.isSchedule) === "0" ? "\n不可排队" : ""}\n提交前会连平台再核对一次`;
+    return `<button class="pchip spchip${on ? " on" : ""}${zero ? " zero" : ""}" data-ws="${esc(id)}" ${dis} ${tip(h)}><span class="pc-t"><b>${esc(nm)}</b><span>${esc(sub || id)}</span></span></button>`;
+  };
+  const spHtml = specs.length || move ? `<div class="wz-pp"><div class="pg-row"><span class="k" ${tip(o.pools_t ? `上次核对：${ts(o.pools_t)}；提交前会连平台再核对一次` : "提交前会连平台再核对一次")}>${move ? "目标规格" : "规格"}</span><div class="pchips">${specs.length ? specs.map(spChip).join("") : `<span class="sm mut">还没有这个池的规格列表：先点「与平台核对」</span>`}</div></div></div>` : "";
+  const picked = move ? !!W.spec : !!W.person;
+  const items = (pv.items || []).filter(i => (W.person || i.item !== "作业名") && (!move || W.spec || i.item !== "规格"));
+  const bad = items.filter(i => i.ok === false), unk = items.filter(i => i.ok === null);
+  const busyMine = stopping && x.mine && x.state === "job", risky = stopping && FRISKY(x) && !busyMine;   // 自用主机上 labmon 之外的 GPU 进程、本地盘写得多也要勾
+  const ready = picked && items.length && !bad.length && !W.busy && !(risky && !W.ack) && !busyMine && !o.op?.active;
   const it = k => items.find(i => i.item === k)?.note || "";
   const base = s => String(s || "—").split("/").pop();     // 镜像只写最后一段
+  const who = move ? x.holder : W.person;
   let chk = "";
-  if (W.person) {
+  if (picked) {
     if (W.busy && !items.length) chk = `<div class="sm mut">核对中…</div>`;
     else if (bad.length) chk = `<div class="steps">${bad.map(i => `<span class="i err">✕</span><span>${esc(i.item)}</span><span class="sm err">${esc(i.note)}</span>`).join("")}</div>`;
-    else if (items.length) chk = `<div class="wz-ok${unk.length ? " warn" : ""}"><span class="i ok">${unk.length ? "？" : "✓"}</span><span>${[`作业名 <b>${esc(pv.job || W.person)}</b>${pv.job && pv.job !== W.person ? `<span class="mut">（${esc(W.person)} 已在用）</span>` : ""}`,
-        `端口 ${esc(it("端口"))}`, `镜像 <code>${esc(base(pv.image))}</code> <span class="mut">${esc(pv.image_src || "")}</span>`, esc(it("配额"))].join(" · ")}
+    else if (items.length) chk = `<div class="wz-ok${unk.length ? " warn" : ""}"><span class="i ok">${unk.length ? "？" : "✓"}</span><span>${[`作业名 <b>${esc(pv.job || who)}</b>${pv.job && pv.job !== who ? `<span class="mut">（${esc(who)} 已在用）</span>` : ""}`,
+        pv.spec_name ? `规格 <b>${esc(pv.spec_name)}</b>${pv.orig_spec && pv.spec !== pv.orig_spec ? '<span class="mut">（新规格）</span>' : ""}` : "",
+        `端口 ${esc(it("端口"))}`, `镜像 <code>${esc(base(pv.image))}</code> <span class="mut">${esc(pv.image_src || "")}</span>`, esc(it("配额"))].filter(Boolean).join(" · ")}
         ${unk.length ? `<div class="sm" style="color:var(--warn)">${esc(unk.map(i => i.note.startsWith("还没") ? i.note : `${i.item}没核对上（${pv.checked_at ? `按 ${ts(pv.checked_at)} 读的` : "还没读过资源池与镜像"}），开始前连平台再核一次`).join("；"))}</div>` : ""}</span></div>`;
   }
   const nodes = pv.nodes || [];
-  const kv = W.person && pv.name ? [["作业名", esc(pv.name)], ["镜像", `<code>${esc(pv.image || "—")}</code> <span class="sm mut">${esc(pv.image_src || "")}</span>`],
-    ["连接", pv.port ? nodes.length === 1 ? `<code>ssh -p ${esc(pv.port)} ${esc(nodes[0])}</code>` : `端口 ${esc(pv.port)}，节点 ${esc(nodes.map(fNode).join("、") || "—")} 之一（开好后看平台分到哪台）` : "—"],
+  const kv = picked && pv.name ? [["作业名", esc(pv.name)], ...(pv.spec_name || pv.spec ? [["规格", esc(pv.spec_name || pv.spec)]] : []),
+    ["镜像", `<code>${esc(pv.image || "—")}</code> <span class="sm mut">${esc(pv.image_src || "")}</span>`],
+    ["连接", pv.port ? nodes.length === 1 && pv.spec === pv.orig_spec ? `<code>ssh -p ${esc(pv.port)} ${esc(nodes[0])}</code>` : `端口 ${esc(pv.port)}，节点 ${esc(nodes.map(fNode).join("、") || "—")} 之一（开好后看平台分到哪台）` : "—"],
     ["启动命令", `<code>${esc(pv.run_cmd || "—")}</code>`], ...((pv.volumes || []).length ? [["挂载", pv.volumes.map(esc).join("<br>")]] : [])] : [];
   const adv = W.adv ? `<div class="wz-adv">${kv.length ? `<div class="kv">${kv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("")}</div>` : ""}
-      <div class="sm mut">${ppl[W.person] ? `镜像与启动命令按这人的设置；要换就到 <a href="${esc(DH.person(W.person))}" data-drw="${esc(DH.person(W.person))}">${esc(W.person)} 的设置</a>里改。` : "新的人按新的人默认的镜像与启动命令开；要换先在「人员」里加上这人。"}</div></div>` : "";
-  const go = swap ? `停 ${x.holder}，换给 ${W.person || "？"}` : `给 ${W.person || "？"} 开机`;
-  const why = !W.person ? "先点一个人" : busyMine ? "" : bad.length ? `${bad.map(i => i.item).join("、")}不对，改好才能开始` : risky && !W.ack ? "先勾“已说好”" : "";
-  return `<div class="wz-q">${q}</div>
-    <div class="wz-pp">${rows}<div class="pg-row"><span class="k">新的人</span><span class="pnew"><input id="fwnew" class="cap-in" placeholder="名字（也是平台作业名）" value="${esc(W.newp)}" autocomplete="off" spellcheck="false">${fopBtn("wiznew", "用这个名字")}</span></div></div>
-    ${chk}
-    ${W.person && pv.after ? `<div class="rn-state">${esc(pv.after)}</div>` : ""}
+      <div class="sm mut">${ppl[who] ? `镜像与启动命令按这人的设置；要换就到 <a href="${esc(DH.person(who))}" data-drw="${esc(DH.person(who))}">${esc(who)} 的设置</a>里改。` : "新的人按新的人默认的镜像与启动命令开；要换先在「人员」里加上这人。"}</div></div>` : "";
+  const go = move ? (W.spec ? `停 ${x.holder}（${x.id}），换到 ${specName(W.pool, W.spec)}` : `停 ${x.holder}，换节点`)
+    : swap ? `停 ${x.holder}，换给 ${W.person || "？"}` : `给 ${W.person || "？"} 开机`;
+  const why = move && !W.spec ? "先选一个目标规格" : !move && !W.person ? "先点一个人" : busyMine ? "" : bad.length ? `${bad.map(i => i.item).join("、")}不对，改好才能开始` : risky && !W.ack ? "先勾“已说好”" : "";
+  return `<div class="wz-q">${q}</div>${ppHtml}${spHtml}${chk}
+    ${picked && pv.after ? `<div class="rn-state">${esc(pv.after)}</div>` : ""}
     ${busyMine ? `<div class="rn-state bad">这台 worker 还有任务在跑（${esc(x.work.map(w => w.label).join("、"))}）：先在<a href="#/host/${encodeURIComponent(x.id)}">主机页</a>暂停队列。</div>` : ""}
-    ${risky ? riskNeed(x, "换人", "data-wack", W.ack) : ""}
-    ${W.person ? `<button class="lnk sm wz-tg" data-fop="wizadv">${W.adv ? "收起镜像与参数" : "镜像与参数"}</button>${adv}` : ""}
+    ${risky ? riskNeed(x, move ? "换节点" : "换人", "data-wack", W.ack) : ""}
+    ${picked ? `<button class="lnk sm wz-tg" data-fop="wizadv">${W.adv ? "收起镜像与参数" : "镜像与参数"}</button>${adv}` : ""}
     <div class="rn"><button class="btn pri" data-fop="wizgo" ${ready ? "" : "disabled"} ${tip("开始前连平台再核一次，有一项不对就什么都不动；出错停在那一步，不自动重试")}>${esc(go)}</button>${fopBtn("wizcancel", "取消")}
-      ${why ? `<span class="sm" style="color:${!W.person ? "var(--muted)" : "var(--warn)"}">${esc(why)}</span>` : ""}</div>
+      ${why ? `<span class="sm" style="color:${!picked ? "var(--muted)" : "var(--warn)"}">${esc(why)}</span>` : ""}</div>
     ${W.err ? `<div class="rn-err">${esc(W.err)}</div>` : ""}`;
 }
 function opProgress(op) {
-  const what = opName(op.kind) + (op.person && ["swap", "open"].includes(op.kind) ? `（${op.kind === "swap" ? "→ " : ""}${op.person}）` : "");
+  const what = opName(op.kind) + (op.person && ["swap", "open"].includes(op.kind) ? `（${op.kind === "swap" ? "→ " : ""}${op.person}）`
+    : op.kind === "move" && (op.spec_name || op.spec) ? `（→ ${op.spec_name || op.spec}）` : "");
   const head = op.active ? `${what}进行中，可以关掉页面，服务在后台做完` : op.error ? `${what}停下了` : `${what}完成`;
   return `<div class="rn-note">${esc(head)}<span class="sm mut">（${ts(op.t0)} 开始）</span></div>
     <div class="steps">${op.steps.map(x => `<span class="i ${x.state}">${RICON[x.state]}</span><span class="${x.state === "err" ? "err" : ""}">${esc(x.name)}</span><span class="sm mut">${esc(x.note || "")}</span>`).join("")}</div>`
