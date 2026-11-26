@@ -101,8 +101,8 @@ th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--lin
 th { font-size: 12.5px; color: var(--muted); font-weight: 500; }
 .lvl { font-family: var(--mono); font-size: 12px; white-space: nowrap; }
 .role-table code { white-space: normal; overflow-wrap: anywhere; }
-.role-table th:first-child { width: 38%; }
-.role-table th:not(:first-child) { width: 31%; }
+.role-table th:first-child { width: 28%; }
+.role-table th:not(:first-child) { width: 24%; }
 @media (max-width: 640px) { .role-table th, .role-table td { padding: 7px 5px; } }
 
 /* 两张清单 */
@@ -298,21 +298,30 @@ html { scroll-behavior: smooth; }
   <p class="prose"><b>部署 agent 不在 worktree 里派</b>（Agent 工具不加 <code>isolation: worktree</code>）：worktree 里的 agent 对主 checkout 执行不了 git，拉不了代码、重启不了看板。直接提交 main 的改动也一样，在 worktree 里改完推到 <code>origin main</code>，随下一批由部署 agent 在主 checkout 收尾。</p>
   <p class="prose"><b>总控的等待</b>：总控自己在主 checkout 后台挂 <code>python3 -I tools/issue_watch.py wait --reports-token ~/.config/labmon/reports.token</code>，输出不重定向。每 5 分钟查 GitHub Issue 和看板报告；退出码 0 先重挂再处理新条目，报告只输出编号、报告人和时刻。非 0 或出现 Traceback 时不重挂，看最后几行查原因。续接、应用重启后总控重新挂上。</p>
   <p class="prose"><b>自己开的 Issue 不报</b>（Issue #50）：总控或子 agent 用 <code>gh issue create</code> 开了 Issue，紧接着跑一次 <code>python3 -I tools/issue_watch.py mark N</code> 把它记为已见。脚本每轮查之前重读已见列表、与内存里的取并集，中途 mark 的号不报、也不会被覆盖掉；还没有已见列表时 mark 不写，首次 wait 会把现有的全记为已见。</p>
-  <p class="prose">总控按派工环境选择对应列，两边共用分档、分工和检查点。GitHub 上的 Codex PR 主审仍在 PR 上单独触发。</p>
+  <p class="prose">总控按派工环境选择对应列，各环境共用分档、分工和检查点。GitHub 上的 Codex PR 主审仍在 PR 上单独触发。</p>
   <div class="tbl">
     <table class="role-table">
-      <thead><tr><th>做什么</th><th>Claude 模型 / 强度</th><th>Codex 模型 / 推理强度</th></tr></thead>
+      <thead><tr><th>做什么</th><th>Antigravity 模型 / 强度（默认 Gemini 池）</th><th>Claude 模型 / 强度</th><th>Codex 模型 / 推理强度</th></tr></thead>
       <tbody>
-        <tr><td>机械活、查状态</td><td>Sonnet medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
-        <tr><td>部署，每批一个；脚本跑不了才手工走七步</td><td>Sonnet low；手工 Sonnet medium</td><td><code>gpt-6.1-sol</code> low；手工 medium</td></tr>
-        <tr><td>修小阻塞：已知修法、一两处改动；用新 agent</td><td>Sonnet medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
-        <tr><td>第 1、2 档与按已定方案实现</td><td>Opus medium；第 1 档只改文档用 Sonnet medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
-        <tr><td>第 3 档设计与实现；第 4 档设计并接着实现；影响调研、原因不明的 bug</td><td>Opus high</td><td><code>gpt-6.1-sol</code> high</td></tr>
-        <tr><td>第 4 档跨模块设计；最难的设计；high 做错过一次的重试</td><td>Opus xhigh</td><td><code>gpt-6-astra</code> xhigh</td></tr>
-        <tr><td>独立兜底审查：GitHub 主审约 30 分钟没结果或报失败；用全新 agent</td><td>第 2 档及纯文档 Opus medium；第 3 档 Opus high；第 4 档 Opus xhigh</td><td>第 2 档及纯文档 <code>gpt-6.1-sol</code> medium；第 3 档 <code>gpt-6-astra</code> high；第 4 档 <code>gpt-6-astra</code> xhigh</td></tr>
+        <tr><td>Swarm <code>monitor</code>（防卡顿）</td><td><code>gemini-3.8-flash-low</code></td><td>—</td><td>—</td></tr>
+        <tr><td>机械活、查状态、纯文档（第 1 档文档小修）</td><td><code>gemini-3.8-flash-medium</code></td><td>Sonnet medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
+        <tr><td>部署，每批一个；脚本跑不了才手工走七步</td><td><code>gemini-3.8-flash-medium</code> 跑脚本；手工 <code>gemini-4-neon-medium</code></td><td>Sonnet low；手工 Sonnet medium</td><td><code>gpt-6.1-sol</code> low；手工 medium</td></tr>
+        <tr><td>总控（<code>coordinator</code>）</td><td><code>gemini-4-neon-medium</code></td><td>Sonnet medium / Opus medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
+        <tr><td>修小阻塞：已知修法、一两处改动；用新 agent</td><td>原实现者当场修；停后新开 <code>gemini-4-neon-medium</code></td><td>Sonnet medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
+        <tr><td>第 1、2 档与按已定方案实现</td><td><code>gemini-4-neon-medium</code>（备选 <code>claude-sonnet-5-5-medium</code>）</td><td>Opus medium；第 1 档只改文档用 Sonnet medium</td><td><code>gpt-6.1-sol</code> medium</td></tr>
+        <tr><td>第 3 档设计与实现；第 4 档设计并接着实现；影响调研、原因不明的 bug</td><td><code>gemini-4-neon-high</code>（备选 <code>claude-opus-5-5-high</code>）</td><td>Opus high</td><td><code>gpt-6.1-sol</code> high</td></tr>
+        <tr><td>第 4 档跨模块设计；最难的设计；high 做错过一次的重试</td><td><code>gemini-4-neon-xhigh</code>（备选 <code>claude-opus-5-5-high</code>）</td><td>Opus xhigh</td><td><code>gpt-6-astra</code> xhigh</td></tr>
+        <tr><td>独立兜底审查：GitHub 主审约 30 分钟没结果或报失败；用全新 agent</td><td>第 2 档 <code>gemini-4-neon-medium</code>；第 3–4 档 <code>gemini-4-neon-high</code>（跨家族备选 <code>claude-opus-5-5-high</code>）</td><td>第 2 档及纯文档 Opus medium；第 3 档 Opus high；第 4 档 Opus xhigh</td><td>第 2 档及纯文档 <code>gpt-6.1-sol</code> medium；第 3 档 <code>gpt-6-astra</code> high；第 4 档 <code>gpt-6-astra</code> xhigh</td></tr>
       </tbody>
     </table>
   </div>
+  <p class="prose"><b>Claude 独立池用完后的三级备选策略（2026-11-26 维护者定，#186）。</b></p>
+  <ul class="prose">
+    <li><b>平时优先 Gemini 池</b>：不拿 Claude 跑 <code>monitor</code>/部署/总控/机械活，把少量 Claude 池留给 Gemini 池见底时的第 4 档或跨家族兜底审查。</li>
+    <li><b>Claude 池用完、Gemini 池尚有余量</b>：全线回退 Gemini 池内降档控耗——<code>monitor</code>/部署/机械活锁 <code>gemini-3.8-flash-low|medium</code>；总控降 <code>gemini-4-neon-low</code>（或 <code>gemini-3.8-flash-high</code>）；第 1–2 档用 <code>gemini-4-neon-low</code> / <code>gemini-3.8-flash-high</code>；第 3 档用 <code>gemini-4-neon-medium</code>；第 4 档优先保 <code>gemini-4-neon-high</code>（或配外部 GitHub Codex 主审用 <code>gemini-4-neon-medium</code>，极难项延后到 Gemini 5 小时重置窗口）。</li>
+    <li><b>Gemini 与 Claude 双池均见底</b>：若 <code>gpt-oss-120b-medium</code> 有余量，仅用于纯文档、整理、总控或低风险第 1 档（不做第 4 档核心调度/平台操作，防返工）；暂停新开第 3–4 档并行写手，已有 PR 留单人等外部 GitHub Codex 主审合并，待配额重置后再开新批。</li>
+    <li><b>流程省额配合</b>：#168 拆包后，brief 注明只读目标子模块，不通读全包；等 CI / 等 Codex 主审用单条阻塞等待命令，避免高频多轮轮询重复喂缓存；合并后及时回收已完成 worker。</li>
+  </ul>
   <p class="prose"><b>Codex 派工自动选型（#281）。</b>维护者指定的项优先，其他项按表选；可用组合以当前派工工具为准。模型缺失时找同用途替代，找不到则用环境默认；推理档缺失时取最接近的支持档，等距取低。工具不支持覆盖或档位未知时省略对应参数，沿用环境设置。brief 记实际选择、默认或回退原因；指定组合不可用时说明限制与替代，明确要求必须用时等维护者决定。</p>
   <h3>brief 模板（总控用，10 行以内）</h3>
   <ul class="prose">
