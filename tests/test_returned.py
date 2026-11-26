@@ -799,6 +799,43 @@ class RegLanesTest(Base):
         self.assertEqual({j["id"]: j["status"] for j in snap["jobs"]}["slp_new"], "queued")
         self.assertTrue(any(a["key"].startswith("lock_dead:") for a in snap["alerts"]))
 
+    def test_returned_done_sig_cleared_when_host_becomes_active_again(self):
+        # 第四轮主审意见 #3：已归还主机全跑完缓存了 done_sig 后，若该主机恢复使用（active）、删掉 .done 重跑，
+        # 在用期间必须清掉旧 done_sig；之后若任务未跑完再次归还且清单正文未变，不能命中旧 done_sig 返回 readonly_done，应报 returned_unfinished。
+        from labmon.state import load_json, save_json, state_dir
+        hosts_ret = (f'[[hosts]]\nid = "here"\ndata_root = "{self.d / "data"}"\nshared = ["{self.d}"]\n\n[[hosts]]\nid = "gone"\n'
+                     f'ssh = "nobody@invalid.example"\nreturned = "2026-11-04 18:40"\nshared = ["{self.d}"]\n')
+        hosts_act = (f'[[hosts]]\nid = "here"\ndata_root = "{self.d / "data"}"\nshared = ["{self.d}"]\n\n[[hosts]]\nid = "gone"\n'
+                     f'shared = ["{self.d}"]\n')
+        gold = self.done_list("gold", 3600, jobs=2, done=True)
+        q_ret = {"root": str(gold), "jobs": "jobs/gold.txt", "project": "p1", "stop": None, "gpus": None, "added": "2026-11-01 10:00"}
+        q_act = {"root": str(gold), "jobs": "jobs/gold.txt", "project": "p1", "stop": None, "gpus": None, "added_t": time.time()}
+        cfg = self.cfg()
+        sd = PJ.out_dir("p1") / ".labmon"
+        gk = C.list_path(str(gold), "jobs/gold.txt")
+        # 1) 第一次归还全跑完：记下 done_sig
+        (self.d / "hosts.toml").write_text(hosts_ret)
+        save_json(state_dir() / "snapshot.json", {"regs": [{"host": "here", "state": "active", "stale": False, "t": 0, "queues": []},
+                                                           {"host": "gone", "state": "returned", "stale": False, "t": 0, "queues": [q_ret]}]})
+        C.collect(cfg)
+        self.assertTrue(load_json(sd / "reg_lanes.json", {})[gk].get("done_sig"))
+        # 2) 主机恢复使用（active）并删掉 .done 准备重跑：reg_queues 必须清除旧 done_sig
+        (self.d / "hosts.toml").write_text(hosts_act)
+        for i in range(2):
+            (gold / "state" / f"gold_{i}.done").unlink()
+        save_json(state_dir() / "snapshot.json", {"regs": [{"host": "here", "state": "active", "stale": False, "t": 0, "queues": []},
+                                                           {"host": "gone", "state": "active", "stale": False, "t": 0, "queues": [q_act]}]})
+        snap_act = C.collect(cfg)
+        self.assertNotIn("done_sig", load_json(sd / "reg_lanes.json", {})[gk])
+        self.assertEqual([j["status"] for j in snap_act["jobs"]], ["queued", "queued"])
+        # 3) 任务还没跑完再次归还（清单正文未变）：不得命中旧 done_sig，必须显示车道并报 returned_unfinished
+        (self.d / "hosts.toml").write_text(hosts_ret)
+        save_json(state_dir() / "snapshot.json", {"regs": [{"host": "here", "state": "active", "stale": False, "t": 0, "queues": []},
+                                                           {"host": "gone", "state": "returned", "stale": False, "t": 0, "queues": [q_ret]}]})
+        snap_ret2 = C.collect(cfg)
+        self.assertIn("gold/jobs/gold.txt", [ln["id"] for ln in snap_ret2["lanes"]])
+        self.assertTrue(any(a["key"].startswith("returned_unfinished:gold/jobs/gold.txt:gone:") for a in snap_ret2["alerts"]))
+
     def test_wait_targets_hosts_with_lanes(self):
         # labmon wait 的主机定向按项目快照的主机（登记带来的主机也算），不看 monitor.toml
         from labmon.waits import wait_check

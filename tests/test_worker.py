@@ -8331,6 +8331,26 @@ class IdleSleepTest(UnitBase):
                 except OSError:
                     pass
 
+    def test_pool_opars_retries_after_transient_read_error(self):
+        # 第四轮主审意见 #1：算力池 par=2 清单在 list_of 命中缓存但读取 par 发生临时 I/O 错误时，
+        # 不能把缺省 par=1 缓存进 opars；恢复可读后应读出 par=2 并把无依赖的 B 放进窗口。
+        qp, = self.hosts.queues({"p": ["# labmon: par=2", "A|true   # gpus=0 after=B", "B|true   # gpus=0"]}, "pa")
+        os.makedirs(qp["state"], exist_ok=True)
+        self.assertEqual(self.add(qp, host="pool")[0], 0)
+        # 先预热 list_of 缓存，但清空 opars（模拟 list_of 缓存命中而本次读取 par 遇到临时读失败）
+        self.assertIsNotNone(self.w.list_of(qp["jobs_path"]))
+        self.w.opars.clear()
+        real_read = self.m.common.read
+        with mock.patch.object(self.m.common, "read", side_effect=lambda p, default=None: default if str(p) == str(qp["jobs_path"]) else real_read(p, default)):
+            self.w.pool_todo(self.hosts.now())
+        # 临时读取失败不得把 par=1 写进 opars
+        self.assertNotIn(qp["jobs_path"], self.w.opars)
+        # 恢复正常后，下一轮读出 par=2，win 包含 (A, B)，pool_view 选中无依赖的 B
+        self.w.pool_todo(self.hosts.now())
+        h = next(x for x in self.w.pool_heads if x["root"] == qp["root"])
+        self.assertEqual(len(h.get("win") or []), 2)
+        self.assertEqual([n for n, _ in h["win"]], ["A", "B"])
+
 
 class WorkerPackageTest(unittest.TestCase):
     """#168 第 1 步：worker 拆成 labmon/worker/ 子包后，默认路径、薄入口转发与模块级打桩透传均保持与原单文件一致。"""

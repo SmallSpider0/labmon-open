@@ -972,7 +972,7 @@ function jobDetails() {
   const actL = D.lanes.filter(l => !l.done_lane), doneL = D.lanes.filter(l => l.done_lane);
   const foldDone = doneL.length && (actL.length || doneL.length > 3);
   for (const l of foldDone ? actL : D.lanes) s += laneBlock(l);
-  if (foldDone) s += `<details class="dlane-more" style="margin-top:6px"><summary class="sm mut" style="cursor:pointer;padding:4px 0">另有 ${doneL.length} 条已跑完的车道（${sum(doneL.map(l => l.total || 0))} 个任务）</summary>${doneL.map(laneBlock).join("")}</details>`;
+  if (foldDone) s += `<details class="dlane-more" ${SS.get("dlaneOpen", false) ? "open" : ""} style="margin-top:6px"><summary class="sm mut" style="cursor:pointer;padding:4px 0">另有 ${doneL.length} 条已跑完的车道（${sum(doneL.map(l => l.total || 0))} 个任务）</summary>${doneL.map(laneBlock).join("")}</details>`;
   return `<details class="jobs" ${SS.get("jobsOpen", false) ? "open" : ""}><summary>任务明细（${D.jobs.length}）</summary>${s}</details>`;
 }
 
@@ -1006,6 +1006,7 @@ tipBind({
 function saveView() {
   SS.set("scroll", window.scrollY);
   const j = document.querySelector("details.jobs"); if (j) SS.set("jobsOpen", j.open);
+  const dl = document.querySelector("details.dlane-more"); if (dl) SS.set("dlaneOpen", dl.open);
   const r = document.querySelector("details.res"); if (r) SS.set("resOpen", r.open);
   const gd = document.querySelector("details.gdone"); if (gd) SS.set("gdone", gd.open);
   const ag = document.querySelector("details.agal"); if (ag) SS.set("agal", ag.open);
@@ -1040,9 +1041,13 @@ document.addEventListener("click", e => {
     LS.set("gfilter", "");
     const m = SS.get("more", {}); m[j.lane] = 1; SS.set("more", m);
     const o = new Set(SS.get("open", D.lanes.map(l => l.id))); o.add(j.lane); SS.set("open", [...o]);
+    if (D.lanes.find(l => l.id === j.lane)?.done_lane) SS.set("dlaneOpen", true);
     SS.set("jobsOpen", true); render();
     const row = document.getElementById("job-" + id);
-    if (row) { row.classList.add("hl"); row.scrollIntoView({block: "center"}); setTimeout(() => row.classList.remove("hl"), 2500); }
+    if (row) {
+      for (let p = row.closest?.("details"); p; p = p.parentElement?.closest?.("details")) p.open = true;
+      row.classList.add("hl"); row.scrollIntoView({block: "center"}); setTimeout(() => row.classList.remove("hl"), 2500);
+    }
   }
 });
 document.addEventListener("toggle", e => { if (e.target.matches?.("details")) saveView(); }, true);

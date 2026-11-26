@@ -1150,11 +1150,15 @@ class SchedMixin:
             n, h = left[0] if left else (None, {})          # 队首：看板放之前看它还有没有、依赖满足没有（pool_view）；都跑完了的也列（n 为 0）
             jsig = _P.file_sig(q["jobs_path"])
             cp = self.opars.get(q["jobs_path"])
+            par_ok = True
             if cp and cp[0] == jsig:
                 par = cp[1]
             else:
-                par = _Q.list_par(_C.read(q["jobs_path"], "") or "")   # 并行清单（#147）：窗口里前 par 行哪一行依赖满足都能放
-                self.opars[q["jobs_path"]] = (jsig, par)
+                ptxt = _C.read(q["jobs_path"], None)
+                par_ok = ptxt is not None
+                par = _Q.list_par(ptxt or "")   # 并行清单（#147）：窗口里前 par 行哪一行依赖满足都能放
+                if par_ok and jsig is not None and _P.file_sig(q["jobs_path"]) == jsig:
+                    self.opars[q["jobs_path"]] = (jsig, par)
             paused = "paused" if ms and "paused" in ms else None
             sleeping = False
             if not left and not away and not paused:
@@ -1162,7 +1166,7 @@ class SchedMixin:
                 if ent is None:
                     since = self._idle_start(q, now, False) if hasattr(self, "_idle_start") else now
                     ent = self.pool_idle[key] = {"since": since, "sig": None, "sleep": False}
-                if now - ent["since"] >= _P.IDLE_REG_S and q.get("_env_ok", True) and (ms is not None or not os.path.exists(q["state"])) and jsig0 is not None and jsig == jsig0:
+                if now - ent["since"] >= _P.IDLE_REG_S and par_ok and q.get("_env_ok", True) and (ms is not None or not os.path.exists(q["state"])) and jsig0 is not None and jsig == jsig0:
                     ent["sig"] = jsig0
                     ent["sleep"] = True
                     sleeping = True

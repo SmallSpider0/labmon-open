@@ -1569,6 +1569,10 @@ t("project", "已跑完的无编号车道（done_lane，#164）：KPI 标注已�
   const tl2 = el(A, "tlbox").innerHTML;
   has(tl2, "done_j1", "点展开后显示已跑完车道");
   has(tl2, "收起已跑完与这段时间没有任务的车道", "展开后收起文案");
+  // 第四轮主审意见 #2：点击时间线里的已跑完任务条时，必须同时展开外层 details.dlane-more，不能让目标行仍藏在折叠里
+  const jrect = {dataset: {id: "done_j1"}, matches: s => s.includes("rect.j"), closest(s) { return s.includes("rect.j") ? this : null; }};
+  fire(A, "click", jrect);
+  has(app(A), '<details class="dlane-more" open', "点击已跑完任务条应展开外层 dlane-more");
 });
 // 时间线上的依赖连线（depLines）：[[等的, 等它的, 类名]]
 const depOf = html => [...html.matchAll(/<g class="dl([^"]*)" data-a="([^"]*)" data-b="([^"]*)"/g)].map(m => [m[2], m[3], m[1].trim().split(" ").filter(Boolean)]);

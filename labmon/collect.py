@@ -84,13 +84,14 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
             act = x.get("state") == "active"
             k, rank = list_path(q["root"], q["jobs"]), (True, q.get("added_t") or 0) if act else (False, q.get("added") or "")
             if k not in found or rank > found[k][0]:
-                found[k] = (rank, x["host"], q)
+                found[k] = (rank, x["host"], x.get("state"), q)
     new = {}
-    for k, (_, hid, q) in found.items():
+    for k, (_, hid, st, q) in found.items():
         om = mem.get(k) or {}
-        keep_done = om.get("host") == hid and om.get("done_sig") is not None
+        # done_sig 仅对同一台仍处于已归还状态且同一份登记的清单有效；主机恢复使用（active）或重新登记后立即失效（#164）
+        keep_done = st == "returned" and om.get("host") == hid and om.get("done_sig") is not None and om.get("reg_added") == q.get("added")
         new[k] = {"id": om.get("id"), "host": hid, "root": q["root"], "jobs": q["jobs"], "first": om.get("first", t), "seen": t,
-                  "reg_t": q.get("added_t"), "reg_stop": q.get("stop"), "sleeping": bool(q.get("sleeping")),
+                  "reg_t": q.get("added_t"), "reg_added": q.get("added"), "reg_stop": q.get("stop"), "sleeping": bool(q.get("sleeping")),
                   **({"done_sig": om["done_sig"], "done_act": om.get("done_act")} if keep_done else {})}
     new.update({k: m for k, m in mem.items() if k not in new and t - m.get("seen", 0) <= REG_KEEP_S})
     unread = {x.get("host") for x in regs or [] if x.get("queues") is None}
