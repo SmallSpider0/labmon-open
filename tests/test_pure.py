@@ -84,6 +84,19 @@ class PureBehaviorTest(unittest.TestCase):
         self.assertEqual(set(P.proc_tree(procs, [10, 999])), {10, 11, 12})
         self.assertEqual(set(P.proc_tree(procs, [20])), {20, 21})
 
+    def test_proc_tree_pgids_and_exclude(self):
+        procs = {
+            1: {"ppid": 0, "pgid": 1},
+            10: {"ppid": 1, "pgid": 10},
+            11: {"ppid": 10, "pgid": 10},
+            12: {"ppid": 11, "pgid": 10},
+            13: {"ppid": 1, "pgid": 10},       # 脱壳孤儿，仍在同 pgid
+            14: {"ppid": 13, "pgid": 14},      # 脱壳孤儿的子进程（改了 pgid）
+            99: {"ppid": 1, "pgid": 99},
+        }
+        self.assertEqual(set(P.proc_tree(procs, [10], pgids=(10,))), {10, 11, 12, 13, 14})
+        self.assertEqual(set(P.proc_tree(procs, [10], pgids=(10,), exclude={11})), {10, 13, 14})
+
     def test_script_arg(self):
         self.assertEqual(P.script_arg(["python3", "-W", "ignore", "./d/../a.py", "--x"], "/w"), ("/w/a.py", 4))
         self.assertEqual(P.script_arg(["python", "-uc", "print(1)"], "/w"), ("-c", 2))

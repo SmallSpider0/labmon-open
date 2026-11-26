@@ -249,8 +249,9 @@ worker 每 5 分钟看一次待跑任务（含正在跑的）`needs=` 声明的�
 
 ## 用量
 
-worker 每轮现读主机容量（各卡显存与利用率、cgroup 内存上限、工作集与收不回的内存 `anon`（用量 − 文件页，含 shmem，不算页缓存，见[准入](#准入)）、CPU 配额、磁盘、容器启动时间），并记每个任务的内存（会话内进程 PSS 之和）、核数与显存
+worker 每轮现读主机容量（各卡显存与利用率、cgroup 内存上限、工作集与收不回的内存 `anon`（用量 − 文件页，含 shmem，不算页缓存，见[准入](#准入)）、CPU 配额、磁盘、容器启动时间），并记每个任务的内存（任务归集进程 PSS 之和）、核数与显存
 （nvidia-smi 给宿主机 PID，经 `/proc/<pid>/sched` 对回容器 PID；3.10 内核可行），写进 `status.json`（运行中任务的开始时刻 `t0`，epoch 秒）。
+任务进程归集（`job_procs` / `proc_tree`，#196）统一排除 worker 自身子树与其他运行中任务根树：单元申请（`slot`）按根进程 PPID 树归集，当根拥有独立进程组（`pgid == root_pid` 且不同于 worker 自身 `pgid`）时并入同 `pgid` 进程及其子孙（中间进程退出导致工作进程脱壳成 `ppid=1` 也不漏计；共享 `pgid` 时不按 `pgid` 合并，避免误拉）；清单任务（及旧 `gpu_queue.sh` 任务）按 PPID 树并入独立会话（`sid == root_pid` 且不同于 worker 自身 `sid`）与独立进程组进程及其子孙，已归属单元的进程不重复记。
 对不上的计算进程记为“labmon 之外”。旧 `gpu_queue.sh` 正在跑的任务也统计（`external`，开始时刻 `t0` 从状态目录的 `current` 换算）。
 
 任务结束时写一行到 `usage.jsonl`：起止 `t0` / `t1`（epoch 秒）、项目、峰值显存与内存、平均核数、运行期间所用卡的平均利用率（`gpu_util`）、时长 `min`（已扣除运行期间 SIGSTOP 挂起时长，另记挂起秒数 `sus`；挂起时长由 `measure` 按进程树 `T` 状态累计在 `use.sus_s` 中，worker 重启接管时找回；旧行没有 `sus` 不迁移，#149）、退出码、估时、GPU 型号、

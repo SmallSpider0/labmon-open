@@ -101,16 +101,32 @@ def mem_unevictable(use, active_file, inactive_file):
     return max(0, use - active_file - inactive_file)
 
 
-def proc_tree(procs, roots):
+def proc_tree(procs, roots, *, pgids=(), exclude=()):
     """roots 里的进程与它们的子孙（procs 进程表里有的；不在表里的根不算）。
-    worker 单元与保活进程树、看板组内服务器保活进程树（fleet.analyze）共用。"""
+    pgids 给了时，procs 里 pgid 在 pgids 里的进程也并作起点一起展开其子孙；
+    exclude 里的进程及其子孙（遇到 roots 中不在 exclude 里的进程时停住，不误伤嵌套子任务）不纳入。
+    worker 任务与保活进程树、看板组内服务器保活进程树（fleet.analyze）共用。"""
     kids = {}
     for pid, p in procs.items():
         kids.setdefault(p["ppid"], []).append(pid)
-    out, seen, todo = [], set(), [pid for pid in roots if pid in procs]
+    excl = set()
+    if exclude:
+        excl_in = set(exclude)
+        keep = set(roots) - excl_in
+        etodo = list(excl_in)
+        while etodo:
+            x = etodo.pop()
+            if x not in excl and x not in keep:
+                excl.add(x)
+                etodo += kids.get(x, [])
+    pg = set(pgids) if pgids else set()
+    todo = [pid for pid in roots if pid in procs and pid not in excl]
+    if pg:
+        todo += [pid for pid, p in procs.items() if p.get("pgid") in pg and pid not in excl]
+    out, seen = [], set()
     while todo:
         x = todo.pop()
-        if x not in seen:
+        if x not in seen and x not in excl:
             seen.add(x)
             out.append(x)
             todo += kids.get(x, [])

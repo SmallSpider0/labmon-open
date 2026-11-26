@@ -134,7 +134,7 @@
 | 125 | 拖动排顺序 | common.js 的 `sortBind`（`SORT`、`sortMove`、`sortEnd`）；计划项排顺序经它（overview_js/project.js） |
 | 126 | 本机存的设置 | `mkStore(前缀, 存储)`（common.js）给 `get(k, d)` / `set(k, v)` |
 | 127 | worker 读的用量历史；写一行 | worker 的 `load_hist`；`Worker.usage_rec`（`finish`、`gang_doomed`） |
-| 128 | 任务的 CPU、读写与挂起测量；一棵进程树这一段用掉的 CPU | worker 的 `measure`（`proc_io`、`PEAK_WIN`、`use.sus_s`）、`job_sus`（`usage_rec`、`finish`、`run_end`、`run_tot` 共用）、`cpu_since`（`Worker.ka_cores`）；页面上 `ioText`（overview_js/home.js） |
+| 128 | 任务的进程归集、CPU、读写与挂起测量；一棵进程树这一段用掉的 CPU | `worker.pure.proc_tree`（支持 `pgids` 与 `exclude`，任务与保活共用）；worker 的 `scan_procs`（含 `pgid`）、`job_procs`、`measure`（`proc_io`、`PEAK_WIN`、`use.sus_s`）、`job_sus`（`usage_rec`、`finish`、`run_end`、`run_tot` 共用）、`cpu_since`（`Worker.ka_cores`）；页面上 `ioText`（overview_js/home.js） |
 | 129 | 主机的 CPU 与读写压力；共享盘慢的基线；共享盘此刻慢不慢 | worker 的 `Worker.press`（`press_raw`、`press_rates`、`nfs_counts`、`local_dev`、`disk_counts`、`psi`）、`io_base`、`nfs_slow`（`info.press.nfs.slow`、`sample`、`Worker.slow`）；看板曲线 `overview._series` 的 `thr`、`nfs`、`busy`、`anon` |
 | 130 | 容器 CPU 限流与超核的任务 | worker 的 `thr_step`（`Worker.press`、`thr_since`、`load_prev`）、`cpu_over`、`Worker.throttle`（`throttle`）；看板项目告警 `collect._host_alerts` 的 `throttle:`；页面上 `thrText`、`thrTag`、`thrOver`（overview_js/core.js、`alertsOf`） |
 | 131 | GPU 利用率的两种口径；近 24 小时平均；项目自己的平均利用率；页面上的利用率文字 | worker 的 `win_mean`（`Worker.util_window` 记 `uwin`、`bwin`；状态的 `util10`、`gpu_busy`（`Worker.busy_view`））；看板 `overview.gpu_busy`、项目快照的 `hosts[].busy`、`history[].busy`（`collect._hosts`）、`collect.gpu_mine`（`u`）；自用主机样本的 `gpus[].busy`（`fleet.from_worker`）；页面上 `utilText`、`utilAvg`、`utilMine`、`gpuBusy`（common.js），组内页取样本的 `fUtil`、`fCardU`（overview_js/fleet.js） |
@@ -453,7 +453,7 @@
    实现：`mkStore(前缀, 存储)`（common.js）给 `get(k, d)` / `set(k, v)`
 127. **worker 读的用量历史；写一行**：worker 读的用量历史（各主机的 `usage.jsonl` 一起看）；写一行（任务结束、没开跑就跟着同伴记失败的成组成员）
    实现：worker 的 `load_hist`；`Worker.usage_rec`（`finish`、`gang_doomed` 共用）
-128. **任务的 CPU、读写与挂起测量；一棵进程树这一段用掉的 CPU**：任务的 CPU、读写与挂起测量（进程树 `/proc/<pid>/io` 与 CPU 累计求和、此刻速率、1 分钟峰值、累计字节；进程树任一进程处于 `T` 状态（SIGSTOP）时累计挂起秒数 `use.sus_s`，重启接管找回，`usage_rec` 的 `min`、`finish` 日志、`run_end` 与 `run_tot` 统一扣除，用量行另记 `sus` 秒，#149）；一棵进程树这一段用掉的 CPU（累计之和求差，负数按 0；保活进程树的核数也用它）
+128. **任务的进程归集、CPU、读写与挂起测量；一棵进程树这一段用掉的 CPU**：任务进程归集统一走 `worker.pure.proc_tree`（支持 `pgids` 与 `exclude`）与 `job_procs`（`scan_procs` 顺带解析 `/proc/<pid>/stat` 的 `pgid`）：单元申请（`slot`）先归集，默认按根进程 PPID 树认，当根拥有独立进程组（`pgid == root_pid` 且不同于 worker 自身 `pgid`）时并入同 `pgid` 进程及其子孙（避免脱壳/孤儿子进程漏计，同时防止共享 `pgid` 误拉）；清单任务（及旧 `gpu_queue.sh` 任务）按 PPID 树并入独立会话（`sid == root_pid` 且不同于 worker 自身 `sid`）与独立进程组进程及其子孙，排除 worker 自身子树、其他运行中任务根树及已归属进程（#196）。任务的 CPU、读写与挂起测量（归集进程 `/proc/<pid>/io` 与 CPU 累计求和、此刻速率、1 分钟峰值、累计字节；任一进程处于 `T` 状态（SIGSTOP）时累计挂起秒数 `use.sus_s`，重启接管找回，`usage_rec` 的 `min`、`finish` 日志、`run_end` 与 `run_tot` 统一扣除，用量行另记 `sus` 秒，#149）；一棵进程树这一段用掉的 CPU（累计之和求差，负数按 0；保活进程树的核数也用它）
    实现：worker 的 `measure`（`proc_io`、`PEAK_WIN`、`use.sus_s`）、`job_sus`（`Worker.usage_rec`、`Worker.finish`、`Worker.run_end`、`run_tot` 共用）、`cpu_since`（`Worker.ka_cores` 也调）；页面上 `ioText`（overview_js/home.js）
 129. **主机的 CPU 与读写压力；共享盘慢的基线；共享盘此刻慢不慢**：主机的 CPU 与读写压力（CPU 限流、共享盘每次读写的执行时间、本地盘忙碌、PSI：近 1 分钟的此刻值与每 5 分钟一行的 `press.jsonl`）；共享盘慢的基线（近 14 天每秒不少于 2 次的样本的 95 分位、不低于 20 ms、样本不够时取 20 ms）；共享盘此刻慢不慢（超过基线且每秒不少于 `IO_MIN_OPS` 次）
    实现：worker 的 `Worker.press`（`press_raw`、`press_rates`、`nfs_counts`、`local_dev`、`disk_counts`、`psi`）、`io_base`、`nfs_slow`（状态的 `info.press.nfs.slow`，`sample` 记进 `Worker.slow`）；看板曲线 `overview._series` 的 `thr`、`nfs`、`busy`、`anon`

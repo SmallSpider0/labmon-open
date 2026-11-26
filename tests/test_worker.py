@@ -6048,10 +6048,10 @@ class DurationTest(unittest.TestCase):
 class UsageTest(unittest.TestCase):
     """用假 /proc、假 cgroup 与假 nvidia-smi 核对主机现状与每个任务的用量归属。"""
 
-    def proc(self, pid, comm, sid, hpid, ticks=0, pss_kb=None, start=0, ppid=1):
+    def proc(self, pid, comm, sid, hpid, ticks=0, pss_kb=None, start=0, ppid=1, pgid=None):
         d = self.p / str(pid)
-        d.mkdir()
-        f = ["S", str(ppid), str(sid), str(sid)] + ["0"] * 7 + [str(ticks), "0", "0", "0"] + ["0"] * 4 + [str(start)]
+        d.mkdir(exist_ok=True)
+        f = ["S", str(ppid), str(sid if pgid is None else pgid), str(sid)] + ["0"] * 7 + [str(ticks), "0", "0", "0"] + ["0"] * 4 + [str(start)]
         (d / "stat").write_text(f"{pid} ({comm}) " + " ".join(f) + " 0 0\n")
         (d / "sched").write_text(f"{comm} ({hpid}, #threads: 1)\n---\n")
         (d / "cmdline").write_text(comm)
@@ -6110,6 +6110,108 @@ class UsageTest(unittest.TestCase):
             self.assertEqual(h["cpu_quota"], 17.0)
             self.assertEqual(h["started"], 1005.0)
             self.assertEqual(h["gpus"][0]["used"], 28000.0)
+
+    def test_sample_orphan_pgid_worker_attributed_to_job(self):
+        """#196：中间进程退出后工作进程脱壳成 ppid=1、仍在独立 pgid=root_pid 内时，CPU/内存/GPU 均正确归属任务，不漏计进 other_cpu。"""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            self.p = d / "proc"
+            self.p.mkdir()
+            (self.p / "stat").write_text("cpu 1 2 3\nbtime 1000\n")
+            self.proc(1, "sh", 1, 44101, start=500)
+            # 独立进程组的单元任务（pid=100, pgid=100, sid=50）：中间进程已退，工作进程 102 脱壳（ppid=1, pgid=100），其子进程 103 改了 pgid=103
+            self.proc(100, "wrapper", 50, 5100, ticks=0, pss_kb=5 * 1024, ppid=1, pgid=100)
+            self.proc(102, "worker", 50, 5102, ticks=0, pss_kb=1024 * 1024, ppid=1, pgid=100)
+            self.proc(103, "helper", 50, 5103, ticks=0, pss_kb=512 * 1024, ppid=102, pgid=103)
+            cgm = d / "cg" / "memory"
+            cgm.mkdir(parents=True)
+            (cgm / "memory.limit_in_bytes").write_text(str(64 * 2 ** 30))
+            (cgm / "memory.usage_in_bytes").write_text(str(4 * 2 ** 30))
+            (cgm / "memory.stat").write_text("total_active_file 0\ntotal_inactive_file 0\n")
+            cgc = d / "cg" / "cpu"
+            cgc.mkdir()
+            (cgc / "cpu.cfs_quota_us").write_text("1700000")
+            (cgc / "cpu.cfs_period_us").write_text("100000")
+            cga = d / "cg" / "cpuacct"
+            cga.mkdir()
+            (cga / "cpuacct.usage").write_text("0")
+            m = worker_module(d, LABMON_PROC=str(self.p), LABMON_CGROUP=str(d / "cg"))
+            clk = os.sysconf("SC_CLK_TCK")
+            env = {"LABMON_GPUS": "GPU-aaa:20000:48000:80", "LABMON_GPU_APPS": "5102:4096:GPU-aaa"}
+            os.environ.update(env)
+            now = [10000.0]
+            old_time = m.time.time
+            m.time.time = lambda: now[0]
+            try:
+                w = m.Worker("t")
+                w.running["u"] = {"name": "job_a", "kind": "slot", "project": "p", "pid": 100, "t0": now[0], "gpus": ["GPU-aaa"], "use": {}}
+                ps = m.scan_procs()
+                self.assertEqual((ps[100]["pgid"], ps[102]["pgid"], ps[103]["pgid"]), (100, 100, 103))
+                w.sample([])
+                # 10 秒后：脱壳工作进程 102 跑了 15 核（150 CPU 秒），子进程 103 跑了 1 核（10 CPU 秒），容器总计 16 核
+                now[0] += 10.0
+                self.proc(102, "worker", 50, 5102, ticks=150 * clk, pss_kb=1024 * 1024, ppid=1, pgid=100)
+                self.proc(103, "helper", 50, 5103, ticks=10 * clk, pss_kb=512 * 1024, ppid=102, pgid=103)
+                (cga / "cpuacct.usage").write_text(str(160 * 10 ** 9))
+                w.sample([])
+            finally:
+                m.time.time = old_time
+                for k in env:
+                    os.environ.pop(k)
+            u = w.running["u"]["use"]
+            self.assertEqual(u["nproc"], 3)
+            self.assertAlmostEqual(u["cores"], 16.0, delta=0.1)
+            self.assertAlmostEqual(u["ram"], 3.01, delta=0.05)     # 10 MiB + 2 GiB + 1 GiB（smaps 两段各 pss_kb）
+            self.assertEqual(u["vram"], 4096.0)
+            self.assertEqual({g["hpid"]: (g["owner"], g["pid"]) for g in w.gprocs}, {5102: ("job", 102)})
+            self.assertLess(w.other["cpu"], 0.2)                   # 不再把 16 核误算成 labmon 之外
+            self.assertAlmostEqual(w.other["ram"], 0.99, delta=0.1)
+
+    def test_job_procs_safety_boundaries(self):
+        """#196：slot 非独立 pgid 不误拉同组进程；不拉入 worker 自身；清单任务树内 setsid 子进程与监督进程下独立 pgid slot 均正确归集；无独立 sid 旧任务不误拉共享会话。"""
+        with tempfile.TemporaryDirectory() as td:
+            m = worker_module(Path(td))
+            procs = {
+                1: {"ppid": 0, "pgid": 1, "sid": 1},
+                # worker 自身与临时子进程（如 nvidia-smi）
+                50: {"ppid": 1, "pgid": 50, "sid": 50},
+                51: {"ppid": 50, "pgid": 50, "sid": 50},
+                # 场景 A：普通 slot 201 与 200/202 共享 pgid=200（非独立 pgid）
+                200: {"ppid": 1, "pgid": 200, "sid": 200},
+                201: {"ppid": 200, "pgid": 200, "sid": 200},
+                202: {"ppid": 200, "pgid": 200, "sid": 200},
+                203: {"ppid": 201, "pgid": 200, "sid": 200},
+                # 场景 B：清单任务 100 下子进程 101 调了 setsid（sid=101），孙进程 102 在其下；另有脱壳孤儿 103（ppid=1, pgid=100, sid=100）
+                100: {"ppid": 50, "pgid": 100, "sid": 100},
+                101: {"ppid": 100, "pgid": 101, "sid": 101},
+                102: {"ppid": 101, "pgid": 101, "sid": 101},
+                103: {"ppid": 1, "pgid": 100, "sid": 100},
+                # 场景 C：接管的旧 gpu_queue.sh 任务 300 与同会话 299/301 共享 sid=299、pgid=299
+                299: {"ppid": 1, "pgid": 299, "sid": 299},
+                300: {"ppid": 299, "pgid": 299, "sid": 299},
+                301: {"ppid": 299, "pgid": 299, "sid": 299},
+                302: {"ppid": 300, "pgid": 299, "sid": 299},
+                # 场景 D：监督进程清单任务 400 启动带独立 pgid=401 的 slot 401，其脱壳进程 402（ppid=1, pgid=401, sid=400）归 slot 不归 400
+                400: {"ppid": 50, "pgid": 400, "sid": 400},
+                401: {"ppid": 400, "pgid": 401, "sid": 400},
+                402: {"ppid": 1, "pgid": 401, "sid": 400},
+            }
+            j_slot = {"kind": "slot", "pid": 201}
+            j_queue = {"kind": "queue", "pid": 100}
+            j_ext = {"ext": True, "pid": 300}
+            j_sup = {"kind": "queue", "pid": 400}
+            j_sup_slot = {"kind": "slot", "pid": 401}
+            res = m.job_procs(procs, [j_slot, j_queue, j_ext, j_sup, j_sup_slot], self_pid=50)
+            self.assertEqual(set(res[id(j_slot)]), {201, 203})           # 不误拉 200、202
+            self.assertEqual(set(res[id(j_queue)]), {100, 101, 102, 103})  # setsid 子进程与脱壳孤儿均纳入，不含 50/51
+            self.assertEqual(set(res[id(j_ext)]), {300, 302})            # 不误拉共享会话的 299、301
+            self.assertEqual(set(res[id(j_sup_slot)]), {401, 402})       # 独立 pgid slot 纳入脱壳进程 402
+            self.assertEqual(set(res[id(j_sup)]), {400})                 # 监督进程不重复计 401、402
+            # 即使某任务与 worker 共享 pgid/sid，也绝不拉入 worker 自身或临时子进程
+            procs_w = {50: {"ppid": 1, "pgid": 50, "sid": 50}, 51: {"ppid": 50, "pgid": 50, "sid": 50},
+                       52: {"ppid": 1, "pgid": 50, "sid": 50}}
+            j_w = {"kind": "slot", "pid": 52}
+            self.assertEqual(set(m.job_procs(procs_w, [j_w], self_pid=50)[id(j_w)]), {52})
 
     def test_guest_keepalive_tree_is_ours(self):
         """借来的主机（#29）：保活带两个 fork 出来的 DataLoader 子进程，整棵进程树的 PSS 都是我们的，不算对方的内存。
