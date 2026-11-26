@@ -231,9 +231,10 @@ def update(hosts: list[dict], t: float | None = None, cfg: dict | None = None) -
         if u not in units and s[-1][1] == 0 and s[-1][0] >= now - 7 * 86400:
             rel = u[len(root):].lstrip("/") if u.startswith(root) else u
             top = rel.split("/", 1)[0] or "."
-            o = by.setdefault(owner_of(top, sets["owners"], names), {"dirs": set(), "units": []})
             g = dead[u] = (-_at(s, now - 86400), -_at(s, now - 7 * 86400))
-            o.setdefault("gone", []).append({"u": rel, "d24": g[0], "d7": g[1]})
+            o = by.get(owner_of(top, sets["owners"], names))
+            if o is not None:
+                o.setdefault("gone", []).append({"u": rel, "d24": g[0], "d7": g[1]})
     hrs = _rows("hours.jsonl")
     out = []
     for name, o in by.items():
@@ -258,7 +259,8 @@ def update(hosts: list[dict], t: float | None = None, cfg: dict | None = None) -
     v = {"root": root, "scanner": ix.get("host"), "at": ix.get("t"), "df": df, "owners": out,
          "eta": _eta(hrs, df, t - 86400), "eta7": _eta(hrs, df, t - 7 * 86400),
          "units": len(units), "pending": sum(o["pending"] for o in out), "unscanned": max(0, df["used"] - scanned),
-         "d24": sum(o["d24"] for o in out), "d7": sum(o["d7"] for o in out), "cold": sum(o["cold"] for o in out),
+         "d24": sum(g[0] for g in grow.values()) + sum(g[0] for g in dead.values()),
+         "d7": sum(g[1] for g in grow.values()) + sum(g[1] for g in dead.values()), "cold": sum(o["cold"] for o in out),
          "hist": [[r["t"], r["used"]] for r in hrs if r["t"] >= t - 30 * 86400],
          "warn_gb": dc.get("warn_gb", WARN_GB), "soon_days": dc.get("soon_days", SOON_D), "burst_gb": dc.get("burst_gb", BURST_GB),
          "bigwrite_gb": dc.get("bigwrite_gb", BIGWRITE_GB), "names": names, "owners_set": sets["owners"],

@@ -842,6 +842,12 @@ t("overview", "共享盘的两张表（#108）：长目录名折行、不把「�
   for (const c of ["7 天", "近 30 天", "文件数", "最近修改"]) has(hd, `hide-sm">${c}</th>`, "窄屏收起 " + c);
   for (const c of ["24 小时", "90 天没改", "统计于"]) has(hd, `<th class="r">${c}</th>`, "窄屏留着 " + c);
   ok(!/<td class="nw"><i class="dot"/.test(hd), "按人表第一列不该 nowrap：长目录名会把右边几列挤出去");
+  // #179：只剩已删除单位、没有现存单位（t0 为空且 pending 为 0）的行不出现在「按人」表里，不出现「还没扫（0 个」
+  ok(!hd.includes("EXPORT_GONE"), "只剩已删除单位的行不该出现在按人表里");
+  ok(!hd.includes("还没扫（0 个"), "不该出现自相矛盾的「还没扫（0 个」");
+  has(hd, "stray_dir", "仍有待扫目录的行照常显示");
+  has(hd, "还没扫（3 个目录排着）", "pending > 0 时照常写还没扫");
+  ok(run(O, 'diskLine("EXPORT_GONE")') === "", "人员卡不该把只剩已删除单位的行写成待扫描");
 });
 t("overview", "共享盘增长的关注档（#108）：7 天内占满或暴涨告警「暴涨」，30 天内「在涨」，不只靠颜色、不借告警红", () => {
   const G = 2 ** 30, free = run(O, "D.disk.df.free"), lv = x => run(O, `diskHeat(${JSON.stringify(x)})?.lv ?? null`);
