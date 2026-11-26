@@ -1883,7 +1883,8 @@ class DiskTest(unittest.TestCase):
                 v, msgs = DK.update(hosts(130, t1), t1, cfg)
                 by = {o["name"]: o for o in v["owners"]}
                 self.assertEqual(round(by["BOB"]["d24"] / G), 70)                  # 原有目录 +50，新建的 +20
-                self.assertEqual(round(by["adg"]["d24"] / G), -10)                 # 删掉的目录算负的
+                self.assertNotIn("adg", by)                                        # 整个删掉的目录不再单独列在按人表里（#179）
+                self.assertEqual(round(v["d24"] / G), 60)                          # 删掉释放的 -10 GiB 仍算进总近 24 小时增量
                 self.assertEqual(len(msgs), 1)
                 self.assertIn("BOB 近 24 小时共享盘 +70 GiB", msgs[0])
                 self.assertEqual(DK.update(hosts(130, t1 + 60), t1 + 60, cfg)[1], [])   # 已报过，不重报
@@ -1901,6 +1902,42 @@ class DiskTest(unittest.TestCase):
                 self.assertTrue(any("超过提醒线 1 GiB" in m for m in evs), evs)
                 hrs = load_rows(Path(td) / "overview" / "fleet" / "disk" / "hours.jsonl")
                 self.assertEqual(len(hrs), 2)                                      # 每小时一行
+            finally:
+                for k, v in old.items():
+                    os.environ.pop(k) if v is None else os.environ.__setitem__(k, v)
+
+    def test_gone_only_owner_omitted(self):
+        # #179：整个一级目录被删掉、只剩已删除单位时，不再进 v["owners"]，释放空间仍计入总 d24/d7；
+        # 仍有现存单位的人删掉部分子目录时，照常留在 v["owners"] 并扣减自己的 d24/d7；未扫的现存目录照常保留 pending。
+        from labmon import disk as DK
+        G = 2 ** 30
+        with tempfile.TemporaryDirectory() as td:
+            env = {"LABMON_STATE": td, "LABMON_HOSTS": str(Path(td) / "none.toml")}
+            old = {k: os.environ.get(k) for k in env}
+            os.environ.update(env)
+            try:
+                t0 = 1_800_000_000
+                (Path(td) / "overview" / "fleet").mkdir(parents=True)
+                save_json(Path(td) / "overview" / "fleet" / "people.json", {"BOB": {}})
+                cfg = {"servers": [], "disk": {}}
+                u = lambda b, t: {"b": b * G, "n": 1, "m": t, "age": [b * G, 0, 0, 0, 0], "t": t, "s": 1}
+                hosts = lambda t: [{"id": "h", "status": {"t": t, "info": {"disk": [{"path": "/r/bob", "free": 500, "total": 1000}]}}}]
+                ix1 = {"root": "/r", "host": "h", "t": t0, "listed": t0, "split": [],
+                       "units": {"/r/bob/keep": u(20, t0), "/r/bob/drop": u(8, t0), "/r/export_gone/a": u(12, t0)}}
+                DK.absorb("1\n" + json.dumps(ix1), t0)
+                DK.update(hosts(t0), t0, cfg)
+                t1 = t0 + 3600
+                ix2 = {"root": "/r", "host": "h", "t": t1, "listed": t1, "split": [],
+                       "units": {"/r/bob/keep": u(20, t0), "/r/new_dir/wait": {"b": None, "t": None}}}
+                DK.absorb("2\n" + json.dumps(ix2), t1)
+                v, _ = DK.update(hosts(t1), t1, cfg)
+                by = {o["name"]: o for o in v["owners"]}
+                self.assertNotIn("export_gone", by)
+                self.assertEqual(round(by["BOB"]["d24"] / G), -8)
+                self.assertEqual(round(by["BOB"]["d7"] / G), -8)
+                self.assertEqual((by["new_dir"]["t0"], by["new_dir"]["pending"]), (None, 1))
+                self.assertEqual(round(v["d24"] / G), -20)                         # BOB -8 + export_gone -12
+                self.assertEqual(round(v["d7"] / G), -20)
             finally:
                 for k, v in old.items():
                     os.environ.pop(k) if v is None else os.environ.__setitem__(k, v)

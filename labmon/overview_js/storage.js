@@ -152,7 +152,7 @@ function diskTab() {
       ${kpi("90 天没改过", `${GB(K.cold)}<small> GiB</small>`, K.owners.filter(o => o.cold > GIB).sort((a, b) => b.cold - a.cold).slice(0, 2).map(o => `${esc(o.name)} ${GB(o.cold)}`).join(" · ") || "—")}</div>
     ${diskBar(K)}<div class="sm mut" style="margin-top:6px">${esc(diskProg(K))}</div>
     ${al.length ? `<div class="alerts" style="margin-top:8px">${al.map(a => `<div>⚠ ${esc(a.msg)}</div>`).join("")}</div>` : ""}</div>`;
-  const rows = K.owners.map(o => { const h = o.t0 == null ? null : diskHeat(o, burstOf(o.name));
+  const rows = K.owners.filter(o => o.t0 != null || o.pending > 0).map(o => { const h = o.t0 == null ? null : diskHeat(o, burstOf(o.name));
     return o.t0 == null ? `<tr class="link" tabindex="0" data-drw="${esc(DH.person(o.name))}">
       <td><i class="dot" style="background:${DKC(o.name)}"></i> <b>${esc(o.name)}</b>${o.person || o.public ? "" : ` <span class="sm mut nw">目录</span>`}</td>
       <td colspan="8" class="sm mut">还没扫（${o.pending} 个目录排着）</td></tr>` : `<tr class="link${h ? " heat-" + h.lv : ""}" tabindex="0" data-drw="${esc(DH.person(o.name))}">
@@ -168,7 +168,7 @@ function diskTab() {
 // 人员卡上的一行
 function diskLine(n) {
   const o = diskOf(n);
-  if (!o) return "";
+  if (!o || (o.t0 == null && !(o.pending > 0))) return "";
   const total = o.t0 == null ? "待扫描" : `${GB(o.b)} GiB`;
   const title = `共享盘：${o.dirs.map(d => d + "/").join("、")}${o.pending ? `\n还有 ${o.pending} 个目录没扫` : ""}`;
   const alert = o.over ? '<span style="color:var(--bad)">超线</span>' : heatTag(diskHeat(o, burstOf(n)));
