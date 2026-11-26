@@ -718,11 +718,12 @@ def from_worker(st: dict, cfg: dict | None, holder: str | None = None, *, job_ow
     root：worker 量的容器根盘（info.rootfs：已用、总量、测不测得准、容器私有的 /dev/shm，与探针同形）。
     fleetboot.mine 给平台操作用的 state（有任务在跑就算 job、labmon 之外的一律未识别）是另一回事，不用这个。"""
     info, gp = st.get("info") or {}, st.get("gpu_procs") or []
-    kind = lambda p: "keepalive" if p.get("owner") == "keepalive" else "job" if p.get("owner") == "job" or p.get("pid") is not None else "unknown"  # noqa: E731
+    is_ka = lambda p: p.get("owner") == "keepalive" or bool(p.get("ka"))  # noqa: E731
+    kind = lambda p: "keepalive" if is_ka(p) else "job" if p.get("owner") == "job" or p.get("pid") is not None else "unknown"  # noqa: E731
     kinds = {kind(p) for p in gp}
     gs = info.get("gpus") or []
     vt = sum(g.get("total") or 0 for g in gs) or None
-    vr = sum(p.get("mb") or 0 for p in gp if p.get("owner") != "keepalive")
+    vr = sum(p.get("mb") or 0 for p in gp if not is_ka(p))
     util = round(sum(g.get("util") or 0 for g in gs) / len(gs), 1) if gs else None
     ur = util if vr else 0
     m = info.get("mem") or {}
@@ -742,7 +743,7 @@ def from_worker(st: dict, cfg: dict | None, holder: str | None = None, *, job_ow
         g["n"] += 1
     work = sorted(({**g, "mb": round(g["mb"])} for g in groups.values()), key=lambda w: (STATES.index(w["kind"]), -w["mb"]))
     return {"state": next((k for k in STATES if k in kinds), "idle"), "work": work, "util": util, "util_real": ur, "vram": sum(g.get("used") or 0 for g in gs),
-            "vram_total": vt, "vram_real": vr, "vram_ka": sum(p.get("mb") or 0 for p in gp if p.get("owner") == "keepalive"),
+            "vram_total": vt, "vram_real": vr, "vram_ka": sum(p.get("mb") or 0 for p in gp if is_ka(p)),
             "cpu": cr, "cpu_real": cr, "cpu_quota": info.get("cpu_quota"), "nproc": info.get("nproc"), "mem": m or None, "mem_real": mr, "mem_ka": None,
             "share": bool(cfg) and shareable(vr, vt, ur, cr, info.get("cpu_quota"), mu, m.get("limit"), cfg),
             # 各卡带上 worker 的吃满程度（gpu_busy：只有保活时按 0 的近 10 分钟、1 小时平均，#51）：组内页卡片与抽屉上的利用率按它（页面 fUtil、fCardU）

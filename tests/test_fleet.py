@@ -381,6 +381,26 @@ class TickTest(unittest.TestCase):
         c["servers"][0]["borrow_returned"] = "2026-11-01 00:05"
         self.assertEqual(FV.view([host], T0 + 30, c)["servers"][0]["state"], "idle")
 
+    def test_from_worker_recognizes_external_keepalive(self):
+        """对方另起、不属于 ka.sh 管理的保活进程（worker 输出 owner='other', ka=True）：
+        from_worker 与借用中组内页实时样本仍归为保活，不把保活显存与利用率算进实验用量。"""
+        c = cfg(me="ME")
+        c["servers"][0] = {**c["servers"][0], "borrow_since": "2026-11-01 00:00", "borrow_by": "ME"}
+        self.out["a"] = IDLE
+        F.tick(T0, self.fetch, c, force="a")
+        info = {"gpus": [{"i": 0, "uuid": "G0", "name": "A6000", "used": 6000, "total": 46000, "free": 40000, "util": 85}],
+                "mem": {"used": 8.0, "limit": 120.0, "anon": 2.0, "src": "cgroup"}, "cpu_used": 0.5, "cpu_quota": 16.0, "nproc": 64}
+        st = fake_status(t=T0 + 30, info=info,
+                         gpu_procs=[{"owner": "other", "ka": True, "pid": 20, "hpid": 200, "mb": 6000, "comm": "python"}],
+                         running=[])
+        a = F.from_worker(st, c, "AA", job_owner="ME")
+        self.assertEqual((a["state"], a["vram_real"], a["vram_ka"], a["util_real"]), ("keepalive", 0, 6000, 0))
+        self.assertEqual([w["kind"] for w in a["work"]], ["keepalive"])
+        host = {"id": "a", "worker_up": True, "lan_off": False, "status": st,
+                "health": {"state": "ok", "fails": 0, "since": None, "why": None}}
+        srv = FV.view([host], T0 + 30, c)["servers"][0]
+        self.assertEqual((srv["state"], srv["sample"]["vram_real"], srv["sample"]["vram_ka"]), ("keepalive", 0, 6000))
+
     def test_stats_by_hour(self):
         """按人统计按小时归一：一人两台，一台每小时 60 次样本（自用主机每分钟一次）、一台 6 次（探针），各一小时，时间占比各一半。"""
         from labmon.state import append_row
