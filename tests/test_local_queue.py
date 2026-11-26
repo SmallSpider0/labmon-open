@@ -369,22 +369,23 @@ class LocalQueueTest(unittest.TestCase):
         self.assertEqual(list(al), ["cpu_low:name:a_run"])
         a = al["cpu_low:name:a_run"]
         self.assertEqual(a["to"], "agent")
-        self.assertIn("任务 a_run（本机 车道 1 训练方）近 10 分钟平均用了 1.0 核，给的 1 核基本用满", a["msg"])
-        self.assertIn("写 cpus=2 试试（cpus= 优先于历史", a["msg"])
+        self.assertIn("任务 a_run（本机 车道 1 训练方）近 10 分钟均用 1.0/1 核且卡利用率 <50%", a["msg"])
+        self.assertIn("未开跑同类写 cpus=2", a["msg"])
+        self.assertIn("见 alerts.md", a["msg"])
         # #112：worker 按配额、同机别的任务与同类条数封顶过（cpu_budget），告警里写出来
         rm = {"per": 3, "cap": 7, "other": 1.0, "out": 0.5, "same": 2, "kept": False}
         a = alerts(run(dict(low, sug=3, room=rm)))["cpu_low:name:a_run"]
-        self.assertIn("写 cpus=3 试试（这台配额 7 核，同类 2 条同时在跑，别的任务记了 1 核，labmon 之外占 0.5 核，每条最多 3 核，再写大会超配额；", a["msg"])
+        self.assertIn("写 cpus=3（这台配额 7 核，同类 2 条同时在跑，别的任务记了 1 核，labmon 之外占 0.5 核，每条最多 3 核，已达上限）", a["msg"])
         al = alerts(run(high, cpus=5.0))
         self.assertEqual(list(al), ["cpu_high:name:a_run"])
-        self.assertIn("清单写了 cpus=5（给 5 核），跑到现在 1 分钟峰值只有 1.2 核", al["cpu_high:name:a_run"]["msg"])
+        self.assertIn("清单 cpus=5（给 5 核），1 分钟峰值仅 1.2 核", al["cpu_high:name:a_run"]["msg"])
         self.assertIn("cpus=2", al["cpu_high:name:a_run"]["msg"])
         self.assertIn("自动按实测记账", al["cpu_high:name:a_run"]["msg"])
         # 同类（tag）的几个任务合成一条：key 不带任务名，消息列出都有谁、峰值范围，建议取大
         tag = lambda n, pk, sug: run(dict(high, peak=pk, sug=sug, by="tag", cls="sm"), name=n, cpus=4.0)   # noqa: E731
         al = alerts(tag("a_s1", 1.0, 1), tag("a_s2", 1.2, 2))
         self.assertEqual(list(al), ["cpu_high:tag:sm"])
-        self.assertIn("同 tag sm 的 2 个任务（本机 车道 1 训练方：a_s1、a_s2）清单写了 cpus=4（给 5 核），跑到现在 1 分钟峰值只有 1.0–1.2 核", al["cpu_high:tag:sm"]["msg"])
+        self.assertIn("同 tag sm 的 2 个任务（本机 车道 1 训练方：a_s1、a_s2）清单 cpus=4（给 5 核），1 分钟峰值仅 1.0–1.2 核", al["cpu_high:tag:sm"]["msg"])
         self.assertIn("cpus=2", al["cpu_high:tag:sm"]["msg"])
         self.assertEqual(list(alerts(tag("a_s1", 1.0, 1), run(low, name="b_s1"))), ["cpu_high:tag:sm", "cpu_low:name:a_run"])   # 给少、给多各报各的
         # #99（Codex 审 #97）：tag 恰好等于另一类去种子号后的名字（tag=train 的 prep_s1、无 tag 的 train_s1）：不同类，各报一条、key 带来源
@@ -414,7 +415,7 @@ class LocalQueueTest(unittest.TestCase):
         C._host_alerts(cfg, snap, {}, [], {"hosts": [{"id": "a", "status": {"running": [run("a_s1", fit(3, 7, 2)), run("a_s2", fit(3, 7, 2))]}},
                                                      {"id": "b", "status": {"running": [run("a_s3", fit(4, 16, 1))]}}]}, time.time())
         msg = {x["key"]: x["msg"] for x in snap["alerts"]}["cpu_low:tag:sm"]
-        self.assertIn("按主机写 甲 上 cpus=3、乙 上 cpus=4 试试（甲 配额 7 核，同类 2 条同时在跑，每条最多 3 核；乙 配额 16 核，每条最多 16 核，再写大会超配额；", msg)
+        self.assertIn("按主机写 甲 上 cpus=3、乙 上 cpus=4（甲 配额 7 核，同类 2 条同时在跑，每条最多 3 核；乙 配额 16 核，每条最多 16 核，已达上限）", msg)
 
     def test_cpu_fit_alert_merged_across_hosts(self):
         """#91：同一类分布在两台主机上的任务合成一条 cpu_high:，wait 只叫醒一次；同类后面的任务接着被判出来（key 不变）6 小时内不再叫醒（#88）。"""

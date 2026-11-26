@@ -213,8 +213,9 @@ def project_init(hid: str, name: str | None) -> dict:
     return {"rc": rc, "out": out, "err": ""}
 
 
-def check(pid: str, text: str, may=None) -> dict:
-    """labmon check：按看板这边的用户级主机清单整套校验项目目录里那份（还没推上来的也行），打出各主机的探针规格（带上全局快照里本项目的登记）；
+def check(pid: str, text: str, may=None, *, probe: bool = False) -> dict:
+    """labmon check：按看板这边的用户级主机清单整套校验项目目录里那份（还没推上来的也行）。
+    默认输出紧凑校验摘要（几台主机、几条清单通过校验）；probe=True（--probe）时打出各主机的完整探针规格 JSON（带上全局快照里本项目的登记）。
     may(主机 id)：看的人能不能用这台（普通用户经 users.may_host，#16）：不能用的只打一行，不打连接信息与探针规格（主机清单里有没有这台都一样）；None 全打。
     after 是同步状态那行（客户端打）之后的几行：不再生效的旧键、wait 还没报过的页面上的改动与归档（列了的 wait 不重报，waits.check_told）。
     校验不过抛 projects.Refused(400)：客户端打“配置错误：…”、退出 3。"""
@@ -226,12 +227,25 @@ def check(pid: str, text: str, may=None) -> dict:
     ign = cfg["ignored"]
     cfg = C.lanes_cfg(cfg, snapshot(), out / ".labmon", time.time(), save=False)
     o, after = Out(), []
-    for h in cfg["hosts"]:
-        if may is not None and not may(h["id"]):
-            o.p(f"# {h['id']}（没开给你用：不列连接信息与探针规格，要用找管理员开）")
-            continue
-        o.p(f"# {h['id']}（{h['ssh'] or '本机'}）")
-        o.p(json.dumps(C.probe_spec(cfg, h), ensure_ascii=False, indent=2))
+    if probe:
+        for h in cfg["hosts"]:
+            if may is not None and not may(h["id"]):
+                o.p(f"# {h['id']}（没开给你用：不列连接信息与探针规格，要用找管理员开）")
+                continue
+            o.p(f"# {h['id']}（{h['ssh'] or '本机'}）")
+            o.p(json.dumps(C.probe_spec(cfg, h), ensure_ascii=False, indent=2))
+    else:
+        ok_ids, denied, n_queues = [], [], 0
+        for h in cfg["hosts"]:
+            if may is not None and not may(h["id"]):
+                denied.append(h["id"])
+                continue
+            ok_ids.append(h["id"])
+            n_queues += len(C.probe_spec(cfg, h)["queues"])
+        hosts_s = f"：{'、'.join(ok_ids)}" if ok_ids else ""
+        o.p(f"[labmon] 校验通过：{pid}（{len(ok_ids)} 台主机{hosts_s}，{n_queues} 条清单）；加 --probe 看探针规格")
+        for hid in denied:
+            o.p(f"# {hid}（没开给你用：不列连接信息与探针规格，要用找管理员开）")
     if ign:
         why = ([f"输出目录固定在 {out}"] if "out_dir" in ign else []) + (["项目页「本机」一栏删了"] if "local" in ign else [])
         after.append(f"[labmon] monitor.toml 里的 {'、'.join('[local]' if k == 'local' else k for k in ign)} 不再生效（{'，'.join(why)}），不用改")
@@ -243,6 +257,12 @@ def check(pid: str, text: str, may=None) -> dict:
 # GET /api/project/<id>/(status|disk|records)：回 {rc, out, err, data}，命令行原样打出 out；--json 打 data。
 def _gib(b: float | None) -> str:
     return "—" if b is None else f"{C.gb(b)} GiB"
+
+
+def _clip_line(s: str, limit: int = 100) -> str:
+    """将日志尾行压成单行并限制长度（<= limit 字符），防超长堆栈/参数刷屏。"""
+    line = " ".join(s.splitlines()).strip()
+    return line if len(line) <= limit else line[:limit - 1] + "…"
 
 
 def _delta(b: float | None) -> str:
@@ -347,8 +367,8 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
                 "挂起中（SIGSTOP）" if j.get("suspended") else "",
                 f"CPU {cores[(host, j['id'])]:.1f} 核" if cores.get((host, j["id"])) is not None else ""]
         o.p(f"  {j['id']}（{where(j)}）：" + "，".join(b for b in bits if b))
-        if j.get("last_line"):
-            o.p("      日志" + (f" {fmt_dur(now - j['log_mtime'])}前" if j.get("log_mtime") else "") + f"：{j['last_line']}")
+        if j.get("last_line") and (tail := _clip_line(str(j["last_line"]))):
+            o.p("      日志" + (f" {fmt_dur(now - j['log_mtime'])}前" if j.get("log_mtime") else "") + f"：{tail}")
     queued = [j for j in jobs if j.get("status") == "queued"]
     if queued:
         queued.sort(key=lambda j: (j.get("plan_start_ts") is None, j.get("plan_start_ts") or 0))

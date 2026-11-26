@@ -1157,23 +1157,61 @@ class AuthTest(unittest.TestCase):
         self.assertEqual([o.get("by") for o in seen["hosts"][0]["status"]["overrides"]], ["boss", None])   # 自己项目的照给，别人项目的去掉
 
     def test_check_hides_hosts_not_opened_to_user(self):
-        """普通用户的 labmon check（#16）：引用了没开给他的主机，照常校验，但不打那台的连接信息与探针规格；管理员照旧全打。"""
+        """普通用户的 labmon check（#16、#200）：默认打紧凑校验摘要，--probe 才打完整探针规格；
+        引用了没开给他的主机，两种模式下都不泄露连接信息与探针规格；管理员带 probe=True 全打。"""
         amy = make_token("amy", role="user", scopes=("project",))
         admin = make_token("boss", role="admin", scopes=("admin", "project"))
         K.hosts_file().write_text('[[hosts]]\nid = "a"\nssh = "remote-a"\nusers = ["amy"]\n'
                                   '[[hosts]]\nid = "b"\nssh = "secret-b"\n[[hosts.checks]]\nid = "c"\ncmd = "secret-cmd"\n')
         text = 'id = "fresh"\n[[hosts]]\nid = "a"\n[[hosts]]\nid = "b"\n[[hosts]]\nid = "nowhere"\n'
         save_json(state_dir() / "snapshot.json", {"wake": []})
+        # 默认紧凑摘要：不倾倒 probe_spec JSON，也不泄露未开放主机信息
         code, _, body = self.call(self.lan + "/api/project/fresh/check", {"text": text}, tok=amy)
         self.assertEqual(code, 200, body)
         out = json.loads(body)["out"]
-        self.assertIn("remote-a", out)
-        for leak in ("secret-b", "secret-cmd"):
+        self.assertIn("校验通过：fresh（1 台主机：a，0 条清单）", out)
+        self.assertIn("--probe", out)
+        for leak in ("remote-a", "secret-b", "secret-cmd", '"worker_status"'):
             self.assertNotIn(leak, out)
         self.assertEqual(out.count("没开给你用"), 2)                          # 清单里有的 b 与没有的 nowhere 一个样
-        out = json.loads(self.call(self.lan + "/api/project/fresh/check", {"text": text}, tok=admin)[2])["out"]
-        self.assertIn("secret-b", out)
-        self.assertIn("secret-cmd", out)
+        # 带 probe=True：普通用户看开放主机的探针规格，仍隐藏未开放主机；管理员全看
+        out_p = json.loads(self.call(self.lan + "/api/project/fresh/check", {"text": text, "probe": True}, tok=amy)[2])["out"]
+        self.assertIn("remote-a", out_p)
+        self.assertIn('"worker_status"', out_p)
+        for leak in ("secret-b", "secret-cmd"):
+            self.assertNotIn(leak, out_p)
+        self.assertEqual(out_p.count("没开给你用"), 2)
+        out_adm = json.loads(self.call(self.lan + "/api/project/fresh/check", {"text": text, "probe": True}, tok=admin)[2])["out"]
+        self.assertIn("secret-b", out_adm)
+        self.assertIn("secret-cmd", out_adm)
+
+    def test_status_clips_running_last_line_and_check_probe_cli(self):
+        """#200：api.status 对运行中任务的 last_line 限制单行 <= 100 字符并去换行；check --probe 透传参数。"""
+        import contextlib
+        import io
+        from labmon import __main__ as M, api as A
+        raw_tail = "Traceback (most recent call last):\n  " + "x" * 160
+        snap = {"title": "演示", "generated": 1700000000.0, "hosts": [], "lanes": [{"id": "l1", "label": "车道 1", "host": "h1", "done": 0, "total": 1}],
+                "jobs": [{"id": "j1", "lane": "l1", "status": "running", "elapsed_min": 5, "last_line": raw_tail, "log_mtime": 1699999990.0}],
+                "groups": [], "alerts": []}
+        out_dir = PJ.out_dir("clip")
+        out_dir.mkdir(parents=True, exist_ok=True)
+        save_json(out_dir / "snapshot.json", snap)
+        res = A.status("clip", now=1700000010.0)
+        log_lines = [ln for ln in res["out"].splitlines() if "日志" in ln]
+        self.assertEqual(len(log_lines), 1, res["out"])
+        shown = log_lines[0].split("：", 1)[1]
+        self.assertNotIn("\n", shown)
+        self.assertLessEqual(len(shown), 100)
+        self.assertTrue(shown.endswith("…"), shown)
+        self.assertEqual(res["data"]["jobs"][0]["last_line"], raw_tail)   # --json 原始数据不截断
+        got = []
+        with mock.patch.object(M, "cmd_check", lambda p, probe=False: got.append((p, probe)) or 0):
+            M.main(["check", "-c", "m.toml"])
+            M.main(["check", "-c", "m.toml", "--probe"])
+        self.assertEqual(got, [("m.toml", False), ("m.toml", True)])
+        with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
+            M.main(["wait", "-c", "m.toml", "--probe"])
 
     def test_wait_request_cache_isolated_by_account_and_project(self):
         amy = make_token("amy", role="user", scopes=("project",))

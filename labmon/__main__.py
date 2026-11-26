@@ -12,9 +12,9 @@
     labmon status  [项目 id] [-c monitor.toml] [--json]     项目现状（各主机与卡、车道、运行中、排队的预计开始、失败、计划项、挪法建议、告警；只读）
     labmon disk    [项目 id] [-c monitor.toml] [--json]     项目的磁盘：共享盘上本项目各目录与增量、整块盘几天满，各主机本地盘上本项目的缓存（只读）
     labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   项目的记录（拉起、掉线、续租、失败、临时指令……；只读）
-    labmon check   -c monitor.toml                          看板按它校验配置、打出各主机的探针规格；末尾列出与看板上那份的同步状态、wait 还没报过的看板页面上的改动
+    labmon check   -c monitor.toml [--probe]                 看板校验配置并输出紧凑摘要（--probe 打印完整探针规格 JSON）；末尾列出同步状态与待拉回消息
     labmon wait    -c monitor.toml                          等告警：每轮先与看板上的配置同步，再问看板（长轮询），出现新告警（含借到卡等全局消息）或采集停了即退出（退出码 1）
-    labmon wait    -c monitor.toml --job 任务 [--job 项目/任务 …]   同时等这些任务跑完（问看板）：都有结果时退出，全成功 0、其余 4；告警照常退出 1；
+    labmon wait    -c monitor.toml --job 任务 [--job 项目/任务 …]   同时等这些任务跑完（问看板）：都有结果时退出，全成功 0、其余 4；告警照常退出 1；超过 5 个任务时打汇总并仅列变动/异常项；
                                                             连不上看板不退出、连回来报 server_back；连着 1 小时连不上才以 server_unreachable 告警退出（1）
                                                             一个项目只让一个会话等：已有别的会话在等时拒绝（退出码 3）；--take 改由本会话等（那边下一轮退出）
     labmon host list | return <id> [--at 时间 | --now] | restore <id>  用户级主机清单：查看、标记已归还（借来的：跑完就还）、恢复在用（借来的：撤销跑完就还）；改的要 admin 令牌
@@ -336,6 +336,56 @@ def _sync(cfg_path: str) -> dict:
 WAIT_RESUME = "_LABMON_WAIT_RESUME"
 WAIT_UPDATE_RETRY_S = 300
 WAIT_OFFLINE_MAX_S = 3600   # wait 连着连不上看板这么久才退出一次（#154）；过了 stale_limit 只提示一次、接着退避重试
+WAIT_JOB_BRIEF_N = 5        # wait --job 超过这么多任务时改打单行汇总 + 仅列变动/异常项（#200）
+_WAIT_JOB_ST = (("queued", "排队"), ("running", "运行"), ("done", "成功"), ("failed", "失败"),
+                ("blocked", "卡住"), ("missing", "找不到"), ("voided", "作废"))
+_WAIT_JOB_BAD = frozenset({"blocked", "failed", "missing", "voided"})
+
+
+def _jobs_tally(st: list[dict]) -> str:
+    """批量任务的单行状态计数（如：95 排队、4 运行、1 成功）。"""
+    cnt: dict[str, int] = {}
+    for x in st:
+        k = x.get("st") or ""
+        cnt[k] = cnt.get(k, 0) + 1
+    known = {k for k, _ in _WAIT_JOB_ST}
+    parts = [f"{cnt[k]} {label}" for k, label in _WAIT_JOB_ST if cnt.get(k)]
+    other = sum(v for k, v in cnt.items() if k not in known)
+    if other:
+        parts.append(f"{other} 其他")
+    return "、".join(parts) or "无"
+
+
+def _print_wait_jobs(st: list[dict], shown_st: dict[str, str | None], *, first: bool = False, done: bool = False) -> dict[str, str | None]:
+    """打印 wait --job 的任务状态：任务数 <= 5 逐行打印；> 5 时打单行汇总并按场景只逐行列变动或异常项。"""
+    if len(st) <= WAIT_JOB_BRIEF_N:
+        if first:
+            print(f"[labmon] 同时等 {len(st)} 个任务跑完（问看板）：", flush=True)
+        else:
+            print(f"[labmon] {fmt_time(time.time())} " + ("等的任务都有结果了：" if done else "等的任务："), flush=True)
+        for x in st:
+            print(f"  - {x['name']}：{x['text']}", flush=True)
+        return {x["name"]: x.get("st") for x in st}
+    if first:
+        print(f"[labmon] 同时等 {len(st)} 个任务跑完（问看板）：{_jobs_tally(st)}", flush=True)
+        for x in st:
+            if x.get("st") in _WAIT_JOB_BAD:
+                print(f"  - {x['name']}：{x['text']}", flush=True)
+    elif done:
+        if all(x.get("st") == "done" for x in st):
+            print(f"[labmon] {fmt_time(time.time())} 等的任务都有结果了：{len(st)} 个任务全部成功", flush=True)
+        else:
+            print(f"[labmon] {fmt_time(time.time())} 等的任务都有结果了（{len(st)} 个）：{_jobs_tally(st)}", flush=True)
+            for x in st:
+                if x.get("st") != "done":
+                    print(f"  - {x['name']}：{x['text']}", flush=True)
+    else:
+        print(f"[labmon] {fmt_time(time.time())} 等的任务（{len(st)} 个）：{_jobs_tally(st)}", flush=True)
+        for x in st:
+            cur = x.get("st")
+            if cur in _WAIT_JOB_BAD or (shown_st and shown_st.get(x["name"]) != cur):
+                print(f"  - {x['name']}：{x['text']}", flush=True)
+    return {x["name"]: x.get("st") for x in st}
 
 
 def _wait_resume(cfg_path: str, jobs: list[str]) -> dict:
@@ -427,6 +477,7 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None, take: bool = False) -
     wid = None if jobs else (saved.get("wid") if isinstance(saved.get("wid"), str) and saved.get("wid") else uuid.uuid4().hex[:16])
     rid, down, back, sess, told = uuid.uuid4().hex, None, 1.0, client.session_id(), False
     retry_commit, retry_at, hinted = None, 0.0, False
+    shown_st: dict[str, str | None] = {}
     while True:
         try:
             r = _sync(cfg_path)
@@ -476,9 +527,7 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None, take: bool = False) -
             print(f"[labmon] 看板认不出这个命令行的版本（{dist.short(dist.version())}，看板在跑 {dist.short(res.get('commit'))}）："
                   "照常等；要与看板一致就跑 labmon update", file=sys.stderr, flush=True)
         if jobs and first:
-            print(f"[labmon] 同时等 {len(st)} 个任务跑完（问看板）：", flush=True)
-            for x in st:
-                print(f"  - {x['name']}：{x['text']}", flush=True)
+            shown_st = _print_wait_jobs(st, shown_st, first=True)
         first = False
         if not new and not done:
             commit = res.get("commit")
@@ -494,17 +543,15 @@ def cmd_wait(cfg_path: str, jobs: list[str] | None = None, take: bool = False) -
             for k, m in new.items():
                 print(f"  - [{k}] {m}", flush=True)
         if jobs:
-            print(f"[labmon] {fmt_time(time.time())} " + ("等的任务都有结果了：" if done else "等的任务："), flush=True)
-            for x in st:
-                print(f"  - {x['name']}：{x['text']}", flush=True)
+            shown_st = _print_wait_jobs(st, shown_st, done=done)
         if new or not done:                            # 有新告警照旧 1：告警已记成报过，退出码不能让人以为不用处理
             return 1
         return 0 if all(x["st"] == "done" for x in st) else JOB_BAD_RC
 
 
-def cmd_check(cfg_path: str) -> int:
-    """labmon check：看板按它的用户级主机清单校验项目目录里这份（POST /api/project/<id>/check，api.check），打出探针规格；再打与看板上那份的同步状态，
-    最后几行由看板给（不再生效的旧键、wait 还没报过的页面上的改动与归档）。"""
+def cmd_check(cfg_path: str, probe: bool = False) -> int:
+    """labmon check：看板按它的用户级主机清单校验项目目录里这份（POST /api/project/<id>/check，api.check），默认打紧凑摘要（probe=True 打完整探针规格）；
+    再打与看板上那份的同步状态，最后几行由看板给（不再生效的旧键、wait 还没报过的页面上的改动与归档）。"""
     try:
         b = brief(cfg_path)
         text = Path(cfg_path).expanduser().read_text()
@@ -512,7 +559,7 @@ def cmd_check(cfg_path: str) -> int:
         print(f"[labmon] 配置错误：{e}", file=sys.stderr)
         return 3
     try:
-        r = client.call("POST", f"/api/project/{quote(b['id'], safe='')}/check", {"text": text})
+        r = client.call("POST", f"/api/project/{quote(b['id'], safe='')}/check", {"text": text, **({"probe": True} if probe else {})})
     except client.Failed as e:
         print(f"[labmon] 配置错误：{e.msg}" if e.code == 400 else f"[labmon] {e.msg}", file=sys.stderr)
         return 3
@@ -671,6 +718,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--at", help="host return 的归还时间（缺省为现在）：2026-11-04 18:40、11-04 18:40、18:40、明天 9:00，写进清单的是带年份的")
     ap.add_argument("--now", action="store_true", help="host return 借来的组内服务器：正在跑的按各自的停法停下，不等跑完")
     ap.add_argument("-c", "--config", action="append", help="项目目录里的配置文件（缺省 monitor.toml）")
+    ap.add_argument("--probe", action="store_true", help="check：打印各主机的完整探针规格 JSON")
     ap.add_argument("--out", help="render 的输出目录（缺省看板上这个项目的输出目录）")
     ap.add_argument("--admin", action="store_true", help="project push：用 labmon login --admin 建的管理员令牌推（改了 [[hosts]]、[[queues]] 时要）")
     ap.add_argument("--job", action="append", help="wait：同时等这个任务跑完（可多次、也可逗号分隔；写法同清单 after=，别的项目的写 项目/任务）")
@@ -682,6 +730,8 @@ def main(argv: list[str] | None = None) -> int:
     configs = a.config or ["monitor.toml"]
     if (a.job or a.take) and a.cmd != "wait":
         ap.error("--job、--take 只用于 wait")
+    if a.probe and a.cmd != "check":
+        ap.error("--probe 只用于 check")
     if a.out and a.cmd != "render":
         ap.error("--out 只用于 render（collect 由看板采，写看板上这个项目的输出目录）")
     if a.cmd == "host":
@@ -764,7 +814,7 @@ def main(argv: list[str] | None = None) -> int:
     if len(configs) > 1:
         ap.error(f"{a.cmd} 只认一个 -c（给了 {len(configs)} 个）")
     if a.cmd == "check":
-        return cmd_check(configs[0])
+        return cmd_check(configs[0], probe=a.probe)
     if a.cmd == "collect":
         return cmd_collect(configs[0])
     if a.cmd == "render":                             # 看板服务那台机器上：只用上次的快照重新渲染（改页面时用）

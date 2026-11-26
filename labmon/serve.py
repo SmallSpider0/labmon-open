@@ -1201,7 +1201,7 @@ class Handler(BaseHTTPRequestHandler):
         m = re.fullmatch(r"project/([^/]+)/check", act)
         if m:
             may = None if who.role == "admin" else lambda hid: U.may_host(who, hid)
-            return 200, {**A.check(unquote(m[1]), s("text"), may), "commit": DP.RUNNING["commit"]}   # 在跑的提交：命令行与自己的不同时提示 labmon update（#167）
+            return 200, {**A.check(unquote(m[1]), s("text"), may, probe=bool(body.get("probe"))), "commit": DP.RUNNING["commit"]}   # 在跑的提交：命令行与自己的不同时提示 labmon update（#167）
         if act.startswith("worker/"):
             sub = act[len("worker/"):]
             args = _worker_args(sub, body)

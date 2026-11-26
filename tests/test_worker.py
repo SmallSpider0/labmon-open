@@ -1058,7 +1058,7 @@ class AdmissionUnitTest(UnitBase):
         self.assertIn("j_s5 ← 卡 1", out)
         self.assertIn("不再开：j_s6：没有可用显存够 21 GiB 的卡", out)
         self.assertIn("合计可再开 3 条车道", out)
-        self.assertIn("其余 1 行（j_s6…）此刻哪台都放不下", out)
+        self.assertIn("余 1 行（j_s6…）留原清单或均摊", out)
         rc, out = self.fit_list_out(self.d / "nope", project=None)
         self.assertEqual(rc, 2)
         self.assertIn("还没登记：写 --project", out)
@@ -1087,7 +1087,9 @@ class AdmissionUnitTest(UnitBase):
         self.assertIn("base（t4 写了 after= 等着它）", line)
         self.assertIn("t2（等的 bad 跑失败了", line)
         self.assertIn("t4（等 base 跑完", line)
-        self.assertIn("t6（等 pc/far 跑完", line)
+        # #200：apart 超过 3 条折叠为前 3 条 + 总数，第 4 条 t6 折叠不展开
+        self.assertNotIn("t6（", line)
+        self.assertTrue(line.endswith("等共 4 行"), line)
         for n in ("t1", "t3", "t5"):
             self.assertNotIn(n + "（", line)
         self.assertIn("  t1 ← 卡 0", out)
@@ -3971,7 +3973,7 @@ class OffersTest(UnitBase):
         s = self.suggest()["pa"]
         self.assertEqual((s["target"], [j["name"] for j in s["jobs"]], self.rel(s["from"]), self.rel(s["to"])), ("t", ["a5", "a4", "a3"], 11, 6))
         self.assertEqual((s["key"], s["cut"]), ("rebalance:pa:t:o/jobs/q.txt/a5", []))   # 目标与第一行（#109）
-        self.assertIn("把 o 上 %s/jobs/q.txt 的 a3、a4、a5 挪到 t（这台还没有本项目同一种环境的清单：新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add t %s 新清单 --project pa）"
+        self.assertIn("把 o 上 %s/jobs/q.txt 的 a3、a4、a5 挪到 t（新建同目录清单（独立 QUEUE_STATE/QUEUE_LOGS，见 alerts.md）并 labmon worker add t %s 新清单 --project pa）"
                       % (self.d / "a", self.d / "a"), s["text"])
         self.assertIn("（早 5.0 小时）", s["text"])
         # 真把这 3 行挪过来（t 上新建 pa 的清单）：t 的推演里 a5 何时跑完与建议里的一样（同一份 simulate）
@@ -4006,7 +4008,7 @@ class OffersTest(UnitBase):
         self.assertEqual([self.rel(j["rest"]) for j in o["jobs"][:3]], [10, 8, 6])
         s = RB.suggest([{"id": "t", "label": "t", "worker_up": True, "status": {"offers": self.w.offer, "todo": self.w.todo}}], None, self.now)["pa"]
         self.assertEqual(([j["name"] for j in s["jobs"]], self.rel(s["from"]), self.rel(s["to"]), s["local"]), (["b5", "b4", "b3"], 12, 6, True))
-        self.assertIn("在 t 上多开一条车道：把 t 上 %s/jobs/L.txt 的 b3、b4、b5 剪到一条新的长期清单" % (self.d / "a"), s["text"])
+        self.assertIn("在 t 上多开一条车道：把 t 上 %s/jobs/L.txt 的 b3、b4、b5 剪到同目录新清单" % (self.d / "a"), s["text"])
         self.assertIn("labmon worker add t %s 新清单 --project pa" % (self.d / "a"), s["text"])
         # 卡吃满了（近 10 分钟 ≥90%）、容器在限流：不出同机的
         self.w.uwin = {"GPU-a": [(self.now - 60 * i, 95) for i in range(5)]}
@@ -4603,7 +4605,7 @@ class OffersTest(UnitBase):
         self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
         self.offer()
         s = self.suggest()["pa"]
-        self.assertIn("新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add t %s 新清单 --project pa" % (self.d / "a"), s["text"])
+        self.assertIn("新建同目录清单（独立 QUEUE_STATE/QUEUE_LOGS，见 alerts.md）并 labmon worker add t %s 新清单 --project pa" % (self.d / "a"), s["text"])
         self.assertTrue(s["text"].endswith("；按 %s 的推演" % fmt_time(self.now, date=False)), s["text"])
 
     def test_needs_miss_heal_hint(self):
@@ -4865,8 +4867,7 @@ class OffersTest(UnitBase):
         q = self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
         self.offer()
         text = self.suggest()["pa"]["text"]
-        self.assertIn("这台还没有本项目同一种环境的清单", text)
-        self.assertIn(".env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的", text)
+        self.assertIn("新建同目录清单（独立 QUEUE_STATE/QUEUE_LOGS，见 alerts.md）", text)
         (self.d / "a" / "jobs" / "new.txt").write_text("")
         (self.d / "a" / "jobs" / "new.env").write_text("QUEUE_STATE=results/_new\nQUEUE_LOGS=results/_new_logs\n")
         qn = self.m.load_queue({"_slug": "n", "root": str(self.d / "a"), "jobs": "jobs/new.txt", "project": "pa"})
@@ -4895,7 +4896,7 @@ class OffersTest(UnitBase):
         self.assertEqual(lane(), [str(self.d / "a"), "jobs/new.txt"])           # 两条都没有
         (jobs / "q.env").write_text("QUEUE_STATE=results/_q\n")
         self.assertEqual(lane(), [str(self.d / "a"), "jobs/new.txt"])           # 原清单只写 QUEUE_STATE，接收方没有
-        self.assertIn("原清单没有 .env 时也新建一个，只写这两行", text)
+        self.assertIn("独立 QUEUE_STATE/QUEUE_LOGS，见 alerts.md", text)
         self.assertTrue(q["state"])
 
     def test_plan_redone_after_marks_change(self):
@@ -4966,7 +4967,7 @@ class OffersTest(UnitBase):
                          ("rebalance:pa:t:o/jobs/q.txt/b2", True, ["b2", "b1", "b0"], 20.5, 1.5))
         self.assertEqual((self.rel(s["from"]), self.rel(s["to"])), (21.5, 20))
         from labmon.config import fmt_time
-        self.assertIn("把 o 上 %s/jobs/q.txt 的 b0、b1、b2 挪到 t（这台还没有本项目同一种环境的清单" % (self.d / "b"), s["text"])
+        self.assertIn("把 o 上 %s/jobs/q.txt 的 b0、b1、b2 挪到 t（新建同目录清单" % (self.d / "b"), s["text"])
         self.assertIn("t 上现在没有 labmon 任务在跑，这几行在原处最早 %s 才跑完，挪过来 %s 前都跑完；整批预计从 %s 提前到 %s"
                       % (fmt_time(s["there"]), fmt_time(s["done"]), fmt_time(s["from"]), fmt_time(s["to"])), s["text"])
         # t 上有任务在跑：不算空着，照旧按整批门槛，不报
@@ -8386,7 +8387,7 @@ class RoomSuggestTest(unittest.TestCase):
         s = RB.suggest([self.host("t", 20)], None, self.now)["pa"]
         self.assertEqual(s["key"], "rebalance:pa:room:t")
         self.assertEqual(s["room"], {"hosts": {"t": 3}, "busy": {"t": 40.0}, "lanes": 3, "rows": 8})
-        self.assertIn("T 吃不满（近 30 分钟 GPU 吃满程度 T 40%），此刻合计还能多开 3 条车道，本项目还有约 8 行在排队", s["text"])
+        self.assertIn("T 吃不满（30 分钟 T 40%），合计还可开 3 条车道，本项目还有约 8 行在排队", s["text"])
         self.assertIn("labmon worker fit t /r jobs/L.txt --list --project pa", s["text"])
         self.assertIn("在 T 上多开一条车道", s["text"])
         # 早不到 15 分钟的不报：收益小的不叫醒
@@ -8403,10 +8404,10 @@ class RoomSuggestTest(unittest.TestCase):
         # 两台都吃不满：句首写合计与各台几条，key 带两台；整批够门槛（早 2 小时）的仍按挪法 key，句首照样写合计
         s = RB.suggest([self.host("t", 20, lanes=3), self.host("u", 25, busy=0.0, lanes=8)], None, self.now)["pa"]
         self.assertEqual(s["key"], "rebalance:pa:room:t,u")
-        self.assertIn("T、U 吃不满（近 30 分钟 GPU 吃满程度 T 40%、U 0%），此刻合计还能多开 11 条车道（T 3、U 8），本项目还有约 16 行在排队", s["text"])
+        self.assertIn("T、U 吃不满（30 分钟 T 40%、U 0%），合计还可开 11 条车道（T 3、U 8），本项目还有约 16 行在排队", s["text"])
         s = RB.suggest([self.host("t", 120)], None, self.now)["pa"]
         self.assertEqual(s["key"], "rebalance:pa:t:t/jobs/L.txt/b5")
-        self.assertIn("此刻合计还能多开 3 条车道", s["text"])
+        self.assertIn("合计还可开 3 条车道", s["text"])
 
 
 class IdleSleepTest(UnitBase):
