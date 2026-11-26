@@ -27,6 +27,7 @@ from . import lease as LS
 from . import pool as PO
 from . import projects as PJ
 from .config import AUTO_GROUP_RE, GIB, POOL, POOL_LABEL, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
+from .fleet import worker_fresh
 from .health import link_step
 from .state import load_json, load_rows, save_json, snapshot, usage_file, usage_hosts, write_atomic
 from .worker.pure import IDLE_REG_S, OVER_FRAC, OVER_MIN_S, is_hold, list_path, overrun_left  # noqa: F401 — 与 worker 共用唯一实现
@@ -482,10 +483,10 @@ def _last_probe(path: Path) -> dict | None:
 
 def _host_cpu(cg: dict, prev: dict | None, t: float, w_entry: dict | None) -> dict | None:
     """一台主机的 CPU 实时占用摘要（项目快照 hosts[].cpu，#208）：
-    优先复用工作台全局快照里新鲜的 worker 状态（info.cpu_used / cpu_quota / nproc / press.thr 与 throttle），
-    没有 worker 或状态过期时退回探针 cgroup 的 cpu_usage_ns 差分与 cpu_quota。
+    优先复用工作台全局快照里新鲜的 worker 状态（fleet.worker_fresh：内网、未掉线且 worker_up，读 info.cpu_used / cpu_quota / nproc / press.thr 与 throttle），
+    没有 worker 或状态不新鲜时退回探针 cgroup 的 cpu_usage_ns 差分与 cpu_quota。
     占用百分比统一按 0–100% 封顶：有容器配额时 min(100, used / quota * 100)，无配额时按可用核数（nproc）换算。"""
-    st = w_entry.get("status") if w_entry and w_entry.get("worker_up", True) else None
+    st = w_entry["status"] if worker_fresh(w_entry) else None
     info = (st or {}).get("info") or {}
     used = info.get("cpu_used")
     if used is None and prev and cg.get("cpu_usage_ns") and t > prev["t"]:

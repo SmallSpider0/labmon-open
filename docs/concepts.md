@@ -80,7 +80,7 @@
 | 71 | 普通用户此刻能用的主机 | `myHosts`（overview_js/home.js） |
 | 72 | 组内服务器页面的数据、详情曲线、人员详情；命令行 `labmon fleet status` / `probe` | `fleetview.view`、`fleetview.detail`、`fleetview.person`；`fleetview.show` |
 | 73 | 使用记录；按人统计 | 记 `fleet._hour`（`fleet.accs`）；拆 `fleetview._parts`、汇总 `fleetview._by_person`、`fleetview._stats`、借来借出 `fleetview._lending`；页面上 `useBar`、`perHist`（`PKS`、`PSN`、`PSC`、`lendLines`、overview_js/fleetops.js） |
-| 74 | worker 状态新鲜度门槛；自用主机与借用中组内服务器的使用样本；逐次样本的一行 | `fleet.worker_fresh`（`fleetboot.mine`、`fleetview.view`）、`fleet.from_worker`（`fleetboot.mine`、`fleetview.view`、`sample`）、`fleet.record_mine`（`overview._notices`）；`fleet._series_row`；曲线接口认哪些 id `fleetview.known` |
+| 74 | worker 状态新鲜度门槛；自用主机与借用中组内服务器的使用样本；逐次样本的一行 | `fleet.worker_fresh`（`fleetboot.mine`、`fleetview.view`、`collect._host_cpu`）、`fleet.from_worker`（`fleetboot.mine`、`fleetview.view`、`sample`）、`fleet.record_mine`（`overview._notices`）；`fleet._series_row`；曲线接口认哪些 id `fleetview.known` |
 | 75 | 可共享 | `fleet.shareable`（`analyze`、`from_worker`） |
 | 76 | 预备续租、续租后拉起 worker | `renew.reserve`、`renew.cancel`、`renew.begin`、`renew.after`；页面上自用主机的按钮 `renewBtns`，续租一台的确认 `goRenew`（overview_js/sched.js） |
 | 77 | 后端看 worker 状态里运行中任务的预计结束 | `renew.eta_of` |

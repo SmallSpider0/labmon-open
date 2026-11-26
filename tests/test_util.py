@@ -265,6 +265,14 @@ class CollectTest(Tmp):
         old_state = {"spans": [[t - 100, t - 100]], "util_h": {}}
         C._long_term(old_state, snap, hist, cfg, t)
         self.assertEqual(snap["cpu_hourly"]["h3"], [[t - 1800, 62.5]])
+        # 工作台上一轮 lan_off 或主机已判 down 时，即使 worker_up 为真也必须经 fleet.worker_fresh 排除，回退本轮探针差分
+        prev_h4 = {"t": t - 100, "host": "h4", "ok": True, "cpu_ns": 100 * 10**9}
+        cg_h4 = {"cpu_usage_ns": 200 * 10**9, "cpu_quota": 4.0}   # 1 核 / 4 配额 = 25%
+        for bad_w in (
+            {"id": "h4", "worker_up": True, "lan_off": True, "status": {"info": {"cpu_used": 4.0, "cpu_quota": 4.0}}},
+            {"id": "h4", "worker_up": True, "health": {"state": "down"}, "status": {"info": {"cpu_used": 4.0, "cpu_quota": 4.0}}},
+        ):
+            self.assertEqual(C._host_cpu(cg_h4, prev_h4, t, bad_w), {"used": 1.0, "quota": 4.0, "cpus": None, "pct": 25.0})
 
 
 class FleetMineTest(unittest.TestCase):
