@@ -1531,7 +1531,8 @@ class FleetOpsTest(unittest.TestCase):
         c_bor["servers"][1]["borrow_since"] = "2026-11-06 10:00"
         with self.assertRaises(P.PlatformError) as cm:
             FO.start("move", c_bor, ids=["b"], spec="sB")
-        self.assertIn("先在它的「借用」里还掉，再换节点", str(cm.exception))
+        self.assertIn("先在它的「借用」里还掉", str(cm.exception))
+        self.assertIn("再换节点", str(cm.exception))
         # 预览：未选规格 / 选了当前规格
         pv0 = FB.preview(c, "move", "b", tcp=lambda n, p: False)
         self.assertFalse(next(x for x in pv0["items"] if x["item"] == "规格")["ok"])
