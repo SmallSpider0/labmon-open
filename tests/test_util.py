@@ -225,6 +225,55 @@ class CollectTest(Tmp):
         O._keep_usage(self.d, "k2", rows, now, {})
         self.assertEqual([r["queue"] for r in load_rows(usage_file("k2"))], ["A.txt", "B.txt"])
 
+    def test_host_cpu_and_hourly(self):
+        """#208：项目快照 hosts[].cpu 优先复用新鲜 worker 的 cpu_used/cpu_quota/nproc/press.thr/throttle，
+        无配额按可用核数换算并封顶 100%，worker 过期回退探针 cgroup 差分；_long_term 同步记 cpu_hourly。"""
+        t = 1_800_000_000.0 // 3600 * 3600 + 1800
+        cfg = {"id": "p", "interval": 120, "history_hours": 24, "hosts": [
+            {"id": "h1", "label": "H1", "ssh": None, "returned": None, "mounts": [], "checks": []},
+            {"id": "h2", "label": "H2", "ssh": None, "returned": None, "mounts": [], "checks": []},
+            {"id": "h3", "label": "H3", "ssh": None, "returned": None, "mounts": [], "checks": []},
+        ]}
+        probes = {
+            "h1": ({"t": t, "gpu": [], "cgroup": {"cpu_usage_ns": 200 * 10**9, "cpu_quota": 17.0}, "loadavg": [12.0, 10.0, 8.0]}, None),
+            "h2": ({"t": t, "gpu": [], "cgroup": {"cpu_usage_ns": 50 * 10**9, "cpu_quota": 64.0}, "loadavg": [2.0, 2.0, 2.0]}, None),
+            "h3": ({"t": t, "gpu": [], "cgroup": {"cpu_usage_ns": 600 * 10**9, "cpu_quota": 4.0}, "loadavg": [5.0, 4.0, 3.0]}, None),
+        }
+        glob = {"hosts": [
+            {"id": "h1", "worker_up": True, "status": {"info": {"cpu_used": 12.4, "cpu_quota": 17.0, "nproc": 144, "press": {"thr": 31.2}},
+                                                        "throttle": {"for": 620, "alert": True, "thr": 31.2}}},
+            {"id": "h2", "worker_up": True, "status": {"info": {"cpu_used": 16.0, "cpu_quota": None, "nproc": 64, "press": {"thr": 0.0}}}},
+            {"id": "h3", "worker_up": False, "status": {"info": {"cpu_used": 99.0, "cpu_quota": 4.0, "nproc": 32}}},
+        ]}
+        snap, state, hist = {"hosts": [], "alerts": []}, {}, [
+            {"t": t - 100, "host": "h3", "ok": True, "cpu_ns": 100 * 10**9, "cpu_pct": 25.0}
+        ]
+        C._hosts(cfg, probes, False, glob, snap, state, hist, self.d, t)
+        by = {h["id"]: h for h in snap["hosts"]}
+        self.assertEqual(by["h1"]["cpu"], {"used": 12.4, "quota": 17.0, "cpus": 144, "pct": 72.9, "thr": 31.2,
+                                           "throttled": True, "throttle_alert": True, "throttle_for": 620})
+        self.assertEqual(by["h1"]["cpu_pct"], 72.9)
+        self.assertEqual(by["h2"]["cpu"], {"used": 16.0, "quota": None, "cpus": 64, "pct": 25.0, "thr": 0.0})
+        # h3 worker 过期：回退探针差分 (600-100)/100 = 5 核 / 4 配额 = 125% → 封顶 100.0%
+        self.assertEqual(by["h3"]["cpu"], {"used": 5.0, "quota": 4.0, "cpus": None, "pct": 100.0})
+        self.assertEqual(by["h3"]["cpu_pct"], 100.0)
+        C._long_term(state, snap, hist, cfg, t)
+        self.assertEqual(snap["cpu_hourly"]["h1"], [[t - 1800, 72.9]])
+        self.assertEqual(snap["cpu_hourly"]["h2"], [[t - 1800, 25.0]])
+        self.assertEqual(snap["cpu_hourly"]["h3"], [[t - 1800, 62.5]])   # (25.0 + 100.0) / 2
+        # 升级旧 state（已有 spans 缺 cpu_h）时从 hist 回填
+        old_state = {"spans": [[t - 100, t - 100]], "util_h": {}}
+        C._long_term(old_state, snap, hist, cfg, t)
+        self.assertEqual(snap["cpu_hourly"]["h3"], [[t - 1800, 62.5]])
+        # 工作台上一轮 lan_off 或主机已判 down 时，即使 worker_up 为真也必须经 fleet.worker_fresh 排除，回退本轮探针差分
+        prev_h4 = {"t": t - 100, "host": "h4", "ok": True, "cpu_ns": 100 * 10**9}
+        cg_h4 = {"cpu_usage_ns": 200 * 10**9, "cpu_quota": 4.0}   # 1 核 / 4 配额 = 25%
+        for bad_w in (
+            {"id": "h4", "worker_up": True, "lan_off": True, "status": {"info": {"cpu_used": 4.0, "cpu_quota": 4.0}}},
+            {"id": "h4", "worker_up": True, "health": {"state": "down"}, "status": {"info": {"cpu_used": 4.0, "cpu_quota": 4.0}}},
+        ):
+            self.assertEqual(C._host_cpu(cg_h4, prev_h4, t, bad_w), {"used": 1.0, "quota": 4.0, "cpus": None, "pct": 25.0})
+
 
 class FleetMineTest(unittest.TestCase):
     def test_from_worker_carries_busy(self):

@@ -3043,6 +3043,35 @@ t("project", "项目页的算力池（#24）：顶栏一个「算力池」，车
   ok(!rc.includes("</span> 算力池</b>"), "资源小图不该画算力池"); has(rc, "srv-h（池 · PERSON7）", "池借来的主机照常画（#78）");
   ok(run(C, 'hostShort(D.hosts.find(h => h.pool))') === "算力池", "短名");
 });
+t("project", "项目页 CPU 占用监控（#208）：顶部 CPU 卡片展示核数/配额与限流，时间线主机行同轴叠画不同颜色 CPU 折线与图例、悬停读数，兼容旧快照", () => {
+  const C = pjCtx(PJ, EVN), h = app(C);
+  has(h, "CPU 占用", "顶部指标区应有 CPU 占用卡片");
+  has(h, "12.4/17 核（73%）", "有配额主机应展示 核数/配额（百分比）");
+  has(h, "限流 29%", "限流主机应给出限流提示");
+  has(h, "1.1 核（7%）", "无配额主机应展示核数与按可用核数换算的百分比");
+  has(h, "配额 8 核（3%）", "缺失 cpu 字段的旧快照主机应向后兼容");
+  run(C, "drawTimeline()");
+  const tl = el(C, "tlbox").innerHTML, tk = el(C, "tlkey").innerHTML;
+  has(tl, 'stroke="var(--accent)"', "时间线应保留蓝色 GPU 折线");
+  has(tl, 'stroke="var(--cpu)"', "时间线主机行应同轴叠画橙色 CPU 折线");
+  has(tl, 'class="tl-h" data-thost="srv-a"', "时间线主机行应有折线悬停命中层");
+  has(tk, "整机 GPU 利用率（蓝底蓝线", "图例应写明 GPU 折线颜色");
+  has(tk, "整机 CPU 占用率（橙线", "图例应写明 CPU 折线颜色");
+  // 悬停主机表头折线区域应返回 GPU + CPU 读数
+  const hov = run(C, '(() => { const b = document.getElementById("tlbox"); b.getBoundingClientRect = () => ({left: 0, width: 800}); return tlHostHover({dataset: {thost: "srv-a"}}, {clientX: TL.g.L + TL.g.PW * 0.25}); })()');
+  has(hov, "GPU 利用率", "悬停应含 GPU 读数"); has(hov, "CPU 占用", "悬停应含 CPU 读数"); has(hov, "此刻 CPU 12.4/17 核（73%）", "悬停应含此刻 CPU 读数");
+  // 长窗口（7 天）应使用 cpu_hourly 正常画出 CPU 折线；悬停在无采样断档区时不得用视窗跨度误填数小时前的旧值
+  run(C, 'LS.set("tl", "week"); drawTimeline()');
+  has(el(C, "tlbox").innerHTML, 'stroke="var(--cpu)"', "7 天视图应由 cpu_hourly 画出 CPU 折线");
+  const gapSnap = {...PJ, history: [], util_hourly: {"srv-a": [[NOW - 24 * H, 80.0], [NOW - 12 * H, 70.0]]}, cpu_hourly: {"srv-a": [[NOW - 24 * H, 50.0], [NOW - 12 * H, 60.0]]}};
+  const G = pjCtx(gapSnap, EVN); run(G, 'LS.set("tl", "week"); drawTimeline()');
+  const gapHov = run(G, `(() => { const b = document.getElementById("tlbox"); b.getBoundingClientRect = () => ({left: 0, width: 800}); const t = ${NOW - 18 * H}; const x = TL.g.L + (t - TL.g.t0) / (TL.g.t1 - TL.g.t0) * TL.g.PW; return tlHostHover({dataset: {thost: "srv-a"}}, {clientX: x}); })()`);
+  has(gapHov, "该时刻无 GPU / CPU 采样", "7 天视图断档空白区悬停不应误填数小时前旧值：" + gapHov);
+  ok(!gapHov.includes("GPU 利用率") && !gapHov.includes("CPU 占用"), "断档空白区悬停混入了旧采样：" + gapHov);
+  // 兼容旧快照：删掉 hosts[].cpu 与 cpu_hourly 不报错、不漏 NaN/undefined
+  const oldSnap = {...PJ, cpu_hourly: undefined, hosts: PJ.hosts.map(x => { const y = {...x}; delete y.cpu; return y; })};
+  const O2 = pjCtx(oldSnap, EVN); clean(app(O2), "旧快照项目页");
+});
 t("overview", "选规格与同池换节点（#172）：多规格池分组显示各规格空位、换节点按钮按池规格显隐、开机/换人/换节点向导选规格与空位拦截、进度条新连接命令", () => {
   const C = ovCtx(OV, RR, "#/fleet");
   const fl = page(C, "#/fleet");

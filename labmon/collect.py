@@ -27,6 +27,7 @@ from . import lease as LS
 from . import pool as PO
 from . import projects as PJ
 from .config import AUTO_GROUP_RE, GIB, POOL, POOL_LABEL, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
+from .fleet import worker_fresh
 from .health import link_step
 from .state import load_json, load_rows, save_json, snapshot, usage_file, usage_hosts, write_atomic
 from .worker.pure import IDLE_REG_S, OVER_FRAC, OVER_MIN_S, is_hold, list_path, overrun_left  # noqa: F401 — 与 worker 共用唯一实现
@@ -375,19 +376,25 @@ KEEP_LONG_S = 30 * 86400
 
 
 def _long_term(state: dict, snap: dict, hist: list, cfg: dict, t: float) -> None:
-    """时间线看长期要的两样（存 30 天）：采集在跑的区间（没采的时段页面标灰，不当成主机空闲），
+    """时间线看长期要的几样（存 30 天）：采集在跑的区间（没采的时段页面标灰，不当成主机空闲），
     各主机每小时的平均 GPU 利用率（逐次采样只留 history_hours）：吃满程度，即逐次采样的 busy（worker 的近 10 分钟平均，只有保活时按 0，#51）
-    再按小时平均；worker 不在、没有 busy 的那几次不记。11-17 之前的小时行是探针瞬时值、含保活，存满 30 天自然滚出。"""
+    再按小时平均；worker 不在、没有 busy 的那几次不记。11-17 之前的小时行是探针瞬时值、含保活，存满 30 天自然滚出。
+    同时按小时平均 CPU 占用百分比（cpu_pct，#208）存 30 天供长窗口时间线叠画。"""
     gap = max(3 * cfg["interval"], 600)
     if "spans" not in state:                        # 第一次：用现有的逐次采样（history_hours 内）补出区间与每小时利用率
-        state["spans"], state["util_h"] = [], {}
+        state["spans"], state["util_h"], state["cpu_h"] = [], {}, {}
         for x in sorted((x for x in hist if x["t"] < t), key=lambda x: x["t"]):
             _add_util(state["util_h"], x.get("host"), x.get("busy"), x["t"])
+            _add_hourly(state["cpu_h"], x.get("host"), x.get("cpu_pct"), x["t"])
             sp = state["spans"]
             if sp and x["t"] - sp[-1][1] <= gap:
                 sp[-1][1] = round(x["t"])
             else:
                 sp.append([round(x["t"]), round(x["t"])])
+    elif "cpu_h" not in state:                      # #208 部署那次的迁移：旧 state.json 缺 cpu_h 时从已有 history 回填；各活跃项目采过一轮后（2026-12-27）可删
+        state["cpu_h"] = {}
+        for x in sorted((x for x in hist if x["t"] < t), key=lambda x: x["t"]):
+            _add_hourly(state["cpu_h"], x.get("host"), x.get("cpu_pct"), x["t"])
     spans = state["spans"]
     if spans and t - spans[-1][1] <= gap:
         spans[-1][1] = round(t)
@@ -395,26 +402,35 @@ def _long_term(state: dict, snap: dict, hist: list, cfg: dict, t: float) -> None
         spans.append([round(t), round(t)])
     state["spans"] = [s for s in spans if s[1] >= t - KEEP_LONG_S]
     snap["spans"] = state["spans"]
-    uh = state.setdefault("util_h", {})
+    uh, ch = state.setdefault("util_h", {}), state.setdefault("cpu_h", {})
     for h in snap["hosts"]:
         rec = next((x for x in reversed(hist) if x.get("host") == h["id"] and x["t"] == t), None)
         _add_util(uh, h["id"], (rec or {}).get("busy"), t)
+        _add_hourly(ch, h["id"], (rec or {}).get("cpu_pct"), t)
     for k in uh:
         uh[k] = [r for r in uh[k] if r[0] >= t - KEEP_LONG_S]
+    for k in ch:
+        ch[k] = [r for r in ch[k] if r[0] >= t - KEEP_LONG_S]
     snap["util_hourly"] = {k: [[r[0], round(r[1] / r[2], 1)] for r in v] for k, v in uh.items()}
+    snap["cpu_hourly"] = {k: [[r[0], round(r[1] / r[2], 1)] for r in v] for k, v in ch.items()}
+
+
+def _add_hourly(store: dict, host: str | None, val: float | None, t: float) -> None:
+    if not host or val is None:
+        return
+    rows = store.setdefault(host, [])
+    hr = int(t // 3600 * 3600)
+    if rows and rows[-1][0] == hr:
+        rows[-1][1] += val
+        rows[-1][2] += 1
+    else:
+        rows.append([hr, val, 1])
 
 
 def _add_util(uh: dict, host: str | None, util: list | None, t: float) -> None:
     u = [v for v in util or [] if v is not None]
-    if not host or not u:
-        return
-    rows = uh.setdefault(host, [])
-    hr = int(t // 3600 * 3600)
-    if rows and rows[-1][0] == hr:
-        rows[-1][1] += sum(u) / len(u)
-        rows[-1][2] += 1
-    else:
-        rows.append([hr, sum(u) / len(u), 1])
+    if u:
+        _add_hourly(uh, host, sum(u) / len(u), t)
 
 
 def build(cfg: dict, probes: dict, out_dir: Path, lan: dict | None = None, glob_snap: dict | None = None) -> dict:
@@ -465,11 +481,44 @@ def _last_probe(path: Path) -> dict | None:
     return p
 
 
+def _host_cpu(cg: dict, prev: dict | None, t: float, w_entry: dict | None) -> dict | None:
+    """一台主机的 CPU 实时占用摘要（项目快照 hosts[].cpu，#208）：
+    优先复用工作台全局快照里新鲜的 worker 状态（fleet.worker_fresh：内网、未掉线且 worker_up，读 info.cpu_used / cpu_quota / nproc / press.thr 与 throttle），
+    没有 worker 或状态不新鲜时退回探针 cgroup 的 cpu_usage_ns 差分与 cpu_quota。
+    占用百分比统一按 0–100% 封顶：有容器配额时 min(100, used / quota * 100)，无配额时按可用核数（nproc）换算。"""
+    st = w_entry["status"] if worker_fresh(w_entry) else None
+    info = (st or {}).get("info") or {}
+    used = info.get("cpu_used")
+    if used is None and prev and cg.get("cpu_usage_ns") and t > prev["t"]:
+        used = max(0.0, (cg["cpu_usage_ns"] - prev["cpu_ns"]) / 1e9 / (t - prev["t"]))
+    quota = info.get("cpu_quota") if st else cg.get("cpu_quota")
+    cpus = info.get("nproc") if st else None
+    denom = quota if quota and quota > 0 else (cpus if cpus and cpus > 0 else None)
+    pct = round(min(100.0, max(0.0, float(used) / float(denom) * 100.0)), 1) if used is not None and denom else None
+    thr = (info.get("press") or {}).get("thr") if st else None
+    th = st.get("throttle") if st else None
+    if used is None and quota is None and cpus is None and thr is None:
+        return None
+    out: dict = {"used": round(float(used), 2) if used is not None else None,
+                 "quota": round(float(quota), 2) if quota is not None else None,
+                 "cpus": int(cpus) if cpus else None,
+                 "pct": pct}
+    if thr is not None:
+        out["thr"] = round(float(thr), 1)
+    if th:
+        out["throttled"] = True
+        out["throttle_alert"] = bool(th.get("alert"))
+        if th.get("for") is not None:
+            out["throttle_for"] = th["for"]
+    return out
+
+
 def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, state: dict, hist: list, sd: Path, t: float) -> dict:
     """各主机：探针结果到 snap["hosts"]（GPU、cgroup、挂载点、自定义检查），连不上的沿用上次存的 last_probe_*.json 并标过期，
     已归还的只留一张标注卡片；这一轮的采样追加到 hist；连通状态（link_step）与磁盘余量的告警。返回各主机的探针原始结果（车道按它读队列）。"""
     hstate, alerts = state.setdefault("hosts", {}), snap["alerts"]
     raw_by_host = {}
+    w_hosts = {e["id"]: e for e in glob_snap.get("hosts", [])}
     lent = {e["id"]: e["borrow"] for e in glob_snap.get("hosts", []) if e.get("borrow")}   # 借来的主机：没有就用主机清单里记的
     busy = {e["id"]: e["busy"] for e in glob_snap.get("hosts", []) if e.get("busy")}       # 各卡的吃满程度（工作台那一轮 overview.gpu_busy 算好的，#51）
     for h in cfg["hosts"]:
@@ -524,9 +573,11 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
                 rec.update(util=[g.get("util") for g in gp], mem=[g.get("mem_used") for g in gp],
                            cpu_ns=cg.get("cpu_usage_ns"), cpu_quota=cg.get("cpu_quota"), ram=cg.get("mem_rss"))
                 prev = next((x for x in reversed(hist) if x.get("host") == h["id"] and x.get("cpu_ns")), None)
-                if prev and rec.get("cpu_ns") and t > prev["t"]:
-                    rec["cpu_pct"] = max(0.0, (rec["cpu_ns"] - prev["cpu_ns"]) / 1e9 / (t - prev["t"])
-                                         / (rec.get("cpu_quota") or 1) * 100)
+                cpu = _host_cpu(cg, prev, t, w_hosts.get(h["id"]))
+                if cpu:
+                    hd["cpu"] = cpu
+                    if cpu.get("pct") is not None:
+                        rec["cpu_pct"] = cpu["pct"]
             hd["cpu_pct"] = rec.get("cpu_pct")
             # 磁盘
             hd["mounts"] = []

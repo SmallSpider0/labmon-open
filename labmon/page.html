@@ -8,11 +8,11 @@
 <style>
 :root {
   --bg: #f4f5f7; --card: #ffffff; --fg: #1d2330; --muted: #6b7280; --faint: #9aa1ab; --line: #e4e7ec; --soft: #eef0f3;
-  --ok: #1a7f4b; --warn: #a86400; --bad: #c62828; --accent: #2f6fdd;
+  --ok: #1a7f4b; --warn: #a86400; --bad: #c62828; --accent: #2f6fdd; --cpu: #d97706;
 }
 @media (prefers-color-scheme: dark) {
   :root { --bg: #121519; --card: #1b1f26; --fg: #e6e8ec; --muted: #9aa3ae; --faint: #6b7380; --line: #2b3139; --soft: #242a32;
-          --ok: #4cc38a; --warn: #f0a640; --bad: #ff6b6b; --accent: #6ea0ff; }
+          --ok: #4cc38a; --warn: #f0a640; --bad: #ff6b6b; --accent: #6ea0ff; --cpu: #f59e0b; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; padding: 14px 20px 30px; background: var(--bg); color: var(--fg);
@@ -201,6 +201,30 @@ const runFrac = j => { const a = jobT0(j), e = jobT1(j); return a != null && e >
 // 各类任务的 实际/估时（worker 的 duration 给的依据；依据里没写比值的补上）
 const ratioText = x => `${x.cls}：${x.src}${x.src.includes("×") ? "" : `，约 ×${f1(x.k, 2)}`}`;
 const HIST = host => (D.history || []).filter(r => r.host === host && r.ok !== false);
+// 主机 CPU 实时占用格式化（唯一实现，#208）：
+// 对无 h.cpu 的旧快照回退读 h.cpu_pct / cgroup.cpu_quota（#208 于 2026-11-27 部署后活跃项目采过一轮即不再产生，2026-12-27 后可删，见 docs/concepts.md「现有的兼容代码」）
+const CPU_HIGH_PCT = 85;
+function cpuView(h) {
+  const c = h?.cpu, cg = h?.cgroup || {};
+  const used = c?.used ?? null, quota = c?.quota ?? (c ? null : cg.cpu_quota ?? null), cpus = c?.cpus ?? null;
+  const pct = c?.pct ?? (h?.cpu_pct != null ? Math.min(100, Math.max(0, h.cpu_pct)) : null);
+  const thr = c?.thr ?? null, throttled = !!c?.throttled, alert = !!c?.throttle_alert;
+  const high = pct != null && pct >= CPU_HIGH_PCT;
+  const level = alert ? "bad" : throttled || high ? "warn" : "";
+  const fmtN = x => Number.isInteger(x) ? String(x) : f1(x, 1);
+  const core = used != null ? (quota ? `${f1(used, 1)}/${fmtN(quota)} 核` : `${f1(used, 1)} 核`)
+    : quota ? `配额 ${fmtN(quota)} 核` : "";
+  const pctStr = pct != null ? `${f1(pct, 0)}%` : "";
+  const short = core && pctStr ? `${core}（${pctStr}）` : core || pctStr || "—";
+  const thrStr = thr != null && (throttled || thr >= 1) ? `限流 ${f1(thr, 0)}%` : throttled ? "限流中" : "";
+  const has = used != null || pct != null || quota != null || thr != null;
+  const tipLines = [
+    `${h.label} CPU：${short}${quota ? "" : cpus ? `（无容器配额，按 ${cpus} 可用核换算）` : ""}`,
+    thr != null ? `近 1 分钟被配额限流 ${f1(thr, 1)}%${throttled && c?.throttle_for != null ? `（已持续 ${dur(c.throttle_for)}）` : ""}` : "",
+    (h.loadavg || []).length ? `系统负载 ${(h.loadavg || []).map(v => f1(v)).join(" / ")}` : ""
+  ].filter(Boolean);
+  return {has, used, quota, cpus, pct, thr, throttled, alert, high, level, core, pctStr, short, thrStr, tip: tipLines.join("\n")};
+}
 
 /* ---------- 折线小图：悬停显示十字线与数值 ---------- */
 const CH = {};
@@ -251,9 +275,12 @@ function topline() {
   const age = Date.now() / 1000 - NOW, stale = age > (D.thresholds?.stale_s ?? 420);   // 与 labmon wait 的 collector_stale 同一门槛（config.stale_limit，缺省配置是 7 分钟）
   const gone = D.hosts.filter(h => h.returned && !retShown(h));
   const pl = poolLanes().filter(l => l.unfinished);
-  const hosts = D.hosts.filter(h => !gone.includes(h) && (!h.pool || pl.length || !h.ok)).map(h => h.pool ? `<span class="nw ${h.ok ? "mut" : ""}" style="${h.ok ? "" : "color:var(--bad)"}" ${tip("交给算力池、还没放到哪台的清单：看板挑一台入池的服务器放过去\n" + (pl.map(l => `${laneName(l, D.hosts)}：${laneState(l)}`).join("\n") || "") + (h.ok ? "" : "\n" + (h.error || "这一轮没读到池里的清单")))}>算力池里待放 ${pl.length} 条清单</span>`
-    : h.returned ? `<span class="nw mut" ${tip(`已归还（${ts(h.returned)}），不再连接；还有任务没跑完`)}><span class="cdot" style="background:var(--faint)"></span> ${esc(h.label)} · 已归还</span>`
-    : `<span class="nw" ${tip(h.ok ? "探针正常" : h.error || "失败")}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}"></span> ${esc(h.label)}</span>${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}`).join(" ")
+  const hosts = D.hosts.filter(h => !gone.includes(h) && (!h.pool || pl.length || !h.ok)).map(h => {
+    if (h.pool) return `<span class="nw ${h.ok ? "mut" : ""}" style="${h.ok ? "" : "color:var(--bad)"}" ${tip("交给算力池、还没放到哪台的清单：看板挑一台入池的服务器放过去\n" + (pl.map(l => `${laneName(l, D.hosts)}：${laneState(l)}`).join("\n") || "") + (h.ok ? "" : "\n" + (h.error || "这一轮没读到池里的清单")))}>算力池里待放 ${pl.length} 条清单</span>`;
+    if (h.returned) return `<span class="nw mut" ${tip(`已归还（${ts(h.returned)}），不再连接；还有任务没跑完`)}><span class="cdot" style="background:var(--faint)"></span> ${esc(h.label)} · 已归还</span>`;
+    const cv = h.ok ? cpuView(h) : null;
+    return `<span class="nw" ${tip(h.ok ? "探针正常" + (cv?.has ? "\n" + cv.tip : "") : h.error || "失败")}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}"></span> ${esc(h.label)}</span>${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}`;
+  }).join(" ")
     + (gone.length ? ` <span class="nw mut" ${tip(gone.map(h => `${h.label}：${ts(h.returned)} 归还`).join("\n") + "\n它们的车道照常显示结果")}>已还 ${gone.length} 台</span>` : "");
   // 嵌在看板里：标题、更新时间、立即采集与连不上的提示都在看板顶栏上（看板经 embedState 取），这里只留主机与告警
   const title = `<div class="project-title">${LIVE ? '<a class="sm" href="../../" style="color:var(--accent);text-decoration:none">← 全局调度</a>' : ""}<h1 ${tip(D.title)}>${esc(D.title)}</h1></div>`;
@@ -324,6 +351,34 @@ function kpis() {
       <div class="segs">${segs}</div>
       <div class="s">${gl.length > 1 ? gl.map((g, k) => dot(k, `${esc(gname(g))} 余 ${f1((g.mem_total - g.mem_used) / 1024, 0)}`)).join(" · ") + " GiB"
         : `${procs.length} 个进程 · 余 ${f1(tot - used, 0)} GiB`}</div></div>`);
+  }
+  // CPU 占用：整机容器 CPU 实时核数/配额与百分比，限流或高占用给出清晰颜色提示（#208）
+  const cl = D.hosts.filter(h => h.ok && !h.pool && !h.returned).map(h => ({h, c: cpuView(h)})).filter(x => x.c.has);
+  if (cl.length) {
+    const CC = ["var(--cpu)", "#D85A30", "#7F77DD", "#1D9E75", "#D4537E", "#BA7517", "#639922", "#888780"];
+    const dot = (k, txt) => `<span class="nw"><span class="cdot" style="background:${CC[k % CC.length]}"></span> ${txt}</span>`;
+    const series = cl.map(({h}, k) => ({name: cl.length > 1 ? hostShort(h) : "", color: CC[k % CC.length],
+      pts: HIST(h.id).filter(r => r.cpu_pct != null).map(r => [r.t, Math.min(100, Math.max(0, r.cpu_pct))])}));
+    const pcts = cl.map(x => x.c.pct).filter(v => v != null);
+    const avgPct = pcts.length ? avg(pcts) : null;
+    const worst = cl.some(x => x.c.level === "bad") ? "bad" : cl.some(x => x.c.level === "warn") ? "warn" : "";
+    const big = cl.length === 1
+      ? (cl[0].c.pct != null ? `${f1(cl[0].c.pct, 0)}<small>%${cl[0].c.core ? " · " + esc(cl[0].c.core) : ""}</small>`
+        : `${esc(cl[0].c.core || "—")}`)
+      : (avgPct != null ? `${f1(avgPct, 0)}<small>% 平均</small>` : "—");
+    const item = ({h, c}, k) => {
+      const tag = c.thrStr ? ` <span style="color:var(--${c.level || "warn"});font-weight:600">${esc(c.thrStr)}</span>`
+        : c.high ? ` <span style="color:var(--warn);font-weight:600">高占用</span>` : "";
+      const txt = `${cl.length > 1 ? esc(hostShort(h)) + " " : "CPU "}<span style="${c.level ? `color:var(--${c.level})` : ""}">${esc(c.short)}</span>${tag}`;
+      return cl.length > 1 ? dot(k, txt) : txt;
+    };
+    const ctip = "整台主机的容器 CPU 占用（含同机别的项目与 labmon 之外的进程）；按容器配额换算，无配额时按可用核数换算\n\n"
+      + cl.map(({c}) => c.tip).join("\n\n");
+    out.push(`<div class="kpi" ${tip(ctip)}>
+      <div class="k">CPU 占用${cl.length > 1 ? ` · ${cl.length} 台` : ""} · 整机</div>
+      <div class="v" style="${worst ? `color:var(--${worst})` : ""}">${big}</div>
+      ${chart({series, t0: since, t1: NOW, ymax: 100, H: 22, area: cl.length === 1, fmt: v => f1(v, 0) + "%"})}
+      <div class="s">${cl.map(item).join(" · ")}</div></div>`);
   }
   // 任务
   const real = D.jobs.filter(j => !j.hold);
@@ -480,7 +535,8 @@ function tlItems(c) {
       sw(`<path d="M1 2H5V7H16V9" fill="none" stroke="var(--fg)" stroke-opacity=".5"/><path d="M13 8L16 12L19 8Z" fill="var(--fg)" fill-opacity=".6"/>`)],
     ["gap", "空档（标原因；往后的写推演里在等谁）", sw(`<line x1="0" x2="22" y1="6" y2="6" stroke="var(--faint)" stroke-dasharray="2 3"/>`)],
     ...occItems("var(--faint)", "同机别的项目："),
-    ["util", "整机 GPU 利用率（主机行的浅底：近 10 分钟平均，保活按 0 算）", sw(`<path d="M0 11L5 4L10 6L15 2L22 7L22 12L0 12Z" fill="var(--accent)" fill-opacity=".13"/><path d="M0 11L5 4L10 6L15 2L22 7" fill="none" stroke="var(--accent)" stroke-opacity=".7"/>`)],
+    ["util", "整机 GPU 利用率（蓝底蓝线：近 10 分钟平均，保活按 0 算，0–100%）", sw(`<path d="M0 11L5 4L10 6L15 2L22 7L22 12L0 12Z" fill="var(--accent)" fill-opacity=".13"/><path d="M0 11L5 4L10 6L15 2L22 7" fill="none" stroke="var(--accent)" stroke-opacity=".7"/>`)],
+    ["cpu", "整机 CPU 占用率（橙线：按容器配额，无配额按可用核数，0–100%）", sw(`<path d="M0 9L5 6L10 7L15 3L22 5" fill="none" stroke="var(--cpu)" stroke-width="1.5"/>`)],
     ["down", "连不上", sw(bandRect("down", 0, 2, 22, 8))],
     ["warn", "drain、暂停、续租截止", sw(bandRect("warn", 0, 2, 22, 8))],
     ["ret", "跑完就还（画到预计归还）", sw(bandRect("ret", 0, 2, 22, 8))],
@@ -492,8 +548,10 @@ function timelineCard() {
     <span id="tlbar" class="row" style="gap:6px"></span></div>
     <div id="tlbox" style="margin-top:6px"></div><div id="tlkey" class="tlkey${TL.key ? " open" : ""}"></div></div>`;
 }
+let TLH = {};      // 时间线主机表头折线的悬停采样数据（hostRow 填充，tlHostHover 读）
 function drawTimeline() {
   const box = document.getElementById("tlbox"); if (!box?.clientWidth) return;     // 嵌在看板里又被隐藏了：再显示时看板会调它重画
+  TLH = {};
   tlBind(box); tlFrame();
   DEPH.ch = depChain(DEPH.id); box.classList.toggle("dh", !!DEPH.ch);     // 悬停着的那格的上下游：重画时照样高亮（laneRow、depLines 读 DEPH.ch）
   const {t0, t1} = tlRange(), win = (a, b) => a != null && b != null && b > t0 && a < t1;
@@ -610,25 +668,61 @@ function depHover(id) {
   box.querySelectorAll("[data-j]").forEach(g => g.classList.toggle("on", !!ch?.has(g.dataset.j)));
   box.querySelectorAll(".dl").forEach(g => g.classList.toggle("on", depOn(ch, g.dataset.a, g.dataset.b, g.classList.contains("t"))));
 }
-// 主机表头一行（上面有分隔线，这台的车道缩进挂在下面）：主机短名；整机 GPU 利用率画成浅底；ev 时底边一条事件色带
-// （连不上、drain、暂停、续租截止、没在采集），竖线是换容器、续租与作废重排
+// 主机表头折线的采样拼接（GPU 与 CPU 共用，#208）：24 小时内取逐次采样，更早或长窗口取每小时平均，按最大间隔分段
+function hostSeries(hs, hourly, valFn, c, long) {
+  const first = hs.length ? hs[0].t : Infinity;
+  const hr = (hourly || []).filter(p => long || p[0] + 3600 <= first).map(p => [p[0] + 1800, p[1], 5400]);
+  const pts = [...hr, ...(long ? [] : hs.map(p => [p.t, valFn(p), (D.interval || 120) * 3.5]))]
+    .filter(p => p[0] >= c.t0 - 3600 && p[0] <= c.t1 + 3600 && p[1] != null)
+    .map(p => [p[0], Math.min(100, Math.max(0, p[1])), p[2]]);
+  const segs = []; let cur = [];
+  pts.forEach((p, i) => { if (i && p[0] - pts[i - 1][0] > Math.max(p[2], pts[i - 1][2])) { segs.push(cur); cur = []; } cur.push(p); });
+  segs.push(cur);
+  return {pts, segs: segs.filter(x => x.length > 1)};
+}
+function tlHostHover(rect, e) {
+  const info = TLH[rect.dataset.thost], g = TL.g, box = document.getElementById("tlbox");
+  if (!info || !g || !box) return null;
+  const br = box.getBoundingClientRect(), f = Math.min(1, Math.max(0, (e.clientX - br.left - g.L) / g.PW));
+  const t = g.t0 + f * (g.t1 - g.t0);
+  // 按样本自身的有效间隔（p[2]/2：逐次采样约 1.75×interval，每小时平均 45 分钟）匹配最近点，不随视窗跨度放宽，避免填充采集中断空白区
+  const near = pts => { let b = null; for (const p of pts) if (!b || Math.abs(p[0] - t) < Math.abs(b[0] - t)) b = p; return b && Math.abs(b[0] - t) <= b[2] / 2 ? b : null; };
+  const gp = near(info.gpuPts), cp = near(info.cpuPts), cv = cpuView(info.host);
+  const lines = [`${info.host.label} · ${ts(t)}`];
+  if (gp) lines.push(`GPU 利用率  ${f1(gp[1], 0)}%（${info.long ? "每小时平均" : "近 10 分钟平均"}）`);
+  if (cp) lines.push(`CPU 占用  ${f1(cp[1], 0)}%${info.long ? "（每小时平均）" : ""}`);
+  if (!gp && !cp) lines.push("该时刻无 GPU / CPU 采样");
+  if (cv.has) lines.push(`此刻 CPU ${cv.short}${cv.thrStr ? " · " + cv.thrStr : ""}`);
+  return lines.join("\n");
+}
+// 主机表头一行（上面有分隔线，这台的车道缩进挂在下面）：主机短名；整机 GPU 利用率画成浅蓝底，同轴叠加橙色 CPU 占用折线（0–100%，#208）；
+// ev 时底边一条事件色带（连不上、drain、暂停、续租截止、没在采集），竖线是换容器、续租与作废重排
 function hostRow(host, hb, ev, y, h, c) {
   // 逐次采样只留 24 小时：更早的、或看的区间超过一天半时用每小时平均（保留 30 天）
-  const hs = HIST(host.id).filter(p => p.busy), first = hs.length ? hs[0].t : Infinity, long = c.t1 - c.t0 > 36 * 3600;
-  const hr = (D.util_hourly?.[host.id] || []).filter(p => long || p[0] + 3600 <= first).map(p => [p[0] + 1800, p[1], 5400]);
-  const pts = [...hr, ...(long ? [] : hs.map(p => [p.t, avg(p.busy), (D.interval || 120) * 3.5]))].filter(p => p[0] >= c.t0 - 3600 && p[0] <= c.t1 + 3600 && p[1] != null);
-  const ub = y + (ev ? h - 11 : h - 2), Y = v => ub - (ub - y - 3) * v / 100;     // 利用率的底边与高度
-  let s = `<text class="lab" x="0" y="${y + (ub - y) / 2 + 5}" style="font-weight:600" ${tip(`${host.label}\n浅蓝底：整机 GPU 平均利用率（含同机别的项目${long ? "，每小时平均" : ""}）`
+  const H = HIST(host.id), long = c.t1 - c.t0 > 36 * 3600;
+  const gpuS = hostSeries(H.filter(p => p.busy), D.util_hourly?.[host.id], p => avg(p.busy), c, long);
+  const cpuS = hostSeries(H.filter(p => p.cpu_pct != null), D.cpu_hourly?.[host.id], p => p.cpu_pct, c, long);
+  const ub = y + (ev ? h - 11 : h - 2), Y = v => ub - (ub - y - 3) * v / 100;     // 利用率的底边与高度（GPU 与 CPU 同轴 0–100%）
+  const cv = cpuView(host);
+  let s = `<text class="lab" x="0" y="${y + (ub - y) / 2 + 5}" style="font-weight:600" ${tip(`${host.label}\n蓝底蓝线：整机 GPU 平均利用率（含同机别的项目${long ? "，每小时平均" : ""}）\n橙线：整机 CPU 占用率（同轴，按容器配额或可用核数换算）`
+    + (cv.has ? `\n此刻 CPU ${cv.short}${cv.thrStr ? " · " + cv.thrStr : ""}` : "")
     + (ev ? "\n底边色带：连不上、drain、暂停、续租截止、labmon 没在采集；竖线是换容器、续租与作废重排" : ""))}>${esc(fit(hostShort(host), c.L - 6))}</text>`;
-  let segs = [], cur = [];
-  pts.forEach((p, i) => { if (i && p[0] - pts[i - 1][0] > Math.max(p[2], pts[i - 1][2])) { segs.push(cur); cur = []; } cur.push(p); }); segs.push(cur);
   s += `<g clip-path="url(#tlclip)">`;
-  for (const sg of segs.filter(x => x.length > 1)) {
+  for (const sg of gpuS.segs) {
     const l = sg.map((p, i) => (i ? "L" : "M") + c.X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1)).join("");
     c.seen.add("util");
     s += `<path d="${l}L${c.X(sg[sg.length - 1][0])},${ub}L${c.X(sg[0][0])},${ub}Z" fill="var(--accent)" fill-opacity=".13"/><path d="${l}" fill="none" stroke="var(--accent)" stroke-width="1" stroke-opacity=".7"/>`;
   }
+  for (const sg of cpuS.segs) {
+    const l = sg.map((p, i) => (i ? "L" : "M") + c.X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1)).join("");
+    c.seen.add("cpu");
+    s += `<path d="${l}" fill="none" stroke="var(--cpu)" stroke-width="1.25" stroke-opacity=".9"/>`;
+  }
   s += `</g>`;
+  if (gpuS.pts.length || cpuS.pts.length) {
+    TLH[host.id] = {host, gpuPts: gpuS.pts, cpuPts: cpuS.pts, long};
+    s += `<rect class="tl-h" data-thost="${esc(host.id)}" x="${c.L}" y="${y}" width="${c.PW}" height="${Math.max(4, ub - y)}" fill="transparent"/>`;
+  }
   // 底边色带按起点排；标签只写到后面那条能写标签的带的起点，起点被前一个标签盖住的不写（悬停照旧），重叠的带不叠字（#103）
   const bs = ev ? hb.iv.filter(x => c.win(x.t0, x.t1)).map(x => ({x, xa: c.cl(x.t0), w: Math.max(2, c.cl(x.t1) - c.cl(x.t0))})).sort((a, b) => a.xa - b.xa) : [];
   let free = -Infinity;
@@ -927,8 +1021,10 @@ function resourcesCard() {
         (h.gpu_procs || []).map(p => `PID ${p.pid}  ${f1(p.mem / 1024)} GiB  ${(p.cmd || "").slice(0, 60)}`).join("\n") || "无 GPU 进程"));
       for (const g of gp) chips.push(`<span class="chip">${gp.length > 1 ? "GPU" + g.index + " " : ""}${f1(g.temp, 0)}°C · ${f1(g.power, 0)} W</span>`);
     }
-    if (cg.cpu_quota) tiles.push(tile(`CPU · ${f1(cg.cpu_quota, 0)} 核`, f1(h.cpu_pct, 0) + "%",
-      line(H.filter(r => r.cpu_pct != null).map(r => [r.t, r.cpu_pct]), 100, v => f1(v, 0) + "%"), `负载 ${(h.loadavg || []).map(v => f1(v)).join(" / ")}`));
+    const cv = cpuView(h);
+    if (cv.has) tiles.push(tile(cv.quota ? `CPU · ${Number.isInteger(cv.quota) ? cv.quota : f1(cv.quota, 1)} 核` : "CPU",
+      `<span style="${cv.level ? `color:var(--${cv.level})` : ""}">${esc(cv.short)}${cv.thrStr ? ` · ${esc(cv.thrStr)}` : ""}</span>`,
+      line(H.filter(r => r.cpu_pct != null).map(r => [r.t, Math.min(100, Math.max(0, r.cpu_pct))]), 100, v => f1(v, 0) + "%", {color: "var(--cpu)"}), cv.tip));
     if (cg.mem_rss || cg.mem_used) tiles.push(tile(`内存${cg.mem_limit ? " · " + f1(cg.mem_limit / GIB, 0) + " GiB" : ""}`, f1((cg.mem_rss || 0) / GIB, 1) + " GiB",
       line(H.filter(r => r.ram).map(r => [r.t, r.ram / GIB]), 0, v => f1(v) + " GiB"), `进程 ${f1((cg.mem_rss || 0) / GIB)} GiB · 含缓存 ${f1((cg.mem_used || 0) / GIB)} GiB`));
     for (const m of h.mounts || []) {     // 采集给的是 GB（历史曲线也是），换成 GiB
@@ -1030,6 +1126,8 @@ tipBind({
     const svg = e.target.closest?.("svg.ch");
     document.querySelectorAll("svg.ch .xh").forEach(x => { if (!svg || !svg.contains(x)) x.setAttribute("visibility", "hidden"); });
     if (svg) { const t = chartHover(svg, e); if (t) return [t, svg]; }
+    const th = e.target.closest?.("rect.tl-h");
+    if (th) { const t = tlHostHover(th, e); if (t) return [t, th]; }
   },
   hide: xhHide,
 });
