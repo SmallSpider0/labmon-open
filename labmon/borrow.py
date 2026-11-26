@@ -290,22 +290,9 @@ def _wq(xs: list[tuple[float, float]], q: float) -> float:
 _REC: dict = {}
 
 
-def _ram_sample(r: dict) -> float | None:
-    """组内探测的一行里对方的内存（GiB，不算页缓存、除保活）：带 mk 的行 ma 已按保活整棵进程树的 PSS 扣（同 worker 的 other.ram）。
-    兼容旧行（两处都只读本机 series，补不出来，到期删）：
-    - 不带 mk 的（#29 修复部署前）ma 扣的是保活进程树的 RSS 合计，父子共享的页重复相加、扣多了（27-15152 上多扣约 2 GiB），
-      改取不扣保活的总 anon（ma + 当时扣的 m − mr）：把保活也算对方的，偏向多留，11-17 后七天内全是带 mk 的，可删；
-    - 不带 ma 的（11-06 前）只有含活跃页缓存的 mr（偏大），11-13 后七天内全是 ma，可删。"""
-    if "mk" in r:
-        return r.get("ma")
-    if r.get("ma") is not None:
-        return r["ma"] + max(0.0, (r.get("m") or 0.0) - (r.get("mr") or 0.0))
-    return r.get("mr")
-
-
 def reserve_for(sid: str, t: float | None = None, bump: float = 1.0) -> dict:
-    """给对方留的量：组内探测近 7 天里对方空着或轻用（sh）时的样本、对方的实际用量（除保活；内存不算页缓存，保活按整棵进程树的 PSS 扣，
-    与 worker 比的 other.ram 同口径，见 _ram_sample），
+    """给对方留的量：组内探测近 7 天里对方空着或轻用（sh）时的样本、对方的实际用量（除保活；内存取不算页缓存的 ma，保活按整棵进程树的 PSS 扣，
+    与 worker 比的 other.ram 同口径），
     按时间衰减加权（半衰期 RESERVE_HALF_S）
     取 RESERVE_Q 分位 ×RESERVE_X，不低于 RESERVE_MIN，再乘 bump。只取轻用时的：借卡只在对方空着或轻用时借，留的是轻用的余量；
     对方回来跑大实验就是超出预留，由 worker 不放新任务。借用中的样本不算（带 bw 的）。
@@ -316,7 +303,7 @@ def reserve_for(sid: str, t: float | None = None, bump: float = 1.0) -> dict:
         rows = [r for r in load_rows(F.state_dir() / "series" / f"{sid}.jsonl")
                 if r.get("t", 0) >= t - 7 * 86400 and (r.get("sh") or r.get("st") in ("idle", "keepalive")) and not r.get("bw")]
         rec, peak = {}, {}
-        for k, f in (("vram", lambda r: r["vr"] / 1024 if r.get("vr") is not None else None), ("ram", _ram_sample), ("cpu", lambda r: r.get("cr"))):
+        for k, f in (("vram", lambda r: r["vr"] / 1024 if r.get("vr") is not None else None), ("ram", lambda r: r.get("ma")), ("cpu", lambda r: r.get("cr"))):
             xs = [(f(r), 0.5 ** ((t - r["t"]) / RESERVE_HALF_S)) for r in rows if f(r) is not None]
             rec[k] = max(RESERVE_MIN[k], _wq(xs, RESERVE_Q) * RESERVE_X)
             peak[k] = round(max((v for v, _ in xs), default=0.0), 1)

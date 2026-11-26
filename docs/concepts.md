@@ -148,7 +148,7 @@
 | 139 | 对方轻用时能不能借、对方在用什么 | `borrow.can_borrow`、`borrow.using` |
 | 140 | 给对方留的量 | `borrow.reserve_for`、`borrow._keep`、`borrow.keep_text`；页面上 `keepText`（common.js） |
 | 141 | 借来的主机上对方的用量、超出预留、扣预留准入、说好不用的时段与作废、快撞上限、被挤掉、OOM 先杀我们 | worker 的 `other`（`sample`）、`guest_scan`（`cpu_hot`、`away_base`）、`guest_block`、`held`、`keep_left`、`away`、`end_away`（`away_state`）、`guest_tight`、`squeezed_by`（`oom_of`）、`oom_check`、`GUEST_ADJ`；看板写、清 `borrow_away` 在 `borrow.begin`、`borrow.check` |
-| 142 | labmon 之外的内存与 CPU 要扣掉的保活 | `worker.pure.proc_tree`（worker 与 `fleet.analyze` 共用）；worker 的 `mem_of`、`Worker.ka_cores`（`ka_roots`）；组内服务器的 `fleet.analyze`（`mem_ka`）、`borrow._ram_sample`、探针 `fleet_probe.sh` 的 `pss` 段（字样由 `fleet.fetch` 传） |
+| 142 | labmon 之外的内存与 CPU 要扣掉的保活 | `worker.pure.proc_tree`（worker 与 `fleet.analyze` 共用）；worker 的 `mem_of`、`Worker.ka_cores`（`ka_roots`）；组内服务器的 `fleet.analyze`（`mem_ka`）、探针 `fleet_probe.sh` 的 `pss` 段（字样由 `fleet.fetch` 传） |
 | 143 | 后台采集线程 | `serve._Collector` |
 | 144 | 页面连不上看板服务 | `api`（`NET_WAIT`）、`netText`、`pollNet`、`offBadge`（common.js） |
 | 145 | 看板服务接受哪些请求；页面上的写请求 | `serve.Handler._gate`（`serve.host_ok`、`hosts`、`serve.allowed_hosts`）；页面上 `postJSON`（common.js）；测试里 `tests/fixtures.post_req`；`tools/deploy.py` 的 `http` |
@@ -189,8 +189,6 @@
 
 [AGENTS.md「一个概念只有一处实现」第 3 条](../AGENTS.md#一个概念只有一处实现硬约束)允许暂留、到期就删的兼容代码（旧数据补不出来的留到期；能一次迁完的迁完就删）。删了的从这里一并去掉，新留的补进来：
 
-- 11-13 借用样本缺 `ma` 的回退（borrow.py，`ma` 11-06 起才记，之前的只有偏大的 `mr`）。
-- 11-17 借用样本不带 `mk` 的回退（borrow.py `_ram_sample`，之前的 `ma` 按保活进程树的 RSS 扣、扣多了，取不扣保活的总 anon）。
 - 11-23 页面上内存估计来源没有 `ram_src` 的回退（overview_js/home.js `ramSrc`，#61 之前放行、被新 worker 接管的运行中任务沿用旧 `est`，跑完就没了）。
 - 11-23 用量行没有 `conc` 的回退（`labmon/worker/sched.py` `rec_conc`，#67 之前的行：同卡没别的任务的当 1、其余不知道，推不出来）。
 - #19 部署那次的迁移（`users.migrate_people` 与它用的旧对应规则 `users._legacy_people`、`serve.serve` 里调它的那几行：#70 之前的账号按主机清单 `[fleet.account_people]`、同名、快照历史认出的人写进账号库）：主与备用的看板服务各启动过一次就删。
@@ -485,7 +483,7 @@
 141. **借来的主机上对方的用量、超出预留、扣预留准入、说好不用的时段与作废、快撞上限、被挤掉、OOM 先杀我们**：借来的主机上对方的用量（内存按不算页缓存的 `mem.anon`；内存与 CPU 都不含任何保活的进程树，与预留同口径；`ka.sh` 停不了的保活占的核 `other.ka_cpu` 另由 `cpu_room` 扣）、超出预留（CPU 连着两轮才算）、扣预留准入（要不要预先留）、对方说好不用的时段与作废、快撞上限、被挤掉（失败是不是 OOM 的判定与 finish 记用量行的 `oom` 共用）、OOM 先杀我们
    实现：worker 的 `other`（`sample` 里量）、`guest_scan`（`cpu_hot`；说好不用开始时对方已有的 GPU 进程 `away_base`）、`guest_block`、`held`、`keep_left`、`away`、`end_away`（状态的 `away_state`）、`guest_tight`、`squeezed_by`（判定 `oom_of`）、`oom_check`、`GUEST_ADJ`；看板写、清 `borrow_away` 在 `borrow.begin`、`borrow.check`
 142. **labmon 之外的内存与 CPU 要扣掉的保活**：labmon 之外的内存与 CPU 要扣掉的保活（GPU 上认作保活的进程整棵进程树，含借来主机上对方另起、`ka.sh` 停不了的；上一轮认过、这一轮漏认但 PID 与启动时刻没变的照样算，停不了的照样算停不了的）：内存扣各进程 PSS 之和（借用的预留与 worker 判超出靠它同口径）；CPU worker 扣这一段的核数，组内探针只有 `ps` 的 %CPU（生命期平均，口径不同）
-   实现：`worker.pure.proc_tree`（worker 单元/保活与组内服务器 `fleet.analyze` 共用）；worker 的 `mem_of`、`Worker.ka_cores`（`ka_roots`，`sample` 里扣；上一轮的累计记两种：所有保活合起来、各棵保活树分开，停不了的核数按后者求和）；组内服务器的 `fleet.analyze`（`mem_ka`，序列行记 `mk`，`borrow._ram_sample` 按它认新旧样本），探针 `fleet_probe.sh` 的 `pss` 段只送命令行带保活字样的 GPU 进程与其子孙的 PSS（字样由 `fleet.fetch` 传；探针在未必有 Python 的镜像里跑，另留 awk 一份）
+   实现：`worker.pure.proc_tree`（worker 单元/保活与组内服务器 `fleet.analyze` 共用）；worker 的 `mem_of`、`Worker.ka_cores`（`ka_roots`，`sample` 里扣；上一轮的累计记两种：所有保活合起来、各棵保活树分开，停不了的核数按后者求和）；组内服务器的 `fleet.analyze`（`mem_ka`，序列行记 `mk`；`borrow.reserve_for` 直接取 `ma`），探针 `fleet_probe.sh` 的 `pss` 段只送命令行带保活字样的 GPU 进程与其子孙的 PSS（字样由 `fleet.fetch` 传；探针在未必有 Python 的镜像里跑，另留 awk 一份）
 143. **后台采集线程**：后台采集线程
    实现：`serve._Collector`
 144. **页面连不上看板服务**：页面连不上看板服务（服务重启的那几秒：fetch 抛 TypeError；页面上的请求都经它，不露浏览器原始报错；只有做两遍也没事的——读数据、立即采集、立即探测——自动重试，别的写请求只提示再点；定时取数顶栏标连不上、提早再取；那几句话、顶栏那一处，#177）

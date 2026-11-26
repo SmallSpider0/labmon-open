@@ -278,31 +278,25 @@ class BorrowTest(Base):
 
 
     def test_reserve_from_history(self):
-        """给对方留的量：近 7 天对方轻用时用量的加权 95 分位 ×1.15，不低于下限；跑大实验时、借用中（bw）的样本不算；被挤到后乘倍数。"""
+        """给对方留的量：近 7 天对方轻用时用量的加权 95 分位 ×1.15，不低于下限；内存直接取不算页缓存的 ma；跑大实验时、借用中（bw）的样本不算；被挤到后乘倍数。"""
         t = time.time()
         f = self.d / "state" / "overview" / "fleet" / "series" / f"{SID}.jsonl"
         f.parent.mkdir(parents=True)
-        rows = [{"t": t - i * 600, "st": "job", "sh": True, "vr": 6144, "mr": 10.0, "cr": 2.0} for i in range(100)]
-        rows += [{"t": t - i * 600 - 100, "st": "job", "sh": False, "vr": 40000, "mr": 60.0, "cr": 20.0} for i in range(100)]   # 跑大实验时
-        rows += [{"t": t - i * 600 - 300, "st": "idle", "vr": 40000, "mr": 60.0, "cr": 20.0, "bw": 1} for i in range(100)]   # 借用中：有我们的
-        rows += [{"t": t - 8 * 86400, "st": "idle", "vr": 40000, "mr": 60.0, "cr": 20.0}]                                  # 7 天前的不算
+        rows = [{"t": t - i * 600, "st": "job", "sh": True, "vr": 6144, "m": 17.0, "mr": 15.8, "ma": 6.0, "mk": 1.2, "cr": 2.0} for i in range(100)]
+        rows += [{"t": t - i * 600 - 100, "st": "job", "sh": False, "vr": 40000, "mr": 60.0, "ma": 50.0, "mk": 1.2, "cr": 20.0} for i in range(100)]   # 跑大实验时
+        rows += [{"t": t - i * 600 - 300, "st": "idle", "vr": 40000, "mr": 60.0, "ma": 50.0, "mk": 1.2, "cr": 20.0, "bw": 1} for i in range(100)]   # 借用中：有我们的
+        rows += [{"t": t - 8 * 86400, "st": "idle", "vr": 40000, "mr": 60.0, "ma": 50.0, "mk": 1.2, "cr": 20.0}]                                  # 7 天前的不算
         f.write_text("".join(json.dumps(r) + "\n" for r in rows))
         k = B.reserve_for(SID, t)
-        self.assertEqual((k["vram"], k["ram"], k["cpu"], k["n"]), (6.9, 11.5, 2.3, 100))
-        self.assertEqual(k["peak"], {"vram": 6.0, "ram": 10.0, "cpu": 2.0})
+        self.assertEqual((k["vram"], k["ram"], k["cpu"], k["n"]), (6.9, 6.9, 2.3, 100))
+        self.assertEqual(k["peak"], {"vram": 6.0, "ram": 6.0, "cpu": 2.0})
         self.assertEqual(B.reserve_for(SID, t, 1.2)["vram"], 8.3)
         self.assertEqual(B.reserve_for("nohist", t)["vram"], B.RESERVE_MIN["vram"])
-        f.write_text("".join(json.dumps({**r, "ma": 4.0} if r.get("sh") else r) + "\n" for r in rows))   # 有 ma 的取 ma（不算页缓存）
+        # ma 为 None 时不退回含页缓存的 mr，回落到下限
+        f.write_text("".join(json.dumps({**r, "ma": None} if r.get("sh") else r) + "\n" for r in rows))
         B._REC.clear()
         k = B.reserve_for(SID, t)
-        self.assertEqual((k["ram"], k["peak"]["ram"]), (4.6, 4.0))
-        # #29：不带 mk 的旧行 ma 扣的是保活进程树的 RSS 合计（扣多了），取不扣保活的总 anon（ma + m − mr）；带 mk 的新行按保活 PSS 扣过，取 ma
-        f.write_text("".join(json.dumps({**r, "ma": 4.0, "m": 17.0, "mr": 14.0} if r.get("sh") else r) + "\n" for r in rows))
-        B._REC.clear()
-        self.assertEqual(B.reserve_for(SID, t)["ram"], 8.0)                    # 7.0 × 1.15（只取 ma 是 4.6）
-        f.write_text("".join(json.dumps({**r, "ma": 6.0, "m": 17.0, "mr": 15.8, "mk": 1.2} if r.get("sh") else r) + "\n" for r in rows))
-        B._REC.clear()
-        self.assertEqual(B.reserve_for(SID, t)["ram"], 6.9)
+        self.assertEqual((k["ram"], k["peak"]["ram"]), (B.RESERVE_MIN["ram"], 0.0))
 
     def test_begin_as_op_shows_progress(self):
         """看板上的借来用在后台跑（fleetops.run_borrow）：每步写进 op.json；开始与完成只记借用那一条，不另记平台操作。"""
