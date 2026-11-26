@@ -2037,6 +2037,12 @@ t("timeline", "#178 并行车道 par=10 重叠 7 层不重叠、超 4 道压细�
   const tp = tips(tl);
   has(tp, "另有 3 个重叠任务", "聚合条悬停应列明细");
   for (const id of ["p6_j5", "p6_j6", "p6_j7"]) has(tp, id, "聚合条悬停应包含 " + id);
+  // 聚合簇内先结束的任务被另一车道后继依赖时，保留真实端点坐标，依赖连线不丢失
+  const Ndep = J("project_par10.json");
+  Ndep.jobs.push({id: "after_p6_j5", est_min: 10, status: "queued", lane: Ndep.lanes[0].id, hold: false, group: "alpha_",
+    plan_start_ts: NOW + 1860, eta_ts: NOW + 2460, dur_min: 10, deps: [[Ndep.id, "p6_j5"]]});
+  const Adep = pjCtx(Ndep, EVN); run(Adep, `TL.v = {a: ${-2 * H}, b: ${2 * H}}; drawTimeline()`);
+  has(el(Adep, "tlbox").innerHTML, 'data-a="p6_j5" data-b="after_p6_j5"', "聚合簇内任务的依赖连线不该丢失");
   // 窄屏渲染不漏 NaN/undefined
   el(A, "tlbox").clientWidth = 343; run(A, "drawTimeline()");
   clean(el(A, "tlbox").innerHTML, "窄屏 par10 时间线");

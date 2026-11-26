@@ -743,7 +743,7 @@ function laneRow(l, hb, gs, y, h, c, used, pk) {
       else {
         const w = Math.max(1.5, m.xe - m.xa);
         s += tlMoreBar(m.xa, yy, w, bh, m.items.map(it => `${it.j.id}（${stOf(it.j)[0]} · ${tsHM(it.t0)}→${tsHM(it.t1)}）`));
-        for (const it of m.items) (c.pos ||= {})[it.j.id] = {x0: m.xa, x1: m.xe, y: yy + bh / 2, yt: y, yb: y + h, r};
+        for (const it of m.items) (c.pos ||= {})[it.j.id] = {x0: c.X(it.t0), x1: c.X(it.t1), y: yy + bh / 2, yt: y, yb: y + h, r};
       }
     }
   }
