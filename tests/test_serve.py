@@ -2427,25 +2427,38 @@ class StateFilesTest(unittest.TestCase):
         self.assertEqual(eta["prog"], ["p|j_prog", "p|j_recent", "p|j_stall"])
 
     def test_occupancy_since_skip_and_lanes(self):
-        # 只取 since 之后结束的；skip 的项目不给（项目页只看同机别的项目，推演里的也跳过）；车道名按项目看板登记的 (主机, 目录, 清单) 对上；不用卡的不画
+        # 只取 since 之后结束的；skip 的项目不给（项目页只看同机别的项目占卡，默认不含纯 CPU）；车道名按项目看板登记的 (主机, 目录, 清单) 对上；
+        # 非占位纯 CPU 任务（已跑、在跑、推演排队）在总览保留 g=[]，占位任务跳过（#207）
         f = state_dir() / "usage" / "h.jsonl"
         f.parent.mkdir(parents=True)
         f.write_text("".join(json.dumps(r) + "\n" for r in [
             {"t": 200, "s": 100, "n": "early", "p": "a", "g": ["G0"], "gi": [0], "st": "done", "root": "/r", "queue": "q.txt"},
             {"t": 400, "s": 300, "n": "mine", "p": "a", "g": ["G0"], "gi": [0], "st": "failed", "root": "/r", "queue": "q.txt"},
             {"t": 500, "s": 450, "n": "theirs", "p": "b", "g": ["G0"], "gi": [0], "st": "stop", "root": "/o", "queue": "q.txt"},
-            {"t": 600, "s": 550, "n": "cpu", "p": "b", "g": [], "gi": [], "st": "done"}]))
+            {"t": 600, "s": 550, "n": "cpu", "p": "b", "g": [], "gi": [], "st": "done", "root": "/o", "queue": "q.txt"},
+            {"t": 610, "s": 560, "n": "hold_done", "p": "b", "g": [], "gi": [], "st": "done"}]))
         hosts = [{"id": "h", "status": {"info": {"gpus": [{"i": 0, "uuid": "G0"}]},
-                                        "plan": {"lanes": [{"root": "/r", "queue": "q.txt", "project": "a", "jobs": [{"name": "a2", "t0": 700, "t1": 800, "gpus": [0]}]},
-                                                           {"root": "/o", "queue": "q.txt", "project": "b", "jobs": [{"name": "b2", "t0": 700, "t1": 900, "gpus": [0], "after": [["a", "a2"]]},
-                                                                                                                      {"name": "hold", "t0": 700, "t1": None, "gpus": []}]}]}}}]
+                                        "plan": {"lanes": [{"root": "/r", "queue": "q.txt", "project": "a", "jobs": [
+                                                            {"name": "a2", "t0": 700, "t1": 800, "gpus": [0]},
+                                                            {"name": "cpu_run", "t0": 680, "t1": 740, "gpus": [], "run": True},
+                                                            {"name": "cpu_plan", "t0": 740, "t1": 820, "gpus": [], "after": [["a", "cpu_run"]]}]},
+                                                           {"root": "/o", "queue": "q.txt", "project": "b", "jobs": [
+                                                            {"name": "b2", "t0": 700, "t1": 900, "gpus": [0], "after": [["a", "a2"]]},
+                                                            {"name": "hold", "t0": 700, "t1": None, "gpus": []},
+                                                            {"name": "hold_wait", "t0": 700, "t1": 760, "gpus": []}]}]}}}]
         projects = [{"id": "a", "lanes": [{"host": "h", "root": "/r", "queue": "q.txt", "label": "车道 1 训练"}]},
                     {"id": "b", "lanes": [{"host": "h", "root": "/o", "queue": "q.txt", "label": "车道 2"}]}]
         occ = O.occupancy(hosts, projects, 250)
-        self.assertEqual([(r["n"], r["lane"], r["st"], r.get("after")) for r in occ["h"]],
-                         [("mine", "车道 1 训练", "failed", None), ("theirs", "车道 2", "stop", None), ("a2", "车道 1 训练", "plan", None), ("b2", "车道 2", "plan", [["a", "a2"]])])
+        self.assertEqual([(r["n"], r["lane"], r["g"], r["st"], r.get("after")) for r in occ["h"]],
+                         [("mine", "车道 1 训练", [0], "failed", None), ("theirs", "车道 2", [0], "stop", None),
+                          ("cpu", "车道 2", [], "done", None), ("a2", "车道 1 训练", [0], "plan", None),
+                          ("cpu_run", "车道 1 训练", [], "run", None), ("cpu_plan", "车道 1 训练", [], "plan", [["a", "cpu_run"]]),
+                          ("b2", "车道 2", [0], "plan", [["a", "a2"]])])
         self.assertEqual([r["n"] for r in O.occupancy(hosts, projects, 250, skip="a")["h"]], ["theirs", "b2"])
+        self.assertEqual([r["n"] for r in O.occupancy(hosts, projects, 250, skip="a", cpu=True)["h"]], ["theirs", "cpu", "b2"])
         self.assertEqual(O.occupancy(hosts, [], 1000)["h"], [{"p": "a", "n": "a2", "lane": None, "t0": 700, "t1": 800, "g": [0], "st": "plan"},
+                                                             {"p": "a", "n": "cpu_run", "lane": None, "t0": 680, "t1": 740, "g": [], "st": "run"},
+                                                             {"p": "a", "n": "cpu_plan", "lane": None, "t0": 740, "t1": 820, "g": [], "st": "plan", "after": [["a", "cpu_run"]]},
                                                              {"p": "b", "n": "b2", "lane": None, "t0": 700, "t1": 900, "g": [0], "st": "plan", "after": [["a", "a2"]]}])
 
     def test_occupancy_after_new_container(self):

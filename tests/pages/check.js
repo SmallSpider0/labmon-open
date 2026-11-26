@@ -2098,6 +2098,40 @@ t("timeline", "#143 左右平移视图时道号与行高不变；项目页拖动
   const ph2 = svgH(A);
   ok(ph2 <= ph1, `松手后应允许收紧：${ph1}→${ph2}`);
 });
+t("timeline", "#207 总览与主机页时间线：有纯 CPU 任务的主机动态显示 CPU 行，无则不画，仅纯 CPU 主机可渲染", () => {
+  const O = ovCtx(clone(OV), RR);
+  page(O, "#/");
+  const tl = el(O, "tlbox").innerHTML;
+  clean(tl, "总览含纯 CPU 时间线");
+  has(tl, ">srv-a CPU</text>", "总览有纯 CPU 任务的主机应画 CPU 行");
+  ok(!tl.includes("借 OWNER CPU</text>"), "总览无纯 CPU 任务的主机不该画 CPU 行");
+  const tp = tips(tl);
+  has(tp, "cpu_eval_s1", "总览 CPU 行应画在跑的纯 CPU 任务");
+  has(tp, "· 纯 CPU", "纯 CPU 任务悬停应写「纯 CPU」");
+  ok(!tp.includes("· 卡 \n") && !tp.endsWith("· 卡 "), "纯 CPU 任务悬停不该出现空的「卡 」");
+  // 主机页：srv-a 有 CPU 行，srv-b 无 CPU 行
+  page(O, "#/host/srv-a");
+  const ha = el(O, "tlbox").innerHTML;
+  clean(ha, "srv-a 主机页时间线");
+  has(ha, ">CPU</text>", "主机页有纯 CPU 任务应画 CPU 行");
+  has(tips(ha), "cpu_eval_s1", "主机页 CPU 行含纯 CPU 任务条");
+  page(O, "#/host/srv-b");
+  const hb = el(O, "tlbox").innerHTML;
+  clean(hb, "srv-b 主机页时间线");
+  ok(!hb.includes(">CPU</text>"), "主机页无纯 CPU 任务不该画 CPU 行");
+  // 仅有纯 CPU 任务且无 GPU 卡的主机：TLH 仍成立并正常渲染 CPU 行
+  const D0 = clone(OV);
+  D0.hosts = [D0.hosts[0]];
+  D0.hosts[0].status.info.gpus = [];
+  D0.occ = {"srv-a": [{p: "proj-a", n: "cpu_only_job", lane: "车道 1", t0: NOW - H, t1: NOW + H, g: [], st: "run"}]};
+  const O0 = ovCtx(D0, RR);
+  page(O0, "#/host/srv-a");
+  const h0 = el(O0, "tlbox")?.innerHTML || "";
+  clean(h0, "仅纯 CPU 主机时间线");
+  has(h0, ">CPU</text>", "仅纯 CPU 主机应正常渲染 CPU 行");
+  has(tips(h0), "cpu_only_job", "仅纯 CPU 主机应含任务条");
+  has(tips(h0), "· 纯 CPU", "仅纯 CPU 主机悬停应写「纯 CPU」");
+});
 t("escape", "恶意项目快照与事件：转义", () => {
   const E = pjCtx(PJE, EVE); run(E, 'LS.get = (k, d) => k === "filter" ? "all" : d; render()');
   const h = app(E); ok(!raw(h), "项目页没转义"); has(h, BADESC);

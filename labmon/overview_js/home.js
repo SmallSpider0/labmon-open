@@ -209,16 +209,17 @@ function tasksCard(hs, jobs, allw, showHost) {
   const head = [`运行 ${jobs.length}`, `等待 ${waits.length}`, `<span ${qe ? tip(`另有 ${qe} 条登记着但清单里没有待办（空着，不占卡）`) : ""}>队列 ${qn} 条${qe ? `（另 ${qe} 条空着）` : ""}</span>`,
     end > D.generated ? `<span style="${late.length ? "color:var(--bad)" : ""}" ${late.length ? tip(`${late.map(hostShort).join("、")} 的排队按推演排到租期之后：续租前跑不完`) : ""}>预计 ${ts(end)} 全部跑完${late.length ? "（晚于租期）" : ""}</span>` : "",
     stuck.length ? `<span style="color:var(--warn)" ${tip(stuck.join("\n"))}>${stuck.length} 条车道推演里排不上</span>` : ""].filter(Boolean).join(" · ");
-  TLH = hs.some(h => h.status?.info?.gpus?.length) ? {hs, showHost} : null;
+  TLH = hs.some(h => h.status?.info?.gpus?.length || (D.occ?.[h.id] || []).some(isCpuOcc)) ? {hs, showHost} : null;
   return `<div class="card"><div class="chd wrap"><b>任务</b><span class="sm mut">${head}</span>
-      <span class="ii" ${tip("点一行展开命令与日志。显存、内存为“当前 / 峰值”；内存按会话内全部进程的 PSS 计，fork 出来的子进程不会重复计。\n时间线：每张卡一行，按项目配色；往后的是 worker 按同一套放行规则推演的，同机各项目一起排。")}>ⓘ</span>
+      <span class="ii" ${tip("点一行展开命令与日志。显存、内存为“当前 / 峰值”；内存按会话内全部进程的 PSS 计，fork 出来的子进程不会重复计。\n时间线：每张卡一行，有纯 CPU 任务的主机在卡行下方加一行 CPU，按项目配色；往后的是 worker 按同一套放行规则推演的，同机各项目一起排。")}>ⓘ</span>
       ${TLH ? `<span id="tlbar"></span>` : ""}</div>
     ${TLH ? `<div class="sm" id="tllegend"></div><div id="tlbox"></div><div id="tlkey" class="tlkey${TL.key ? " open" : ""}"></div>` : ""}${jobsTable(jobs, showHost)}
     ${allw.length ? `<div class="sub">等待</div>${waitingTable(allw, showHost)}` : ""}</div>`;
 }
 
-// 任务卡里的占用时间线（common.js 的时间线引擎）：每台主机每张卡一行，按项目配色。已跑的是工作台存的用量记录，往后是 worker 推演（overview.occupancy）。
+// 任务卡里的占用时间线（common.js 的时间线引擎）：每台主机每张卡一行，有纯 CPU 任务的主机在卡行下方加一行 CPU，按项目配色。已跑的是工作台存的用量记录，往后是 worker 推演（overview.occupancy）。
 // TLH 是 tasksCard 定的这次画哪些主机；render 之后调
+const isCpuOcc = x => !x.g || !x.g.length;
 let TLH = null;
 tlInit({get: (k, d) => ST.get("ov" + k, d), set: (k, v) => ST.set("ov" + k, v), now: () => D.generated, draw: () => drawTimeline(),
   all: () => { const hs = TLH?.hs || [], xs = hs.flatMap(h => D.occ?.[h.id] || []);     // 「全部」也包住租期到期，看排队跑不跑得完
@@ -228,14 +229,23 @@ function drawTimeline() {
   const box = document.getElementById("tlbox"); if (!box?.clientWidth || !TLH) return;
   tlBind(box); tlFrame();
   const {t0, t1} = tlRange(), rows = [], used = new Set();
-  const sep = TLH.hs.length > 1 && TLH.hs.some(h => (h.status?.info?.gpus || []).length > 1);     // 有主机不止一张卡时，每台的第一张卡上面画分隔线
-  for (const h of TLH.hs) {
-    const oc = D.occ?.[h.id] || [];     // 按全量稳定分道（#143），画时再跳过视图外的条
-    for (const [k, g] of (h.status?.info?.gpus || []).entries()) {
-      const xs = oc.filter(x => x.g.includes(g.i)).map(x => ({...x}));     // 多卡任务每张卡各画一条，各自分道
+  const hostRows = TLH.hs.map(h => {
+    const oc = D.occ?.[h.id] || [], gs = h.status?.info?.gpus || [];
+    const cpu = oc.filter(isCpuOcc).map(x => ({...x}));     // 纯 CPU 任务（#207）：有才动态追加 CPU 行，无则不画
+    return {h, oc, gs, cpu, n: gs.length + (cpu.length ? 1 : 0)};
+  });
+  const sep = TLH.hs.length > 1 && hostRows.some(r => r.n > 1);     // 有主机不止一行（多卡或含 CPU 行）时，每台的第一行上面画分隔线
+  for (const {h, oc, gs, cpu} of hostRows) {
+    for (const [k, g] of gs.entries()) {
+      const xs = oc.filter(x => x.g?.includes(g.i)).map(x => ({...x}));     // 多卡任务每张卡各画一条，各自分道
       xs.forEach(x => { if (x.t1 > t0 && x.t0 < t1) used.add(x.p); });
       const lay = tlRowLayout(tlPack(xs), OCC_CARD_LAY);
       rows.push({key: `card:${h.id}:${g.i}`, h: lay.h, sep: sep && !k, draw: (y, hh, c) => cardRow(h, g, xs, lay, y, hh, c)});
+    }
+    if (cpu.length) {
+      cpu.forEach(x => { if (x.t1 > t0 && x.t0 < t1) used.add(x.p); });
+      const lay = tlRowLayout(tlPack(cpu), OCC_CARD_LAY);
+      rows.push({key: `cpu:${h.id}`, h: lay.h, sep: sep && !gs.length, draw: (y, hh, c) => cardRow(h, null, cpu, lay, y, hh, c)});
     }
   }
   const marks = [...new Map(D.projects.flatMap(p => p.markers || []).map(m => [m.label + m.ts, m])).values()];
@@ -245,10 +255,14 @@ function drawTimeline() {
   if (lg) lg.innerHTML = [...used].map(p => projName(p, {always: true})).join(" &nbsp;");     // 只列这段时间图上有的
 }
 function cardRow(h, g, xs, lay, y, hh, c) {
-  let s = `<text x="0" y="${y + hh / 2 + 4}" ${tip(`${h.label} GPU ${g.i}：现在 ${mb2g(g.used)} / ${mb2g(g.total)} GiB`)}>${esc(fit((TLH.showHost ? hostShort(h) + " " : "") + "卡 " + g.i, c.L - 6))}</text>`;
+  const info = h.status?.info, q = info?.cpu_quota || info?.nproc;
+  const rowTip = g ? `${h.label} GPU ${g.i}：现在 ${mb2g(g.used)} / ${mb2g(g.total)} GiB`
+    : `${h.label} 纯 CPU 任务${info?.cpu_used != null && q ? `：现在 CPU ${g1(info.cpu_used)} / ${g1(q)} 核` : ""}`;
+  const lab = (TLH.showHost ? hostShort(h) + " " : "") + (g ? "卡 " + g.i : "CPU");
+  let s = `<text x="0" y="${y + hh / 2 + 4}" ${tip(rowTip)}>${esc(fit(lab, c.L - 6))}</text>`;
   s += `<rect x="${c.L}" y="${y + hh / 2 - .5}" width="${c.PW}" height="1" fill="var(--line)"/>`;
   s += occBars(xs, y, hh, c, {layout: lay, color, label: x => x.n,
-    text: x => `${projName(x.p, {always: true, plain: true})}${x.lane ? x.lane + " · " : ""}${x.n}\n${occState(x)} · ${ts(x.t0)} → ${ts(x.t1)}（${dur(x.t1 - x.t0)}）· 卡 ${x.g.join(",")}`
+    text: x => `${projName(x.p, {always: true, plain: true})}${x.lane ? x.lane + " · " : ""}${x.n}\n${occState(x)} · ${ts(x.t0)} → ${ts(x.t1)}（${dur(x.t1 - x.t0)}）· ${x.g?.length ? "卡 " + x.g.join(",") : "纯 CPU"}`
       + (x.after ? `\n等 ${afterText(x.after)} 跑完才轮到` : "")});
   if (h.lease_end >= c.t0 && h.lease_end <= c.t1) {
     c.seen.add("lease");

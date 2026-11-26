@@ -222,13 +222,13 @@ class ContractTest(unittest.TestCase):
         self.assertGreater(sp[run["project"]]["cards"], 0)
         self.assertEqual((sp["pa"]["wait_n"], sp["pa"]["wait_avg"]), (1, 0.0))                             # a0 一来就放行：等待 0 分钟
 
-        # ---- 占用（时间线）：在跑与排队的来自推演，车道名是项目看板定的 ----
+        # ---- 占用（时间线）：已跑的（含非占位纯 CPU 任务 a0，#207）取用量记录，在跑与排队的来自推演，车道名是项目看板定的 ----
         occ = {x["n"]: x for x in snap["occ"]["t"]}
-        self.assertEqual(set(occ), {run["name"], wait["name"]})
+        self.assertEqual(set(occ), {"a0", run["name"], wait["name"]})
         for x in occ.values():
             self.assertLessEqual({"p", "n", "lane", "t0", "t1", "g", "st"}, set(x))
-            self.assertEqual((x["lane"], x["g"]), ("车道 1", [0]))
-        self.assertEqual((occ[run["name"]]["st"], occ[wait["name"]]["st"], occ[wait["name"]]["after"]), ("run", "plan", [[run["project"], run["name"]]]))
+            self.assertEqual((x["lane"], x["g"]), ("车道 1", [] if x["n"] == "a0" else [0]))
+        self.assertEqual((occ["a0"]["st"], occ[run["name"]]["st"], occ[wait["name"]]["st"], occ[wait["name"]]["after"]), ("done", "run", "plan", [[run["project"], run["name"]]]))
         self.assertEqual(text_times(snap["occ"]) + text_times(S), [])
 
         # ---- 项目看板：worker_view 认出它在管的队列，快照里排队任务的预计时间只取推演 ----
@@ -296,7 +296,7 @@ class ContractTest(unittest.TestCase):
         self.assertEqual([(r["n"], r["p"], r["gi"], r["st"]) for r in rows], [("a0", "pa", [], "done"), (run["name"], run["project"], [0], "done"), (wait["name"], wait["project"], [0], "done")])
         occ = {x["n"]: x for x in snap["occ"]["t"]}
         self.assertEqual({(x["st"], x["lane"]) for x in occ.values()}, {("done", "车道 1")})
-        self.assertEqual(set(occ), {run["name"], wait["name"]})                                            # a0 不用卡：不画
+        self.assertEqual({k: x["g"] for k, x in occ.items()}, {"a0": [], run["name"]: [0], wait["name"]: [0]})   # a0 纯 CPU 保留 g=[]（#207）
         self.assertEqual(snap["sched"]["projects"] and {p["id"]: p["cards"] for p in snap["sched"]["projects"]}, {"pa": 0, "pb": 0})
         self.assertEqual({j["status"] for s in snaps.values() for j in s["jobs"]}, {"done"})
         self.assertEqual(text_times(h["status"]) + text_times(h["done"]), [])
