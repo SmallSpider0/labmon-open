@@ -196,6 +196,7 @@
 - #19 部署那次的迁移（`users.migrate_people` 与它用的旧对应规则 `users._legacy_people`、`serve.serve` 里调它的那几行：#70 之前的账号按主机清单 `[fleet.account_people]`、同名、快照历史认出的人写进账号库）：主与备用的看板服务各启动过一次就删。
 - #161 部署那次的迁移（把 launchd plist 里旧的 `-c` 登记进来：`projects.adopt`（连同 `OUT_NAMES`）、`serve.serve` 的 `legacy`、`service._read` 的 `legacy` 与 `service.install` 里迁移的几行、`__main__` 传 `legacy` 的那处）：部署后跑过一次 `labmon service install` 就删。
 - #147 部署那次的迁移（`collect._last_probe` 把旧探针缓存 `last_probe_*.json` 里单个对象的 `current` 迁成列表）：部署后各项目采过一轮就删。
+- 2026-12-27 项目页旧快照缺 `hosts[].cpu` 的回退（`page.html` `cpuView` 回退读 `h.cpu_pct` / `cgroup.cpu_quota`）与旧状态缺 `cpu_h` 的回填（`collect._long_term`）：#208（2026-11-27）部署后活跃项目采过一轮即不再产生，2026-12-27 后可删。
 
 ## 各概念的口径
 
@@ -553,3 +554,5 @@
    实现：`tools/deploy.py` 的 `deploy`（远端模式 `_update_remote`、`make_bundle`、`wait_new`）；服务端与两种模式共用的判断在 `labmon/deploy.py`：`is_doc`、`is_worker`、`has_worker`、`is_page`、`log_text`、`tracebacks`、`apply`、`status`、在跑哪个提交 `RUNNING`；`leak`（`tests/pages/dom.js`，`check.js` 与 `smoke.js` 都取它）
 176. **一台主机上除本项目外其他项目的聚合负载与提示（不含他人明细）**：只读已有 worker `status.json` 的 `running`、`todo`、`waiting`、`plan`，统计除当前项目外其他项目的在跑数（不含占位）、排队数（不含占位与暂停清单）与预计最晚忙到时刻（`#197`），格式化成极短提示（如 `他项 2 跑/8 排`、`他项 2 跑/8 排，忙至 23:40`），绝不输出他人项目名或任务名
    实现：`worker.pure.other_load`、`worker.pure.other_load_text`（worker 的 `fit.fit_list` 与看板的 `api.status` 共用）
+177. **项目页主机的 CPU 实时占用与时间线同轴折线**：项目快照 `hosts[].cpu` 优先复用经 `fleet.worker_fresh` 判定的新鲜 worker 状态（`info.cpu_used` / `cpu_quota` / `nproc` / `press.thr` 与 `throttle`），不新鲜时回退探针 `cgroup` 差分，百分比按 0–100% 封顶（有配额按配额、无配额按可用核数换算）；`_long_term` 经共用 `_add_hourly` 同步维护 30 天 `cpu_hourly`；项目页顶部 CPU 卡片、顶栏悬停、时间线主机行与资源小图共用 `cpuView`，时间线经 `hostSeries` 在 GPU 折线区同轴叠画橙色 CPU 折线并由 `tlHostHover` 按样本自身间隔提供双读数（`#208`）
+   实现：`collect._host_cpu`、`collect._add_hourly`；页面上 `cpuView`、`hostSeries`、`tlHostHover`（page.html）

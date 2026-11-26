@@ -391,7 +391,7 @@ def _long_term(state: dict, snap: dict, hist: list, cfg: dict, t: float) -> None
                 sp[-1][1] = round(x["t"])
             else:
                 sp.append([round(x["t"]), round(x["t"])])
-    elif "cpu_h" not in state:                      # 升级旧状态：用现有的逐次采样补出每小时 CPU 占用
+    elif "cpu_h" not in state:                      # #208 部署那次的迁移：旧 state.json 缺 cpu_h 时从已有 history 回填；各活跃项目采过一轮后（2026-12-27）可删
         state["cpu_h"] = {}
         for x in sorted((x for x in hist if x["t"] < t), key=lambda x: x["t"]):
             _add_hourly(state["cpu_h"], x.get("host"), x.get("cpu_pct"), x["t"])

@@ -3060,9 +3060,14 @@ t("project", "项目页 CPU 占用监控（#208）：顶部 CPU 卡片展示核�
   // 悬停主机表头折线区域应返回 GPU + CPU 读数
   const hov = run(C, '(() => { const b = document.getElementById("tlbox"); b.getBoundingClientRect = () => ({left: 0, width: 800}); return tlHostHover({dataset: {thost: "srv-a"}}, {clientX: TL.g.L + TL.g.PW * 0.25}); })()');
   has(hov, "GPU 利用率", "悬停应含 GPU 读数"); has(hov, "CPU 占用", "悬停应含 CPU 读数"); has(hov, "此刻 CPU 12.4/17 核（73%）", "悬停应含此刻 CPU 读数");
-  // 长窗口（7 天）应使用 cpu_hourly 正常画出 CPU 折线
+  // 长窗口（7 天）应使用 cpu_hourly 正常画出 CPU 折线；悬停在无采样断档区时不得用视窗跨度误填数小时前的旧值
   run(C, 'LS.set("tl", "week"); drawTimeline()');
   has(el(C, "tlbox").innerHTML, 'stroke="var(--cpu)"', "7 天视图应由 cpu_hourly 画出 CPU 折线");
+  const gapSnap = {...PJ, history: [], util_hourly: {"srv-a": [[NOW - 24 * H, 80.0], [NOW - 12 * H, 70.0]]}, cpu_hourly: {"srv-a": [[NOW - 24 * H, 50.0], [NOW - 12 * H, 60.0]]}};
+  const G = pjCtx(gapSnap, EVN); run(G, 'LS.set("tl", "week"); drawTimeline()');
+  const gapHov = run(G, `(() => { const b = document.getElementById("tlbox"); b.getBoundingClientRect = () => ({left: 0, width: 800}); const t = ${NOW - 18 * H}; const x = TL.g.L + (t - TL.g.t0) / (TL.g.t1 - TL.g.t0) * TL.g.PW; return tlHostHover({dataset: {thost: "srv-a"}}, {clientX: x}); })()`);
+  has(gapHov, "该时刻无 GPU / CPU 采样", "7 天视图断档空白区悬停不应误填数小时前旧值：" + gapHov);
+  ok(!gapHov.includes("GPU 利用率") && !gapHov.includes("CPU 占用"), "断档空白区悬停混入了旧采样：" + gapHov);
   // 兼容旧快照：删掉 hosts[].cpu 与 cpu_hourly 不报错、不漏 NaN/undefined
   const oldSnap = {...PJ, cpu_hourly: undefined, hosts: PJ.hosts.map(x => { const y = {...x}; delete y.cpu; return y; })};
   const O2 = pjCtx(oldSnap, EVN); clean(app(O2), "旧快照项目页");
