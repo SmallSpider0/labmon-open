@@ -43,7 +43,7 @@ from .renew import eta_of
 from .service import log
 from .state import load_json, load_rows, save_json, state_dir
 from .users import person_of
-from .workerctl import worker_env, host_conf, override_each, run_out
+from .workerctl import clear_overrides, host_conf, override_each, run_out, worker_env
 
 MARGIN_S = 3600                  # 对方租期到期前这么久截止：续租会重启容器，没跑完的白跑
 DUE_WARN_S = 2 * 3600            # 约定时间前这么久提醒一次
@@ -390,6 +390,8 @@ def request_return(sid: str, now: bool = False, running: list[dict] | None = Non
     rc = ovr("add", "drain", sid)
     for p in sorted({j.get("project") for j in running or [] if j.get("project")}) if now else []:
         rc |= ovr("add", "pause", sid, p, None, True)
+    if rc == 255:
+        raise ConfigError(f"连不上 {label(s)}，给 worker 下指令失败：若作业已被平台停掉，先在组内服务器页点「与平台核对」，确认不在运行后会自动按已停归还")
     if rc:
         raise ConfigError(f"给 worker 下指令失败（退出码 {rc}）")
     _update(lambda st: st.setdefault(sid, {"warned": []}).update(returning=round(time.time()), now=now))
@@ -432,8 +434,8 @@ def wrote_note(w: dict | None, holder: str) -> str | None:
             + f"），没动：留在 {holder} 那边，我们拿不到，对方续租时会清掉")
 
 
-def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), probe=None, gone: bool = False, stuck: dict | None = None,
-           mine: dict | None = None, adopt=None) -> str:
+def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), probe=None, gone: bool | str = False, stuck: dict | None = None,
+           mine: dict | None = None, adopt=None, clear_ovr=None) -> str:
     """归还：一条 ssh 停 worker、停掉还挂着的占位任务（kill：它们的进程组）、清掉容器里 labmon 的本地目录与这台的临时指令。主机清单写 borrow_returned。
     卡上的保活是借用期间 worker 开的（mine：worker 状态的 keepalive.mine；没有就按 ka.sh 的事件日志认），不动进程、登记成看板的保活
     （adopt 缺省 fleet.ka_adopt，在现场核对身份，#102）：不停再开，没有空档；认不出的照旧——借来时 GPU 上没有保活的停掉再按保活守护开，
@@ -441,29 +443,47 @@ def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), prob
     保活已在，它醒来不会再多拉一个：出借方自己的保活管理器见到不是自己登记的同脚本保活会换成自己的，结果仍是一个），最后探一次这一台（同手动开保活，fleetops._probe）。
     wrote：借用期间本地盘 labmon 目录之外新写的（worker 的 storage.wrote：只列出来，不动，wrote_note）。
     stuck：借用期间 worker 要卡时停不了卡上的保活（worker 状态的 keepalive.stuck，#102）：结果里照实写一句，不只说保活是谁的。
-    gone：这台换了容器（算力池借着时主人续租或重启了，pool._returns 的 R5，#25）：旧容器里的 worker、任务、保活、/tmp/labmon 都已不在，
-    只 worker stop（按命令行核对 PID，新容器里不会误停别的）、删这台的临时指令；不 kill 旧的进程组号、不停保活、不清 /tmp/labmon、
-    不开保活、不恢复看门狗（新容器里的保活由主人与保活守护照现有规则管），只探一次。"""
+    gone：
+    - True（换了容器，算力池 R5）：先 ssh 到这台 worker stop 与删 overrides.json；若连不上（rc == 255），经共用 worker_home 的在用主机删共享盘上的 overrides.json，
+      不抛错阻塞归还；不 kill 旧进程组、不停保活、不清 /tmp/labmon、不开保活、不恢复看门狗。
+    - "stopped"（#171：link_step 判定掉线且平台核对确认作业不在运行）：容器已没，不 ssh 这台、不 probe，直接经共用 worker_home 的在用主机删 overrides.json 并记归还。"""
     cfg, s = _server(sid)
     h = host_conf(sid)
     w = f"env {worker_env(h)} {shlex.quote(h['python'])} {shlex.quote(h['worker_home'] + '/labmon_worker.py')}"
     ka_cmd = F.ka_cmd(s, cfg)
     theirs = bool((load_json(state_dir() / "borrow.json", {}).get(sid) or {}).get("ka"))
     ovr_file = f"rm -f {shlex.quote(h['worker_home'] + '/hosts/' + sid + '/overrides.json')}"
-    remote = (f"{w} stop --host {shlex.quote(sid)} >/dev/null 2>&1; {ovr_file}" if gone else
-              f"{w} stop --host {shlex.quote(sid)} >/dev/null 2>&1; sleep 2; "
-              + "".join(f"kill -TERM -- -{int(p)} 2>/dev/null; " for p in kill)
-              + f"du -sm /tmp/labmon 2>/dev/null | cut -f1; rm -rf /tmp/labmon; {ovr_file}")
-    rc, out, err = (ssh or F.ssh)(s, remote)
-    if rc == 255:
-        raise ConfigError(f"连不上 {label(s)}，还没还：{err.strip()}")
-    mb = 0 if gone else next((int(x) for x in out.split() if x.isdigit()), 0)
+    stopped = gone == "stopped"
+    ovr_note, do_probe = None, not stopped
+    if stopped:
+        ok, why = (clear_ovr or clear_overrides)(sid, home=h["worker_home"], skip={sid})
+        if not ok:
+            ovr_note = f"共享盘上的临时指令暂未删成（{why}），下次接入或再借时清理"
+        mb = 0
+    else:
+        remote = (f"{w} stop --host {shlex.quote(sid)} >/dev/null 2>&1; {ovr_file}" if gone else
+                  f"{w} stop --host {shlex.quote(sid)} >/dev/null 2>&1; sleep 2; "
+                  + "".join(f"kill -TERM -- -{int(p)} 2>/dev/null; " for p in kill)
+                  + f"du -sm /tmp/labmon 2>/dev/null | cut -f1; rm -rf /tmp/labmon; {ovr_file}")
+        rc, out, err = (ssh or F.ssh)(s, remote)
+        if rc == 255:
+            if not gone:
+                raise ConfigError(f"连不上 {label(s)}，还没还（若作业已被平台停掉，先点「与平台核对」，确认不在运行后会自动按已停归还）：{err.strip()}")
+            ok, why = (clear_ovr or clear_overrides)(sid, home=h["worker_home"], skip={sid})
+            if not ok:
+                ovr_note = f"共享盘上的临时指令暂未删成（{why}），下次接入或再借时清理"
+            mb, do_probe = 0, False
+        else:
+            mb = 0 if gone else next((int(x) for x in out.split() if x.isdigit()), 0)
     set_fleet_keys({"borrow_returned": fmt_time(time.time(), year=True)}, f"把 {label(s)} 还给 {s['holder']}", sid=sid)
     since = parse_time(s.get("borrow_since"))
     took = f"（借了 {(time.time() - since) / 3600:.0f} 小时）" if since else ""
     if gone:
-        (probe or FO._probe)(sid)
-        msg = f"已把 {sid} 还给 {s['holder']}{took}：容器换了（续租或重启），上面的 worker 与任务已随旧容器停下，新容器没动"
+        if do_probe:
+            (probe or FO._probe)(sid)
+        why_gone = ("这台已掉线且平台核对显示作业不在运行，上面的 worker 与任务已随容器停下"
+                    if stopped else "容器换了（续租或重启），上面的 worker 与任务已随旧容器停下，新容器没动")
+        msg = f"已把 {sid} 还给 {s['holder']}{took}：{why_gone}" + (f"；{ovr_note}" if ovr_note else "")
         _update(lambda st: st.setdefault(sid, {}).update(returning=None, done=round(time.time())))
         log_events([{"kind": "borrow_return", "host": sid, "who": s["holder"], "msg": msg, **({"pool": True} if s.get("borrow_pool") else {})}])
         return msg
@@ -569,14 +589,10 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
     返回 (要弹的通知, wake 条目 [{key, msg, projects}]，projects 为 None 是各项目都报)。
     算力池借的（borrow.pool，#25）：不给实验会话发 borrow*（池清单的去向由 pool 经 records.tell 说），提醒只进记录、不弹通知（还不成的照弹）；
     主人回来、要还与搬走由 pool.tick 管，这里不另提醒“对方在用”。"""
+    cfg_arg = cfg
     cfg = cfg if cfg is not None else F.conf() or {}
     sts, fst = load_json(state_dir() / "borrow.json", {}), F._load_state()
-    out, wake, evs, by = [], [], [], {e["id"]: e for e in hosts}
-    for s in cfg.get("servers", []):                 # 还了的：一天内 wait 还报，登记在上面的队列要换主机（算力池的由 pool 搬回池里）
-        rt = parse_time(s.get("borrow_returned"))
-        if s.get("borrow_since") and rt and t - rt < DONE_KEEP_S and not s.get("borrow_pool"):
-            wake.append({"key": f"borrow_done:{s['id']}:{round(rt)}", "projects": _projects(s.get("borrow_for")), "host": s["id"],
-                         "msg": f"{s['id']} 已于 {fmt_time(rt)} 还给 {s['holder']}：登记在它上面、没跑完的队列要换到别的主机（labmon worker add）"})
+    out, wake, evs, by, returned_any = [], [], [], {e["id"]: e for e in hosts}, False
     for h in user_hosts():
         b, hid = h.get("borrow"), str(h.get("id"))
         if not b or h.get("returned") or hid not in by:
@@ -601,6 +617,18 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
         who, name, msgs = b.get("holder") or "原使用人", e.get("label", hid), []
         say = lambda key, kind, msg: _say(st, key, kind, hid, b.get("holder"), msg, evs,   # noqa: E731
                                           [] if pool and kind != "borrow_return" else msgs)   # 算力池的只进记录（还不成的照弹）
+        hl = e.get("health") or {}                   # #171：掉线判定（health.link_step）+ 平台核对作业不在运行 → 按已停归还（手动借与池借共用）
+        if not swap and hl.get("state") == "down" and FO.job_stopped(hid, after=b.get("since"), down_since=hl.get("since"))[0]:
+            try:
+                done = finish_fn(hid, gone="stopped")
+                if not pool:
+                    msgs.append(done)
+                st.update(returning=None, done=round(t))
+                out += msgs
+                returned_any = True
+                continue
+            except ConfigError as x:
+                say(f"nofin:stopped:{round(hl.get('since') or t)}", "borrow_return", f"{name} 作业已停但没还成：{x}")
         if b.get("until_bad"):                       # 手写的 borrow_until 认不出（config._until）：说一次，不然静默当成没约定
             say(f"badts:{b['until_bad']}", "borrow", f"{name} 的 borrow_until「{b['until_bad']}」认不出，当作没约定时间：要写成 "
                 f"{fmt_time(t, year=True)} 这样（YYYY-MM-DD HH:MM），改 ~/.config/labmon/hosts.toml 或 labmon borrow {hid} --until …")
@@ -658,6 +686,7 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
                     msgs.append(done)
                 st.update(returning=None, done=round(t))
                 out += msgs
+                returned_any = True
                 continue
             except ConfigError as x:                 # 多半是连不上：这一次要还只说一次，连上还掉了再报结果
                 say(f"nofin:{st['returning']}", "borrow_return", f"{name} 没还成：{x}；连上了会自动再还")
@@ -694,6 +723,12 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
         ab = st.get("away_back")                     # 说好不用被对方作废：一小时内 wait 都报（back 可能为空：hold 为真且在预留以内、因 OOM 作废）
         if ab and t - ab["t"] < OVER_S:
             wake.append({"key": f"borrow_back:{ep}:away:{ab['t']}", "projects": ps, "host": hid, "msg": ab["msg"]})
+    cfg_after = (F.conf() or {}) if (returned_any and cfg_arg is None) else cfg
+    for s in cfg_after.get("servers", []):           # 还了的：一天内 wait 还报，登记在上面的队列要换主机（算力池的由 pool 搬回池里）
+        rt = parse_time(s.get("borrow_returned"))
+        if s.get("borrow_since") and rt and t - rt < DONE_KEEP_S and not s.get("borrow_pool"):
+            wake.append({"key": f"borrow_done:{s['id']}:{round(rt)}", "projects": _projects(s.get("borrow_for")), "host": s["id"],
+                         "msg": f"{s['id']} 已于 {fmt_time(rt)} 还给 {s['holder']}：登记在它上面、没跑完的队列要换到别的主机（labmon worker add）"})
     log_events(evs, t)
 
     def merge(cur):                                  # 只并本轮改的几项：命令行、页面可能同时在改 returning（要还、撤销）

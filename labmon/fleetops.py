@@ -45,9 +45,10 @@ from . import renew as R
 from .config import active_hosts, fmt_time, parse_time
 from .health import lease_end
 from .records import log_events
-from .service import notify
+from .service import log, notify
 from .state import load_json, save_json, snapshot
 from .users import person_of
+from .workerctl import clear_overrides
 
 LOCK = threading.Lock()
 CAPTCHA_GAP = 10                 # 换验证码至少隔这么多秒（像人点“换一张”）
@@ -289,7 +290,7 @@ def _check_start(kind: str, cfg: dict, ids: list[str], kw: dict) -> None:
     if kind != "borrow":                              # 借来在用的：续租、关机、换人、开保活都会停掉自己的 worker 与 /tmp/labmon，先还
         lent = [s["id"] for s in cfg["servers"] if s["id"] in ids and F.borrowed(s)]
         if lent:
-            raise P.PlatformError(f"{'、'.join(lent)} 正借来在用：先在它的「借用」里还掉，再{OP_NAMES[kind]}")
+            raise P.PlatformError(f"{'、'.join(lent)} 正借来在用：先在它的「借用」里还掉（若已被平台停掉连不上，先点「与平台核对」，确认作业不在运行后会自动归还），再{OP_NAMES[kind]}")
     if kind in ("off", "swap", "open") and len(ids) > 1:
         raise P.PlatformError("关机、换人、开机一次一台")
     if kind == "open":
@@ -426,8 +427,32 @@ def _running(j: dict) -> bool:
     return int(j.get("runningCount") or 0) >= 1
 
 
-def find_job(cli: P.Client, jobs: list[dict], s: dict, human) -> tuple[dict | None, list[dict], str | None]:
-    """平台上这一台运行中的作业：作业名（s["job"]）、资源池对、端口 22→port。返回 (作业, 角色, 对不上的原因)。
+SYNC_GRACE_S = 300               # 平台核对时刻允许早于 link_step 首次连不上时刻这么多秒（作业刚停用户就点核对、看板随后首次探失败）
+
+
+def job_stopped(sid: str, *, after: float | None = None, down_since: float | None = None, plat: dict | None = None) -> tuple[bool, float | None]:
+    """最近一次与平台核对（platform.json）是否确认 sid 的作业不在运行（不含端口映射不对）。
+    after：至少在这个时刻之后核对过（借用取 borrow_since）；down_since：本次掉线首次连不上的时刻（核对不早于它前 SYNC_GRACE_S 秒）。
+    返回 (是否确认不在运行, 核对时刻)。"""
+    plat = platform_state() if plat is None else plat
+    pt = plat.get("t")
+    if not pt or sid not in (plat.get("stopped") or ()):
+        return False, None
+    if after is not None and pt < after:
+        return False, None
+    if down_since is not None and pt < down_since - SYNC_GRACE_S:
+        return False, None
+    return True, pt
+
+
+def _clear_stopped(sid: str) -> None:
+    """这台新作业已起：从上次平台核对的 stopped 里去掉，免得旧核对残留误导。"""
+    if F.state_file("platform.json").exists():
+        F.edit_state("platform.json", lambda d: sid in (d.get("stopped") or ()) and d.update(stopped=[x for x in d["stopped"] if x != sid]))
+
+
+def _find_job(cli: P.Client, jobs: list[dict], s: dict, human) -> tuple[dict | None, list[dict], str | None, bool]:
+    """平台上这一台运行中的作业：作业名（s["job"]）、资源池对、端口 22→port。返回 (作业, 角色, 对不上的原因, 作业是否确实不在运行)。
     第一页里没有就按名字查一次（像在网页上搜名字）。"""
     def cands(js):
         return [j for j in js if j.get("taskName") == s["job"] and j.get("poolName") == s["pool"] and _running(j)]
@@ -436,13 +461,18 @@ def find_job(cli: P.Client, jobs: list[dict], s: dict, human) -> tuple[dict | No
         human()
         cs = cands(cli.jobs(s["job"]))
     if not cs:
-        return None, [], f"平台上没有运行中的 {s['job']}（{s['pool']}）"
+        return None, [], f"平台上没有运行中的 {s['job']}（{s['pool']}）", True
     for j in cs:
         human()
         roles = cli.roles(j["id"])
         if P.roles_port_ok(roles, s["port"]):
-            return j, roles, None
-    return None, [], f"运行中的 {s['job']} 端口映射都不是 22→{s['port']}"
+            return j, roles, None, False
+    return None, [], f"运行中的 {s['job']} 端口映射都不是 22→{s['port']}", False
+
+
+def find_job(cli: P.Client, jobs: list[dict], s: dict, human) -> tuple[dict | None, list[dict], str | None]:
+    """平台上这一台运行中的作业：作业名（s["job"]）、资源池对、端口 22→port。返回 (作业, 角色, 对不上的原因)。"""
+    return _find_job(cli, jobs, s, human)[:3]
 
 
 def reconcile(cfg: dict, sl: list[dict], running: list[dict], found: dict[str, tuple[dict, dict]], old: dict, own: dict) -> dict:
@@ -484,12 +514,14 @@ def run_sync(cfg: dict, cli: P.Client, code: str | None, password=P.password, pa
         running = [j for j in jobs if _running(j)]
         r.step(f"第一页 {len(jobs)} 条，运行中 {len(running)} 个")
         t = time.time() if t is None else t
-        issues, found = [], {}
+        issues, found, stopped = [], {}, []
         old, sl = boot(), FB.slots(cfg)                 # 组内服务器加自用主机（自用的克隆配置给“我”开新的时用）
         for s in sl:
-            j, roles, why = find_job(cli, jobs, s, r.human)
+            j, roles, why, is_stopped = _find_job(cli, jobs, s, r.human)
             if j is None:
                 issues.append(f"{s['holder']}（{s['id']}）：{why}")
+                if is_stopped:
+                    stopped.append(s["id"])
                 continue
             d = from_detail({"workTaskRoleVOList": roles, "poolName": j.get("poolName"), "createTime": j.get("createTime")})
             found[s["id"]] = (j, d)
@@ -525,7 +557,7 @@ def run_sync(cfg: dict, cli: P.Client, code: str | None, password=P.password, pa
         own = {h.get("platform_job"): h["id"] for h in active_hosts() if h.get("platform_job")}
         rec = reconcile(cfg, sl, running, found, old, own)
         issues += rec["issues"]
-        res = {"t": round(t), "running": rec["rows"], "issues": issues, "changes": [m for _, m in rec["changes"]]}
+        res = {"t": round(t), "running": rec["rows"], "stopped": stopped, "issues": issues, "changes": [m for _, m in rec["changes"]]}
         F.state_dir().mkdir(parents=True, exist_ok=True)
         save_json(F.state_file("platform.json"), res)
         for sid, m in rec["changes"]:
@@ -747,6 +779,7 @@ def run_renew(cfg: dict, cli: P.Client, code: str | None, ids: list[str], ack=()
             F.edit_state("boot.json", lambda b, s=s, new=new: b.setdefault(s["id"], {}).update(
                 holder=s["holder"], job=s["job"], job_id=new.get("id"), created=new.get("createTime"), clone=c,
                 clone_job=new.get("id"), src="续租", t=round(t1)))
+            _clear_stopped(sid)
             F._event("fleet_renew", sid, f"{s['holder']}（{sid}）续租：新作业 {_created(new)} 创建", t1, s["holder"])
             r.step(f"{_created(new)} 创建")
             forget_fn(s)
@@ -958,6 +991,7 @@ def _adopt(cli: P.Client, cfg: dict, kind: str, prev: dict | None, roles: list[d
         x.update(d, holder=name, job=job, job_id=nj.get("id"), created=nj.get("createTime"), clone=plan["c"], clone_job=nj.get("id"),
                  clone_t=round(t1), src={"swap": "换人", "open": "开机"}[kind], t=round(t1))
     F.edit_state("boot.json", upd)
+    _clear_stopped(nsid)
     was = f"，接替 {prev['holder']}（{prev['id']}）" if prev and (prev["holder"] != name or prev["id"] != nsid) else ""
     F._event("fleet_boot", nsid, f"{name}（{nsid}）开机：新作业 {_created(nj)} 创建{was}"
              + (f"，作业名 {job}" if job != name else "") + ("，接成自用主机" if to_me else ""), t1, name)
@@ -966,20 +1000,31 @@ def _adopt(cli: P.Client, cfg: dict, kind: str, prev: dict | None, roles: list[d
     return new, conn
 
 
+def _mine_host_spec(hid: str, tgt: dict) -> dict:
+    """接成自用主机后的主机配置（含 worker_home 与 python）：优先从主机清单读，测试打桩未改清单时照模板补齐。"""
+    found = next((h for h in C.active_hosts() if str(h["id"]) == hid), None)
+    if found is not None:
+        return found
+    tpl = C._guest_tpl(C.all_hosts())
+    return C.host_defaults({**{k: tpl[k] for k in ("python", "data_root", "worker_home", "ka_bin") if k in tpl}, **tgt})
+
+
 def run_swap(cfg: dict, cli: P.Client, code: str | None, ids=(), kind: str = "swap", person: str | None = None,
              pool: str | None = None, ack=(), password=P.password,
              pace: float = 3, poll: float = 20, fast: float = 6, wait_s: float = 900, ssh_poll: float = 30, ssh_wait_s: float = 900,
              probe=_probe, probe_mine=_probe_mine, ssh_fn=None, forget_fn=None, tcp=None, hosts=None, t: float | None = None,
-             account: str | None = None) -> None:
+             account: str | None = None, clear_ovr=None) -> None:
     """后台线程：关机（off）、换人（swap：同一个池，停旧作业后立刻开新的，沿用端口）、开机（open：重开一台已关机的，或在一个池开新的）。
     登录 → 核对（_old_job：探旧服务器、在平台上找到旧作业；_new_job：拼好新作业并逐项核对），有一项不对就什么都不动 →
     停旧作业（stop_job，停旧到提交新之间每 fast 秒查一次，空档只有十几秒；停下就记关机或归还，_mark_off）→ 关机到此为止；
     提交新作业、等运行（submit_job）→ 登记新服务器（_adopt）→ 等 ssh、开保活 → 给出连接命令。出错停在那一步，不自动重试。
     旧服务器可以是自用主机：worker 有任务在跑就拒绝（先在主机页暂停队列），停了作业后标成已归还；
-    新的使用人是自己时，开好的服务器接成自用主机（也先开保活，worker 由看板下一轮采集拉起）。
+    新的使用人是自己时，开好的服务器接成自用主机（也先开保活，worker 由看板下一轮采集拉起），并清掉同 id 遗留的借用指令（guest、target=borrow 的 deadline）。
     关机时连不上、平台上也没有它运行中的作业：只在看板上标为已关机。
     hosts：改主机清单的函数（holder、add、remove 管组内服务器，add_mine、return_mine 管自用主机），测试替换用。"""
     ssh_fn, forget_fn, tcp = ssh_fn or F.ssh, forget_fn or F.forget, tcp or FB.tcp_open
+    ovr_run = (lambda h, cmd: ssh_fn(h, cmd)[:2]) if ssh_fn is not F.ssh else None
+    ovr_fn = clear_ovr or clear_overrides
     hosts = hosts or {"holder": C.set_fleet_holder, "add": C.add_fleet_server, "remove": C.remove_fleet_server,
                       "add_mine": lambda *a: C.add_mine_host(*a)[1],
                       "return_mine": lambda hid: C.set_returned(hid, fmt_time(time.time(), year=True))}
@@ -1031,10 +1076,21 @@ def run_swap(cfg: dict, cli: P.Client, code: str | None, ids=(), kind: str = "sw
         # forget 删掉里面这个 host:port 的旧条目（同一 ssh 与端口开回来时旧容器的密钥还在，accept-new 会拒连），
         # 等 ssh 的那次连接把新密钥记回那份（#109：记进状态目录的话，worker 复用长连接不核对，实验会话裸 ssh 被拒）
         tgt = next((s for s in FB.mine(cfg) if s["id"] == new["id"]), new) if conn["mine"] else new
+        ovr_cleared, ovr_msg, mine_h = False, "", None
+        if conn["mine"]:
+            mine_h = _mine_host_spec(new["id"], tgt)
+            ovr_cleared, ovr_msg = ovr_fn(new["id"], home=mine_h["worker_home"], borrow_only=True, skip={new["id"]}, ssh_fn=ovr_run)
         forget_fn(tgt)
         note = keepalive(tgt, cfg, ssh_fn, ssh_poll, ssh_wait_s)
         _srv(key, ka=True)
         if conn["mine"]:
+            if not ovr_cleared:
+                ovr_cleared, ovr_msg = ovr_fn(new["id"], home=mine_h["worker_home"], borrow_only=True, target=mine_h, ssh_fn=ovr_run)
+            if ovr_cleared and ovr_msg.startswith("已清"):
+                note += f"；{ovr_msg}"
+                log(f"接成自用主机 {new['id']}：{ovr_msg}")
+            elif not ovr_cleared:
+                log(f"接成自用主机 {new['id']}：未能清理遗留借用指令：{ovr_msg}")
             note += "；看板下一轮采集时拉起 worker"
         else:
             probe(new["id"])

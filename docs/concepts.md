@@ -45,7 +45,7 @@
 | 36 | 清单登记的全局视图 | 全局快照的 `regs`：`overview._regs`（`config.home_host`、`overview.fetch` 的 `_reg_cmd`、`_parse_regs`、`REG_KEYS`；worker 另有一份）；页面上 `projRegSec`、`regRow`、`regQuiet`、`regTally`、`tallyBar`、`tallyHtml`、`REG_ST`（overview_js/project.js） |
 | 37 | 项目配置的摘要与页面上改项目的 monitor.toml；计划项的进度 | `serve.Overview.cfg_info`（`projects[].cfg`、`spec`、`config.cfg_spec`）、`serve.Overview.proj_info`；`projects.set_config`→ `config.set_project`（`PROJ_KEYS`、`ALERT_KEYS`、`_proj_val`、`_move_groups`、`_set_markers`，接新块 `_append_blocks`、值的写法 `_toml_val`（`_set_keys`）；`POST /project/config`）；页面上 `projCfgSec`（`cfRow`、`cfDurRow`、`cfRhythm`、`cfMarkers`、`cfGroups`、`cfAlerts`、`cfgSaveBar`、`cfgDiffText`），草稿 `CFE`（`cfgEdit`、`cfgCur`、`cfgDraft`）、改了哪些 `cfgDiff`（`cfgKeep`）、当场校验 `cfgErrs`、画一节要的 `cfgCtx`、打字时就地换 `cfgPatch`、`cfgAct`、`cfgInput`（overview_js/project.js） |
 | 38 | 哪几台在用主机共用一个 worker_home | `config.home_peers`（`config.home_host`、`_same_home`）；`api.hosts` 的 `home_with`、`api.home_text` |
-| 39 | 在哪台上操作一台主机目录下的登记 | `workerctl.via`（`run_out`、`config.home_host`） |
+| 39 | 在哪台上操作一台主机目录下的登记与清理临时指令 | `workerctl.via`（`run_out`、`config.home_host`）、`workerctl.clear_overrides`（`borrow.finish`、`fleetops.run_swap`） |
 | 40 | 页面上搬、移除登记；能搬去哪些主机 | `serve.reg_move`、`serve.reg_rm`（`POST /reg/move|rm`）；页面上 `regHostBtns`、`regTo`（`freeCards`）、`regAct`（`regMine`），一条登记的进度 `regLeft`（`regRow`、`queueRow`、overview_js/project.js；`queueRow` 在 overview_js/storage.js） |
 | 41 | 上一台自用主机；新主机页接上原来的项目 | `fleetboot.last_mine`（`back_port`、`regs`、`prev`）；页面上 `adoptSrc`、`adoptCard`、平台操作结果后的一句 `adoptHint`（overview_js/project.js） |
 | 42 | 项目登记；看板上有哪些项目 | `projects.root`、`cfg_file`、`files_dir`、`out_dir`、`ver_of`、`registered`、`project_ids`、`load_cfg`、`get_config`、`put_config`（`_check`、`_store`、`Refused`）、`set_config`、锁 `_reg_locked`；经接口改 `[[hosts]]`、`[[queues]]` 要平台操作的权限（`projects.GUARDED`、`_guarded`、`put_config`、`ops`、`users.can_ops`）；done_when 文件的位置 `config.done_key`、用到哪些 `config.done_files`；接口 `GET/PUT /api/project/<id>/config`（serve.py） |
@@ -64,7 +64,7 @@
 | 55 | 自用主机入池 | `pool._selfs`、`pool._self_bar`、`pool._self_in`；入池的各台 `pool._units`、`pool._unit`（`member`、`need_holder`、`set_lend`、`my_servers`、`reclaim`）；登记标记 worker `add --pool`（`load_queue`、`pool`、`proj_lanes`）、`serve.reg_move` 的 `pool`、`workerctl.run_out` 的 `pool`、全局视图 `overview._pool_mark`，各台数几条 `pool._placed`；校验 `fleet._lend_check`；页面上 `poolCard`、`lendTag`、`lendName`（overview_js/account.js） |
 | 56 | 租期到期时刻；租期提醒的档 | `health.lease_end`；`health.lease_due` |
 | 57 | 掉线与恢复判定；换了新容器 | `health.link_step`；`health.container_step` |
-| 58 | 平台操作 | `fleetops.run_*`（`fleetops.OP_NAMES`）；核对的比对 `fleetops.reconcile`；停平台作业、提交克隆并等运行 `fleetops.stop_job`、`fleetops.submit_job`（`op.json`）；出错时这一台的状态一句话 `fleetops._note` |
+| 58 | 平台操作 | `fleetops.run_*`（`fleetops.OP_NAMES`）；核对的比对 `fleetops.reconcile`、确认作业不在运行 `fleetops.job_stopped`（`platform.json` 的 `stopped`）；停平台作业、提交克隆并等运行 `fleetops.stop_job`、`fleetops.submit_job`（`op.json`）；出错时这一台的状态一句话 `fleetops._note` |
 | 59 | 这一台此刻能不能动 | `fleetops._risk`、`fleetops._need_ack`（`lw`、`fleetops._lw`）；页面上 `FBUSY`、`FRISKY`，勾选框的文字 `ackText`（overview_js/fleetops.js） |
 | 60 | 换人、开机的作业名与端口；续租、开机换了容器清旧主机密钥；连一台时新主机密钥记在哪份 | `fleetboot.taken_jobs`、`fleetboot.job_name`；`fleetboot.back_port`、`fleetboot.pick_port`（`fleetboot.used_ports`）；`fleet.forget`（`fleetboot.mine`、`known_hosts`）；`fleet._ssh_cmd` |
 | 61 | worker 停启保活 | worker 的 `keepalive`、`ka`；`gpu_owners`（`ka_full`、`ka_owned`）、`guest_scan`；推演经快照卡的 `ka` 由 `sim_snapshot` 挡 |
@@ -84,7 +84,7 @@
 | 75 | 可共享 | `fleet.shareable`（`analyze`、`from_worker`） |
 | 76 | 预备续租、续租后拉起 worker | `renew.reserve`、`renew.cancel`、`renew.begin`、`renew.after`；页面上自用主机的按钮 `renewBtns`，续租一台的确认 `goRenew`（overview_js/sched.js） |
 | 77 | 后端看 worker 状态里运行中任务的预计结束 | `renew.eta_of` |
-| 78 | 借用 | `borrow.begin`（`fleetops.run_borrow`、`pool=True`）、`borrow.cutoff`、`borrow.check`、`borrow.request_return`、`borrow.cancel_return`、`borrow.finish`；页面上 `borrowText`、`borrowBadge`（common.js、`borrow.check`），操作按钮 `borrowBtns`（overview_js/fleet.js） |
+| 78 | 借用 | `borrow.begin`（`fleetops.run_borrow`、`pool=True`）、`borrow.cutoff`、`borrow.check`、`borrow.request_return`、`borrow.cancel_return`、`borrow.finish`（`gone=True|"stopped"`）；页面上 `borrowText`、`borrowBadge`（common.js、`borrow.check`），操作按钮 `borrowBtns`（overview_js/fleet.js） |
 | 79 | 按钮旁的小弹窗与按钮配色 | `popConfirm`、`popToggle`、`popClose`、`closePop`、`fitPops`；平台操作的弹窗 `opPop`（overview_js/fleet.js） |
 | 80 | 平台操作确认的风险分层；会中断什么的那句 | `riskSay`、`riskNeed`、`riskMore`；`busyText`（`renewWarn`、overview_js/fleetops.js） |
 | 81 | 批量续租 | `renewDrawer`（`rpList`、`rpBody`、`DH.renew`、overview_js/fleetops.js） |
@@ -275,8 +275,8 @@
    实现：`serve.Overview.cfg_info`（全局快照 `projects[].cfg`，范围 `spec` 取 `config.cfg_spec`）、`serve.Overview.proj_info`；`projects.set_config`（改的是登记目录里那份，与推同一把锁）→ `config.set_project`（`PROJ_KEYS`、`ALERT_KEYS`、`_proj_val`、`_move_groups`、`_set_markers`，接新块 `_append_blocks`、值的写法 `_toml_val`（与 `_set_keys` 共用）；`POST /project/config`）；页面上 `projCfgSec`（一项一行 `cfRow`、档位 `cfDurRow`、节奏 `cfRhythm`、里程碑 `cfMarkers`、计划项 `cfGroups`、告警 `cfAlerts`、保存条 `cfgSaveBar` 与对照 `cfgDiffText`），草稿 `CFE`（按项目各一份：`cfgEdit`、`cfgCur`、`cfgDraft`）、改了哪些 `cfgDiff`（哪些自动组要写 `cfgKeep`）、当场校验 `cfgErrs`、画一节要的 `cfgCtx`、打字时就地换 `cfgPatch`、`cfgAct`、`cfgInput`（overview_js/project.js）
 38. **哪几台在用主机共用一个 worker_home**：哪几台在用主机共用一个 worker_home（同一块共享盘；`labmon host list` 分组那行、`worker status` 末尾那句，#35 A）
    实现：`config.home_peers`（与 `config.home_host` 共用 `_same_home`）；`api.hosts` 的 `home_with`、`api.home_text`
-39. **在哪台上操作一台主机目录下的登记**：在哪台上操作一台主机目录下的登记（在用的就是它；已归还的、主机清单里没有的经共用 worker_home 的在用主机代办，不连已归还的那台；`worker rm` 与归档都经它；算力池的 add、rm 也经它，池在 `config.pool_home`）
-   实现：`workerctl.via`（`run_out` 的 rm；挑哪台 `config.home_host`，工作台每轮代读登记也经它）
+39. **在哪台上操作一台主机目录下的登记与清理临时指令**：在哪台上操作一台主机目录下的登记（在用的就是它；已归还的、主机清单里没有的经共用 worker_home 的在用主机代办，不连已归还的那台；`worker rm` 与归档都经它；算力池的 add、rm 也经它，池在 `config.pool_home`）；借用归还连不上目标机时经共用 `worker_home` 的在用主机删共享盘上的 `overrides.json`，换人/开机接成自用主机时仅清同 id 遗留的借用指令（`guest` 与 `target=borrow` 的 `deadline`）（#171）
+   实现：`workerctl.via`（`run_out` 的 rm；挑哪台 `config.home_host`，工作台每轮代读登记也经它）、`workerctl.clear_overrides`（`borrow.finish`、`fleetops.run_swap` 共用）
 40. **页面上搬、移除登记；能搬去哪些主机**：页面上搬、移除登记（按项目整台，页面上叫「换到其他主机」「不用这台」：搬 = 逐条在目标主机 `worker add`，别的主机上同一条清单的登记由 worker 删掉；移除 = 逐条 `worker rm`，有一条在跑就整批拒绝；各记一条配置改动、按项目告诉实验会话；#121）；能搬去哪些主机（worker_home 相同的在用主机，借来的只给 `borrow.for` 里的项目；给人挑的空几张卡、租期）
    实现：`serve.reg_move`、`serve.reg_rm`（`POST /reg/move|rm`）；页面上 `regHostBtns`、`regTo`（空卡 `freeCards`）、`regAct`（这项目在这台的登记 `regMine`），一条登记的进度 `regLeft`（`regRow`、主机页 `queueRow`、接上卡共用，overview_js/project.js；`queueRow` 在 overview_js/storage.js）
 41. **上一台自用主机；新主机页接上原来的项目**：上一台自用主机（同一个池里最近归还的；开机沿用它的端口、新主机页列它的登记）；新主机页接上原来的项目
@@ -313,8 +313,8 @@
    实现：`health.lease_end`；`health.lease_due`
 57. **掉线与恢复判定；换了新容器**：掉线与恢复判定（连续至少 2 次、持续 `DOWN_S` 秒连不上才算掉线；工作台主机、组内服务器、项目页同一条）；换了新容器（续租或重启）
    实现：`health.link_step`；`health.container_step`
-58. **平台操作**：平台操作（核对、续租、开保活、关机、开机、换人、借来用；自用主机与组内服务器同一套）
-   实现：`fleetops.run_*`（中文名 `fleetops.OP_NAMES`）；核对的比对 `fleetops.reconcile`（纯函数）；停平台作业、提交克隆并等运行 `fleetops.stop_job`、`fleetops.submit_job`（续租、换人、开关机共用，进度记进 `op.json`）；出错时这一台的状态一句话 `fleetops._note`
+58. **平台操作**：平台操作（核对、续租、开保活、关机、开机、换人、借来用；自用主机与组内服务器同一套；核对把无运行中同名同池作业的记入 `platform.json` 的 `stopped`（不含端口映射不对），续租/开机新作业起后从中移除；接成自用主机时清掉同 id 遗留借用指令，#171）
+   实现：`fleetops.run_*`（中文名 `fleetops.OP_NAMES`）；核对的比对 `fleetops.reconcile`（纯函数）、确认作业不在运行 `fleetops.job_stopped`（`SYNC_GRACE_S`）；停平台作业、提交克隆并等运行 `fleetops.stop_job`、`fleetops.submit_job`（续租、换人、开关机共用，进度记进 `op.json`）；出错时这一台的状态一句话 `fleetops._note`
 59. **这一台此刻能不能动**：这一台此刻能不能动（在跑实验、未识别的 GPU 进程、没探到的、本地盘 labmon 之外写得多（`lw.risk`）的要勾「已说好」；自用主机 worker 在跑只许续租勾「可以中断」）
    实现：`fleetops._risk`、`fleetops._need_ack`（这一台的 `lw`：`fleetops._lw`）；页面上 `FBUSY`、`FRISKY`，勾选框的文字 `ackText`（overview_js/fleetops.js；续租一台、批量续租、关机、换人共用）
 60. **换人、开机的作业名与端口；续租、开机换了容器清旧主机密钥；连一台时新主机密钥记在哪份**：换人、开机的作业名（同名已在用就加后缀；真操作只认刚读的平台列表，预览用上次核对存的）与端口（接替的那台的、这人在这个池里上次关掉那台的优先，被占了往后挑；向导预览与真操作同一处取，连同“为什么选它”那句）；续租、开机换了容器清旧主机密钥（状态目录的与自用主机自己那份）；连一台时新主机密钥记在哪份（服务器项带 `known_hosts` 的自用主机记在它那份、与实验会话裸 ssh 同一份，其余记在状态目录，#109）
@@ -353,8 +353,8 @@
    实现：`renew.reserve`、`renew.cancel`、`renew.begin`、`renew.after`；页面上自用主机的按钮 `renewBtns`，续租一台的确认 `goRenew`（overview_js/sched.js，都由主机页与组内服务器抽屉共用）
 77. **后端看 worker 状态里运行中任务的预计结束**：后端看 worker 状态里运行中任务的预计结束（续租与借用的截止判断共用）
    实现：`renew.eta_of`
-78. **借用**：借用（借来、约定时间与对方租期取早、补齐指令、到点提醒、要还、归还；算力池借的同一套，按 `borrow_pool` 分支：不写 `borrow_by`、不唤醒会话、换了容器 `finish(gone=True)`）
-   实现：`borrow.begin`（页面上点的经 `fleetops.run_borrow` 在后台跑、显示进度；`pool=True` 是算力池借）、`borrow.cutoff`、`borrow.check`、`borrow.request_return`、`borrow.cancel_return`（撤销跑完就还）、`borrow.finish`；页面上 `borrowText`、`borrowBadge`（common.js，两个页面共用；项目快照的主机带上 `borrow.check` 算好的 borrow），操作按钮 `borrowBtns`（overview_js/fleet.js，抽屉与主机页共用）
+78. **借用**：借用（借来、约定时间与对方租期取早、补齐指令、到点提醒、要还、归还；算力池借的同一套，按 `borrow_pool` 分支：不写 `borrow_by`、不唤醒会话、换了容器 `finish(gone=True)`；手动借与算力池借在 `health.link_step` 判掉线且 `fleetops.job_stopped` 确认平台核对作业不在运行时自动走 `finish(gone="stopped")` 归还，不 ssh 目标机，连不上时经 `workerctl.clear_overrides` 删共享盘上的 `overrides.json`，#171）
+   实现：`borrow.begin`（页面上点的经 `fleetops.run_borrow` 在后台跑、显示进度；`pool=True` 是算力池借）、`borrow.cutoff`、`borrow.check`、`borrow.request_return`、`borrow.cancel_return`（撤销跑完就还）、`borrow.finish`（`gone=True|"stopped"`）；页面上 `borrowText`、`borrowBadge`（common.js，两个页面共用；项目快照的主机带上 `borrow.check` 算好的 borrow），操作按钮 `borrowBtns`（overview_js/fleet.js，抽屉与主机页共用）
 79. **按钮旁的小弹窗与按钮配色**：按钮旁的小弹窗（短确认、短表单、验证码；同一时间一个，状态在 `POP`；点外面、Esc 取消，有输入的点外面不关；窄屏贴在屏幕底部，让出底栏与软键盘）与按钮配色（主色推荐、红框会中断、琥珀框撤销，主色灰掉时灰底灰字）
    实现：`popConfirm`、`popToggle`、`popClose`、`closePop`、`fitPops`；平台操作的弹窗 `opPop`（overview_js/fleet.js）
 80. **平台操作确认的风险分层；会中断什么的那句**：平台操作确认的风险分层（#14：一句结论 → 要勾才动的风险与勾选框 → 折起来的细节，开合记在 `POP.more`；续租一台、关机的弹窗与换人向导共用）；会中断什么的那句
