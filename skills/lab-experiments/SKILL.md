@@ -11,7 +11,7 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 
 原则是**快**：不加快照哈希、逐次确认之类的流程，只守下面会真出事的规则。
 
-Codex 与 Claude 共用这份流程。首次使用或接续等待时读 [sessions.md](sessions.md)，按当前客户端的进程工具运行和接收 `labmon wait` 输出。
+各客户端（Antigravity、Codex 与 Claude 等）共用这份流程。首次使用或接续等待时读 [sessions.md](sessions.md)，按当前客户端的进程工具运行和接收 `labmon wait` 输出。
 
 ## 红线
 

@@ -11,11 +11,12 @@
 python3.11 tests/pages/preview.py --port 8799 [--kind normal|evil|sparse] [--as admin|public|user] [--prefix /pfx]   # --prefix 照反代挂在路径前缀下（#165）
 ```
 
-- **打开**：缺省参数的预览在 `.claude/launch.json` 里登记为 `labmon-preview`，`preview_start` 按名字起服务并开一个标签。它读的是会话所在目录的 `launch.json`、在那份 checkout 里起：
-  Agent 工具派出的 worktree 子 agent 这样起的是主 checkout 的 main，看不到自己的改动；要带 `--kind`、`--as`、`--prefix` 时也不能按名字起。
-  这两种情况在自己的 worktree 里用 Bash 后台跑上面那条命令，再 `preview_start` 传 `url: http://localhost:8799/` 开标签。
-- **窄屏**：`resize_window` 的 `mobile` 预设（375 宽）后重新 `navigate` 一次，看完用 `desktop` 预设复原。
-- **控制台**：`read_console_messages`（`onlyErrors` 看报错）；读文字用 `get_page_text`、`read_page`，看版面才截图（`computer` 的 `screenshot`）。
+- **打开与验收（按客户端并列）**：
+  - **Antigravity**：使用 `browser` 子代理（`Model: "flash"`）核验离线预览页面与控制台报错；Swarm worker 若环境无内置浏览器工具，可回退本机无头浏览器脚本核对，或交总控调用 `browser` 子代理核验。
+  - **Claude 桌面应用**：缺省参数在 `.claude/launch.json` 登记为 `labmon-preview`，`preview_start` 按名字起服务并开一个标签。worktree 子 agent 或需带 `--kind`、`--as`、`--prefix` 时，在自己的 worktree 里后台跑上面那条命令，再 `preview_start` 传 `url: http://localhost:8799/` 开标签。
+  - **Codex / CLI 等无原生内置浏览器环境**：在 worktree 启动 `preview.py` 后，使用无头脚本（如 headless Playwright / curl 桩）抓取核对，或交总控核验。
+- **窄屏**：按 375 宽（如 mobile 预设或无头浏览器窗口预设）核对响应式布局，窄屏贴底与抽屉显示正常。
+- **控制台**：确认无异常报错（控制台日志里只该有 404 与 501 两类预期返回，别的报错都是页面的问题）；页面文本与版面结构正常。
 - **身份**：`--as` 定“我是谁”（缺省从内网入口来的管理员；`public` 是从公网入口来的管理员，`user` 是普通用户），改了按身份收起的按钮、账号自助与人员管理（`#/me`、`#/fleet/people`）或登录页（`/login`）的三种都看。
 - **它做什么**：把 `snapshots.py` 的快照经 `collect.write_page` 渲染到临时目录（退出时删掉：Ctrl-C、kill（SIGTERM）、关掉终端（SIGHUP）都行，`kill -9` 会留下 `/tmp/labmon-preview-*`），起一个只读的静态服务，目录布局照看板服务。
   不 ssh、不连平台、不发通知，不碰真看板（dashboard-host 上的主、笔记本上的冷备）与 `~/.local/state/labmon`。页面定时取的 `/overview.json`、`/records.json`、
