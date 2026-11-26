@@ -411,7 +411,10 @@ def overview() -> dict:
              {"p": "proj-b", "n": "beta_x", "lane": None, "t0": NOW - 9 * H, "t1": NOW - 8 * H, "g": [1], "st": "stop"},
              {"p": "proj-a", "n": "alpha_train_s1", "lane": "车道 1", "t0": NOW - 2 * H, "t1": NOW + 8 * H, "g": [0], "st": "run"},
              {"p": "proj-a", "n": "alpha_train_s2", "lane": "车道 1", "t0": NOW + 3 * H, "t1": NOW + 5 * H, "g": [1], "st": "plan"},
-             {"p": "proj-a", "n": "alpha_train_s3", "lane": "车道 1", "t0": NOW + 5 * H, "t1": NOW + 7 * H, "g": [1], "st": "plan", "after": [["proj-b", "beta_eval_s7"]]}]
+             {"p": "proj-a", "n": "alpha_train_s3", "lane": "车道 1", "t0": NOW + 5 * H, "t1": NOW + 7 * H, "g": [1], "st": "plan", "after": [["proj-b", "beta_eval_s7"]]},
+             {"p": "proj-a", "n": "cpu_prep_s0", "lane": "车道 1", "t0": NOW - 3 * H, "t1": NOW - 2 * H, "g": [], "st": "done"},
+             {"p": "proj-b", "n": "cpu_eval_s1", "lane": None, "t0": NOW - 0.5 * H, "t1": NOW + 0.5 * H, "g": [], "st": "run"},
+             {"p": "proj-a", "n": "cpu_pack_s2", "lane": "车道 1", "t0": NOW + 0.5 * H, "t1": NOW + H, "g": [], "st": "plan"}]
     occ_b = [{"p": "proj-b", "n": "beta_eval_s7", "lane": "车道 1", "t0": NOW - H, "t1": NOW + 2 * H, "g": [0], "st": "run"},
              {"p": "proj-b", "n": "beta_eval_s8", "lane": "车道 1", "t0": NOW + 2 * H, "t1": NOW + 4 * H, "g": [0], "st": "plan"}]
     return {"generated": NOW, "hosts": [a, b], "colors": {"proj-a": "#7F77DD", "proj-b": "#D85A30"}, "notices": [],

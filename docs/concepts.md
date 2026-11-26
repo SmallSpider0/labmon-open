@@ -121,7 +121,7 @@
 | 112 | 多主机负载均衡的提示 | worker 的 `offers`（`proj_lanes`、`move_cands`、`cant_move`、`try_move`、`Worker.idle`、`plan_lanes`、`list_of`、`list_env`、`peer_st`、`peer_todo`）、同机 `local_offers`（`Worker.lane_offer`、`Worker.local_moves`、`Worker.move_before`、`Worker.moved_past`、`Worker.local_cards`、`Worker.util10`）、`Worker.lane_room`；看板 `rebalance.suggest`（`rebalance.move_key`、`_needs_miss`、`_text`、`_why`、`_est_text`、`_idle_gain`、`_live`、`_fresh`、`rebalance.log_text`）、`rebalance.keep_offers`、`rebalance._under`、`rebalance._room_text`、`rebalance._queued`、`collect._rebalance`；页面上 `rebalMark`、`rebalTip`（common.js） |
 | 113 | 工作台上运行中任务的预计结束 | `etaOf`（overview_js/home.js） |
 | 114 | 运行中任务剩余时长说不准时的估计 | `worker.pure.overrun_left`（`OVER_FRAC`、`OVER_MIN_S`；worker `run_end` 与看板 `collect._job_times`、`_segment_eta` 共用） |
-| 115 | 各卡被谁占着 | `overview._keep_usage`、`overview.occupancy`（`/p/<id>/events.json`） |
+| 115 | 各卡与纯 CPU 被谁占着 | `overview._keep_usage`、`overview.occupancy`（`/p/<id>/events.json` 传 `skip` 缺省仅 GPU 占卡） |
 | 116 | 工作台存的用量记录；存着记录的主机 | 路径 `state.usage_file`；`state.usage_hosts`（`waits.JobWatch.check`、`collect._attempts`）；项目页的失败尝试 `collect._attempts` |
 | 117 | 等待原因的结构化字段 | worker 等待项的 `miss`（`place`）、`local[].how`（`copy`、`redo`、`mixed`）；看板按字段认，不按 `why` 文字 |
 | 118 | 容量单位 | `worker.pure.GIB`（`config.GIB` 与 worker 共用）；页面上 `GIB`（common.js） |
@@ -428,7 +428,7 @@
    实现：`etaOf`（overview_js/home.js）
 114. **运行中任务剩余时长说不准时的估计**：运行中任务剩余时长说不准时的估计（已用的 20%、至少 10 分钟：worker 估超了预计的，看板估超了估时又看不出进度的（没有进度行、进度停了，#138）与第一段只有一个步数 > 0 的采样、又没有估时或已超估时的）
    实现：`worker.pure.overrun_left`（`OVER_FRAC`、`OVER_MIN_S`；worker `run_end` 与看板 `collect._job_times`、`_segment_eta` 共用）
-115. **各卡被谁占着**：各卡被谁占着（已跑的用量记录存在本机，加推演）
+115. **各卡与纯 CPU 被谁占着**：各卡及非占位纯 CPU 任务（`g=[]`）被谁占着（已跑的用量记录存在本机，加推演；总览与主机页有纯 CPU 任务的主机在卡行下方动态追加 `CPU` 行，项目页经 `/p/<id>/events.json` 传 `skip` 时缺省仅取 GPU 占卡，#207）
    实现：`overview._keep_usage`、`overview.occupancy`（项目页经 `/p/<id>/events.json` 取）
 116. **工作台存的用量记录；存着记录的主机**：工作台存的用量记录（各主机 worker 跑完的任务，30 天；时间线已跑占用、调度卡平均等待、项目页失败的尝试都读它）；存着记录的主机（不知道在哪台跑时各台都看）
    实现：路径 `state.usage_file`；`state.usage_hosts`（`waits.JobWatch.check`、`collect._attempts`）；项目页的失败尝试 `collect._attempts`

@@ -45,7 +45,7 @@ from .health import container_step, lease_due, lease_end, link_step
 from .records import EVENT_CATS, EVENT_KINDS, log_events, told
 from .state import append_row, load_json, load_rows, parse_rows, save_json, snapshot, state_dir, usage_file, write_atomic
 from .service import log
-from .worker.pure import person_use
+from .worker.pure import is_hold, person_use
 from .workerctl import run_out, ssh
 
 KEEP_S = 7 * 86400
@@ -722,11 +722,12 @@ def _keep_usage(sd: Path, hid: str, rows: list[dict], t: float, idx: dict) -> No
         seen.add((s0, r.get("name"), r.get("root"), r.get("queue")))
 
 
-def occupancy(hosts: list[dict], projects: list[dict], since: float, skip: str | None = None) -> dict:
-    """各主机各卡被谁占着（时间线用）：已跑的取本机存的用量记录（_keep_usage），在跑与排队的取 worker 推演（status.plan）。
-    不用卡的任务（占位、纯 CPU）不画。skip：不给这个项目的（项目页只看同机别的项目）。
-    返回 {主机: [{p 项目, n 任务, lane 车道名, t0, t1, g [卡序号], st done/failed/stop/run/plan, after}]}；
+def occupancy(hosts: list[dict], projects: list[dict], since: float, skip: str | None = None, *, cpu: bool | None = None) -> dict:
+    """各主机各卡（及非占位纯 CPU 任务）被谁占着（时间线用）：已跑的取本机存的用量记录（_keep_usage），在跑与排队的取 worker 推演（status.plan）。
+    占位任务（is_hold）不画；skip：不给这个项目的（项目页只看同机别的项目占卡，cpu 缺省随 skip is None，不破坏项目页 othersRow）。
+    返回 {主机: [{p 项目, n 任务, lane 车道名, t0, t1, g [卡序号，纯 CPU 为空列表], st done/failed/stop/run/plan, after}]}；
     车道名取登记它的项目看板定的（projects 的 lanes），单元申请没有。"""
+    include_cpu = (skip is None) if cpu is None else cpu
     names = {(ln.get("host"), ln.get("root"), ln.get("queue")): ln.get("label") for p in projects for ln in p.get("lanes") or []}
     out = {}
     for h in hosts:
@@ -734,17 +735,32 @@ def occupancy(hosts: list[dict], projects: list[dict], since: float, skip: str |
         idx = {g["uuid"]: g["i"] for g in (st.get("info") or {}).get("gpus") or []}
         rows = []
         for r in load_rows(usage_file(h["id"])):
-            # 卡按 uuid 对到此刻的序号；换过容器的（uuid 全不在了）用记下时的序号 gi
-            g = [idx[u] for u in r.get("g") or [] if u in idx] or r.get("gi")
-            if g and r["t"] >= since and r.get("p") != skip:
-                rows.append({"p": r.get("p"), "n": r["n"], "lane": names.get((h["id"], r.get("root"), r.get("queue"))), "t0": r["s"], "t1": r["t"], "g": g, "st": r["st"]})
+            if r["t"] < since or r.get("p") == skip:
+                continue
+            raw_g = r.get("g") or []
+            gi = r.get("gi") or []
+            if raw_g or gi:
+                # 卡按 uuid 对到此刻的序号；换过容器的（uuid 全不在了）用记下时的序号 gi；11-07 前无 gi 的旧 GPU 记录仍跳过，不当纯 CPU
+                g = [idx[u] for u in raw_g if u in idx] or gi
+                if not g:
+                    continue
+            else:
+                if not include_cpu or is_hold(r.get("n")):
+                    continue
+                g = []
+            rows.append({"p": r.get("p"), "n": r["n"], "lane": names.get((h["id"], r.get("root"), r.get("queue"))), "t0": r["s"], "t1": r["t"], "g": g, "st": r["st"]})
         for ln in (st.get("plan") or {}).get("lanes", []):
             if ln.get("project") == skip:
                 continue
             lab = names.get((h["id"], ln.get("root"), ln.get("queue")))
             for j in ln["jobs"]:
-                g = [i for i in j.get("gpus") or [] if i is not None]
-                if g and j.get("t1"):
-                    rows.append({"p": ln.get("project"), "n": j["name"], "lane": lab, "t0": j["t0"], "t1": j["t1"], "g": g, "st": "run" if j.get("run") else "plan", **({"after": j["after"]} if j.get("after") else {})})
+                if not j.get("t1"):
+                    continue
+                raw_g = j.get("gpus") or []
+                g = [i for i in raw_g if i is not None]
+                if not g:
+                    if raw_g or not include_cpu or is_hold(j.get("name")):
+                        continue
+                rows.append({"p": ln.get("project"), "n": j["name"], "lane": lab, "t0": j["t0"], "t1": j["t1"], "g": g, "st": "run" if j.get("run") else "plan", **({"after": j["after"]} if j.get("after") else {})})
         out[h["id"]] = rows
     return out
