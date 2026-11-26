@@ -8,7 +8,7 @@
 
 - `page:…`：维护者在看板修改了项目状态。
   - `move`（迁移登记）：将新清单登记到指定主机。
-  - `rm` / `restore`：重新登记 `worker add`。
+  - `rm` / `restore`：移除了登记或恢复了项目，若需要再跑才重新 `worker add`。
   - `pause`：等待恢复，不随意改动清单。
   - `config`：看板更新了 `monitor.toml`，wait 会自动拉取同步至本地，随项目提交即可，不得回滚。
 - `sync_conflict:…`：本地与看板两端均修改了 `monitor.toml`。执行 `labmon project pull -c monitor.toml` 拉回看板配置（本地暂存至 `.labmon/monitor.toml.mine`），重新合并修改后 wait 会自动推送。

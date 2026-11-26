@@ -79,7 +79,7 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 
 ### 暂停与让路
 
-- 临时让路：`labmon pause <项目> [--until …] [--host …]`（`--now` 立即中断当前任务重排；缺省等当前任务跑完）。恢复用 `labmon resume <项目>`。
+- 临时让路：`labmon pause <项目> [--until …] [--host …]`（`--now` 按登记的停法停下，重新排队不记失败；缺省停法等当前任务跑完，要马上停需先 `worker add … --stop term` 登记）。恢复用 `labmon resume <项目>`。
 - 整条队列停：在状态目录建 `paused` 文件（写入原因），删掉即恢复。
 - 任务间等待外部条件：在清单中使用规范命名的占位任务（见 [lists.md](lists.md)「占位任务」）。
 
