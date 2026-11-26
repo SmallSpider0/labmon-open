@@ -129,6 +129,43 @@ def token_file(admin: bool = False) -> Path:
     return conf_file().parent / ("admin.token" if admin else "client.token")
 
 
+def admin_meta_file() -> Path:
+    """admin.token 的旁记元数据路径（权限 600，只记到期时刻与对应 admin.token 的 mtime_ns，绝不存令牌原文）。"""
+    return token_file(True).with_name("admin.token.meta")
+
+
+def _save_admin_meta(tok_path: Path, until: float | int | None) -> None:
+    meta = admin_meta_file()
+    if until is None:
+        meta.unlink(missing_ok=True)
+        return
+    try:
+        mtime = tok_path.stat().st_mtime_ns
+    except OSError:
+        return
+    write_atomic(meta, json.dumps({"until": until, "mtime": mtime}) + "\n", mode=0o600)
+
+
+def admin_expired_hint(now: float | None = None) -> str | None:
+    """admin.token 已过期时返回明确提示；未过期、无旁记、或 admin.token 已被外部替换（mtime_ns 不一致）返回 None。"""
+    f = token_file(True)
+    try:
+        if not f.read_text().strip():
+            return None
+        mtime = f.stat().st_mtime_ns
+        meta = json.loads(admin_meta_file().read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(meta, dict) or meta.get("mtime") != mtime:
+        return None
+    until = meta.get("until")
+    if not isinstance(until, (int, float)):
+        return None
+    if (time.time() if now is None else now) < until:
+        return None
+    return f"admin.token 已于 {config.fmt_time(until)} 过期，重跑 labmon login --admin（1 小时的 admin 令牌，写到 {f}）后再跑"
+
+
 def servers() -> list[dict]:
     """要试的地址 [{url, ctx}]，按 client.toml 的顺序；没有 client.toml 时是本机的内网入口。写错抛 config.ConfigError。"""
     f = conf_file()
@@ -215,6 +252,9 @@ def call(method: str, path: str, body=None, *, admin: bool = False, timeout: flo
     idem：做两遍也没事（缺省 GET 是）；4xx 与别的 5xx 抛 Failed，都不通抛 Unreachable。"""
     idem = method == "GET" if idem is None else idem
     hd = dict(headers or {})
+    if admin and token_path is None and not os.environ.get("LABMON_TOKEN"):
+        if expired := admin_expired_hint():
+            raise Failed(401, expired)
     try:
         tok = token(admin) if token_path is None else token_path.read_text().strip()
     except OSError as e:
@@ -310,6 +350,8 @@ def login(name: str | None = None, admin: bool = False) -> int:
                 return 3
             f = token_file(admin)
             write_atomic(f, js["token"] + "\n", mode=0o600)
+            if admin:
+                _save_admin_meta(f, js.get("until"))
         except _Down as d:
             print(f"[labmon] 建令牌时连接断了（{d.why}）：再跑一次 labmon login", file=sys.stderr)
             return 2

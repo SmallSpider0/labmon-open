@@ -264,6 +264,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 - 用哪个令牌：环境变量 `LABMON_TOKEN` › 要管理员的命令（与 `labmon project push --admin`）先用 `admin.token` › `client.token`。令牌只放在 `Authorization` 头里。
 - 看板这台机器上不想输口令的：`labmon user token <名字> --scope project --out ~/.config/labmon/client.token`。
 - 没带令牌、令牌不认（看板回 401）：命令行在看板说的原因后面接一句这两条路（交给用户做，路径按 `LABMON_CLIENT` 取；要管理员的命令指到 `labmon login --admin`；设了 `LABMON_TOKEN` 的说换掉或去掉它），退出码 3（`client.login_hint`，#191）。
+- `admin.token` 过期提示（#136）：`labmon login --admin` 会在同目录旁记 `admin.token.meta`（权限 600，仅记录到期时刻与 `admin.token` 的修改时间，不存令牌原文）；过期后要管理员的命令直接提示过期时刻与重跑 `labmon login --admin`，不再先发一次请求拿到含糊的 401（设了 `LABMON_TOKEN` 或外部替换了 `admin.token` 时不拦截）。
 - **`project` 令牌做不了的**（403，打一句“这类事要管理员在内网入口做（看板页面上，或 `labmon login --admin` 后再跑）”）：`borrow`、`host return|restore`、`drain|undrain`、`worker start|stop|limit`，推改了 `[[hosts]]`、`[[queues]]` 的配置。实验会话的令牌是 `project` 的，这些交给用户。
 
 ### 命令行用的接口

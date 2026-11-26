@@ -177,6 +177,66 @@ class CallTest(_Base):
         self.assertIn(f"labmon login --admin（1 小时的 admin 令牌，写到 {self.d / 'admin.token'}）", err.getvalue())
         self.assertNotIn("--scope project", err.getvalue())
 
+    def test_admin_login_meta_and_expired_hint(self):
+        # labmon login --admin 旁记到期时刻（不落盘令牌原文），过期后要管理员的命令直接提示过期时刻与重跑，不发请求（#136）
+        os.environ.pop("LABMON_TOKEN")
+        t0 = 1795000000
+        until = t0 + 3600
+        secret_tok = "adm-secret-token-value"
+        url, _ = self.fake([
+            (200, {"ok": 1}),
+            (200, {"token": secret_tok, "name": "命令行（管理员）", "scopes": ["admin"], "until": until}),
+            (200, {"ok": 1}),
+        ])
+        self.servers(url)
+        with mock.patch("getpass.getpass", return_value="pw"), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(client.login(name="boss", admin=True), 0)
+        meta_path = client.admin_meta_file()
+        self.assertTrue(meta_path.is_file())
+        self.assertEqual(meta_path.stat().st_mode & 0o777, 0o600)
+        raw_meta = meta_path.read_text()
+        self.assertNotIn(secret_tok, raw_meta)
+        self.assertEqual(json.loads(raw_meta)["until"], until)
+
+        url2, hits = self.fake([(200, {"rc": 0})])
+        self.servers(url2)
+
+        # 未过期：正常发请求
+        with mock.patch.object(client.time, "time", return_value=until - 10):
+            self.assertEqual(client.call("POST", "/api/borrow", {}, admin=True), {"rc": 0})
+        self.assertEqual(len(hits), 1)
+        hits.clear()
+
+        # 已过期：直接抛 401，不发请求，提示具体过期时刻与重跑命令
+        err = io.StringIO()
+        with mock.patch.object(client.time, "time", return_value=until + 1), contextlib.redirect_stderr(err):
+            self.assertEqual(client.run("POST", "/api/borrow", {}, admin=True), 3)
+        self.assertEqual(hits, [])
+        self.assertIn(f"admin.token 已于 {client.config.fmt_time(until)} 过期", err.getvalue())
+        self.assertIn("labmon login --admin", err.getvalue())
+        self.assertNotIn(secret_tok, err.getvalue())
+
+        # 非管理员命令不受 admin.token 过期影响
+        (self.d / "client.token").write_text("proj-tok\n")
+        with mock.patch.object(client.time, "time", return_value=until + 1):
+            self.assertEqual(client.call("GET", "/api/hosts", admin=False), {"rc": 0})
+        self.assertEqual(len(hits), 1)
+        hits.clear()
+
+        # 设了 LABMON_TOKEN 或外部替换了 admin.token：不误拦
+        with mock.patch.dict(os.environ, {"LABMON_TOKEN": "override"}), mock.patch.object(client.time, "time", return_value=until + 1):
+            self.assertEqual(client.call("POST", "/api/borrow", {}, admin=True), {"rc": 0})
+        self.assertEqual(len(hits), 1)
+        hits.clear()
+
+        adm_file = client.token_file(True)
+        adm_file.write_text("fresh-manual-token\n")
+        st = adm_file.stat()
+        os.utime(adm_file, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000_000))
+        with mock.patch.object(client.time, "time", return_value=until + 1):
+            self.assertEqual(client.call("POST", "/api/borrow", {}, admin=True), {"rc": 0})
+        self.assertEqual(len(hits), 1)
+
     def test_env_proxy_ignored(self):
         # 环境里配了代理（Claude 应用里 HTTPS_PROXY 指向 Clash，NO_PROXY 没有看板的地址，#195）：连看板一律直连，代理一个请求也收不到。
         # 命令行（call、login）、部署脚本的远端模式、冷备的 pull 都经 client.opener
