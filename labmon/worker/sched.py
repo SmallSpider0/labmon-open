@@ -579,14 +579,19 @@ def conc_key(k):
     return min(_C.CONC_MAX, max(1, int(round(k))))
 
 
-def run_tot(running, eta, eta_t):
-    """在跑任务按日志进度估的总时长 {(项目, 同类名): [(任务, 分钟)]}：看板写来的预计结束（eta.json 的 jobs，写的时刻 eta_t 在任务开始之后才算）− 开始。
+def run_tot(running, eta, eta_t, prog=None):
+    """在跑任务按日志进度估的总时长 {(项目, 同类名): [(任务, 分钟)]}：看板写来的预计结束（eta.json 的 jobs，写的时刻 eta_t 在任务开始之后才算）− 开始 − 累计挂起。
+    只认看板标进 eta.json 的 prog（真正按日志进度外推，#149）的任务；prog 为 None 时兼容不含 prog 的旧 eta.json。
     同类还没有跑完的时，排队的按它估（duration 的 run，#67）。占位任务不算（它没有日志进度）。Worker.run_tot 与 fit（读状态里的 running）共用。"""
     out = {}
     for j in running:
-        e = None if _C.is_hold(j["name"]) else eta.get("%s|%s" % (j.get("project"), j["name"]))
-        if e and eta_t >= j["t0"] and e > j["t0"]:
-            out.setdefault((j.get("project"), _C.base_name(j["name"])), []).append((j["name"], round((e - j["t0"]) / 60)))
+        k = "%s|%s" % (j.get("project"), j["name"])
+        if _C.is_hold(j["name"]) or (prog is not None and k not in prog):
+            continue
+        e = eta.get(k)
+        sus = _M.job_sus(j, e) if e and e > j["t0"] else 0.0
+        if e and eta_t >= j["t0"] and e > j["t0"] + sus:
+            out.setdefault((j.get("project"), _C.base_name(j["name"])), []).append((j["name"], round((e - j["t0"] - sus) / 60)))
     return out
 
 
@@ -974,7 +979,7 @@ class SchedMixin:
 
     def run_tot(self):
         """在跑任务按日志进度估的总时长（模块级 run_tot，fit 也用）。"""
-        return run_tot(self.running.values(), self.eta, self.eta_t)
+        return run_tot(self.running.values(), self.eta, self.eta_t, self.eta_prog)
 
     def dur_k(self, r):
         """清单里一个任务在同卡有 k 条 labmon 任务（含自己）时的预计时长（duration 的结果；估不出为 None）：返回 k → 结果 的函数，
@@ -996,30 +1001,32 @@ class SchedMixin:
         return f
 
     def load_eta(self):
-        """看板写来的运行中任务预计结束 {"t": 写的时刻, "jobs": {"项目|任务": 时刻}}（项目看板按日志进度算的，比时长估计准）；文件变了才重读。"""
+        """看板写来的运行中任务预计结束 {"t": 写的时刻, "jobs": {"项目|任务": 时刻}, "prog": ["项目|任务", …]}（项目看板算的；prog 是其中真正按日志进度外推的，#149）；文件变了才重读。"""
         try:
             m = _C.fsig(self.p.eta)
         except OSError:
-            self.eta, self.eta_t, self.eta_m = {}, 0, None
+            self.eta, self.eta_prog, self.eta_t, self.eta_m = {}, None, 0, None
             return
         if m != self.eta_m:
             try:
                 d = json.loads(_C.read(self.p.eta, "{}") or "{}")
             except ValueError:
                 d = {}
-            self.eta, self.eta_t, self.eta_m = d.get("jobs") or {}, d.get("t") or 0, m
+            p = d.get("prog")
+            self.eta, self.eta_prog, self.eta_t, self.eta_m = d.get("jobs") or {}, set(p) if isinstance(p, list) else None, d.get("t") or 0, m
 
     def run_end(self, j, now):
-        """运行中任务的预计结束：看板写来的（任务开始后写的才算这一次）、否则 开始 + 预计时长；超了预计的剩余按 overrun_left 估（已跑的 20%、至少 10 分钟），
+        """运行中任务的预计结束：看板写来的（任务开始后写的才算这一次）、否则 开始 + 累计挂起 + 预计时长；超了预计的剩余按 overrun_left 估（已跑不含挂起的 20%、至少 10 分钟，#149），
         不当“马上结束”。时长不明的（没估时也没有同类历史）为 None。
         占位任务不看看板写来的（它没有日志进度，看板的就是推演的回声）；写了 after= 的等的都已结束时算现在（它下一次检查就放行）。"""
         hold = _C.is_hold(j["name"])
         e = None if hold else self.eta.get("%s|%s" % (j.get("project"), j["name"]))
         d = self.req_dur(j, self.k_of(j))
-        end = e if e and self.eta_t >= j["t0"] else j["t0"] + d * 60 if d is not None else None
+        sus = _M.job_sus(j, now)
+        end = e if e and self.eta_t >= j["t0"] else j["t0"] + sus + d * 60 if d is not None else None
         if end is None or end > now:
             return end
-        return now if hold and _DP.dep_keys(j) else now + _C.overrun_left(now - j["t0"])
+        return now if hold and _DP.dep_keys(j) else now + _C.overrun_left(max(0.0, now - j["t0"] - sus))
 
     # ---- 调度设置与公平份额 ----
     def policy(self):

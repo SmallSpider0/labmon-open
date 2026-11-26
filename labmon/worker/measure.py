@@ -102,7 +102,7 @@ def scan_procs():
             with open(os.path.join(_C.PROC, n, "stat")) as f:
                 st = f.read()
             f = st.rsplit(")", 1)[1].split()
-            p = {"comm": st[st.find("(") + 1:st.rfind(")")], "ppid": int(f[1]), "sid": int(f[3]), "ticks": sum(int(x) for x in f[11:15])}
+            p = {"comm": st[st.find("(") + 1:st.rfind(")")], "state": f[0], "ppid": int(f[1]), "sid": int(f[3]), "ticks": sum(int(x) for x in f[11:15])}
         except (OSError, IndexError, ValueError):
             continue
         try:
@@ -416,6 +416,13 @@ def win_mean(w, t, span, n=3):
     return round(sum(v) / len(v), 1) if len(v) >= n else None
 
 
+def job_sus(j, now):
+    """运行中或刚结束的任务累计被 SIGSTOP 挂起的秒数（measure 记在 use.sus_s，夹在 [0, now - t0] 内）。
+    Worker.usage_rec、Worker.finish、Worker.run_end 与 run_tot 共用（#149）。"""
+    wall = max(0.0, now - j["t0"])
+    return min(wall, max(0.0, float((j.get("use") or {}).get("sus_s") or 0.0)))
+
+
 def card_conc(j, on, jobs):
     """此刻任务 j 所用的卡 on（非空）上平均几条 labmon 任务（含自己；jobs 里的占位任务不算，按对象去重，多卡取各卡平均）。
     measure 按它累计按时间加权的 conc（用量行同名字段，duration 挑记录比的就是它），Worker.k_of 在还没量到 conc 时按它回退（#67、#86）。"""
@@ -565,6 +572,8 @@ class MeasureMixin:
         if any(ovram.get(x) for x in on):
             j["owner_gpu"] = True             # 运行期间所用的卡上有过 labmon 之外的进程（借来的主机上据此判断 CUDA OOM 是不是被挤的）
         if u.get("t") and t > u["t"]:
+            if any(procs[p].get("state") == "T" for p in pids):
+                u["sus_s"] = round(u.get("sus_s", 0.0) + t - u["t"], 1)
             dc = cpu_since(ticks, u.get("ticks"))
             u["cores"] = round(dc / (t - u["t"]), 2)
             u["cpu_s"], u["wall_s"] = u.get("cpu_s", 0) + dc, u.get("wall_s", 0) + t - u["t"]

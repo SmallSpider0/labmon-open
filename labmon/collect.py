@@ -1176,6 +1176,13 @@ def _attempts(snap: dict, pid: str, t: float) -> list[dict]:
     return out
 
 
+def eta_by_progress(src: str | None) -> bool:
+    """运行中任务的预计结束是不是真正按日志进度外推出来的（近期速度、进度、进度（停了一阵））：
+    overview._to_worker 据此写进 eta.json 的 prog，worker 的 run_tot 只把这些算作“按进度估”，
+    避免把没有进度行时看板回写的估时（开始 + 预计时长）当成按进度估的回声（#149）。"""
+    return src in ("近期速度", "进度", "进度（停了一阵）")
+
+
 def _segment_eta(pr, samples: list, seg: dict | None, el: float, floor: float | None, is_multi: bool, t: float,
                  hold: bool = False, paused: float = 0.0) -> tuple[float, str, float | None] | None:
     """运行中任务的剩余秒数：返回 (剩余, 来源, 速度 步/分钟) 或 None（交给估时、无估时等后备）。

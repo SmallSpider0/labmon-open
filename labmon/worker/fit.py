@@ -104,7 +104,9 @@ class FitHost:
 
     def runs(self, r):
         """这台在跑的同类（项目 + 去掉种子编号的名字）按进度估的总长（模块级 run_tot，与 worker 同口径；看板写来的 eta.json），不含它自己。"""
-        return [m for y, m in _S.run_tot(self.st.get("running") or [], self.eta.get("jobs") or {}, self.eta.get("t") or 0).get((r["project"], _C.base_name(r["name"])), [])
+        p = self.eta.get("prog")
+        prog = set(p) if isinstance(p, list) else None
+        return [m for y, m in _S.run_tot(self.st.get("running") or [], self.eta.get("jobs") or {}, self.eta.get("t") or 0, prog).get((r["project"], _C.base_name(r["name"])), [])
                 if y != r["name"]]
 
     def blocked(self, project):

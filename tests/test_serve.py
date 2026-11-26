@@ -1480,6 +1480,7 @@ class OverviewTest(unittest.TestCase):
             self.assertIn('"worker_up": true', (d / "state" / "overview" / "index.html").read_text())
             # 运行中任务的预计结束（项目看板按进度算的）写给 worker 推演；占用：已跑的从本机存的用量记录来，在跑与排队的从推演来
             self.assertEqual(json.loads((wh / "eta.json").read_text())["jobs"], {"demo-b|j1": round((now + 600) / 60) * 60})
+            self.assertEqual(json.loads((wh / "eta.json").read_text())["prog"], [])            # 未标进度来源的不进 prog（#149）
             usage = load_rows(d / "state" / "overview" / "usage" / "here.jsonl")
             self.assertEqual((usage[0]["gi"], usage[0]["wait"]), ([0], None))                  # 用的卡也存序号（换容器后 uuid 全变还能画）
             self.assertEqual([(r["n"], r["s"], r["t"]) for r in usage], [("old2", now - 7200, now - 3600), ("old3", now - 3000, now - 2400)])
@@ -2280,6 +2281,23 @@ class StateFilesTest(unittest.TestCase):
         self.assertIsNone(O.fetch({**h, "id": "h2"})[1])                      # 另一台（目录没有）：不记已发，也不影响 h1 的
         self.assertNotIn(("h2", "eta.json"), O._SENT)
         self.assertEqual(O._SENT[("h1", "eta.json")], {"jobs": {"a1|x": 60}})
+
+    def test_to_worker_eta_prog(self):
+        # #149：eta.json 的 prog 只放真正按日志进度外推的任务（近期速度、进度、进度（停了一阵）），估时回声与兜底不进 prog；jobs 照旧全给
+        projects = [{"id": "p", "running": [
+            {"id": "j_recent", "eta_ts": 1200, "eta_source": "近期速度"},
+            {"id": "j_prog", "eta_ts": 1260, "eta_source": "进度"},
+            {"id": "j_stall", "eta_ts": 1320, "eta_source": "进度（停了一阵）"},
+            {"id": "j_est", "eta_ts": 1380, "eta_source": "清单估时"},
+            {"id": "j_first", "eta_ts": 1440, "eta_source": "估时（进度刚开始）"},
+            {"id": "j_multi", "eta_ts": 1500, "eta_source": "估时（多段任务，进度只算当前这段）"},
+            {"id": "j_over", "eta_ts": 1560, "eta_source": "已超估时"},
+            {"id": "j_none", "eta_ts": None, "eta_source": "无估时"},
+        ]}]
+        _, put_fn = O._to_worker(projects, 1000.0, {})
+        eta = put_fn({"id": "h1"})["eta.json"]
+        self.assertEqual(set(eta["jobs"]), {"p|j_recent", "p|j_prog", "p|j_stall", "p|j_est", "p|j_first", "p|j_multi", "p|j_over"})
+        self.assertEqual(eta["prog"], ["p|j_prog", "p|j_recent", "p|j_stall"])
 
     def test_occupancy_since_skip_and_lanes(self):
         # 只取 since 之后结束的；skip 的项目不给（项目页只看同机别的项目，推演里的也跳过）；车道名按项目看板登记的 (主机, 目录, 清单) 对上；不用卡的不画
