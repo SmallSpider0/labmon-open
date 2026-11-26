@@ -989,17 +989,15 @@ def _cpu_fit_alerts(fits: dict) -> list:
             room = "；".join(_cpu_room_text(h if len(best) > 1 else "这台", f["room"]) for h, f in best.items() if f.get("room"))
             full = any(f.get("room") and f["sug"] >= f["room"]["per"] for f in best.values())   # 建议值已到每条最多能给的
             out.append(alert(f"cpu_low:{by}:{cls}", "agent",
-                             f"{subj}近 10 分钟平均用了 {rng('avg')} 核，给的 {give} 核基本用满，所在的卡利用率不到 50%：可能给少了。"
-                             f"没开跑的同类任务在清单那一行{write} 试试（{room + ('，再写大会超配额' if full else '') + '；' if room else ''}"
-                             "cpus= 优先于历史；跑过以后可以删掉，历史只会往实测靠），"
-                             "线程数、DataLoader 进程数按 $LABMON_CPUS 取；在跑的不必停"))
+                             f"{subj}近 10 分钟均用 {rng('avg')}/{give} 核且卡利用率 <50%：核数可能偏少。"
+                             f"未开跑同类{write}" + (f"（{room}{'，已达上限' if full else ''}）" if room else "")
+                             + "，按 $LABMON_CPUS 设线程，在跑不必停（见 alerts.md）"))
         else:
             sug = max(x[1]["sug"] for x in xs)
             hint = "、".join(f"{c:g}" for c in sorted({x[0]["cpus"] for x in xs if x[0].get("cpus") is not None})) or "?"
             out.append(alert(f"cpu_high:{by}:{cls}", "agent",
-                             f"{subj}清单写了 cpus={hint}（给 {give} 核），跑到现在 1 分钟峰值只有 {rng('peak')} 核：写多了。"
-                             "同类跑完几次、峰值都不到一半后，没开跑的自动按实测记账（开跑仍按 cpus= 给核），不必改清单；"
-                             f"想马上让出核，没开跑的改成 cpus={sug}，或删掉 cpus= 改按历史估；在跑的不必停"))
+                             f"{subj}清单 cpus={hint}（给 {give} 核），1 分钟峰值仅 {rng('peak')} 核：写多了。"
+                             f"同类跑满几次后自动按实测记账，一般不必改；想立即让出核可改为 cpus={sug} 或删 cpus=，在跑不必停（见 alerts.md）"))
     return out
 
 

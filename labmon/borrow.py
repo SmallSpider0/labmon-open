@@ -562,9 +562,9 @@ def late_do(why: str | None, user: bool = False) -> str:
     user=True 给用户的写人话（页面上的告警、弹给用户的 borrow_due 提醒；快照主机的 borrow.late_say）。
     why：borrow.cutoff 给的依据。截止取的是对方租期时延长约定推不迟它，不提延长。"""
     if user:
-        return ("可在主机页「改约定」延长，或由实验会话换到别的在用主机" if why == "约定"
-                else f"截止取的是 {why}，延长约定推不迟它，由实验会话换到别的在用主机")
-    return "换到别的在用主机（labmon worker add）" + ("，或请用户延长约定" if why == "约定" else f"；截止取的是 {why}，延长约定推不迟它")
+        return ("可在主机页「改约定」延长，或让实验会话换主机" if why == "约定"
+                else f"截止按 {why}（无法延长），让实验会话换主机")
+    return "换主机（labmon worker add）" + ("，或请用户延长约定" if why == "约定" else f"；截止按 {why}，无法延长")
 
 
 def _late_text(late: list[dict], why: str | None, user: bool = False) -> str:

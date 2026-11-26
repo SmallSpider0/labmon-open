@@ -80,14 +80,14 @@ ln -s /path/to/labmon/skills/lab-experiments ~/.claude/skills/lab-experiments
 ```bash
 labmon update                           # 从看板下载当前版本并更新命令行
 labmon login                            # 命令行经看板接口做事（#162）：输口令换一个 project 令牌（--admin：1 小时的 admin 令牌）；连哪个看板写在 ~/.config/labmon/client.toml（docs/api.md「命令行」）
-labmon check   -c monitor.toml          # 看板校验配置，打印各主机的探针规格
+labmon check   -c monitor.toml [--probe]   # 看板校验配置并输出紧凑摘要（--probe 打印完整探针规格 JSON）
 labmon status | disk | records          # 只读（#52，项目缺省取当前目录的 monitor.toml）：项目现状（车道、运行中、排队的预计开始、失败、挪法、告警）/ 项目的磁盘（共享盘各目录与增量、几天满、本地盘缓存）/ 项目的记录；--json 打原始数据
 labmon collect -c monitor.toml          # 让看板立即采集这个项目一次，打出结果与链接
 labmon render  -c monitor.toml          # 看板那台机器上：只用上次的 snapshot.json 重新渲染页面（改页面时用）
 labmon project push -c monitor.toml     # 登记到看板上（第一次推就是登记）/ 推上改动；看板上改过的先 labmon project pull；改了 [[hosts]]、[[queues]] 的加 --admin（docs/workbench.md「项目登记与配置」）
 labmon service install                  # 装上常驻的看板服务（macOS launchd、Linux systemd）：缺省 http://127.0.0.1:8765/（dashboard-host 上是 --port 8443，docs/deploy.md），项目页 /p/<id>/；要登录，第一次先 labmon user person <人员名>，再 labmon user add <账号> --person <人员名> --admin
 labmon wait    -c monitor.toml          # 每轮先与看板同步配置，再问看板等告警（长轮询）：出现新告警或采集停了即退出（退出码 1），用来唤醒会话
-labmon wait    -c monitor.toml --job 任务   # 同时等任务跑完（问看板、不连服务器）：都有结果时退出，全成功 0、其余 4
+labmon wait    -c monitor.toml --job 任务   # 同时等任务跑完（问看板、不连服务器）：都有结果时退出，全成功 0、其余 4（>5 个任务时打汇总并仅列变动/异常项）
 labmon wait    -c monitor.toml --take   # 一个项目只让一个会话等：别的会话已在等时 wait 以 3 退出；--take 改由本会话等（那边下一轮退出）
 
 labmon worker start 29                 # 服务器端 worker：部署 main 上已提交的版本并拉起（已在跑则无缝替换；start、stop、limit 要 admin 令牌）

@@ -101,20 +101,20 @@ def _text(p: dict, proj: str, label: dict, t: float) -> str:
     else:
         cache = ""
     dep = [j["name"] for j in p["jobs"] if j.get("dep")]
-    tail = f"；写了 after= 的 {'、'.join(dep)} 排在挪来的几行最后（等别的任务的行在前会堵住后面的）" if dep and len(dep) < len(p["jobs"]) else ""
+    tail = f"；带 after= 的 {'、'.join(dep)} 放最后" if dep and len(dep) < len(p["jobs"]) else ""
     lane = p.get("lane") and f"{p['lane'][0].rstrip('/')}/{p['lane'][1]}"
-    where = (f"插在 {lane} 里 {p['before']} 前面（它写了 after=，要等别的任务；接在它后面会被它堵住）" if lane and p.get("before")
+    where = (f"插在 {lane} 里 {p['before']} 前面（避开其 after= 阻塞）" if lane and p.get("before")
              else f"接在 {lane} 后面" if lane else None)
     if p.get("local") and lane:        # 同机挪到另一条早跑完的清单（#110）：车道数不变，原清单在同一台排到别的清单跑完后才跑完
         return f"把 {what} 挪到同一台上另一条早跑完的清单（{where}{tail}）：{when}{par_dep}{cache}{TAIL % fmt_time(t, date=False)}"
     if p.get("local"):                 # 同机多开一条车道（#43）：剪到新的长期清单，与原清单同目录、同环境
         # 推演只在没吃满的卡上排（offer 的 gpus）：登记时照样限卡，否则真放行可能放到吃满的卡上（Codex 审 #63）
-        gp = f" --gpus {','.join(map(str, p['gpus']))}（只用这几张卡：别的卡已吃满）" if p.get("gpus") else ""
-        return (f"在 {label.get(tid, tid)} 上多开一条车道：把 {what} 剪到一条新的长期清单（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；"
-                f"原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}{gp}，以后同类任务也往这条追加{tail}："
+        gp = f" --gpus {','.join(map(str, p['gpus']))}" if p.get("gpus") else ""
+        return (f"在 {label.get(tid, tid)} 上多开一条车道：把 {what} 剪到同目录新清单（独立 QUEUE_STATE/QUEUE_LOGS，见 alerts.md）并 "
+                f"labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}{gp}{tail}："
                 f"{when}{par_dep}{cache}{TAIL % fmt_time(t, date=False)}")
-    where = where or (f"这台还没有本项目同一种环境的清单：新建一条（与原清单同目录，.env 照抄原清单的，但 QUEUE_STATE 与 QUEUE_LOGS 写这条自己的；"
-                      f"原清单没有 .env 时也新建一个，只写这两行）并 labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}")
+    where = where or (f"新建同目录清单（独立 QUEUE_STATE/QUEUE_LOGS，见 alerts.md）并 "
+                      f"labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}")
     return f"把 {what} 挪到 {label.get(tid, tid)}（{where}{tail}）：{when}{par_dep}{cache}{TAIL % fmt_time(t, date=False)}"
 
 
@@ -293,9 +293,8 @@ def _room_text(p: dict, proj: str, label: dict) -> str:
     busy = "、".join(f"{label.get(h, h)} {rm['busy'][h]:.0f}%" for h in hs)
     each = f"（{'、'.join(f'{label.get(h, h)} {n}' for h, n in rm['hosts'].items())}）" if len(hs) > 1 else ""
     rows = f"，本项目还有约 {rm['rows']} 行在排队" if rm["rows"] else ""
-    return (f"{'、'.join(label.get(h, h) for h in hs)} 吃不满（近 30 分钟 GPU 吃满程度 {busy}），此刻合计还能多开 {rm['lanes']} 条车道{each}{rows}："
-            f"先 labmon worker fit {hs[0]} {j['root']} {j['queue']} --list --project {proj} 看各台此刻能开几条（共用 worker 目录的在用主机一起算），"
-            f"照它把排队的行摊到这几台，不限于下面这一批；其中一种挪法：")
+    return (f"{'、'.join(label.get(h, h) for h in hs)} 吃不满（30 分钟 {busy}），合计还可开 {rm['lanes']} 条车道{each}{rows}："
+            f"先跑 labmon worker fit {hs[0]} {j['root']} {j['queue']} --list --project {proj} 摊开排队行（见 alerts.md）；示例挪法：")
 
 
 def move_key(proj: str, p: dict) -> str:

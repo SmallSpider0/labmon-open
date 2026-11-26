@@ -341,7 +341,11 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
     if (q.get("par") or 1) > 1:
         print("这条清单写了 par=%d：登记的那台上同时最多跑 %d 行，卡有余量时 worker 自己补，不用为这台拆清单（下面算的是还能再开几条车道）" % (q["par"], q["par"]))
     if apart:
-        print("不分的 %d 行（留在原处）：%s" % (len(apart), "、".join("%s（%s）" % (n, w) for n, _, w in apart)))
+        if len(apart) > 3:
+            shown = "、".join("%s（%s）" % (n, w) for n, _, w in apart[:3])
+            print("不分的 %d 行（留在原处）：%s 等共 %d 行" % (len(apart), shown, len(apart)))
+        else:
+            print("不分的 %d 行（留在原处）：%s" % (len(apart), "、".join("%s（%s）" % (n, w) for n, _, w in apart)))
     if skip:
         print("没算：" + "；".join(skip))
     if not fhs:
@@ -376,8 +380,8 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
             print("  %s不再开：%s" % ("" if fh.lanes else "一条也", fh.why))
     got = sum(len(fh.lanes) for fh in fhs)
     if got:
-        print("合计可再开 %d 条车道。登记的那台上的，在清单里写或调大 `# labmon: par=N`，worker 自己加行；分到别的主机的，新建清单、把分到的行剪过去再 labmon worker add（lists.md「开并行车道」）；%s" % (
-            got, "其余 %d 行（%s…）此刻哪台都放不下：留在原清单，或接在新清单后面，让各条车道的行数相近" % (len(left), left[0][0]) if left else "没有剩下的行"))
+        tail = "余 %d 行（%s…）留原清单或均摊" % (len(left), left[0][0]) if left else "无剩余行"
+        print("合计可再开 %d 条车道（本机调 par=N，跨机剪行并 worker add，见 lists.md）；%s" % (got, tail))
     else:
         print("此刻哪台都不再开车道：%s" % ("这些行排在已有车道后面" if todo else "没有能分的行"))
     return 0

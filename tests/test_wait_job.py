@@ -452,6 +452,62 @@ class CmdWaitJobTest(_Base):
         with self.assertRaises(SystemExit), contextlib.redirect_stderr(io.StringIO()):
             M.main(["check", "-c", str(self.d / "m.toml"), "--job", "x"])
 
+    def test_wait_job_bulk_summary_and_changes(self):
+        """#200：wait --job <=5 个逐行打印；>5 个首轮与中间唤醒打汇总并仅列变动/异常项；最终全成功打汇总、有失败列全部非成功项。"""
+        cfg = str(self.d / "m.toml")
+        # 1) 5 个任务：保持逐行打印
+        five = [{"name": f"j{i}", "st": "done", "text": f"成功；日志 h:/l/j{i}.log"} for i in range(1, 6)]
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+             mock.patch.object(M.client, "call", return_value={"done": True, "jobs": five}), \
+             contextlib.redirect_stdout(io.StringIO()) as buf:
+            self.assertEqual(M.cmd_wait(cfg, [x["name"] for x in five]), 0)
+        out5 = buf.getvalue()
+        for i in range(1, 6):
+            self.assertIn(f"  - j{i}：", out5)
+        # 2) 6 个任务：首轮打汇总并只列 blocked；中间告警唤醒只列状态变化(j2)与异常(j6)
+        r1 = [{"name": "j1", "st": "running", "text": "在 h 上跑"},
+              {"name": "j2", "st": "queued", "text": "排队"},
+              {"name": "j3", "st": "queued", "text": "排队"},
+              {"name": "j4", "st": "queued", "text": "排队"},
+              {"name": "j5", "st": "queued", "text": "排队"},
+              {"name": "j6", "st": "blocked", "text": "队首依赖失败"}]
+        r2 = [{"name": "j1", "st": "running", "text": "在 h 上跑"},
+              {"name": "j2", "st": "running", "text": "在 h 上跑"},
+              {"name": "j3", "st": "queued", "text": "排队"},
+              {"name": "j4", "st": "queued", "text": "排队"},
+              {"name": "j5", "st": "queued", "text": "排队"},
+              {"name": "j6", "st": "blocked", "text": "队首依赖失败"}]
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), mock.patch.object(M.time, "sleep"), \
+             mock.patch.object(M.client, "call", side_effect=[{"done": False, "jobs": r1}, {"done": False, "new": {"disk:p1": "涨得快"}, "jobs": r2}]), \
+             contextlib.redirect_stdout(io.StringIO()) as buf:
+            self.assertEqual(M.cmd_wait(cfg, [x["name"] for x in r1]), 1)
+        out_mid = buf.getvalue()
+        self.assertIn("4 排队、1 运行、1 卡住", out_mid)
+        self.assertIn("等的任务（6 个）：3 排队、2 运行、1 卡住", out_mid)
+        self.assertIn("  - j6：队首依赖失败", out_mid)
+        self.assertIn("  - j2：在 h 上跑", out_mid)
+        for quiet in ("  - j1：", "  - j3：", "  - j4：", "  - j5："):
+            self.assertNotIn(quiet, out_mid)
+        # 3) 6 个任务全部成功：最终退出只打汇总行
+        all_ok = [{"name": f"j{i}", "st": "done", "text": f"成功；日志 h:/l/j{i}.log"} for i in range(1, 7)]
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+             mock.patch.object(M.client, "call", return_value={"done": True, "jobs": all_ok}), \
+             contextlib.redirect_stdout(io.StringIO()) as buf:
+            self.assertEqual(M.cmd_wait(cfg, [x["name"] for x in all_ok]), 0)
+        out_ok = buf.getvalue()
+        self.assertIn("6 个任务全部成功", out_ok)
+        self.assertNotIn("  - j1：", out_ok)
+        # 4) 6 个任务含 1 个失败：最终退出码 4，打汇总并逐行列出全部非成功任务及日志位置
+        with_fail = all_ok[:5] + [{"name": "j6", "st": "failed", "text": "失败；日志 h:/l/j6.log；要重跑删掉 /s/j6.failed"}]
+        with mock.patch.object(M, "_sync", return_value={"act": "same"}), \
+             mock.patch.object(M.client, "call", return_value={"done": True, "jobs": with_fail}), \
+             contextlib.redirect_stdout(io.StringIO()) as buf:
+            self.assertEqual(M.cmd_wait(cfg, [x["name"] for x in with_fail]), M.JOB_BAD_RC)
+        out_bad = buf.getvalue()
+        self.assertIn("等的任务都有结果了（6 个）：5 成功、1 失败", out_bad)
+        self.assertIn("  - j6：失败；日志 h:/l/j6.log", out_bad)
+        self.assertNotIn("  - j1：", out_bad)
+
 
 class CollectLogsDirTest(unittest.TestCase):
     """探针把清单 .env 的 QUEUE_LOGS 解析出的日志目录带到车道的 logs_dir；真采集一轮后 wait --job 的结果写出日志位置。"""

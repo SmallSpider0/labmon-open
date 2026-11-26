@@ -271,7 +271,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 | 请求 | 回 |
 |---|---|
 | `POST /api/wait {"project", "jobs", "watch", "hold", "extra", "rid", "session", "wid", "take"}` | `{"new": {键: 文字}, "jobs": [{"name", "st", "text", "final"}], "watch", "done"}`（`waits.wait`） |
-| `POST /api/project/<id>/check {"text"}` | `{"rc", "out"（各主机的探针规格）, "err", "after"（同步状态那行之后的几行）}`；配置不对 400。普通用户看到的 `out` 里，没开给他的主机只有一行“没开给你用”，不列连接信息与探针规格（#16） |
+| `POST /api/project/<id>/check {"text", "probe"?}` | `{"rc", "out"（默认紧凑校验摘要：几台主机、几条清单通过校验；`probe=true` / `--probe` 打印各主机完整探针规格 JSON）, "err", "after"（同步状态那行之后的几行）}`；配置不对 400。普通用户看到的 `out` 里，没开给他的主机只有一行“没开给你用”，不列连接信息与探针规格（#16、#200） |
 | `POST /api/project/init {"host", "name"}` | `{"rc", "out", "err"}`（`api.project_init`） |
 | `POST /api/worker/<动作> {"host", "args", "gpus", "project", "stop"}` | `{"rc", "out", "err"}`；`usage` 是参数错（如 `--project` 不是看板上的项目） |
 | `POST /api/override/<动作> {"target", "hosts", "until", "now"}` | `{"rc", "out", "err"}`；`until` 是 epoch 秒（相对写法在命令行那台机器上解析） |
@@ -299,7 +299,7 @@ labmon disk    [项目 id] [--json]      # 共享盘上本项目各目录的大�
 labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # 项目所用主机上与本项目有关的记录（拉起、掉线、续租、失败、临时指令……）
 ```
 
-- `status` 首行写快照是几分钟前的；超过 `config.stale_limit` 的门槛（项目快照的 `thresholds.stale_s`）时写“看板没在采集”，会话告诉用户。项目已归档时先写那句（`projects.archived_msg`）。
+- `status` 首行写快照是几分钟前的；超过 `config.stale_limit` 的门槛（项目快照的 `thresholds.stale_s`）时写“看板没在采集”，会话告诉用户。运行中任务的日志尾行（`last_line`）压成单行并截断至 100 字符（`--json` 仍返回原始快照，#200）。项目已归档时先写那句（`projects.archived_msg`）。
 - `disk` 与项目页「本项目占用」同一份数据（项目快照的 `storage`，#53：项目根下的一级目录、删掉的目录、近来结束的任务写了多少；同一组扫描量得的几个任务合成一条，与 `bigwrite:` 告警同一句 `collect.write_text`）；别人的、组里的明细只给管理员。
 - `records` 的“与本项目有关”与项目页时间线的事件同一规则（`records.project_mine`）：去掉同机别的项目的作废、被挤掉与对它的暂停、优先，加上对本项目下的项目级暂停与优先。普通用户再按 `users.visible` 筛。
 
@@ -307,6 +307,7 @@ labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # �
 
 - 每轮先与看板上的配置同步，再 `POST /api/wait`：第一次 `hold=0`（马上列出等的任务此刻的状态），之后 `hold=25`。看板那边有新告警、或等的任务都有了结果就回，
   否则挂着，相关文件（项目快照、全局快照、`projects.json`、被等的别的项目的快照）变了、或离上次判过 30 秒时再判一次，最多挂 25 秒（小于 TX 上 nginx 的 60 秒超时）。
+- `--job` 批量输出（#200）：等待任务数 `≤ 5` 保持逐行打印；超过 5 个时，首轮与中间告警唤醒输出单行状态汇总（`X 排队、Y 运行、Z 成功…`）并仅逐行列出本轮状态变化或异常（`blocked`/`failed`/`missing`/`voided`）的任务；最终都有结果退出时，全成功只打汇总行，有非成功时打汇总并逐行列出全部非成功任务及日志位置。
 - “报过没有”照旧记在看板上这个项目输出目录的 `.labmon/wait_state.json`（同一项目几个会话共用）；`--job` 的确认状态（见过它在跑、确认了几份快照……）在 `watch` 里，命令行每轮带回，看板不记会话、重启不丢。
 - 请求号 `rid`：回话丢在半路时命令行带同一个号重试，看板 2 分钟内回上次那份，已记成报过的告警不会漏。同时挂着的最多 32 个，多了回 503、命令行退避；一个普通账号同时最多 8 个（`waits.ACCOUNT_SLOTS`，#18），多了回 429，命令行打出原因、退出 3（先停掉用不着的会话里的 wait），管理员只受 32 个的限。
 - 连不上看板退避重试、不退出（#154）：连续连不上超过 max(3×采集间隔, `stale_min`) + 1 分钟（`config.stale_limit`，与 `collector_stale` 同一门槛，按本地 monitor.toml）往 stderr 提示一次，接着按 `client.BACKOFF_MAX` 退避；请求号与 `watch` 照旧带着。连回来的那一轮多报一条 `server_back`（只给会话，写断了多久，提醒看 `labmon status`、`labmon check`；没过门槛的闪断不报），退出 1。连着满 1 小时（`__main__.WAIT_OFFLINE_MAX_S`）才以 `server_unreachable` 退出 1，消息写着马上重挂。
