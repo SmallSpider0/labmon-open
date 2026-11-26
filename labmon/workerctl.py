@@ -23,6 +23,7 @@ from __future__ import annotations
 import base64
 import io
 import json
+import re
 import shlex
 import subprocess
 import tarfile
@@ -148,6 +149,83 @@ def override_each(action: str, kind: str, target: str | None, hosts: list[str], 
         rc, text = ssh(h, f"{w} {' '.join(shlex.quote(x) for x in args)}{extra} --host {shlex.quote(hid)}")
         out.append({"host": hid, "rc": rc, "out": text})
     return out
+
+
+def _clear_borrow_cmd(path: str) -> str:
+    """在远端用 Python 3.8+ 清掉 overrides.json 里遗留的借用指令（guest、target=borrow 的 deadline），
+    与 worker/common.py 共用 overrides.json.lock 互斥锁与原子替换；文件不存在时直接返回 ok 0。"""
+    code = (
+        "import fcntl, json, os, sys\n"
+        "p = sys.argv[1]\n"
+        "if not os.path.exists(p):\n"
+        "    print('ok 0')\n"
+        "    sys.exit(0)\n"
+        "with open(p + '.lock', 'w') as lk:\n"
+        "    try:\n"
+        "        fcntl.flock(lk, fcntl.LOCK_EX)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    if not os.path.exists(p):\n"
+        "        print('ok 0')\n"
+        "        sys.exit(0)\n"
+        "    raw = open(p).read().strip()\n"
+        "    cur = json.loads(raw) if raw else []\n"
+        "    keep = [o for o in cur if not (o.get('kind') == 'guest' or (o.get('kind') == 'deadline' and o.get('target') == 'borrow'))]\n"
+        "    n = len(cur) - len(keep)\n"
+        "    if n:\n"
+        "        tmp = '%s.tmp.%d' % (p, os.getpid())\n"
+        "        with open(tmp, 'w') as f:\n"
+        "            f.write(json.dumps(keep, ensure_ascii=False))\n"
+        "        os.replace(tmp, p)\n"
+        "    print('ok %d' % n)\n"
+    )
+    return f"{shlex.quote(code)} {shlex.quote(path)}"
+
+
+def clear_overrides(hid: str, *, home: str | None = None, borrow_only: bool = False, skip=(),
+                    ssh_fn=None, target: dict | None = None) -> tuple[bool, str]:
+    """清理共享盘上 hosts/<hid>/overrides.json：借用归还连不上目标机时删整份（borrow_only=False）；
+    换人或开机接成自用主机时只清遗留借用指令 guest 与 target=borrow 的 deadline（borrow_only=True，保留其它主机级指令）。
+    target 给了就在该主机上直接执行；否则经 config.home_host 从在用主机（排除 skip）里依次挑共用 worker_home 的代办，
+    连不上（rc == 255）顺延试下一台。返回 (是否清理成功, 说明或原因)，不抛错阻塞归还与开机。"""
+    LS.need("清理临时指令")
+    run = ssh_fn or ssh
+    skip_ids = {str(x) for x in skip}
+    if target is not None:
+        h = host_defaults(dict(target))
+        home = home or h["worker_home"]
+        cands = [h]
+    else:
+        act = [h for h in active_hosts() if str(h["id"]) not in skip_ids]
+        if home is None:
+            home = next((h["worker_home"] for h in all_hosts() if str(h["id"]) == str(hid)), None)
+        if not home:
+            return False, f"不知道 {hid} 的 worker 目录"
+        cands, rest = [], list(act)
+        me = next((h for h in rest if str(h["id"]) == str(hid) and home_host(home, [h])), None)
+        if me is not None:
+            cands.append(me)
+            rest.remove(me)
+        while (o := home_host(home, rest)) is not None:
+            cands.append(o)
+            rest.remove(o)
+    if not cands:
+        return False, f"没有与 {hid} 共用 worker 目录（{home}）的在用主机"
+    ovr = f"{home.rstrip('/')}/hosts/{hid}/overrides.json"
+    last_err = ""
+    for c in cands:
+        cmd = f"{shlex.quote(c['python'])} -c {_clear_borrow_cmd(ovr)}" if borrow_only else f"rm -f {shlex.quote(ovr)}"
+        rc, out = run(c, cmd)
+        if rc == 0:
+            if borrow_only:
+                m = re.search(r"ok (\d+)", out or "")
+                n = int(m.group(1)) if m else 0
+                return True, f"已清 {n} 条遗留借用指令" if n else "无遗留借用指令"
+            return True, f"经 {c['id']} 删掉 overrides.json" if str(c["id"]) != str(hid) else "已删 overrides.json"
+        last_err = f"{c['id']}：{(out or '').strip() or f'退出码 {rc}'}"
+        if rc != 255:
+            break
+    return False, last_err or "没有可用的代办主机"
 
 
 CHANGE = ("start", "stop", "add", "rm", "limit")     # 改 worker 的子命令（备用时不做）

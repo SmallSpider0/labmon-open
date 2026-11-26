@@ -323,16 +323,20 @@ function renewWarn(x, {local = true, risk = true} = {}) {
 // 输验证码、提交中勾选锁住（lock）：要提交的已记进 FCAP.next，改了也不会跟着变
 let RPICK = null;          // {key: 抽屉地址, sel: 勾了要续的, ack: 勾了「已说好」的, busy}
 const rpList = () => [...D.fleet.servers, ...D.fleet.mine];
-const rpBody = R => { const ids = rpList().filter(x => R.sel.has(x.id) && !x.off).map(x => x.id); return {ids, ack: ids.filter(i => R.ack.has(i))}; };
+const rpBorrowed = x => !x.mine && borrowOf(x);
+const rpBody = R => { const ids = rpList().filter(x => R.sel.has(x.id) && !x.off && !rpBorrowed(x)).map(x => x.id); return {ids, ack: ids.filter(i => R.ack.has(i))}; };
 function renewDrawer(id) {
   const key = DH.renew(id), op = fops().op, sv = rpList(), ops = canOps();
-  if (RPICK?.key !== key) {                         // 换了地址就是另一份勾选：缺省勾上 24 小时内到期、没在跑实验的；上一份的验证码作废（要提交的记在 FCAP.next 里，不跟着变）
-    RPICK = {key, sel: new Set(id ? [id] : fleetDue().filter(x => !FRISKY(x)).map(x => x.id)), ack: new Set()};
+  if (RPICK?.key !== key) {                         // 换了地址就是另一份勾选：缺省勾上 24 小时内到期、没在跑实验且没借用中的；上一份的验证码作废（要提交的记在 FCAP.next 里，不跟着变）
+    RPICK = {key, sel: new Set(id ? [id] : fleetDue().filter(x => !FRISKY(x) && !rpBorrowed(x)).map(x => x.id)), ack: new Set()};
     if (FCAP?.pop === "renew") FCAP = null;
   }
   const R = RPICK, lock = !ops || FCAP?.pop === "renew" || R.busy, {ids} = rpBody(R), need = sv.filter(x => ids.includes(x.id) && FRISKY(x) && !R.ack.has(x.id));
-  const row = x => { const on = R.sel.has(x.id) && !x.off, w = x.off ? ["已关机：要用就开机"] : renewWarn(x), nm = x.mine ? x.label : x.holder;
-    return `<div class="rp-row"><input type="checkbox" data-rsel="${esc(x.id)}" ${on ? "checked" : ""} ${x.off || lock ? "disabled" : ""} aria-label="续租 ${esc(nm)}">
+  const row = x => { const br = rpBorrowed(x), dis = x.off || !!br, on = R.sel.has(x.id) && !dis;
+    const w = x.off ? ["已关机：要用就开机"]
+      : br ? [`${br.pool ? "正借给算力池：先在「借用」里点「收回」还掉" : "正借来在用：先在它的「借用」里还掉"}（若已被平台停掉连不上，先点「与平台核对」，确认作业不在运行后会自动归还）再续租`]
+      : renewWarn(x), nm = x.mine ? x.label : x.holder;
+    return `<div class="rp-row"><input type="checkbox" data-rsel="${esc(x.id)}" ${on ? "checked" : ""} ${dis || lock ? "disabled" : ""} aria-label="续租 ${esc(nm)}">
       <div class="rp-m"><div class="rp-h"><b>${esc(nm)}</b><span class="sm mut">${esc(x.id)} · ${fKind(x)}</span>${fState(x)}<span class="sp"></span><span class="sm nw">${x.lease_end ? leaseHtml(x.lease_end) : "—"}</span></div>
       ${w.length ? `<div class="sm rp-w">${esc(w.join("；"))}</div>` : ""}
       ${on && FRISKY(x) ? `<label class="sm rp-ack"><input type="checkbox" data-rack="${esc(x.id)}" ${R.ack.has(x.id) ? "checked" : ""} ${lock ? "disabled" : ""}> ${ackText(x)}</label>` : ""}</div></div>`; };

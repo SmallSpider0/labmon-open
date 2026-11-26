@@ -397,8 +397,9 @@ function borrowSec(x) {
     ...wd.frozen?.length || wd.seen?.length ? [["看门狗", [wd.frozen?.length ? `暂停着（还卡时恢复）：${esc(wdt(wd.frozen))}` : "",
       wd.seen?.length ? `<span class="mut">找到、没动：${esc(wdt(wd.seen))}</span>` : ""].filter(Boolean).join("<br>")]] : []];
   const btns = !LIVE ? "" : `<div class="rn"><a class="btn" href="#/host/${encodeURIComponent(x.id)}">主机页</a>${borrowBtns(x)}</div>`;
+  const downTip = x.state === "down" ? `<div class="rn-state bad">这台已掉线，ssh 连不上时无法直接归还或续租：若怀疑作业已被平台停掉，先在组内服务器页点「与平台核对」，确认作业不在运行后会自动按已停归还，之后即可续租。</div>` : "";
   return dSec("借用", `<div class="rn-state${hb.back?.length || hb.overdue ? " bad" : ""}">${esc(borrowText(hb, D.generated))}</div>`
-    + (BMSG?.id === x.id ? `<div class="sm mut">${esc(BMSG.msg)}</div>` : "") + kvHtml(kv) + btns);
+    + downTip + (BMSG?.id === x.id ? `<div class="sm mut">${esc(BMSG.msg)}</div>` : "") + kvHtml(kv) + btns);
 }
 // 按钮旁的小弹窗：点按钮在它下面弹出说明与「确认 / 取消」，同一时间只开一个（POP 记着是哪个）。点外面或按 Esc 等于取消（closePop）；
 // 里面有输入的（表单、验证码：keep）点外面不关，只认 Esc 与「取消」。btn：触发按钮；open：开着；body：说明或表单；go：确认按钮。

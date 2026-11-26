@@ -438,6 +438,17 @@ t("overview", "本地盘开机以来的新写入（#149）：主机页的资源�
   r = run(O, 'FCAP = {code: "ab12", tok: "t", input: "", t: Date.now(), next: {act: "renew", body: rpBody(RPICK)}, pop: "renew"}; renewDrawer("")');
   ok(/data-rsel="srv-d" checked\s+disabled/.test(r) && /data-rack="srv-d" checked\s+disabled/.test(r), "输验证码时还能改勾选");
   run(O, "FCAP = null; RPICK = null");
+  // #171：借用中的服务器在批量续租里禁选并写清解开办法；单台掉线借用节同样提示先点「与平台核对」
+  r = run(O, 'RPICK = {key: DH.renew("srv-b"), sel: new Set(["srv-b"]), ack: new Set()}; renewDrawer("srv-b")');
+  ok(/data-rsel="srv-b"\s+disabled/.test(r), "借用中的服务器在批量续租里还能勾选");
+  has(r, "正借来在用：先在它的「借用」里还掉（若已被平台停掉连不上，先点「与平台核对」，确认作业不在运行后会自动归还）再续租");
+  ok(JSON.stringify(run(O, "rpBody(RPICK).ids")) === "[]", "rpBody 不应带出借用中的服务器");
+  r = run(O, 'const s = D.fleet.servers.find(x => x.id === "srv-b"); const p0 = s.borrow.pool; s.borrow.pool = true; const h = renewDrawer("srv-b"); s.borrow.pool = p0; h');
+  has(r, "正借给算力池：先在「借用」里点「收回」还掉（若已被平台停掉连不上，先点「与平台核对」，确认作业不在运行后会自动归还）再续租");
+  run(O, "RPICK = null");
+  const bsDown = run(O, 'borrowSec({...D.fleet.servers.find(s => s.id === "srv-b"), state: "down"})');
+  has(bsDown, "这台已掉线，ssh 连不上时无法直接归还或续租：若怀疑作业已被平台停掉，先在组内服务器页点「与平台核对」");
+  ok(!run(O, 'borrowSec(D.fleet.servers.find(s => s.id === "srv-b"))').includes("这台已掉线"), "在线的借用机不该出掉线解开提示");
   // 预备续租的确认也提一句
   has(run(O, 'POP = {k: "reserve", id: "srv-a"}; renewBtns(D.hosts[0])'), LA); run(O, "POP = null");
 });

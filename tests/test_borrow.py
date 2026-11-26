@@ -18,10 +18,14 @@ from pathlib import Path
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from fixtures import fake_host, fake_status, make_token, running_job, worker_module  # noqa: E402
+from fixtures import Hosts, fake_host, fake_status, make_token, running_job, worker_module  # noqa: E402
 from labmon import borrow as B  # noqa: E402
 from labmon import config as K  # noqa: E402
 from labmon import fleet as F  # noqa: E402
+from labmon import fleetops as FO  # noqa: E402
+from labmon import overview as O  # noqa: E402
+from labmon import platform as PF  # noqa: E402
+from labmon import workerctl as W  # noqa: E402
 from labmon.waits import wait_check  # noqa: E402
 from labmon.config import ConfigError, load, user_hosts  # noqa: E402
 from labmon.records import records  # noqa: E402
@@ -745,6 +749,175 @@ class BorrowTest(Base):
         self.assertEqual(probed, [SID])
         self.assertIn("容器换了", out)
         self.assertTrue(self.server()["borrow_returned"])
+
+    def test_stopped_down_auto_returns_and_unblocks_renew(self):
+        """#171：借用中服务器被平台强停（link_step 判掉线 + 平台核对显示作业不在运行）→ 按 gone='stopped' 自动归还、
+        不 ssh 目标机、经共用 worker_home 的在用主机删共享盘 overrides.json、续租不再被挡，未核对/旧核对/离线/端口错均不误还。"""
+        import subprocess
+        wh = self.d / "shared_home"
+        ovr = wh / "hosts" / SID / "overrides.json"
+        ovr.parent.mkdir(parents=True)
+        ovr.write_text(json.dumps([{"kind": "guest", "target": "a1", "keep": self.KEEP},
+                                   {"kind": "deadline", "target": "borrow", "at": time.time() + 3600}]))
+        (self.d / "hosts.toml").write_text(
+            f'[[hosts]]\nid = "29"\nssh = "root@198.51.100.29"\nport = 15155\npython = "{sys.executable}"\n'
+            f'worker_home = "{wh}"\nshared = ["/root/data1"]\nworker = "auto"\n\n'
+            '[fleet]\nkeepalive_cmd = "bash ka.sh"\n\n'
+            f'[[fleet.servers]]\nid = "{SID}"\nholder = "BOB"\nssh = "root@198.51.100.27"\nport = 15152\npool = "p"\n'
+        )
+        t0 = round(time.time())
+        self.begin(until=t0 + 86400, projects="a1")
+        # 借用中续租被挡，且报错写清掉线后的解开办法
+        with self.assertRaises(PF.PlatformError) as cm:
+            FO.start("renew", F.conf(), ids=[SID])
+        self.assertIn("先在它的「借用」里还掉", str(cm.exception))
+        self.assertIn("与平台核对", str(cm.exception))
+
+        # 经 overview.health（health.link_step）连续两轮间隔 >= DOWN_S 连不上 → 判掉线
+        e = {"id": SID, "label": "27（借 BOB）", "error": "ssh: Connection refused", "status": None, "worker_up": False}
+        O.health([e], {SID: {}}, t0 + 10)
+        self.assertEqual(e["health"]["state"], "suspect")
+        O.health([e], {SID: {}}, t0 + 10 + 160)
+        self.assertEqual(e["health"]["state"], "down")
+        down_since = e["health"]["since"]
+
+        # 1) 还没核对平台：不归还
+        msgs, _ = B.check([e], t0 + 200, finish_fn=lambda *a, **k: self.fail("没核对平台不该归还"), ovr=self.ovr)
+        self.assertEqual(msgs, [])
+
+        # 2) 旧核对（早于借来时刻、或早于 down_since - 300）或不在 stopped（如端口配置不对）：不归还
+        F.state_dir().mkdir(parents=True, exist_ok=True)
+        for bad_plat in ({"t": t0 - 600, "running": [], "stopped": [SID]},
+                         {"t": t0 + 200, "running": [], "stopped": []}):
+            save_json(F.state_file("platform.json"), bad_plat)
+            B.check([e], t0 + 200, finish_fn=lambda *a, **k: self.fail("无效核对不该归还"), ovr=self.ovr)
+        # 核对早于 down_since - SYNC_GRACE_S 也不触发
+        e_later = dict(e, health={"state": "down", "fails": 3, "since": t0 + 1000, "why": "连不上"})
+        save_json(F.state_file("platform.json"), {"t": t0 + 200, "running": [], "stopped": [SID]})
+        B.check([e_later], t0 + 1200, finish_fn=lambda *a, **k: self.fail("过旧核对不该归还"), ovr=self.ovr)
+
+        # 3) 本机离线（lan_off）：health.state == "lan"，不误还
+        e_lan = dict(e, lan_off=True, health={"state": "lan", "fails": 0, "since": None, "why": None})
+        save_json(F.state_file("platform.json"), {"t": down_since + 10, "running": [], "stopped": [SID]})
+        B.check([e_lan], down_since + 20, finish_fn=lambda *a, **k: self.fail("离线不该归还"), ovr=self.ovr)
+
+        # 4) 有效平台核对（作业不在运行）+ link_step 已判掉线 → 自动按 gone="stopped" 归还
+        via_calls = []
+
+        def fake_peer_ssh(h, cmd):
+            via_calls.append((h["id"], cmd))
+            r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+            return r.returncode, r.stdout + r.stderr
+
+        fin = lambda hid, **k: B.finish(hid, ssh=lambda *a: self.fail("作业已停不该 ssh 目标机"),
+                                        probe=lambda *a: self.fail("作业已停不该探目标机"),
+                                        clear_ovr=lambda i, **ck: W.clear_overrides(i, ssh_fn=fake_peer_ssh, **ck), **k)
+        msgs, wake = B.check([e], down_since + 20, finish_fn=fin, ovr=self.ovr)
+        self.assertTrue(self.server().get("borrow_returned"))
+        self.assertFalse(ovr.exists())                                         # 已通过共用 worker_home 的 29 删掉 overrides.json
+        self.assertEqual([h for h, _ in via_calls], ["29"])
+        self.assertTrue(any("已掉线且平台核对显示作业不在运行" in m for m in msgs), msgs)
+        self.assertIn(f"borrow_done:{SID}:{self.ep('borrow_returned')}", [w["key"] for w in wake])
+        # 归还后续租不再被借用挡住（只差登录）
+        with self.assertRaises(PF.PlatformError) as cm:
+            FO.start("renew", F.conf(), ids=[SID])
+        self.assertIn("验证码", str(cm.exception))
+
+    def test_pool_stopped_down_auto_returns(self):
+        """#171：算力池借用的服务器掉线且平台核对作业已停 → 同样按 gone='stopped' 自动归还，不弹通知、不发 borrow_done。"""
+        t0 = round(time.time())
+        self.pool_begin()
+        e = {"id": SID, "label": "27（池 · BOB）", "error": "ssh: Connection refused", "status": None, "worker_up": False,
+             "health": {"state": "down", "fails": 3, "since": t0 + 10, "why": "连不上"}}
+        F.state_dir().mkdir(parents=True, exist_ok=True)
+        save_json(F.state_file("platform.json"), {"t": t0 + 20, "running": [], "stopped": [SID]})
+        called = []
+        fin = lambda hid, **k: called.append((hid, k.get("gone"))) or B.finish(
+            hid, ssh=lambda *a: self.fail("不该 ssh"), probe=lambda *a: self.fail("不该探"),
+            clear_ovr=lambda *a, **ck: (True, "经 29 删掉 overrides.json"), **k)
+        msgs, wake = B.check([e], t0 + 30, finish_fn=fin, ovr=self.ovr)
+        self.assertEqual(called, [(SID, "stopped")])
+        self.assertEqual((msgs, wake), ([], []))                               # 池借的不弹通知、不报 borrow_done
+        self.assertTrue(self.server().get("borrow_returned"))
+        self.assertTrue(any(r["kind"] == "borrow_return" and r.get("pool") for r in records(cat="borrow")))
+
+    def test_finish_gone_unreachable_falls_back_to_peer_and_no_peer(self):
+        """#171 评论 #1：finish(gone=True) 连不上目标机（255）时不抛错卡住，回退经共用 worker_home 的在用主机删 overrides.json；
+        没有任何在线代办主机时也照常记归还解死锁，并在结果里写明暂未删成。"""
+        self.pool_begin()
+        cleared = []
+        out = B.finish(SID, ssh=lambda s, cmd: (255, "", "Connection refused"),
+                       probe=lambda *a: self.fail("连不上不该探"),
+                       clear_ovr=lambda hid, **k: cleared.append((hid, k.get("skip"))) or (True, "经 29 删掉 overrides.json"),
+                       gone=True)
+        self.assertEqual(cleared, [(SID, {SID})])
+        self.assertIn("容器换了", out)
+        self.assertTrue(self.server().get("borrow_returned"))
+
+        # 再借一次，所有共用 worker_home 的主机都连不上：仍完成归还，并在文案中注明暂未删成
+        self.begin()
+        out2 = B.finish(SID, ssh=lambda *a: self.fail("stopped 不该 ssh"),
+                        probe=lambda *a: self.fail("stopped 不该探"),
+                        clear_ovr=lambda hid, **k: W.clear_overrides(hid, ssh_fn=lambda h, cmd: (255, "Connection refused"), **k),
+                        gone="stopped")
+        self.assertTrue(self.server().get("borrow_returned"))
+        self.assertIn("共享盘上的临时指令暂未删成", out2)
+
+    def test_request_return_and_finish_offline_hint(self):
+        """连不上时（rc == 255）request_return 与正常 finish 均提示先点「与平台核对」自动按已停归还。"""
+        self.begin()
+        with self.assertRaises(ConfigError) as c1:
+            B.request_return(SID, ovr=lambda *a, **k: 255)
+        self.assertIn("与平台核对", str(c1.exception))
+        with self.assertRaises(ConfigError) as c2:
+            B.finish(SID, ssh=lambda s, cmd: (255, "", "Connection refused"))
+        self.assertIn("与平台核对", str(c2.exception))
+
+    def test_cross_host_clear_overrides_and_adopt_mine(self):
+        """多主机夹具（fixtures.Hosts）：共用 worker_home 的两台主机，借用机连不上时经在用主机删 overrides.json；
+        残留 guest（带 target）与 deadline(borrow) 时经 borrow_only=True 仅清借用指令、保留 pause，接成自用主机后新 worker 正常放行。"""
+        import subprocess
+        H = Hosts(self.d / "multi")
+        try:
+            (self.d / "hosts.toml").write_text(
+                f'[[hosts]]\nid = "h1"\nssh = "root@198.51.100.29"\nport = 15155\npython = "{sys.executable}"\n'
+                f'worker_home = "{H.home}"\nshared = ["{self.d}"]\nworker = "auto"\n\n'
+                '[fleet]\nkeepalive_cmd = "bash ka.sh"\n\n'
+                f'[[fleet.servers]]\nid = "h2"\nholder = "BOB"\nssh = "root@198.51.100.27"\nport = 15152\npool = "p"\n'
+                'borrow_since = "2026-11-20 10:00"\n'
+            )
+            ovr = H.home / "hosts" / "h2" / "overrides.json"
+            ovr.parent.mkdir(parents=True, exist_ok=True)
+            items = [{"kind": "guest", "target": "a1,b2", "keep": {"vram": 2.0, "ram": 4.0, "cpu": 1.0, "hold": True}},
+                     {"kind": "deadline", "target": "borrow", "at": round(H.now() + 60)},
+                     {"kind": "pause", "target": "other-proj", "until": round(H.now() + 3600)}]
+            ovr.write_text(json.dumps(items, ensure_ascii=False))
+
+            def local_run(h, cmd):
+                r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+                return r.returncode, r.stdout + r.stderr
+
+            # 1) 换人接成自用主机场景：borrow_only=True 经 h1 仅清 guest（含 target）与 deadline(borrow)，保留 pause
+            ok, msg = W.clear_overrides("h2", home=str(H.home), borrow_only=True, skip={"h2"}, ssh_fn=local_run)
+            self.assertTrue(ok, msg)
+            self.assertIn("已清 2 条", msg)
+            left = json.loads(ovr.read_text())
+            self.assertEqual([(o["kind"], o.get("target")) for o in left], [("pause", "other-proj")])
+
+            # 新自用主机 h2 的 worker 读 overrides.json，不再被当借用主机（a1 之外的项目也不被 guest 挡住，也不受借用截止挡住）
+            w2 = H.worker("h2")
+            w2.ovr = w2.load_overrides()
+            self.assertFalse(any(o.get("kind") == "guest" or o.get("target") == "borrow" for o in w2.ovr))
+            self.assertIsNone(w2.override_hit({"project": "demo-c", "name": "x", "est_min": 600}))
+            self.assertEqual(w2.override_hit({"project": "other-proj", "name": "y", "est_min": 5})[0], "pause")
+
+            # 2) 归还连不上场景：borrow_only=False 经 h1 整份删掉 h2 的 overrides.json
+            ok2, msg2 = W.clear_overrides("h2", home=str(H.home), borrow_only=False, skip={"h2"}, ssh_fn=local_run)
+            self.assertTrue(ok2, msg2)
+            self.assertIn("经 h1", msg2)
+            self.assertFalse(ovr.exists())
+        finally:
+            H.close()
 
     def test_finish_thaws_watchdogs_after_keepalive(self):
         """还卡：保活开了之后再恢复借来时暂停的看门狗（worker thaw），结果写进归还的说明。"""

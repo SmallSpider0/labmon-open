@@ -349,6 +349,7 @@ class FleetOpsTest(unittest.TestCase):
             with self.assertRaises(P.PlatformError) as cm:
                 FO.start(kind, c, ids=["b"], **kw)
             self.assertIn("先在它的「借用」里还掉", str(cm.exception))
+            self.assertIn("与平台核对", str(cm.exception))
         c["servers"][1]["borrow_returned"] = "2026-11-07 10:00"
         with self.assertRaises(P.PlatformError) as cm:
             FO.start("renew", c, ids=["b"])                             # 还了：只差登录
@@ -928,6 +929,93 @@ class FleetOpsTest(unittest.TestCase):
         self.assertEqual(self.hosts, [("remove", "a"), ("add_mine", "a", "ALICE-2", "root@198.51.100.29", 15001, PRIV, "a（自用）", "ALICE")])
         self.assertTrue(op["conn"]["mine"])
         self.assertEqual((FO.boot()["a"]["holder"], FO.boot()["a"]["job"]), ("ALICE", "ALICE-2"))
+
+    def test_sync_records_stopped_and_renew_clears_it(self):
+        """#171：与平台核对把无运行中同名同池作业的记入 platform.json['stopped']（端口不对不算不在运行）；
+        job_stopped 校验 after 与 down_since - SYNC_GRACE_S；续租新作业起来后从 stopped 移除。"""
+        self.plat.jobs[1]["port"] = "19999"                                    # b 在运行但端口对不上：不算 stopped
+        op = self.sync()
+        self.assertIsNone(op["error"], op)
+        pf = FO.platform_state()
+        self.assertEqual(pf["stopped"], ["c"])                                 # 只有 c 无运行中作业；a 正常、b 端口不对均不在 stopped
+        pt = pf["t"]
+        self.assertEqual(FO.job_stopped("c", after=pt - 10, down_since=pt - 5), (True, pt))
+        self.assertEqual(FO.job_stopped("c", after=pt - 10, down_since=pt + 120), (True, pt))      # 300s 容错内
+        self.assertEqual(FO.job_stopped("c", after=pt + 1, down_since=pt), (False, None))          # 核对早于借来
+        self.assertEqual(FO.job_stopped("c", after=pt - 1000, down_since=pt + 400), (False, None)) # 核对早于掉线前 300s
+        self.assertEqual(FO.job_stopped("b", after=pt - 10, down_since=pt), (False, None))
+        # c 续租重开（克隆已停的旧作业）后从 stopped 移除
+        self.plat.jobs.append({"id": "jc0", "taskName": "CC", "poolName": PUB, "createTime": "2026-11-01 09:00:00",
+                               "runningCount": 0, "port": "15003", "image": REG + "ubuntu:bb"})
+        self.plat.jobs[1]["runningCount"] = 0                                  # 公用池空出名额（public_max=1）
+        self.plat.jobs[2]["runningCount"] = 0
+        op = self.renew(["c"], code=None)
+        self.assertIsNone(op["error"], op)
+        self.assertNotIn("c", FO.platform_state().get("stopped") or [])
+
+    def test_swap_to_me_clears_legacy_borrow_overrides(self):
+        """#171 评论 #1：换人接成自用主机时清掉同 id 遗留的 guest（含带 target）与 deadline(target=borrow)，保留其他指令；
+        无其他共用 worker_home 的在用主机时，在等上新容器 ssh 后直接在自身上清理。"""
+        import subprocess
+        wh = Path(self.tmp.name) / "wh"
+        ovr = wh / "hosts" / "a" / "overrides.json"
+        ovr.parent.mkdir(parents=True)
+        Path(os.environ["LABMON_HOSTS"]).write_text(
+            f'[[hosts]]\nid = "29"\nssh = "root@198.51.100.29"\nport = 15155\npython = "{sys.executable}"\n'
+            f'worker_home = "{wh}"\nplatform_job = "ALICE"\nplatform_pool = "{PRIV}"\n'
+        )
+        self.sync()
+        self.me()
+
+        def write_legacy():
+            ovr.write_text(json.dumps([
+                {"kind": "guest", "target": "a1,b2", "keep": {"vram": 2.0, "ram": 4.0, "cpu": 1.0, "hold": True}},
+                {"kind": "deadline", "target": "borrow", "at": 1900000000},
+                {"kind": "pause", "target": "p2", "until": 1900000000},
+            ], ensure_ascii=False))
+
+        # 1) 经共用 worker_home 的自用主机 29 清理
+        write_legacy()
+        via = []
+
+        def ssh_exec(s, cmd, input=None, timeout=60):
+            if "overrides.json" in cmd:
+                via.append(s["id"])
+                r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+                return r.returncode, r.stdout, r.stderr
+            return 0, "ok start 123\n", ""
+
+        rem = Remote(down=0)
+        rem.ssh = ssh_exec
+        op = self.renew(["a"], rem, code=None, kind="swap", person="ALICE", account="alice")
+        self.assertIsNone(op["error"], op)
+        self.assertEqual(via, ["29"])
+        self.assertIn("已清 2 条遗留借用指令", op["steps"][-1]["note"])
+        self.assertEqual([(o["kind"], o.get("target")) for o in json.loads(ovr.read_text())], [("pause", "p2")])
+
+        # 2) 其他共用主机连不上（255）→ 等新容器 a 的 ssh 连上后直接在 a 上清理
+        write_legacy()
+        via.clear()
+        FO.SESS["captcha_at"] = 0
+
+        def ssh_only_new(s, cmd, input=None, timeout=60):
+            if "overrides.json" in cmd:
+                via.append(s["id"])
+                if s["id"] == "29":
+                    return 255, "", "Connection refused"
+                r = subprocess.run(["bash", "-c", cmd], capture_output=True, text=True)
+                return r.returncode, r.stdout, r.stderr
+            return 0, "ok start 123\n", ""
+
+        rem2 = Remote(down=0)
+        rem2.ssh = ssh_only_new
+        self.plat.jobs[0]["taskName"] = "AA"                                   # 让旧的 a 可再次换人
+        self.plat.jobs[0]["runningCount"] = 1
+        op2 = self.renew(["a"], rem2, code=None, kind="swap", person="ALICE", account="alice")
+        self.assertIsNone(op2["error"], op2)
+        self.assertEqual(via, ["29", "a"])
+        self.assertIn("已清 2 条遗留借用指令", op2["steps"][-1]["note"])
+        self.assertEqual([(o["kind"], o.get("target")) for o in json.loads(ovr.read_text())], [("pause", "p2")])
         self.assertIn("worker", op["steps"][-1]["note"])
 
     def test_swap_from_me(self):
