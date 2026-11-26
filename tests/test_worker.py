@@ -2569,6 +2569,76 @@ class DepsTest(UnitBase):
         self.w.ends[("pa", "a2")] = 0                                                              # a2 跑完了、它还没放行：算现在，不按超时往后推
         self.assertEqual(self.w.run_end(self.w.running["h5"], now + 10), now + 10)
 
+    def test_dep_why_matches_forecast_start(self):
+        # #166：同份 status.json 中等待项的 why 预计时刻必须与推演 start 一致：
+        # 1) 跨主机 peer_ends 从 16 小时后提前到 2 小时后：当轮立即重推，且同轮刷新 why，why 与 start 一致；
+        # 2) 已 stopped 的旧主机留有更晚的旧 plan：不污染 peer_ends / self.ends，且不再维护旧 peer_end 兼容表；
+        # 3) 依赖之一刚 .done（旧 ends 记着 14 小时后）：同轮 why 不再被已 done 的旧项拉高；
+        # 4) 本机 4 层依赖链（清单倒序：s3 → s2 → s1 → t0）：forecast 迭代收敛，why 预计时刻与 start 一致。
+        now = time.time()
+        self.cards(40000)
+        qs = self.hosts.queues({
+            "a_wait": ["w_peer|true   # gpus=0 est_min=10 after=pb/p_fast,pb/p_done"],
+            "b_chain": ["# labmon: par=3",
+                        "s3|true   # gpus=0 est_min=10 after=s2",
+                        "s2|true   # gpus=0 est_min=60 after=s1",
+                        "s1|true   # gpus=0 est_min=30 after=t0"],
+            "c_cpu": ["t0|sleep 5   # gpus=0 est_min=120"],
+        }, "pa")
+        # 初始：主机 o1 上 p_fast 预计 16 小时后完、p_done 预计 14 小时后完
+        self.hosts.status("o1",
+                          plan={"t": now, "lanes": [{"project": "pb", "jobs": [
+                              {"name": "p_fast", "t0": now, "t1": now + 16 * 3600},
+                              {"name": "p_done", "t0": now, "t1": now + 14 * 3600},
+                          ]}]},
+                          todo=[{"project": "pb", "jobs": ["p_fast", "p_done"], "deps": {}, "held": None}])
+        # 已 stopped 的旧主机 o_old 留着 20 小时后的旧 plan：不应污染有效主机
+        self.hosts.status("o_old",
+                          plan={"t": now, "lanes": [{"project": "pb", "jobs": [
+                              {"name": "p_fast", "t0": now, "t1": now + 20 * 3600},
+                          ]}]},
+                          todo=[{"project": "pb", "jobs": ["p_fast"], "deps": {}, "held": None}],
+                          stopped=True)
+        try:
+            self.w.tick(qs, True)
+            st1 = json.loads(Path(self.w.p.status).read_text())
+            w1 = {x["name"]: x for x in st1["waiting"]}
+            # 首轮即一致（不缺预计时刻，也不被 o_old 20h 污染；只维护 peer_ends，不再留旧 peer_end 兼容表）
+            self.assertFalse(hasattr(self.w, "peer_end"))
+            self.assertIn("o1", self.w.peer_ends)
+            self.assertNotIn("o_old", self.w.peer_ends)
+            self.assertAlmostEqual(w1["w_peer"]["start"], now + 16 * 3600, delta=60)
+            self.assertIn("（预计 %s）" % self.m.now_str(w1["w_peer"]["start"])[5:16], w1["w_peer"]["why"])
+            # 本机 4 层依赖链（t0 120m → s1 30m → s2 60m → s3）：每层 why 预计时刻与 start 完全一致
+            for name in ("s1", "s2", "s3"):
+                self.assertIsNotNone(w1[name]["start"])
+                self.assertIn("（预计 %s）" % self.m.now_str(w1[name]["start"])[5:16], w1[name]["why"], (name, w1[name]))
+            self.assertAlmostEqual(w1["s3"]["start"] - w1["s1"]["start"], 90 * 60, delta=120)
+
+            # 第 2 轮（推进 PEER_EVERY，但仍未到 FORECAST_EVERY）：o1 上 p_fast 提前到 2 小时后、p_done 已跑完
+            self.hosts.advance(self.m.PEER_EVERY + 5)
+            t2 = time.time()
+            self.hosts.status("o1",
+                              plan={"t": t2, "lanes": [{"project": "pb", "jobs": [
+                                  {"name": "p_fast", "t0": t2, "t1": t2 + 2 * 3600},
+                              ]}]},
+                              todo=[{"project": "pb", "jobs": ["p_fast"], "deps": {}, "held": None}])
+            self.hosts.usage("o1", [{"project": "pb", "name": "p_done", "rc": "0", "t0": t2 - 600, "t1": t2 - 10, "ram_peak": 1.0}])
+            self.w.tick(qs, False)
+            st2 = json.loads(Path(self.w.p.status).read_text())
+            w2 = {x["name"]: x for x in st2["waiting"]}
+            # 旧代码：plan_key 漏跨主机结束时刻或同轮 prep 早于 forecast，why 仍写 16h/14h 而 start 是 2h
+            self.assertAlmostEqual(w2["w_peer"]["start"], t2 + 2 * 3600, delta=60)
+            self.assertIn("（预计 %s）" % self.m.now_str(w2["w_peer"]["start"])[5:16], w2["w_peer"]["why"])
+            self.assertNotIn("p_done", w2["w_peer"]["why"])
+        finally:
+            for j in self.w.running.values():
+                try:
+                    os.killpg(j["pid"], 9)
+                    os.waitpid(j["pid"], 0)
+                except OSError:
+                    pass
+
     def blocked(self, qs, now=None):
         """各清单队首的 dep_block：{任务: (状态, 原因) 或 None}。"""
         now = now or time.time()
@@ -2795,7 +2865,7 @@ class CrossHostTest(UnitBase):
             self.assertEqual(self.events("dep"), [])
             self.hosts.advance(self.m.PEER_EVERY)                       # 重读后认出 A 在 o 上跑着
             self.w.tick([qz, qb], False)
-            self.assertEqual(self.waiting(self.w)["B"][1][:7], "等 A 跑完")
+            self.assertTrue(self.waiting(self.w)["B"][1].startswith("等 A 跑完（预计 "), self.waiting(self.w)["B"][1])
             self.assertEqual(self.w.dep_miss, {})
         finally:
             for j in o.running.values():
@@ -4596,6 +4666,162 @@ class OffersTest(UnitBase):
         s4 = self.suggest()["pa"]
         self.assertNotIn("needs_miss", s4)
         self.assertNotIn("目标主机当前缺本地文件", s4["text"])
+
+    def test_par_dep_window_full_rebalance_hint(self):
+        # #166：原清单是并行清单（par=3）且剩余窗口被等依赖的行占满，后面无依赖短行被推后数小时；
+        # 挪到空主机产生收益时，offers 标 par_dep_full，rebalance 建议句点明“原清单的并行窗口被等依赖的行占满”；
+        # 窗口未全被等依赖占满、或窗口外行本身在等更晚依赖、或串行清单（par=1）均不误报。
+        from labmon.config import fmt_time
+        H = self.H
+        # 1a) 还原 #166：主机 o 上 par=3 清单前 3 行（smoke_y / y / y_sum）全在等依赖占满窗口，
+        #     后 2 行（smoke_sum_x 无依赖 5 分钟、sum_x 等 smoke_sum_x 与 train_x 1 小时后完）：
+        #     在 o 上 smoke_sum_x 等 3 小时腾格后跑完，sum_x 又因占格被推到 5.5 小时后才开跑；
+        #     把 sum_x 挪到 t 上后 3 小时出头即可跑完（早 2 小时），点明“原清单的并行窗口被等依赖的行占满”
+        q_cpu, q_gpu = self.hosts.queues({
+            "cpu": [
+                "# labmon: par=3",
+                "smoke_y|true   # gpus=0 est_min=5 after=train_y",
+                "y|true   # gpus=0 est_min=120 after=smoke_y",
+                "y_sum|true   # gpus=0 est_min=5 after=y",
+                "smoke_sum_x|true   # gpus=0 est_min=5",
+                "sum_x|true   # gpus=0 est_min=10 after=smoke_sum_x,train_x",
+            ],
+            "gpu": ["train_y|true   # vram=20 est_min=180", "train_x|true   # vram=20 est_min=60"],
+        }, "pa")
+        self.hosts.status(
+            "o",
+            plan={"t": self.now, "lanes": [
+                {"root": q_gpu["root"], "queue": q_gpu["jobs"], "project": "pa", "kind": "queue", "jobs": [
+                    {"name": "train_y", "t0": self.now, "t1": self.now + 3 * H, "run": True},
+                    {"name": "train_x", "t0": self.now, "t1": self.now + 1 * H, "run": True},
+                ]},
+                {"root": q_cpu["root"], "queue": q_cpu["jobs"], "project": "pa", "kind": "queue", "jobs": [
+                    {"name": "smoke_y", "t0": self.now + 3 * H, "t1": self.now + 3 * H + 300},
+                    {"name": "y", "t0": self.now + 3 * H + 300, "t1": self.now + 5 * H + 300},
+                    {"name": "y_sum", "t0": self.now + 5 * H + 300, "t1": self.now + 5 * H + 600},
+                    {"name": "smoke_sum_x", "t0": self.now + 3 * H + 300, "t1": self.now + 3 * H + 600},
+                    {"name": "sum_x", "t0": self.now + 5 * H + 600, "t1": self.now + 5 * H + 1200},
+                ]},
+            ]},
+            todo=[
+                {"project": "pa", "root": q_gpu["root"], "queue": q_gpu["jobs"], "jobs": ["train_y", "train_x"], "deps": {}, "held": None},
+                {"project": "pa", "root": q_cpu["root"], "queue": q_cpu["jobs"], "par": 3,
+                 "jobs": ["smoke_y", "y", "y_sum", "smoke_sum_x", "sum_x"],
+                 "deps": {"smoke_y": [["pa", "train_y"]], "y": [["pa", "smoke_y"]], "y_sum": [["pa", "y"]],
+                          "sum_x": [["pa", "smoke_sum_x"], ["pa", "train_x"]]}, "held": None},
+            ],
+            running=[
+                {"root": q_gpu["root"], "queue": q_gpu["jobs"], "name": "train_y", "project": "pa"},
+                {"root": q_gpu["root"], "queue": q_gpu["jobs"], "name": "train_x", "project": "pa"},
+            ],
+        )
+        o = self.offer()["pa"]
+        self.assertIn("sum_x", [j["name"] for j in o["jobs"]])
+        self.assertTrue(any(j["name"] == "sum_x" and j.get("par_dep_full") for j in o["jobs"]), o["jobs"])
+        s = self.suggest()["pa"]
+        self.assertTrue(s.get("par_dep_full"), s)
+        self.assertIn("原清单的并行窗口被等依赖的行占满", s["text"])
+        self.assertTrue(s["text"].endswith("；按 %s 的推演" % fmt_time(self.now, date=False)), s["text"])
+        self.assertNotIn("；按 ", RB.log_text(s["text"]))
+
+        # 1b) 窗口外是无依赖短行：同样触发 par_dep_full
+        q_short = self.hosts.queues({"short": [
+            "# labmon: par=3",
+            "smoke_y|true   # gpus=0 est_min=5 after=train_y",
+            "y|true   # gpus=0 est_min=10 after=smoke_y",
+            "y_sum|true   # gpus=0 est_min=5 after=y",
+            "short_x|true   # gpus=0 est_min=10",
+        ]}, "pa")[0]
+        self.hosts.status(
+            "o",
+            plan={"t": self.now, "lanes": [
+                {"root": q_gpu["root"], "queue": q_gpu["jobs"], "project": "pa", "kind": "queue", "jobs": [
+                    {"name": "train_y", "t0": self.now, "t1": self.now + 5 * H, "run": True},
+                ]},
+                {"root": q_short["root"], "queue": q_short["jobs"], "project": "pa", "kind": "queue", "jobs": [
+                    {"name": "smoke_y", "t0": self.now + 5 * H, "t1": self.now + 5 * H + 300},
+                    {"name": "y", "t0": self.now + 5 * H + 300, "t1": self.now + 5 * H + 900},
+                    {"name": "y_sum", "t0": self.now + 5 * H + 900, "t1": self.now + 5 * H + 1200},
+                    {"name": "short_x", "t0": self.now + 5 * H + 300, "t1": self.now + 5 * H + 900},
+                ]},
+            ]},
+            todo=[
+                {"project": "pa", "root": q_gpu["root"], "queue": q_gpu["jobs"], "jobs": ["train_y"], "deps": {}, "held": None},
+                {"project": "pa", "root": q_short["root"], "queue": q_short["jobs"], "par": 3,
+                 "jobs": ["smoke_y", "y", "y_sum", "short_x"],
+                 "deps": {"smoke_y": [["pa", "train_y"]], "y": [["pa", "smoke_y"]], "y_sum": [["pa", "y"]]}, "held": None},
+            ],
+            running=[{"root": q_gpu["root"], "queue": q_gpu["jobs"], "name": "train_y", "project": "pa"}],
+        )
+        o1b = self.offer()["pa"]
+        self.assertTrue(any(j["name"] == "short_x" and j.get("par_dep_full") for j in o1b["jobs"]), o1b["jobs"])
+        s1b = self.suggest()["pa"]
+        self.assertIn("原清单的并行窗口被等依赖的行占满", s1b["text"])
+
+        # 2) 负例：前 3 行中有一行无依赖（窗口未全部被等依赖占满）→ 不标 par_dep_full
+        q_part = self.hosts.queues({"part": [
+            "# labmon: par=3",
+            "smoke_y|true   # gpus=0 est_min=5 after=train_y",
+            "free_mid|true   # vram=40 est_min=300",
+            "y_sum|true   # gpus=0 est_min=5 after=smoke_y",
+            "tail_x|true   # gpus=0 est_min=10",
+        ]}, "pa")[0]
+        self.hosts.status(
+            "o",
+            plan={"t": self.now, "lanes": [
+                {"root": q_gpu["root"], "queue": q_gpu["jobs"], "project": "pa", "kind": "queue", "jobs": [
+                    {"name": "train_y", "t0": self.now, "t1": self.now + 5 * H, "run": True},
+                ]},
+                {"root": q_part["root"], "queue": q_part["jobs"], "project": "pa", "kind": "queue", "jobs": [
+                    {"name": "smoke_y", "t0": self.now + 5 * H, "t1": self.now + 5 * H + 300},
+                    {"name": "free_mid", "t0": self.now + 1 * H, "t1": self.now + 6 * H},
+                    {"name": "y_sum", "t0": self.now + 5 * H + 300, "t1": self.now + 5 * H + 600},
+                    {"name": "tail_x", "t0": self.now + 6 * H, "t1": self.now + 6 * H + 600},
+                ]},
+            ]},
+            todo=[
+                {"project": "pa", "root": q_gpu["root"], "queue": q_gpu["jobs"], "jobs": ["train_y"], "deps": {}, "held": None},
+                {"project": "pa", "root": q_part["root"], "queue": q_part["jobs"], "par": 3,
+                 "jobs": ["smoke_y", "free_mid", "y_sum", "tail_x"],
+                 "deps": {"smoke_y": [["pa", "train_y"]], "y_sum": [["pa", "smoke_y"]]}, "held": None},
+            ],
+            running=[{"root": q_gpu["root"], "queue": q_gpu["jobs"], "name": "train_y", "project": "pa"}],
+        )
+        o2 = self.offer()["pa"]
+        self.assertTrue(all("par_dep_full" not in j for j in o2["jobs"]), o2["jobs"])
+        s2 = self.suggest()["pa"]
+        self.assertNotIn("par_dep_full", s2)
+        self.assertNotIn("原清单的并行窗口被等依赖的行占满", s2["text"])
+
+        # 3) 负例：串行清单（par=1）队首等依赖 → 不是并行窗口，不标 par_dep_full
+        q_ser = self.hosts.queues({"ser": [
+            "head_y|true   # gpus=0 est_min=5 after=train_y",
+            "tail_s|true   # gpus=0 est_min=10",
+        ]}, "pa")[0]
+        self.hosts.status(
+            "o",
+            plan={"t": self.now, "lanes": [
+                {"root": q_gpu["root"], "queue": q_gpu["jobs"], "project": "pa", "kind": "queue", "jobs": [
+                    {"name": "train_y", "t0": self.now, "t1": self.now + 5 * H, "run": True},
+                ]},
+                {"root": q_ser["root"], "queue": q_ser["jobs"], "project": "pa", "kind": "queue", "jobs": [
+                    {"name": "head_y", "t0": self.now + 5 * H, "t1": self.now + 5 * H + 300},
+                    {"name": "tail_s", "t0": self.now + 5 * H + 300, "t1": self.now + 5 * H + 900},
+                ]},
+            ]},
+            todo=[
+                {"project": "pa", "root": q_gpu["root"], "queue": q_gpu["jobs"], "jobs": ["train_y"], "deps": {}, "held": None},
+                {"project": "pa", "root": q_ser["root"], "queue": q_ser["jobs"],
+                 "jobs": ["head_y", "tail_s"],
+                 "deps": {"head_y": [["pa", "train_y"]]}, "held": None},
+            ],
+            running=[{"root": q_gpu["root"], "queue": q_gpu["jobs"], "name": "train_y", "project": "pa"}],
+        )
+        o3 = self.offer()["pa"]
+        self.assertTrue(all("par_dep_full" not in j for j in o3["jobs"]), o3["jobs"])
+        s3 = self.suggest()["pa"]
+        self.assertNotIn("par_dep_full", s3)
+        self.assertNotIn("原清单的并行窗口被等依赖的行占满", s3["text"])
 
     def test_target_lane_same_root_and_env(self):
         # #25 D：只接到与挪来的行目录相同、.env 一样的清单后面（任务在清单的目录下跑、读那条清单的 .env）；不同目录的当新的一条

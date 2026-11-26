@@ -74,7 +74,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.eta, self.eta_prog, self.eta_t, self.eta_m = {}, set(), 0, None   # 看板写来的运行中任务预计结束与其中按进度外推的（load_eta）
         self.hrows, self.hrows_v = [], -1     # 跑完的任务 [(项目, 卡数, 开始, 结束)]（share 按 hist 换算，hist 变了才重算）
         self.peer, self.peer_t = [], 0.0      # 别的主机在跑的任务（peers）
-        self.peer_end = {}                    # 别的主机 plan 里各任务的预计结束 {(项目, 任务): 时刻}（peers 一起读）
+        self.peer_ends = {}                   # 别的主机 plan 里各任务的预计结束 {主机: {(项目, 任务): 时刻}}（peers 一起读）
         self.peer_todo = []                   # 别的主机还会跑的任务 [(主机, 状态已多久没更新, 状态时刻, 清单项)]（各自状态里的 todo，peers 一起读）
         self.pool_heads = []                  # 算力池里待放的各清单的队首（pool_todo 读，pool_view 判依赖，#25）
         self.elsewhere = {}                   # 别的主机放行、这台不动的清单任务 {队列: (主机, 任务)}（run_elsewhere）：变了才记事件
@@ -939,6 +939,11 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.gang_recheck(limits, gpus, apps, now)   # 成组：放掉这一轮没重新留的；这一轮回填的可能用了留着的资源，留着的成员按放行后的快照再看一遍
         self.gang_commit(reqs, waiting, now)      # 成组：本机成员都留好、别的主机的都此刻就能，一起放行
         self.forecast(queues, reqs, limits, now, pol)
+        for w in waiting:                         # 同轮推演更新了 self.ends：用同一份最新口径刷新依赖等待原因，保证 why 与 start 一致（#166）
+            if w.get("dep") and w["dep"][0] == "wait":
+                d = self.dep_block(w, now)
+                if d:
+                    w["dep"], w["why"] = d, d[1]
         self.gang_publish(waiting, now)           # 推演之后：本机成员此刻怎样（eta 取这一轮推演的）写进 gang.json
         self.note_waits(waiting, reqs, now)
         self.scan_local(queues, now)

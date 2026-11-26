@@ -217,6 +217,25 @@ class DepsMixin:
                 **({"sleeping": True} if r.get("sleeping") else {}))
         return out
 
+    def dep_base_ends(self):
+        """依赖推演的基础预计结束表 {(项目, 任务): 时刻}（forecast 与 fit_deps 共用）：已跑完的（dep_state 认的）为 0；
+        还在排/在跑的只认 dep_where 归属在别的主机上的那台有效主机的 plan（peer_ends），不被已停机或旧主机的残留 plan 污染（#166）。"""
+        ends = {k: 0 for k, v in self.dep_idx.items() if v == "done"}
+        for k, (host, _, _) in self.dep_where.items():
+            if host is not None and k in self.peer_ends.get(host, ()):
+                ends[k] = self.peer_ends[host][k]
+        return ends
+
+    def dep_waiting(self, project, h):
+        """只读判断清单行（hints h）此刻是否有未满足的依赖（查 dep_idx，不改 dep_miss）：offers 判并行窗口是否被等依赖的行占满用（#166）。"""
+        if not h:
+            return False
+        for p, n, anyok in dep_keys(dict(h, project=project)):
+            v = self.dep_idx.get((p, n))
+            if v != "done" and not (anyok and v == "failed"):
+                return True
+        return False
+
     def dep_block(self, r, now):
         """请求写的依赖（dep_keys）还没都满足：返回 (状态, 原因)，状态 wait（等的还在排、在跑）、failed（after= 等的跑失败了）、
         missing（等的哪里都找不到，持续满 DEP_MISS_S：起算时刻记在 self.dep_miss，时限内算 wait、原因写 MISS_NOTE）、cycle（依赖成环，谁也轮不到：dep_cycle）；
@@ -236,7 +255,7 @@ class DepsMixin:
             return "cycle", "依赖成环，谁也轮不到：%s。改清单顺序或 after= 后下一轮生效" % ring
         why = []
         if pend:
-            e = dep_end([k for k, _ in st], now, self.ends, self.dead)
+            e = dep_end(pend, now, self.ends, self.dead)
             note = "；".join(x for x in (self.dep_note(k[:2], r["project"]) for k in pend) if x)
             why.append("等 %s 跑完%s%s" % (dep_names(pend, r["project"]), "（预计 %s）" % _C.now_str(e)[5:16] if e else "", "；" + note if note else ""))
         if new:
