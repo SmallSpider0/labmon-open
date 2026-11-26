@@ -992,6 +992,39 @@ def project_many() -> dict:
     return d
 
 
+def project_par10() -> dict:
+    """#178 并行车道高重叠快照：一条 par=10 窗口内重叠 7 层，一条 par=6 重叠 8 层触发最后一道聚合条。"""
+    d = project()
+    base = copy.deepcopy(d["lanes"][0])
+    l10 = {**base, "id": "par/jobs/p10.txt", "label": "车道 3", "root": "/data/me/proj-a/par", "queue": "jobs/p10.txt",
+           "alive": True, "paused": None, "held": None, "waiting": None, "stuck": None,
+           "par": 10, "running_n": 7, "total": 10, "done": 2, "failed": 0, "unfinished": 8, "eta_ts": NOW + 3600}
+    l6 = {**base, "id": "par/jobs/p6.txt", "label": "车道 4", "root": "/data/me/proj-a/par", "queue": "jobs/p6.txt",
+          "alive": True, "paused": None, "held": None, "waiting": None, "stuck": None,
+          "par": 6, "running_n": 6, "total": 8, "done": 0, "failed": 0, "unfinished": 8, "eta_ts": NOW + 3600}
+    d["lanes"].extend([l10, l6])
+    # 先前的短任务（首尾相接）+ 窗口内 7 层同时重叠
+    d["jobs"].append({"id": "p10_d0", "est_min": 20, "status": "done", "lane": l10["id"], "hold": False, "group": "alpha_",
+                      "start_ts": NOW - 5400, "end_ts": NOW - 4200, "actual_min": 20})
+    d["jobs"].append({"id": "p10_d1", "est_min": 20, "status": "done", "lane": l10["id"], "hold": False, "group": "alpha_",
+                      "start_ts": NOW - 4200, "end_ts": NOW - 3000, "actual_min": 20})
+    for i in range(7):
+        d["jobs"].append({"id": f"p10_r{i}", "est_min": 45, "status": "running", "lane": l10["id"], "hold": False, "group": "alpha_",
+                          "start_ts": NOW - 1800 + i * 120, "elapsed_min": 30 - i * 2, "speed": [], "eta_source": "清单估时",
+                          "remaining_min": 15 + i * 2, "eta_ts": NOW + 900 + i * 120, "dur_min": 45})
+    d["jobs"].append({"id": "p10_q0", "est_min": 30, "status": "queued", "lane": l10["id"], "hold": False, "group": "alpha_",
+                      "plan_start_ts": NOW + 900, "eta_ts": NOW + 2700, "dur_min": 30})
+    # par=6 但同时重叠 8 层（触发第 6 道「+3 个」聚合条）
+    for i in range(8):
+        st = "running" if i < 6 else "queued"
+        d["jobs"].append({"id": f"p6_j{i}", "est_min": 50, "status": st, "lane": l6["id"], "hold": False, "group": "alpha_",
+                          **({"start_ts": NOW - 1500 + i * 60, "elapsed_min": 25 - i, "speed": [], "eta_source": "清单估时",
+                              "remaining_min": 25 + i, "eta_ts": NOW + 1500 + i * 60}
+                             if st == "running" else {"plan_start_ts": NOW - 600 + i * 60, "eta_ts": NOW + 2400 + i * 60}),
+                          "dur_min": 50})
+    return d
+
+
 def overview_dense() -> dict:
     """overview() 的占用上再加 _dense_jobs：原有的长任务（srv-a 的 alpha_train_s1 到 +8 小时、排队到 +7 小时，srv-b 的 beta_eval_s7/s8 到 +4 小时）
     留着，与任务表对得上；它们正是近景的长尾规则要判的情形。"""
@@ -1014,5 +1047,5 @@ def overview_user() -> dict:
 EXTRA = {"overview_user": overview_user, "records": records, "records_evil": records_evil, "events": project_events, "events_evil": project_events_evil,
          "project_overdue": project_overdue, "project_longq": project_longq, "project_moved": project_moved, "project_pool_back": project_pool_back, "events_overdue": project_events_overdue,
          "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many,
-         "project_deps": project_deps}
+         "project_deps": project_deps, "project_par10": project_par10}
 

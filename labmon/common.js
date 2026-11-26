@@ -390,8 +390,48 @@ const TL_WIN = {near: ["近景", null, null], day: ["24 小时", -6, 18], week: 
 const TL_MIN = 1800, TL_MAX = 60 * 86400;
 // 每页调一次 tlInit：get、set 读写本机存的设置（视图 tlv、预设 tl），now() 是页面上的“现在”，all() 给「全部」要包住的 [最早, 最晚]（经 tlSpan 算），
 // near() 给近景定宽用的任务 [[开始, 结束, 在跑或推演里排队], …]（经 tlFit 算），draw() 重画
-const TL = {cfg: null, v: null, g: null, d: null, sw: false, raf: 0, save: 0, key: false, fw: 0};     // key：窄屏上图例点开了没有；fw：近景上一次取的宽度档（滞回用，不存本机）
-function tlInit(cfg) { TL.cfg = cfg; const v = cfg.get("tlv", null); TL.v = Number.isFinite(v?.a) && Number.isFinite(v?.b) ? v : null; }
+// key：窄屏上图例点开了没有；fw：近景上一次取的宽度档（滞回用，不存本机）；lk/lkt/last/cur：拖动与滚轮缩放平移时的布局锁（#143）
+const TL = {cfg: null, v: null, g: null, d: null, sw: false, raf: 0, save: 0, key: false, fw: 0, lk: null, lkt: 0, last: null, cur: null};
+function tlInit(cfg) {
+  TL.cfg = cfg;
+  clearTimeout(TL.lkt); TL.lkt = 0; TL.lk = null; TL.last = null; TL.cur = null;
+  const v = cfg.get("tlv", null); TL.v = Number.isFinite(v?.a) && Number.isFinite(v?.b) ? v : null;
+}
+// 拖动/滚轮平移或缩放期间锁住行结构（#143）：行不消失、行高与左栏宽只升不缩，松手或停止滚动后再收紧。两页共用
+function tlFrame() { TL.cur = {rows: new Map(), lw: 0, flags: Object.create(null)}; }
+function tlLock() {
+  clearTimeout(TL.lkt); TL.lkt = 0;
+  if (TL.lk) return;
+  const s = TL.last;
+  TL.lk = s ? {rows: new Map(s.rows), lw: s.lw, flags: Object.assign(Object.create(null), s.flags)}
+    : {rows: new Map(), lw: 0, flags: Object.create(null)};
+}
+function tlUnlock(delay = 0) {
+  clearTimeout(TL.lkt); TL.lkt = 0;
+  if (!TL.lk) return;
+  if (delay > 0) { TL.lkt = setTimeout(() => tlUnlock(0), delay); return; }
+  TL.lk = null;
+  if (!TL.raf) TL.raf = setTimeout(() => { TL.raf = 0; TL.cfg?.draw(); }, 16);
+}
+function tlLockFlag(key, val) {
+  const on = !!val || !!TL.lk?.flags[key];
+  if (on && TL.cur) TL.cur.flags[key] = true;
+  if (on && TL.lk) TL.lk.flags[key] = true;
+  return on;
+}
+function tlLockRow(key, h) {
+  const out = TL.lk ? Math.max(h, TL.lk.rows.get(key) || 0) : h;
+  if (TL.cur) TL.cur.rows.set(key, out);
+  if (TL.lk) TL.lk.rows.set(key, out);
+  return out;
+}
+function tlLockLw(lw) {
+  const v = Number.isFinite(lw) ? lw : 0;
+  const out = TL.lk ? Math.max(v, TL.lk.lw || 0) : v;
+  if (TL.cur) TL.cur.lw = out;
+  if (TL.lk) TL.lk.lw = out;
+  return out;
+}
 // 「全部」要包住的区间：各起点里最早的、各终点里最晚的；没有数据的一端为 null（tlRange 按现在算）
 const tlSpan = (starts, ends) => [starts.length ? Math.min(...starts) : null, ends.length ? Math.max(...ends) : null];
 // 近景（Issue #49）：现在线放在左起 1/3，往后包住在跑与排队的任务里最晚的结束、右边留 5%；最晚的离现在超过 90% 分位的 2 倍时算长尾，改取 90% 分位。
@@ -439,7 +479,7 @@ function tlZoom(f, ta) {
   ta = ta ?? (r.t0 + r.t1) / 2;
   tlView({t0: ta - (ta - r.t0) * f, t1: ta + (r.t1 - ta) * f});
 }
-function tlFollow() { TL.v = null; TL.cfg.set("tlv", null); TL.cfg.draw(); }
+function tlFollow() { clearTimeout(TL.lkt); TL.lkt = 0; TL.lk = null; TL.v = null; TL.cfg.set("tlv", null); TL.cfg.draw(); }
 // 时间线右上的按钮；点击由各页的 click 交给 tlClick（data-tl 换预设，data-tz 缩放或回到现在，data-tlkey 窄屏开关图例）
 function tlBar() {
   const mode = TL.cfg.get("tl", "near"), r = tlRange();
@@ -478,12 +518,17 @@ function tlBind(box) {
     const dx = e.clientX - TL.d.x;
     if (!TL.d.moved) {
       if (Math.abs(dx) < 4) return;
-      TL.d.moved = true; box.setPointerCapture(e.pointerId); box.classList.add("drag"); hideTip();
+      TL.d.moved = true; box.setPointerCapture(e.pointerId); box.classList.add("drag"); hideTip(); tlLock();
     }
     const k = (TL.d.r.t1 - TL.d.r.t0) / TL.g.PW;
     tlView({t0: TL.d.r.t0 - dx * k, t1: TL.d.r.t1 - dx * k});
   });
-  const up = () => { if (TL.d?.moved) { TL.sw = true; setTimeout(() => { TL.sw = false; }, 0); } TL.d = null; box.classList.remove("drag"); };
+  const up = () => {
+    const moved = !!TL.d?.moved;
+    if (moved) { TL.sw = true; setTimeout(() => { TL.sw = false; }, 0); }
+    TL.d = null; box.classList.remove("drag");
+    if (moved) tlUnlock(0);
+  };
   box.addEventListener("pointerup", up);
   box.addEventListener("pointercancel", up);
   box.addEventListener("click", e => { if (TL.sw) { e.stopPropagation(); e.preventDefault(); TL.sw = false; } }, true);
@@ -492,11 +537,15 @@ function tlBind(box) {
     const r = tlRange(), span = r.t1 - r.t0;
     if (e.ctrlKey || e.metaKey) {
       e.preventDefault();
+      tlLock();
       tlZoom(Math.exp(Math.max(-1, Math.min(1, e.deltaY * (e.deltaMode ? 0.05 : 0.01)))), tAt(e.clientX));
+      tlUnlock(250);
     } else if (Math.abs(e.deltaX) > Math.abs(e.deltaY)) {
       e.preventDefault();
+      tlLock();
       const k = span / TL.g.PW * (e.deltaMode ? 16 : 1);
       tlView({t0: r.t0 + e.deltaX * k, t1: r.t1 + e.deltaX * k});
+      tlUnlock(250);
     }
   }, {passive: false});
   box.addEventListener("dblclick", e => {
@@ -512,9 +561,11 @@ const TL_DEFS = `<defs><pattern id="hatch" width="6" height="6" patternUnits="us
 // o.markers [{label, ts}] 里程碑（视图之外的在右上角提示），o.seen 收集图上出现了哪些画法（图例只列这些），o.under(c) 画完各行后调、结果压在各行下面。TL.g 记下布局给拖动、缩放换算
 function tlSvg(box, rows, o = {}) {
   const {t0, t1} = tlRange(), now = TL.cfg.now(), seen = o.seen || new Set();
+  for (const r of rows) if (r.key) r.h = tlLockRow(r.key, r.h);
+  const lw = tlLockLw(o.lw || 0);
   // 左栏缺省宽屏 116、窄屏 82；o.lw 是行名要多宽（项目页按车道名算，#108），在缺省与上限（宽屏 200、不超过整宽的 30%；窄屏 128、不超过 34%）之间取
   const W = Math.max(300, box.clientWidth), narrow = W < 600, L0 = narrow ? 82 : 116, R = narrow ? 8 : 84;
-  const L = Math.round(Math.max(L0, Math.min(o.lw || 0, narrow ? 128 : 200, W * (narrow ? .34 : .3)))), PW = W - L - R;
+  const L = Math.round(Math.max(L0, Math.min(lw, narrow ? 128 : 200, W * (narrow ? .34 : .3)))), PW = W - L - R;
   TL.g = {L, PW, t0, t1};
   const X = t => L + PW * (t - t0) / (t1 - t0);
   const c = {t0, t1, W, L, R, PW, narrow, X, cl: t => Math.max(L, Math.min(W - R, X(t))), win: (a, b) => a != null && b != null && b > t0 && a < t1, seen};
@@ -538,6 +589,7 @@ function tlSvg(box, rows, o = {}) {
   if (off.length) s += `<text x="${W}" y="9" text-anchor="end" style="fill:var(--fg)" ${tip(off.map(m => `${m.label}  ${ts(m.ts)}`).join("\n"))}>${esc(off[0].label)} ${tsMD(off[0].ts)} ›</text>`;
   if (now >= t0 && now <= t1) { seen.add("now"); s += `<line x1="${X(now)}" x2="${X(now)}" y1="2" y2="${H - 16}" stroke="var(--bad)" stroke-width="1.5"/>`; }
   else s += `<text x="${now < t0 ? L : W - R}" y="${H - 3}" text-anchor="${now < t0 ? "start" : "end"}" class="more" data-tz="now" style="fill:var(--accent);cursor:pointer">${now < t0 ? "‹ 现在" : "现在 ›"}</text>`;
+  if (TL.cur) { TL.last = TL.cur; TL.cur = null; }
   return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${TL_DEFS}<defs><clipPath id="tlclip"><rect x="${L}" y="0" width="${PW}" height="${H}"/></clipPath></defs>${s}</svg>`;
 }
 // 画进页面：#tlbox 放图（下面接 o.more），#tlkey 放图例，#tlbar 放按钮。o.items(seen) 在画完后调，给图例条目 [[画法, 说明, 样例]]，
@@ -567,18 +619,52 @@ function jobBar(st, hold, x, y, w, h, c, frac, a = "") {
     <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="3" fill="transparent" stroke="var(--fg)" stroke-width="1.3" ${a}/>`;
   return `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="3" fill="${c}" fill-opacity="${st === "queued" ? .2 : .85}" ${st === "queued" ? `stroke="${c}" stroke-opacity=".55"` : ""} ${a}/>`;
 }
-// 重叠的条分到几道（先开始的先占道），各条写上道号 k；返回道数
+// 重叠的条分到几道（先开始的先占道；同起点按结束时间与名字稳定排序），各条写上道号 k；返回道数。按全部任务调用，道号不随视图平移跳动（#143）
 function tlPack(items) {
   const ends = [];
-  for (const x of [...items].sort((a, b) => a.t0 - b.t0)) {
+  const ord = [...items].sort((a, b) => (a.t0 - b.t0) || (a.t1 - b.t1) || String(a.id ?? a.n ?? "").localeCompare(String(b.id ?? b.n ?? "")));
+  for (const x of ord) {
     let k = ends.findIndex(e => e <= x.t0 + 1);
     if (k < 0) { k = ends.length; ends.push(0); }
     ends[k] = x.t1; x.k = k;
   }
   return Math.max(1, ends.length);
 }
+// 单行道数与行高布局（#178）：totalN 是全量分道数；cap 是该行上限（不超过整行高度 maxH 按 minStep 放得下的道数）。
+// 1..hi 道用舒适步长（base + step*(n-1)，封顶 softH）；超 hi 道压细到 minStep（如 8px），总高封顶 maxH。totalN > cap 时 over=true，多出来的在最后一道经 tlOverflow 聚合，不叠在同一位置
+const OCC_CARD_LAY = {base: 20, step: 14, hi: 3, softH: 40, maxH: 52, pad: 4, minStep: 8, cap: 6};
+const OCC_OTHER_LAY = {base: 18, step: 10, hi: 4, softH: 44, maxH: 52, pad: 4, minStep: 8, cap: 6};
+function tlRowLayout(totalN, o) {
+  const pad = o.pad ?? 4, ms = o.minStep || 8, hi = o.hi || 4;
+  const cap = Math.max(1, Math.min(o.cap || 6, Math.floor((o.maxH - pad) / ms)));
+  const n = Math.max(1, Math.min(totalN || 1, cap)), over = cap >= 2 && totalN > cap;
+  const soft = o.softH ?? (o.base + o.step * (hi - 1));
+  const h = n <= hi ? Math.min(soft, o.base + o.step * (n - 1)) : Math.min(o.maxH, Math.max(soft, pad + ms * n));
+  return {n, total: Math.max(1, totalN || 1), cap, over, h};
+}
+// 溢出到最后一道（k >= cap - 1）的可见条按像素区间合并成互不相交的簇：单条照常画，多条合成「+N 个」聚合条（tlMoreBar），任何时候不重叠（#178）
+function tlOverflow(items, c, gap = 1) {
+  const xs = items.map(x => {
+    const xa = c.cl(x.t0), xe = Math.max(xa + 1.5, c.cl(x.t1) - gap);
+    return {x, xa, xe};
+  }).sort((a, b) => (a.xa - b.xa) || (a.xe - b.xe));
+  const cs = [];
+  for (const it of xs) {
+    const m = cs[cs.length - 1];
+    if (m && it.xa < m.xe + 1) { m.xe = Math.max(m.xe, it.xe); m.items.push(it.x); }
+    else cs.push({xa: it.xa, xe: it.xe, items: [it.x]});
+  }
+  return cs;
+}
+function tlMoreBar(xa, y, w, h, lines) {
+  const n = lines.length, show = lines.slice(0, 12);
+  const tt = `另有 ${n} 个重叠任务：\n` + show.join("\n") + (n > show.length ? `\n… 另 ${n - show.length} 个` : "");
+  const lab = w >= 36 ? `+${n} 个` : w >= 20 ? `+${n}` : "";
+  return `<rect class="tl-more" x="${xa}" y="${y}" width="${w}" height="${h}" rx="3" fill="var(--muted)" fill-opacity=".22" stroke="var(--muted)" stroke-width="1" stroke-dasharray="2 2" ${tip(tt)}/>`
+    + (lab ? `<text x="${xa + w / 2}" y="${y + h / 2 + 3}" text-anchor="middle" style="font-size:${h < 10 ? 8.5 : 9.5}px;pointer-events:none;fill:var(--fg)">${esc(lab)}</text>` : "");
+}
 // 占用（工作台 overview.occupancy 给的：st 为 done / failed / stop / run / plan）画成任务条：已跑的实色，在跑的描边并填到现在，worker 推演的排队淡色；
-// 同一行里重叠的分道（先 tlPack）。o.color(项目)、o.text(条) 悬停、o.label(条) 条上的字（放不下省略中间）、o.pre(条) 可选的前缀（原样留着）
+// 同一行里重叠的分道（先 tlPack + tlRowLayout）。o.color(项目)、o.text(条) 悬停、o.label(条) 条上的字（放不下省略中间）、o.pre(条) 可选的前缀（原样留着）
 const OCC_BAR = {done: "done", failed: "failed", stop: "failed", run: "running", plan: "queued"};
 const OCC_ST = {done: "完成", failed: "失败", stop: "停下重排", run: "在跑（预计结束）", plan: "预计（推演）"};
 const occState = x => OCC_ST[x.st];
@@ -592,15 +678,30 @@ const occItems = (c, pre = "") => [
   ["occ_failed", pre + "失败", tlSw(jobBar("failed", false, 0, 1, 22, 10, "var(--bad)"))],
   ["occ_stop", pre + "停下重排", tlSw(jobBar("failed", false, 0, 1, 22, 10, "var(--warn)"))]];
 function occBars(items, y, h, c, o) {
-  const n = Math.max(1, ...items.map(x => x.k + 1)), th = (h - 4) / n, now = TL.cfg.now();
+  const lay = o.layout || {n: Math.max(1, ...items.map(x => (x.k || 0) + 1)), over: false};
+  const th = (h - 4) / lay.n, bh = Math.max(4, th - 1), now = TL.cfg.now();
+  const drawOne = (x, k) => {
+    const xa = c.cl(x.t0), w = Math.max(1.5, c.cl(x.t1) - xa - 1), yy = y + 2 + k * th, st = OCC_BAR[x.st] || "done";
+    c.seen.add("occ_" + x.st);
+    let r = jobBar(st, false, xa, yy, w, bh, x.st === "failed" ? "var(--bad)" : x.st === "stop" ? "var(--warn)" : o.color(x.p),
+      st === "running" ? (c.cl(now) - xa) / w : 0, tip(o.text(x)));
+    if (w > 56 && th >= 13) r += `<text x="${xa + 4}" y="${yy + th / 2 + 3}" style="font-size:10px;pointer-events:none;fill:${st === "done" ? "#fff" : "var(--fg)"}">${esc(fit(o.label(x), w - 8, o.pre ? o.pre(x) : true))}</text>`;
+    return r;
+  };
   let s = "";
+  const over = [];
   for (const x of items) {
     if (!c.win(x.t0, x.t1)) continue;
-    const xa = c.cl(x.t0), w = Math.max(1.5, c.cl(x.t1) - xa - 1), yy = y + 2 + x.k * th, st = OCC_BAR[x.st] || "done";
-    c.seen.add("occ_" + x.st);
-    s += jobBar(st, false, xa, yy, w, th - 1, x.st === "failed" ? "var(--bad)" : x.st === "stop" ? "var(--warn)" : o.color(x.p),
-      st === "running" ? (c.cl(now) - xa) / w : 0, tip(o.text(x)));
-    if (w > 56 && th >= 13) s += `<text x="${xa + 4}" y="${yy + th / 2 + 3}" style="font-size:10px;pointer-events:none;fill:${st === "done" ? "#fff" : "var(--fg)"}">${esc(fit(o.label(x), w - 8, o.pre ? o.pre(x) : true))}</text>`;
+    if (lay.over && x.k >= lay.n - 1) over.push(x);
+    else s += drawOne(x, x.k || 0);
+  }
+  if (over.length) {
+    const yy = y + 2 + (lay.n - 1) * th;
+    for (const m of tlOverflow(over, c, 1)) {
+      if (m.items.length === 1) s += drawOne(m.items[0], lay.n - 1);
+      else s += tlMoreBar(m.xa, yy, Math.max(1.5, m.xe - m.xa), bh,
+        m.items.map(x => `${o.pre ? o.pre(x) : x.p ? x.p + " " : ""}${o.label(x)}（${occState(x)} · ${tsHM(x.t0)}→${tsHM(x.t1)}）`));
+    }
   }
   return s;
 }

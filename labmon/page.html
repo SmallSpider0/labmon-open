@@ -494,7 +494,7 @@ function timelineCard() {
 }
 function drawTimeline() {
   const box = document.getElementById("tlbox"); if (!box?.clientWidth) return;     // 嵌在看板里又被隐藏了：再显示时看板会调它重画
-  tlBind(box);
+  tlBind(box); tlFrame();
   DEPH.ch = depChain(DEPH.id); box.classList.toggle("dh", !!DEPH.ch);     // 悬停着的那格的上下游：重画时照样高亮（laneRow、depLines 读 DEPH.ch）
   const {t0, t1} = tlRange(), win = (a, b) => a != null && b != null && b > t0 && a < t1;
   const showAll = LS.get("tlall", false), rows = [], used = new Set();
@@ -508,25 +508,34 @@ function drawTimeline() {
       const inWin = l.unfinished || rowJobs(l, h.id).some(j => win(jobT0(j), jobT1(j))) || ran(l, h.id);
       if (showAll) vis.push(l);
       else if (foldDone && l.done_lane) hiddenDone++;
-      else if (inWin) vis.push(l);
+      else if (tlLockFlag(`lane:${h.id}:${l.id}`, inWin)) vis.push(l);
       else hidden++;
     }
     // 清单已搬到别的主机、这台还在跑完手上那一格（#100），或交回算力池的清单在这台跑过、在跑的（#99）：照这条车道另起一行挂在这台下面，只画这台的那几格
     const left = D.lanes.filter(l => l.host !== h.id && (rowJobs(l, h.id).length || att.some(x => x.lane === l.id && x.host === h.id)));
-    const away = left.filter(l => showAll || rowJobs(l, h.id).some(j => j.status === "running" || win(jobT0(j), jobT1(j))) || ran(l, h.id));
+    const away = left.filter(l => showAll || tlLockFlag(`away:${h.id}:${l.id}`, rowJobs(l, h.id).some(j => j.status === "running" || win(jobT0(j), jobT1(j))) || ran(l, h.id)));
     hidden += left.length - away.length;
     return [h, [...vis, ...away.map(l => ({...l, away: h.id}))]];
   }).filter(([, vis]) => vis.length);
   // 车道名右边用计划项配色的圆点标出这段时间里它跑的计划项：图上不止一个计划项时才画（只有一个时标题旁已列出）
   const gsOf = l => laneGroups(rowJobs(l, l.away || l.host).filter(j => win(jobT0(j), jobT1(j))));
-  const multi = new Set(shown.flatMap(([, vis]) => vis.flatMap(gsOf))).size > 1;
+  const multi = tlLockFlag("multi", new Set(shown.flatMap(([, vis]) => vis.flatMap(gsOf))).size > 1);
+  const pks = new Map();
+  const packOf = l => { const k = (l.away || l.host) + "\0" + l.id; if (!pks.has(k)) pks.set(k, parPack(l, rowJobs(l, l.away || l.host))); return pks.get(k); };
   // 每台主机一组：表头一行（主机名、利用率、事件），同机别的项目占了卡时一行，下面是这台的车道
   for (const [h, vis] of shown) {
-    const hb = hostBands(h.id), oc = (EV.occ?.[h.id] || []).filter(x => win(x.t0, x.t1));
-    const ev = hb.iv.some(x => win(x.t0, x.t1)) || hb.ticks.some(x => x.t >= t0 && x.t <= t1);     // 看的这段有事件：表头底边加一条色带
-    rows.push({h: ev ? 32 : 22, sep: true, draw: (y, hh, c) => hostRow(h, hb, ev, y, hh, c)});
-    if (oc.length) rows.push({h: Math.min(44, 8 + 10 * tlPack(oc)), draw: (y, hh, c) => othersRow(h, oc, y, hh, c)});
-    vis.forEach(l => rows.push({h: 24 + 14 * (parPack(l, rowJobs(l, l.away || l.host)).n - 1), draw: (y, hh, c) => laneRow(l, hb, multi ? gsOf(l) : [], y, hh, c, used)}));
+    const hb = hostBands(h.id), allOc = (EV.occ?.[h.id] || []).map(x => ({...x}));     // 按全量稳定分道（#143），画时跳过视图外
+    const ocHas = tlLockFlag(`occ:${h.id}`, allOc.some(x => win(x.t0, x.t1)));
+    const ev = tlLockFlag(`ev:${h.id}`, hb.iv.some(x => win(x.t0, x.t1)) || hb.ticks.some(x => x.t >= t0 && x.t <= t1));     // 看的这段有事件：表头底边加一条色带
+    rows.push({key: `host:${h.id}`, h: ev ? 32 : 22, sep: true, draw: (y, hh, c) => hostRow(h, hb, ev, y, hh, c)});
+    if (ocHas) {
+      const ocLay = tlRowLayout(allOc.length ? tlPack(allOc) : 1, OCC_OTHER_LAY);
+      rows.push({key: `occ:${h.id}`, h: ocLay.h, draw: (y, hh, c) => othersRow(h, allOc, ocLay, y, hh, c)});
+    }
+    vis.forEach(l => {
+      const pk = packOf(l);
+      rows.push({key: `lane:${l.away || l.host}:${l.id}`, h: pk.h, draw: (y, hh, c) => laneRow(l, hb, multi ? gsOf(l) : [], y, hh, c, used, pk)});
+    });
   }
   // 池里待放的（#89）：一条清单一行，写原因与已等多久
   const left = l => jobsOf(l.id).filter(j => inPool(j) && (j.status === "queued" || j.status === "running")).length;     // 跑过、在跑的已画在那台下（#99）
@@ -535,8 +544,8 @@ function drawTimeline() {
   const hasDone = foldDone && D.lanes.some(l => l.done_lane);
   const more = pool + (hideMsg || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? (hasDone ? "收起已跑完与这段时间没有任务的车道" : "收起这段时间没有任务的车道") : `另有 ${hideMsg}的车道，显示`}</span></div>` : "");
   // 左栏要多宽（#108）：主机短名、车道名（从 x=18 起，右边留计划项圆点）都写得下；tlSvg 再按上限截
-  const lw = Math.max(...shown.flatMap(([h, vis]) => [textW(hostShort(h)) + 8,
-    ...vis.map(l => 26 + 7 * Math.min(4, multi ? gsOf(l).length : 0) + textW(laneLabel(l) + laneTail(l, parPack(l, rowJobs(l, l.away || l.host)).n > 1)))]));
+  const lw = Math.max(0, ...shown.flatMap(([h, vis]) => [textW(hostShort(h)) + 8,
+    ...vis.map(l => 26 + 7 * Math.min(4, multi ? gsOf(l).length : 0) + textW(laneLabel(l) + laneTail(l, packOf(l).n > 1)))]));
   tlShow(box, rows, {markers: D.markers, more, under: depLines, lw, items: () => tlItems(gcolor([...used][0]))});
   const lg = document.getElementById("tllegend");
   if (lg) lg.innerHTML = D.groups.filter(g => used.has(g.id)).map(g => `<span class="nw"><span class="dot" style="background:${g.color}"></span> ${esc(g.label)}</span>`).join(" &nbsp;");   // 只列这段时间图上有的
@@ -640,11 +649,11 @@ function hostRow(host, hb, ev, y, h, c) {
   return s;
 }
 // 同机别的项目占卡的情况（工作台 occupancy：已跑的、在跑的、worker 推演的排队），重叠的分道；本项目的车道空着时看这一行就知道卡被谁占着
-function othersRow(host, oc, y, h, c) {
-  const who = [...new Set(oc.map(x => x.p))];
+function othersRow(host, oc, lay, y, h, c) {
+  const vis = oc.filter(x => c.win(x.t0, x.t1)), who = [...new Set((vis.length ? vis : oc).map(x => x.p))];
   let s = `<text x="10" y="${y + h / 2 + 4}" style="font-size:10.5px" ${tip(`${host.label} 上别的项目占卡的情况：${who.join("、")}\n实色已跑，描边在跑，淡色是 worker 按同一套放行规则推演的排队；本项目车道上的“让位”就是在等它们`)}>${esc(fit("别的项目", c.L - 16))}</text>`;
   s += `<rect x="${c.L}" y="${y + h / 2 - .5}" width="${c.PW}" height="1" fill="var(--line)"/>`;
-  return s + occBars(oc, y, h, c, {color: p => EV.colors?.[p] || "var(--faint)", label: x => x.n, pre: x => x.p + " ",
+  return s + occBars(oc, y, h, c, {layout: lay, color: p => EV.colors?.[p] || "var(--faint)", label: x => x.n, pre: x => x.p + " ",
     text: x => `${x.p}${x.lane ? " " + x.lane : ""} · ${x.n}\n${occState(x)} · ${ts(x.t0)} → ${ts(x.t1)}（${dur(x.t1 - x.t0)}）· 卡 ${x.g.join(",")}`
       + (x.after ? `\n等 ${afterText(x.after, D.id)} 跑完才轮到` : "")});
 }
@@ -652,19 +661,23 @@ function othersRow(host, oc, y, h, c) {
 // 并行清单（#147）的「并行 k/N」：行分了几道时写在车道名下面一行（窄屏车道名截短也看得见），只有一道时接在车道名后面
 const parTag = l => l.par > 1 && !l.away ? `并行 ${l.running_n || 0}/${l.par}` : "";
 const laneTail = (l, two) => (parTag(l) && !two ? `（${parTag(l)}）` : "") + (l.away ? "（在这台跑完）" : l.returned ? "（已归还）" : "");
-// 并行清单（#147）的车道一行里同时有几格：重叠的条分道（tlPack），n 是几道（至多 4，再多的叠在最后一道），k 是各任务在第几道；串行车道一道
+// 并行清单（#147、#178、#143）的车道一行里同时有几格：按全部任务稳定分道（tlPack），上限跟 par 走（至多 10 道、整行高至多 86px），
+// 超 4 道压细到 8px/道且条上不写字，仍超上限时多出来的在最后一道经 tlOverflow 合成「+N 个」聚合条；串行车道一道
+const PAR_LAY = {base: 24, step: 14, hi: 4, softH: 66, maxH: 86, pad: 6, minStep: 8};
 function parPack(l, js) {
   const k = new Map();
-  if (!(l.par > 1)) return {n: 1, k};
+  if (!(l.par > 1)) return {n: 1, total: 1, cap: 1, over: false, h: 24, k};
   const xs = js.map(j => ({id: j.id, t0: jobT0(j), t1: jobT1(j)})).filter(x => x.t0 != null && x.t1 != null);
-  const n = Math.min(4, tlPack(xs));
-  xs.forEach(x => k.set(x.id, Math.min(n - 1, x.k)));
-  return {n, k};
+  const lay = tlRowLayout(tlPack(xs), {...PAR_LAY, cap: Math.min(l.par, 10)});
+  xs.forEach(x => k.set(x.id, x.k));
+  return {...lay, k};
 }
-function laneRow(l, hb, gs, y, h, c, used) {
+function laneRow(l, hb, gs, y, h, c, used, pk) {
   let s = "";
   const r = c.nrow = (c.nrow || 0) + 1;     // 行号：依赖连线认同一行（depLines）
-  const js = rowJobs(l, l.away || l.host), pk = parPack(l, js), th = (h - 6) / pk.n;
+  const js = rowJobs(l, l.away || l.host);
+  pk ||= parPack(l, js);
+  const th = (h - 6) / pk.n, bh = Math.max(4, th - (pk.n > 1 ? 1.5 : 0));
   const lt = l.away ? `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n` + (l.pool ? `清单已交回算力池，之后的任务等看板放到某台；这一行是它在 ${hostOf(l.away).label || l.away} 跑过、在跑的任务`
     : `清单已登记到 ${hostOf(l.host).label || l.host}，之后的任务在那台跑；这一格是登记搬走前 ${hostOf(l.away).label || l.away} 放行的，在这台跑完`) : `${laneName(l, D.hosts)}（队列 ${l.id}${l.queue ? " · " + l.queue : ""}）\n计划项：${laneGroups(js).map(g => GROUPS[g]?.label || g).join("、") || "—"}\n完成 ${l.done}/${l.total} · 排队 ${js.filter(j => j.status === "queued").length}${l.failed ? " · 失败 " + l.failed : ""}\n${l.par > 1 ? `并行清单：同时最多 ${l.par} 行，此刻在跑 ${l.running_n || 0} 行（卡吃满、在限流时 worker 不再加行）\n` : ""}${laneState(l)}${l.eta_ts ? "\n本车道完成 " + ts(l.eta_ts) + (l.has_hold ? holdGuess(js) ? "（含暂停，时长是猜的）" : "（含暂停，按它等的任务算）" : "") + (l.overrun ? "（当前任务已超估时，会更晚）" : "") : ""}${l.fs_skew ? `\n共享盘时钟${l.fs_skew > 0 ? "快" : "慢"} ${f1(Math.abs(l.fs_skew) / 60)} 分（已校正）` : ""}`;
   const dc = l.away ? "var(--ok)" : l.returned ? "var(--faint)" : l.paused || l.holding || l.waiting ? "var(--warn)" : l.alive || l.managed && l.unfinished ? "var(--ok)" : l.unfinished && l.started !== false ? "var(--bad)" : "var(--faint)";
@@ -691,13 +704,7 @@ function laneRow(l, hb, gs, y, h, c, used) {
     }
     s += `<rect x="${xa}" y="${y + 4}" width="${Math.max(4, gw)}" height="${h - 8}" fill="transparent" ${tip(`${g.future ? "预计空档" : "空档"} ${ts(g.a)} → ${g.now ? "现在" : ts(g.b)}（${dur(g.b - g.a)}）\n` + (g.why.length ? g.why.slice(0, 8).map(x => x.text).join("\n") : "原因未记录：这段时间没有掉线、重启、drain 或等待记录（较早的事件 labmon 还没开始存）"))}/>`;
   }
-  let beyond = null;
-  for (const j of js) {
-    const a0 = jobT0(j), e0 = jobT1(j);
-    if (a0 == null || e0 == null) continue;
-    if (e0 > c.t1 && j.status !== "done") beyond = Math.max(beyond || 0, e0);
-    if (e0 < c.t0 || a0 > c.t1) continue;
-    used.add(j.group);
+  const drawJob = (j, a0, e0, k) => {
     const xa = c.X(Math.max(a0, c.t0)), xe = c.X(Math.min(e0, c.t1)), w = Math.max(1.5, xe - xa - 1.5);
     const col = j.status === "failed" ? (j.killed ? "var(--warn)" : "var(--bad)") : gcolor(j.group);
     const tt = `${j.id}\n${stOf(j)[0]} · ${ts(a0)} → ${ts(e0)}` + (j.hold && j.status !== "done" ? `（${j.deps ? j.dur_src : "时长按估时猜"}）` : "")
@@ -705,17 +712,40 @@ function laneRow(l, hb, gs, y, h, c, used) {
       + (j.dur_min ? `\n预计 ${dur(j.dur_min * 60)}` : "") + (j.overrun_min ? ` · 已超 ${dur(j.overrun_min * 60)}` : "") + (j.actual_min != null ? ` · 实际 ${dur(j.actual_min * 60)}` : "")
       + (j.status === "running" && !j.hold && j.eta_source ? `\n预计结束依据：${j.eta_source}` : "") + (j.host ? `\n${awayText(j)}（${l.pool ? "清单已交回算力池" : "清单已搬到 " + hostShort(hostOf(l.host))}）` : "")
       + (j.last_line ? "\n" + j.last_line.slice(0, 90) : "");
-    const yy = y + 3 + th * (pk.k.get(j.id) || 0), hh = th - (pk.n > 1 ? 1.5 : 0);
-    (c.pos ||= {})[j.id] = {x0: c.X(a0), x1: c.X(e0), y: yy + hh / 2, yt: y, yb: y + h, r};     // 依赖连线（depLines）从这里取
+    const yy = y + 3 + th * k;
+    (c.pos ||= {})[j.id] = {x0: c.X(a0), x1: c.X(e0), y: yy + bh / 2, yt: y, yb: y + h, r};     // 依赖连线（depLines）从这里取
     c.seen.add(j.hold ? "hold" : j.status === "failed" ? (j.killed ? "killed" : "failed") : j.status);
     // 运行中的填色到“现在”：条从开始画到预计结束，条上的百分比也是现在线在条上的位置（runFrac）；按步数比例会因启动、加载那段没有步数、多段任务只报当前这段而对不上（Issue #33），步数进度写在悬停里
-    s += `<g class="jg${DEPH.ch?.has(j.id) ? " on" : ""}" data-j="${esc(j.id)}">` + jobBar(j.status, j.hold, xa, yy, w, hh, col, j.status === "running" ? (c.cl(NOW) - xa) / w : 0, `class="j" data-id="${esc(j.id)}" ${tip(tt)}`);
-    if (w > 56) {
+    let out = `<g class="jg${DEPH.ch?.has(j.id) ? " on" : ""}" data-j="${esc(j.id)}">` + jobBar(j.status, j.hold, xa, yy, w, bh, col, j.status === "running" ? (c.cl(NOW) - xa) / w : 0, `class="j" data-id="${esc(j.id)}" ${tip(tt)}`);
+    if (w > 56 && th >= 13) {     // 超 4 道压细后不写字，悬停照给完整信息（#178）
       // 占位任务的斜纹已表明暂停，只加 ⏸；挂起的是在跑的任务被 SIGSTOP，写明
       const lab = barName(j) + (j.status !== "running" || j.hold || j.suspended ? "" : j.overrun_min ? " · 超估时" : j.eta_source === "无估时" ? " · 无估时" : ` · ${Math.round(runFrac(j) * 100)}%`);
-      s += `<text x="${xa + 5}" y="${yy + hh / 2 + 4}" style="pointer-events:none;fill:${j.status === "done" && !j.hold ? "#fff" : "var(--fg)"}">${esc(fit(lab, w - 10, j.hold ? "⏸ " : j.suspended ? "⏸ 挂起 · " : true))}</text>`;
+      out += `<text x="${xa + 5}" y="${yy + bh / 2 + 4}" style="pointer-events:none;fill:${j.status === "done" && !j.hold ? "#fff" : "var(--fg)"}">${esc(fit(lab, w - 10, j.hold ? "⏸ " : j.suspended ? "⏸ 挂起 · " : true))}</text>`;
     }
-    s += "</g>";
+    return out + "</g>";
+  };
+  let beyond = null;
+  const over = [];
+  for (const j of js) {
+    const a0 = jobT0(j), e0 = jobT1(j);
+    if (a0 == null || e0 == null) continue;
+    if (e0 > c.t1 && j.status !== "done") beyond = Math.max(beyond || 0, e0);
+    if (e0 < c.t0 || a0 > c.t1) continue;
+    used.add(j.group);
+    const k = pk.k.get(j.id) || 0;
+    if (pk.over && k >= pk.n - 1) over.push({j, t0: a0, t1: e0});
+    else s += drawJob(j, a0, e0, k);
+  }
+  if (over.length) {
+    const yy = y + 3 + th * (pk.n - 1);
+    for (const m of tlOverflow(over, c, 1.5)) {
+      if (m.items.length === 1) { const it = m.items[0]; s += drawJob(it.j, it.t0, it.t1, pk.n - 1); }
+      else {
+        const w = Math.max(1.5, m.xe - m.xa);
+        s += tlMoreBar(m.xa, yy, w, bh, m.items.map(it => `${it.j.id}（${stOf(it.j)[0]} · ${tsHM(it.t0)}→${tsHM(it.t1)}）`));
+        for (const it of m.items) (c.pos ||= {})[it.j.id] = {x0: c.X(it.t0), x1: c.X(it.t1), y: yy + bh / 2, yt: y, yb: y + h, r};
+      }
+    }
   }
   // 失败的尝试（后来重跑成功的也留着）：车道底部细红条＋圆标，横向相距不到 14px 的合成一个标
   const fa = (D.attempts || []).filter(x => x.lane === l.id && (x.host || l.host) === (l.away || l.host) && c.win(x.t0, x.t1)).sort((a, b) => a.t0 - b.t0), cs = [];
