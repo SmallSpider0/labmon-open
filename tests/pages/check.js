@@ -1332,6 +1332,56 @@ t("reg", "恶意快照：换到、不用这台的弹窗与接上卡都转义", (
   run(E, "POP = null; D.regs[0].queues = []; D.hosts[0].status.queues = []; D.regs.at(-1).home = D.regs[0].home; ADOPT = null");
   const c = run(E, 'hostPage("srv-a")'); clean(c, "接上卡"); has(c, "坏" + BADESC);
 });
+t("reg", "给项目用（#173）：无登记自用主机显示，借来或有登记的不显示，普通用户按权限过滤，恶意快照转义", () => {
+  const S = ovCtx(OV, RR);
+  ok(!run(S, 'hostPage("srv-a")').includes("给项目用"), "有登记时不该出");
+  run(S, "D.regs[0].queues = []; D.hosts[0].status.queues = []");
+  const ha = run(S, 'hostPage("srv-a")');
+  has(ha, "给项目用"); has(ha, 'data-assign="open"'); clean(ha, "给项目用卡片");
+  // 直接借来的组内服务器不显示；换人换给自己的自用主机（borrow.swap）显示
+  run(S, "D.regs[1].queues = []; D.hosts[1].status.queues = []");
+  ok(!run(S, 'hostPage("srv-b")').includes("给项目用"), "借来的组内服务器不该出");
+  run(S, "D.hosts[1].borrow.swap = true");
+  has(run(S, 'hostPage("srv-b")'), "给项目用");
+  // 普通用户：有别人登记（h.status.queues 非空，D.regs 被过滤为空）不显示；无登记且有权用该主机和项目才显示
+  const U = mkCtx(ovSrc, OV, {hash: "#/host/srv-a", filename: "overview.js", me: {...ADMIN_ME, name: "amy", role: "user", admin: false, ops: false, write: true, own: ["proj-a"], hosts: ["srv-a"]}});
+  run(U, "D.regs[0].queues = []");
+  ok(!run(U, 'hostPage("srv-a")').includes("给项目用"), "主机上有别人登记时不该误判为空");
+  run(U, "D.hosts[0].status.queues = []");
+  has(run(U, 'hostPage("srv-a")'), "给项目用");
+  run(U, 'ME = {...ME, hosts: []}');
+  ok(!run(U, 'hostPage("srv-a")').includes("给项目用"), "无主机权限时不该出");
+  // file:// 离线文件不显示
+  const F = mkCtx(ovSrc, OV, {hash: "#/host/srv-a", filename: "overview.js", protocol: "file:"});
+  run(F, "D.regs[0].queues = []; D.hosts[0].status.queues = []");
+  ok(!run(F, 'hostPage("srv-a")').includes("给项目用"), "file:// 不该出");
+  // 恶意快照转义
+  const E = ovCtx(OVE, RRE);
+  run(E, 'D.regs[0].queues = []; D.hosts[0].status.queues = []; assignAct("open", {h: "srv-a"})');
+  clean(run(E, 'hostPage("srv-a")'), "恶意快照给项目用弹窗");
+});
+ta("reg", "给项目用（#173）：弹窗选项目提交 POST host/assign，成功显示回执并关窗，失败报错", async () => {
+  const S = ovCtx(OV, RR, "#/host/srv-a"), sent = [];
+  run(S, "D.regs[0].queues = []; D.hosts[0].status.queues = []");
+  S.fetch = async (u, o) => {
+    const b = JSON.parse(o.body); sent.push([u, b]);
+    return b.project === "proj-b" ? {ok: true, status: 200, json: async () => ({msg: "已通知 proj-b 的实验会话使用 srv-a"})}
+      : {ok: false, status: 409, json: async () => ({error: "项目已归档"})};
+  };
+  run(S, 'assignAct("open", {h: "srv-a"})');
+  const pop = run(S, 'hostPage("srv-a")');
+  has(pop, 'data-assignto="proj-a"'); has(pop, 'data-assignto="proj-b"');
+  // 失败路径：错误显示在弹窗里，弹窗保持打开
+  await run(S, 'assignAct("go", {h: "srv-a"})');
+  has(run(S, 'hostPage("srv-a")'), "项目已归档");
+  ok(run(S, 'popIs("assign", "srv-a")'), "失败后弹窗应保持打开");
+  // 切换选 proj-b 后提交成功：发 POST host/assign，关闭弹窗并显示回执
+  run(S, 'POP.to = "proj-b"');
+  await run(S, 'assignAct("go", {h: "srv-a"})');
+  ok(sent.length === 2 && sent[1][0] === "host/assign" && sent[1][1].host === "srv-a" && sent[1][1].project === "proj-b", "请求不对：" + JSON.stringify(sent));
+  ok(!run(S, "POP"), "成功后弹窗应关闭");
+  has(run(S, 'hostPage("srv-a")'), "已通知 proj-b 的实验会话使用 srv-a");
+});
 t("manage", "缺省快照（没有 regs、项目没有 cfg）：抽屉照样画、写明还没有数据", () => {
   const S = ovCtx(OVS, RR), h = drw(S, "#/p/proj-a/manage");
   clean(h, "缺省快照的抽屉"); has(h, "还没有登记数据"); has(h, "还没有配置摘要"); has(h, "还没有调度数据");

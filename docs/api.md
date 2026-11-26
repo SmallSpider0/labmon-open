@@ -99,7 +99,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `GET /fleet/…`（组内服务器的数据） | `read`，只给管理员 |
 | `POST /fleet/op/…`、`/fleet/probe/…`、`/renew/…`（平台操作） | `admin`，只给管理员；公网须开启账号许可 |
 | `POST /sched/(weight\|focus\|unfocus)`、`/api/override/(focus\|unfocus)`（调度权重与优先，#16） | `project`，只给管理员 |
-| `POST /sched/…`、`/project/…`、`/reg/…`、`/p/<id>/collect`；`PUT /api/project/<id>/config` | `project` |
+| `POST /sched/…`、`/project/…`、`/reg/…`、`/host/assign`、`/p/<id>/collect`；`PUT /api/project/<id>/config` | `project`（`/host/assign` 按 `users.need_host` 与 `users.need_project` 核） |
 | `POST /collect` | `project` 或 `deploy`，只给管理员（普通用户用 `POST /p/<id>/collect` 采自己的项目） |
 | `GET /api/admin/deploy` | `deploy`，只给管理员 |
 | `GET /api/admin/backup`（冷备，回 `.tar.gz`） | `backup`，只给管理员，只在内网入口（#17） |

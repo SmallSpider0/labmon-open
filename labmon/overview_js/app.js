@@ -229,6 +229,7 @@ document.addEventListener("change", e => {               // 批量续租的勾�
   if ("achost" in d && POP?.k === "acc-hosts") { t.checked ? POP.sel.add(d.achost) : POP.sel.delete(d.achost); return; }
   if ("pushkind" in d && POP?.k === "acc-push") { POP.kind = t.value; ACC.err = null; t.blur(); return render(false); }
   if ("regto" in d && POP) { POP.to = d.regto; POP.err = null; return render(false); }   // 换到哪台
+  if ("assignto" in d && POP?.k === "assign") { POP.to = d.assignto; POP.err = null; return render(false); }   // 给项目用：选项目
   if ("adopt" in d && ADOPT) { ADOPT.sel[d.adopt] = t.checked; return render(false); }    // 接上卡的勾选
   const sel = d.rsel, ack = d.rack;
   if (!RPICK || (!sel && !ack) || FCAP?.pop === "renew" || RPICK.busy) return;      // 输验证码、提交中不改（同 renewDrawer 的 lock）
@@ -371,6 +372,8 @@ document.addEventListener("click", e => {
   const rgb = e.target.closest?.("[data-reg]");
   if (rgb && LANOFF() && rgb.dataset.reg !== "mv" && rgb.dataset.reg !== "rm") return noNet(e, rgb);
   if (rgb) { if (!rgb.disabled) regAct(rgb.dataset.reg, rgb.dataset); return; }
+  const asg = e.target.closest?.("[data-assign]");
+  if (asg) { if (!asg.disabled) assignAct(asg.dataset.assign, asg.dataset); return; }
   const fo = e.target.closest?.("[data-fop]");
   if (fo && LANOFF() && NONET.has(fo.dataset.fop)) return noNet(e, fo);
   if (fo) {

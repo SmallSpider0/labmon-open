@@ -174,6 +174,54 @@ async function adoptGo(hid) {
   catch (e) { ADOPT.busy = false; ADOPT.err = e.message || String(e); }
   render(false);
 }
+// 「给项目用」（主机页，#173）：这台在用的自用主机（不是直接借来的组内服务器）还没有任何登记时，选一个自己有权操作的项目，
+// 经 POST /host/assign → records.tell(project, "host", …) 通知该项目的实验会话去 labmon worker add，不改登记、不替会话挑清单。
+// 同时看 h.status.queues 与 D.regs：普通用户的 D.regs 只含自己的项目，用 h.status.queues 避免把已有别人登记的主机误判为空。
+let AMSG = null;                                          // 上一次通知的结果：{host, msg}（一分钟后收起）
+function assignSrc(h) {
+  if (!LIVE || !canUseHost(h.id) || (h.borrow && !h.borrow.swap) || !h.status) return null;
+  if ((h.status.queues || []).length) return null;
+  const me = (D.regs || []).find(x => x.host === h.id);
+  if (me && (me.state !== "active" || me.stale || (me.queues || []).length)) return null;
+  const ps = (D.projects || []).filter(p => canWrite(p.id));
+  return ps.length ? {h, ps} : null;
+}
+function assignCard(h) {
+  const A = assignSrc(h);
+  if (!A) return "";
+  const open = popIs("assign", h.id), P = open ? POP : null, ps = A.ps, hn = esc(hostShort(h));
+  const btn = `<button class="btn mini-btn pri" id="assign-${esc(h.id)}" data-assign="open" data-h="${esc(h.id)}" aria-haspopup="dialog" aria-expanded="${open}" ${tip("通知选定项目的实验会话使用这台主机")}>给项目用</button>`;
+  const tgt = open && ps.find(p => p.id === P.to);
+  const pick = ps.length > 1 ? `<div class="rg-tos">${ps.map(p => `<label class="rg-to"><input type="radio" name="assignto" data-assignto="${esc(p.id)}"${P?.to === p.id ? " checked" : ""}>`
+    + `<b>${esc(p.title || p.id)}</b>${p.title && p.title !== p.id ? `<span class="sm mut">${esc(p.id)}</span>` : ""}</label>`).join("")}</div>` : "";
+  const body = !open ? "" : `<div class="rn-note">${ps.length > 1 ? `要把 <b>${hn}</b> 给哪个项目用：` : `通知 <b>${esc(tgt?.title || ps[0].id)}</b> 的实验会话使用 <b>${hn}</b>？`}</div>${pick}
+    <div class="sm mut">发送一条消息给该项目的实验会话（下一轮 <code>labmon wait</code> 收到），由会话自行 <code>labmon worker add</code> 登记；看板不改动现有登记。</div>${P.err ? `<div class="rn-err">${esc(P.err)}</div>` : ""}`;
+  const go = `<button class="btn pri" data-assign="go" data-h="${esc(h.id)}" ${P?.busy ? "disabled" : ""}>${P?.busy ? "正在通知…" : "通知实验会话"}</button>`;
+  const msg = AMSG?.host === h.id ? `<div class="rn-state">${esc(AMSG.msg)}</div>` : "";
+  return `<div class="card assign"><div class="chd wrap"><b>给项目用</b><span class="sm mut">这台自用主机还没有登记队列</span></div>
+    <div class="row wrap" style="gap:8px;align-items:center"><span class="sm mut">选一个项目，通知它的实验会话来登记清单。</span>${popConfirm(btn, open, body, go, true)}</div>${msg}</div>`;
+}
+async function assignAct(act, d) {
+  const h = D.hosts.find(e => e.id === d.h), A = h && assignSrc(h);
+  if (!A) return;
+  if (act === "open") {
+    popToggle("assign", h.id, {to: A.ps[0].id, route: location.hash, trigger: "assign-" + h.id});
+    return render(false);
+  }
+  if (act !== "go" || !popIs("assign", h.id) || POP.busy) return;
+  const P = POP;
+  if (!A.ps.some(p => p.id === P.to)) { P.err = "选一个有权操作的项目"; return render(false); }
+  P.busy = true; P.err = null; render(false);
+  try {
+    const r = await postJSON("host/assign", {host: h.id, project: P.to});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+    const cur = AMSG = {host: h.id, msg: j.msg || "已通知实验会话"};
+    setTimeout(() => { if (AMSG === cur) { AMSG = null; render(false); } }, 60000);
+    if (POP === P) { FFOCUS = P.trigger; popClose(); }
+  } catch (e) { if (POP === P) { P.busy = false; P.err = e.message || String(e); } }
+  render(false);
+}
 // 「主机与队列」：这个项目的清单登记在哪几台（在用的在前），每台一行（.rg：左边名字与按状态分色的条、右边「换到其他主机」「不用这台」，照 .strip 的两列网格排，按钮不随名字长短折行）；
 // 逐条清单折在「展开 N 条」里只读，项目页收起的（跑完久了没动）不列。monitor.toml 列着、哪台都没登记的车道单列“只显示”；车道所在主机这轮登记没读到（regs 里没有这台，或 queues 为空值）的不算没登记
 function projRegSec(p) {
