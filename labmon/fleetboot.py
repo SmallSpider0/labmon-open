@@ -57,7 +57,7 @@ def mine(cfg: dict | None, hosts: list[dict] = ()) -> list[dict]:
         owners = {p.get("owner") for p in st.get("gpu_procs") or []}
         state = "down" if hl.get("state") == "down" else "job" if "job" in owners or st.get("running") \
             else "unknown" if "other" in owners else "keepalive" if "keepalive" in owners else "idle" if st else None
-        fresh = bool(st) and state != "down" and e.get("worker_up") and not e.get("lan_off")
+        fresh = F.worker_fresh(e)
         error = None if fresh or state == "down" or not e else "本机不在内网" if e.get("lan_off") \
             else e.get("error") or e.get("status_error") or (f"worker 已停（{e['stopped']}）" if e.get("stopped") else
                                                               f"worker 状态 {fmt_dur(e['age'])} 没更新" if e.get("age") is not None else "worker 没有状态")

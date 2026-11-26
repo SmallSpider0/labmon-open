@@ -123,21 +123,28 @@ def view(hosts: list[dict] | None = None, t: float | None = None, cfg: dict | No
     sts, off, busy, accs = F._load_state(), F.off_servers(), FO.busy(), F.accs()
     who = DK.whose(cfg, active_hosts())
     h0 = int(t // 3600 * 3600) - 167 * 3600
+    snap = {e["id"]: e for e in hosts or []}
     servers = []
     for s in cfg["servers"]:
         st = sts.get(s["id"]) or {}
         rows = _rows(s["id"], accs.get(s["id"]))
         strip, idle_h = _strip(rows, h0)
-        smp, o = st.get("sample") or {}, off.get(s["id"])
-        if smp:                                          # 每组实验归谁：按路径，对不上算使用人（归属表在页面上改了立刻生效，所以不存进样本）
-            smp = {**smp, "work": [w if w["kind"] == "keepalive" else {**w, "owner": who([w.get("cwd"), *reversed(w.get("chain") or [])]) or s["holder"]}
+        o = off.get(s["id"])
+        # 借用中且 worker 状态新鲜（与自用主机同一门槛 fleet.worker_fresh，#174）：实时 sample 改用 worker 状态，避免滞后最多 10 分钟；
+        # worker 过期、不在内网或掉线时回退探测样本。小时使用记录（hours/ 的 bw）仍由探针统一记，保持同一小时采样密度一致。
+        e = snap.get(s["id"]) if not o and F.borrowed(s) else None
+        live = F.worker_fresh(e)
+        smp = F.from_worker(e["status"], cfg, s["holder"], job_owner=F.borrower(s, cfg)) if live else st.get("sample") or {}
+        if smp:                                          # 每组实验归谁：按路径，对不上算兜底归属（借用中 labmon 任务归借用方，其余归使用人）
+            smp = {**smp, "work": [w if w["kind"] == "keepalive" else {**w, "owner": who([w.get("cwd"), *reversed(w.get("chain") or [])]) or w.get("owner") or s["holder"]}
                                    for w in smp.get("work", [])]}
         lease = None if o else F.lease_end(st, cfg)
         servers.append({**{k: s.get(k) for k in ("id", "holder", "job", "label", "ssh", "port", "pool")},
-                        "public": s["pool"] not in cfg["private_pools"], "last": st.get("last"), "error": None if o else st.get("error"),
-                        "down": None if o else st.get("down"), "fails": st.get("fails", 0), "since": st.get("since"), "started": st.get("started"),
+                        "public": s["pool"] not in cfg["private_pools"], "last": st.get("last"), "error": None if o or live else st.get("error"),
+                        "down": None if o or live else st.get("down"), "fails": 0 if live else st.get("fails", 0), "since": None if o or live else st.get("since"),
+                        "started": (smp.get("started") if live else None) or st.get("started"),
                         "lease_end": lease, "lease_cut": B.cutoff({"holder": s["holder"]}, lease)[0], "off": o,   # lease_cut：借用最晚截止到它（借来用的表单提示）
-                        "last_job": st.get("last_job"), "state": "off" if o else "down" if st.get("down") else smp.get("state"),
+                        "last_job": st.get("last_job"), "state": "off" if o else smp["state"] if live else "down" if st.get("down") else smp.get("state"),
                         "sample": None if o else smp or None,
                         # 本地盘开机以来的新写入（#149）：总量取这次探测的，路径取扫出的（换了容器的旧结果不要）
                         "lw": None if o else F.server_lw(st),
