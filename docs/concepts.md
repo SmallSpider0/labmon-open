@@ -80,7 +80,7 @@
 | 71 | 普通用户此刻能用的主机 | `myHosts`（overview_js/home.js） |
 | 72 | 组内服务器页面的数据、详情曲线、人员详情；命令行 `labmon fleet status` / `probe` | `fleetview.view`、`fleetview.detail`、`fleetview.person`；`fleetview.show` |
 | 73 | 使用记录；按人统计 | 记 `fleet._hour`（`fleet.accs`）；拆 `fleetview._parts`、汇总 `fleetview._by_person`、`fleetview._stats`、借来借出 `fleetview._lending`；页面上 `useBar`、`perHist`（`PKS`、`PSN`、`PSC`、`lendLines`、overview_js/fleetops.js） |
-| 74 | 自用主机的使用样本；逐次样本的一行 | `fleet.from_worker`（`fleetboot.mine`、`sample`）、`fleet.record_mine`（`overview._notices`）；`fleet._series_row`；曲线接口认哪些 id `fleetview.known` |
+| 74 | worker 状态新鲜度门槛；自用主机与借用中组内服务器的使用样本；逐次样本的一行 | `fleet.worker_fresh`（`fleetboot.mine`、`fleetview.view`）、`fleet.from_worker`（`fleetboot.mine`、`fleetview.view`、`sample`）、`fleet.record_mine`（`overview._notices`）；`fleet._series_row`；曲线接口认哪些 id `fleetview.known` |
 | 75 | 可共享 | `fleet.shareable`（`analyze`、`from_worker`） |
 | 76 | 预备续租、续租后拉起 worker | `renew.reserve`、`renew.cancel`、`renew.begin`、`renew.after`；页面上自用主机的按钮 `renewBtns`，续租一台的确认 `goRenew`（overview_js/sched.js） |
 | 77 | 后端看 worker 状态里运行中任务的预计结束 | `renew.eta_of` |
@@ -345,8 +345,8 @@
    实现：`fleetview.view`、`fleetview.detail`、`fleetview.person`；`fleetview.show`
 73. **使用记录；按人统计**：使用记录（每小时一行，组内服务器与自用主机同一套；借用中的那部分记在行的 `bw[借的人]`）；按人统计（拆小时行：借用中的算给借的人、主人那边记“借出”，按小时归一；人员卡、人员详情、`holders` 共用）
    实现：记 `fleet._hour`（当前小时的累计 `fleet.accs`）；拆 `fleetview._parts`、汇总 `fleetview._by_person`、`fleetview._stats`、借来借出 `fleetview._lending`；页面上 `useBar`、`perHist`（状态名 `PKS`、`PSN`、`PSC`，借来借出的明细 `lendLines`，overview_js/fleetops.js）
-74. **自用主机的使用样本；逐次样本的一行**：自用主机的使用样本（worker 状态换成与探针的 `analyze` 同形的样本：状态只看 GPU 进程，负载按任务归组；每轮全局采集记一次小时行，每 `interval` 写一行逐次样本）；逐次样本的一行（探针与自用主机共用）
-   实现：`fleet.from_worker`（`fleetboot.mine` 的 `sample`，卡片与抽屉都取它）、`fleet.record_mine`（`overview._notices` 调）；`fleet._series_row`；曲线接口认哪些 id `fleetview.known`
+74. **worker 状态新鲜度门槛；自用主机与借用中组内服务器的使用样本；逐次样本的一行**：`fleet.worker_fresh` 判工作台快照里主机的 worker 状态是否新鲜（有 `status`、没掉线、`worker_up` 为真且 `not lan_off`），自用主机（`fleetboot.mine`）与借用中组内服务器（`fleetview.view`，不新鲜或连不上时回退探测样本，#174）共用；使用样本由 `fleet.from_worker` 把 worker 状态换成与探针 `analyze` 同形的样本（状态只看 GPU 进程，负载按任务与对方进程归组）；自用主机每轮全局采集记一次小时行、每 `interval` 写一行逐次样本，借用中组内服务器的小时行（`bw`）与逐次样本仍由探针统一记；逐次样本的一行（探针与自用主机共用）
+   实现：`fleet.worker_fresh`、`fleet.from_worker`（`fleetboot.mine` 与 `fleetview.view` 的 `sample`，卡片与抽屉都取它）、`fleet.record_mine`（`overview._notices` 调）；`fleet._series_row`；曲线接口认哪些 id `fleetview.known`
 75. **可共享**：可共享（除保活外的显存、利用率、CPU、内存都低于 `[fleet] share`）
    实现：`fleet.shareable`（`analyze` 与 `from_worker` 共用）
 76. **预备续租、续租后拉起 worker**：预备续租（取消时记下这一期，自动预备时段里取消过的不再自动预备）、续租后拉起 worker

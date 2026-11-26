@@ -340,6 +340,47 @@ class TickTest(unittest.TestCase):
         self.assertEqual(p["total"]["frac"]["job"], 0)
         self.assertAlmostEqual(sum(d["h"].get("lent", 0) for d in p["days"]), aa["h"]["lent"], delta=0.05)
 
+    def test_borrowed_view_uses_fresh_worker_sample(self):
+        """借用中且 worker 状态新鲜时，组内页 sample 与 state 立即改用 fleet.from_worker（#174），不滞后最多 10 分钟；
+        同时保留对方 GPU 进程（容器内 other 与宿主机未知进程）及归属；worker 过期/不在内网/掉线/未传 hosts 时回退探测样本；
+        小时使用记录（hours/ 的 bw）仍由探针记，view 不改写它。"""
+        c = cfg(me="ME")
+        c["servers"][0] = {**c["servers"][0], "borrow_since": "2026-11-01 00:00", "borrow_by": "ME"}
+        self.out["a"] = IDLE
+        F.tick(T0, self.fetch, c, force="a")                  # 探测样本还是 idle
+        before = F.accs()["a"]["n"]
+        info = {"gpus": [{"i": 0, "uuid": "G0", "name": "A6000", "used": 14000, "total": 46000, "free": 32000, "util": 88}],
+                "mem": {"used": 24.0, "limit": 120.0, "anon": 6.0, "src": "cgroup"}, "cpu_used": 6.0, "cpu_quota": 16.0, "nproc": 64,
+                "started": T0 - 3600}
+        procs = [{"owner": "job", "job": "train1", "pid": 11, "hpid": 101, "mb": 8000, "comm": "python"},
+                 {"owner": "other", "pid": 15, "hpid": 105, "mb": 1200, "comm": "jupyter"},
+                 {"owner": "other", "pid": None, "hpid": 106, "mb": 300, "comm": None},
+                 {"owner": "keepalive", "pid": 14, "hpid": 104, "mb": 4500, "comm": "python"}]
+        running = [{"name": "train1", "project": "p1", "t0": T0 - 120, "root": "/tmp/p1"}]
+        st = fake_status(t=T0 + 30, info=info, gpu_procs=procs, running=running)
+        host = {"id": "a", "worker_up": True, "lan_off": False, "status": st,
+                "health": {"state": "ok", "fails": 0, "since": None, "why": None}}
+        v = FV.view([host], T0 + 30, c)
+        a = v["servers"][0]
+        self.assertEqual((a["state"], a["sample"]["state"]), ("job", "job"))
+        self.assertEqual((a["sample"]["vram_real"], a["sample"]["vram_ka"]), (9500, 4500))
+        by_lbl = {w["label"]: w for w in a["sample"]["work"]}
+        self.assertEqual((by_lbl["train1"]["kind"], by_lbl["train1"]["owner"]), ("job", "ME"))
+        self.assertEqual((by_lbl["labmon 之外：jupyter"]["kind"], by_lbl["labmon 之外：jupyter"]["owner"]), ("job", "AA"))
+        self.assertEqual(by_lbl["宿主机 PID 106（容器里找不到）"]["kind"], "unknown")
+        self.assertIn("保活", by_lbl)
+        self.assertEqual([u["label"] for u in v["unknown"]], ["宿主机 PID 106（容器里找不到）"])
+        self.assertEqual(F.accs()["a"]["n"], before)          # view 不改写小时使用记录
+        # worker 不新鲜 / 不在内网 / 掉线 / 未传 hosts：回退探测样本（idle）
+        for bad in ({**host, "worker_up": False}, {**host, "lan_off": True},
+                    {**host, "health": {"state": "down", "fails": 3, "since": T0, "why": "连不上"}}):
+            fb = FV.view([bad], T0 + 30, c)["servers"][0]
+            self.assertEqual((fb["state"], fb["sample"]["state"]), ("idle", "idle"))
+        self.assertEqual(FV.view([], T0 + 30, c)["servers"][0]["state"], "idle")
+        # 归还后恢复探测样本
+        c["servers"][0]["borrow_returned"] = "2026-11-01 00:05"
+        self.assertEqual(FV.view([host], T0 + 30, c)["servers"][0]["state"], "idle")
+
     def test_stats_by_hour(self):
         """按人统计按小时归一：一人两台，一台每小时 60 次样本（自用主机每分钟一次）、一台 6 次（探针），各一小时，时间占比各一半。"""
         from labmon.state import append_row

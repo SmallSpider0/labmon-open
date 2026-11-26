@@ -701,13 +701,21 @@ def shareable(vr, vt, ur, cr, cq, mr, ml, cfg: dict) -> bool:
                 and (mr is None or not ml or mr / ml < s["mem"]))
 
 
-def from_worker(st: dict, cfg: dict | None, holder: str | None = None) -> dict:
-    """自用主机的 worker 状态换成与 analyze 同形的样本（使用记录与组内页的抽屉用），口径与探针一致：状态只看 GPU 进程，按 STATES 的先后取；
+def worker_fresh(e: dict | None) -> bool:
+    """工作台快照里这台主机的 worker 状态新不新鲜（本机在内网、没掉线、有状态且未过 STALE_S）：
+    自用主机（fleetboot.mine）与借用中的组内服务器（fleetview.view）共用同一门槛（#174）。"""
+    return bool(e and e.get("status") and (e.get("health") or {}).get("state") != "down"
+                and e.get("worker_up") and not e.get("lan_off"))
+
+
+def from_worker(st: dict, cfg: dict | None, holder: str | None = None, *, job_owner: str | None = None) -> dict:
+    """自用主机与借用中组内服务器的 worker 状态换成与 analyze 同形的样本（使用记录与组内页用），口径与探针一致：状态只看 GPU 进程，按 STATES 的先后取；
     labmon 的任务与容器里找得到的 labmon 之外的 GPU 进程都算实验（探针：找得到、不是保活的一律算实验），对不回容器的（pid 为空）算未识别，
     命令行含 keep_alive 的算保活（worker 认的字样，同 [fleet] keepalive 的缺省；worker 不 import 本包，另加的字样与规则它不认）。
     只有 CPU 的任务、占位任务不占 GPU，不算实验。CPU 与内存取整个容器的（worker 状态里没有保活进程树单独的量：mem_ka 为 None），只用来判可共享。
     work：GPU 进程归成一组组负载（worker 的任务按任务名一组，保活一组，labmon 之外的每个进程一组），不带 pid（页面上不出「这是保活」：
-    worker 认保活不看 [fleet] keepalive）。root：worker 量的容器根盘（info.rootfs：已用、总量、测不测得准、容器私有的 /dev/shm，与探针同形）。
+    worker 认保活不看 [fleet] keepalive）。job_owner：借用中 labmon 任务的兜底归属（路径对不上共享盘时算借用方，对方进程仍归 holder）。
+    root：worker 量的容器根盘（info.rootfs：已用、总量、测不测得准、容器私有的 /dev/shm，与探针同形）。
     fleetboot.mine 给平台操作用的 state（有任务在跑就算 job、labmon 之外的一律未识别）是另一回事，不用这个。"""
     info, gp = st.get("info") or {}, st.get("gpu_procs") or []
     kind = lambda p: "keepalive" if p.get("owner") == "keepalive" else "job" if p.get("owner") == "job" or p.get("pid") is not None else "unknown"  # noqa: E731
@@ -723,11 +731,13 @@ def from_worker(st: dict, cfg: dict | None, holder: str | None = None) -> dict:
     runs, groups = {j.get("name"): j for j in st.get("running") or []}, {}
     for p in gp:
         k = kind(p)
+        pk = p.get("hpid") if p.get("hpid") is not None else p.get("pid")
         key, label = (("job", p.get("job")), p.get("job")) if p.get("owner") == "job" else (("ka",), "保活") if k == "keepalive" \
-            else (("p", p.get("hpid")), f"labmon 之外：{p.get('comm') or '进程'}") if k == "job" else (("p", p.get("hpid")), f"宿主机 PID {p.get('hpid')}（容器里找不到）")
+            else (("p", pk), f"labmon 之外：{p.get('comm') or '进程'}") if k == "job" else (("p", pk), f"宿主机 PID {p.get('hpid')}（容器里找不到）")
         j = runs.get(p.get("job")) if p.get("owner") == "job" else None
+        who = (job_owner or holder) if p.get("owner") == "job" else holder
         g = groups.setdefault(key, {"kind": k, "label": label, "mb": 0, "n": 0, "names": [], "cwd": j and j.get("root"),
-                                    "etime": round(st["t"] - j["t0"]) if j and j.get("t0") and st.get("t") else None, **({"owner": holder} if k == "job" else {})})
+                                    "etime": round(st["t"] - j["t0"]) if j and j.get("t0") and st.get("t") else None, **({"owner": who} if k == "job" else {})})
         g["mb"] += p.get("mb") or 0
         g["n"] += 1
     work = sorted(({**g, "mb": round(g["mb"])} for g in groups.values()), key=lambda w: (STATES.index(w["kind"]), -w["mb"]))
