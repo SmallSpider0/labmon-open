@@ -359,8 +359,8 @@
    实现：`popConfirm`、`popToggle`、`popClose`、`closePop`、`fitPops`；平台操作的弹窗 `opPop`（overview_js/fleet.js）
 80. **平台操作确认的风险分层；会中断什么的那句**：平台操作确认的风险分层（#14：一句结论 → 要勾才动的风险与勾选框 → 折起来的细节，开合记在 `POP.more`；续租一台、关机的弹窗与换人向导共用）；会中断什么的那句
    实现：`riskSay`、`riskNeed`、`riskMore`；`busyText`（批量续租的注意 `renewWarn` 也用它，overview_js/fleetops.js）
-81. **批量续租**：批量续租（#14：右侧抽屉 `#/fleet/renew`，提醒条点的 `#/fleet/renew/<id>` 只勾那一台；一台一行，本行勾「已说好」；勾选在 `RPICK`；没登录时验证码在抽屉底部（`FCAP.pop = "renew"`），开始后进度在抽屉顶上）
-   实现：`renewDrawer`（`rpList`、`rpBody`；`DH.renew`，overview_js/fleetops.js）
+81. **批量续租**：批量续租（#14：右侧抽屉 `#/fleet/renew`，提醒条点的 `#/fleet/renew/<id>` 只勾那一台；一台一行，本行勾「已说好」，借用中的禁选并提示还掉或点「与平台核对」自动归还，#171；勾选在 `RPICK`；没登录时验证码在抽屉底部（`FCAP.pop = "renew"`），开始后进度在抽屉顶上）
+   实现：`renewDrawer`（`rpList`、`rpBorrowed`、`rpBody`；`DH.renew`，overview_js/fleetops.js）
 82. **弹窗里选一个将来的时刻**：弹窗里选一个将来的时刻（借卡与改约定的约定时间、优先的到期：日期框加时、分下拉，缺省现在（下一个 5 分钟档），小签在当前值上往后加、「现在」、清空，一句到几点还有多久；晚于租期截止的说明；过去的、没填完的、停在「现在」的标红，点确认时拦下）
    实现：`whenPick`（缺省 `whenInit`、`whenNow`，小签 `whenTap`、`whenAdd`（`WHEN_ADD`）、点前失焦 `whenBlur`，控件改了 `whenInput`、`whenRead`、`whenSync`，说明 `whenSay`，`whenT`、`whenPast`、`whenHalf`，提交前 `whenStop`；epoch 秒换成控件的值 `dtLocal`，overview_js/fleet.js）
 83. **主机的名字只有三种写法：短名、全名、组内服务器「使用人」**：主机的名字只有三种写法：短名（表格的主机列、小图、时间线、车道名；直接借来的叫“借 EVA”）、全名（主机清单的 `label`，借来的是「节点（借 EVA）」：告警、标题、悬停）、组内服务器「使用人（id）」
