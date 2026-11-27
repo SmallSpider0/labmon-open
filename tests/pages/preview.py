@@ -109,6 +109,12 @@ def build(out: Path, kind: str = "normal", who=None) -> list[str]:
             listing = U.listing(directory=True) if ident.role == "admin" else None
         me.update(commit="a1b2c3d000000000000000000000000000000000",
                   push={"set": True, "kind": "bark", "target": "Bark · abc…xyz"} if ident.name == "amy" else {"set": False})
+        if ident.role != "admin" and isinstance(snap.get("fleet"), dict):
+            # 普通用户预览：为本人持有的服务器写假曲线，抽屉内图表可直接渲染不报 404（#211）
+            fdir = out / "fleet"
+            fdir.mkdir(exist_ok=True)
+            for s in (snap["fleet"].get("servers") or []) + (snap["fleet"].get("mine") or []):
+                (fdir / f"{s['id']}.json").write_text(json.dumps({"id": s["id"], "series": S._series(30, 61.0, 1)}, ensure_ascii=False))
         (out / "api").mkdir(exist_ok=True)
         (out / "api" / "me.json").write_text(json.dumps(me, ensure_ascii=False))
         if listing:

@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from http.cookies import CookieError, SimpleCookie
 from pathlib import Path
 
+from . import disk as DK
 from . import projects as PJ
 from .config import CLIENT_HEADER, COMMIT_RE, POOL, ConfigError, host_users, pause_by, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
@@ -956,11 +957,17 @@ def visible(who: Ident, acc: Access | None = None):
                           or e.get("kind") in ("account", "hostcheck", "maint", "server", "report") or e.get("who")) and _related(e, acc)
 
 
-# 普通用户的全局快照只取这些（#17）：VIEW_KEYS 原样给，下面 view 里再按 access 过滤几项（sched 去掉别人项目暂停的 by，#16）；不在白名单里的（以后新加的字段也一样）不给。
+# 普通用户的全局快照只取这些（#17、#211）：VIEW_KEYS 原样给，下面 view 里再按 access 与本人绑定过滤几项；不在白名单里的（以后新加的字段也一样）不给。
 VIEW_KEYS = ("generated", "lan", "event_kinds")
-# 共享盘只给主机页那条共享盘条要的：总量、剩余、历史、提醒线与扫描进度（ours 另按项目过滤，scanner 只在可见主机时给）
-VIEW_DISK = ("root", "df", "eta", "hist", "warn_gb", "at", "units", "pending", "yield")
-VIEW_DISK_ALERTS = ("low", "soon")                     # 整块盘的告警（快满）；按人的 burst:、over: 不给
+# 共享盘白名单统一定义在 disk.py（VIEW_DISK、VIEW_DISK_ALERTS、disk.person_storage），这里保留同名导出
+VIEW_DISK = DK.VIEW_DISK
+VIEW_DISK_ALERTS = DK.VIEW_DISK_ALERTS
+# 本人持有服务器的字段白名单（#211）：剥离 lease_cut、using、reserve、known_hosts 等平台/借用内部字段
+SELF_FLEET_KEYS = ("id", "holder", "job", "label", "ssh", "port", "pool", "public", "mine",
+                   "last", "error", "down", "fails", "since", "started",
+                   "lease_end", "off", "last_job", "state", "lw",
+                   "strip", "h0", "idle_h", "s7", "s30", "guard", "lend")
+SELF_BORROW_KEYS = ("since", "until", "pool", "returning", "returned", "by")
 STANDBY_SAY = "这台看板服务是备用：页面上的数据可能不是最新的，要动东西到主看板做"
 
 
@@ -972,18 +979,110 @@ def _ovr_by(h: dict, own) -> dict:
     return {**h, "status": {**st, "overrides": [o if o.get("target") in own else {k: v for k, v in o.items() if k != "by"} for o in st["overrides"]]}}
 
 
+def _is_other_work(w: dict, person: str, borrowed: bool, other_jobs: set[str]) -> bool:
+    """这条 sample.work 是否属于借用方/他人池任务（需脱敏）。保留 keepalive 与本人进程。"""
+    if w.get("kind") == "keepalive":
+        return False
+    if w.get("label") in other_jobs:
+        return True
+    owner = w.get("owner")
+    if owner and owner != person:
+        return True
+    if borrowed:
+        if not owner:
+            return True
+        if any("labmon" in str(c) for c in (w.get("chain") or [])) or str(w.get("cwd") or "").startswith("/tmp/labmon"):
+            return True
+    return False
+
+
+def _sanitize_work(w: dict, pool_task: bool) -> dict:
+    """脱敏借用方/算力池任务：仅保留 kind/mb/n/etime 与通用标签，剥离 names/cwd/chain/owner/rule/pid。"""
+    return {"kind": w.get("kind"), "label": "算力池任务" if pool_task else "借用方任务",
+            "mb": w.get("mb"), "n": w.get("n"), "etime": w.get("etime")}
+
+
+def _clean_srv(x: dict, person: str, snap: dict, acc: Access) -> dict:
+    """一台本人持有的服务器按白名单投影（#211）：保留实时资源、保活守护、租期、逐小时条与借用人名；
+    剥离 reserve/using/lease_cut/borrow.for/away；借用中与入池自用主机的他人任务脱敏。"""
+    out = {k: x[k] for k in SELF_FLEET_KEYS if k in x}
+    b = x.get("borrow")
+    active_borrow = isinstance(b, dict) and bool(b.get("since")) and not b.get("returned")
+    if isinstance(b, dict):
+        cb = {k: b[k] for k in SELF_BORROW_KEYS if k in b}
+        if active_borrow and "returning" not in cb:
+            he = next((h for h in snap.get("hosts") or [] if h.get("id") == x.get("id")), None)
+            ret = ((he or {}).get("borrow") or {}).get("returning")
+            if ret:
+                cb["returning"] = ret
+        out["borrow"] = cb
+    else:
+        out["borrow"] = None
+    # 自用主机上跑着他人项目（如入池跑的池任务）时，认出这些任务名并脱敏顶层 work 与 sample.work
+    other_jobs: set[str] = set()
+    if x.get("mine"):
+        he = next((h for h in snap.get("hosts") or [] if h.get("id") == x.get("id")), None)
+        other_jobs = {j.get("name") for j in ((he or {}).get("status") or {}).get("running") or []
+                      if j.get("name") and j.get("project") and j.get("project") not in acc.projects}
+        if "work" in x and isinstance(x["work"], list):
+            out["work"] = [{"kind": "job", "label": "算力池任务", "mb": w.get("mb")}
+                           if w.get("kind") == "job" and w.get("label") in other_jobs else w
+                           for w in x["work"]]
+    smp = x.get("sample")
+    if isinstance(smp, dict):
+        pool_task = bool((b or {}).get("pool")) if active_borrow else bool(x.get("mine"))
+        ws = smp.get("work")
+        if isinstance(ws, list) and (active_borrow or other_jobs):
+            ws = [_sanitize_work(w, pool_task) if _is_other_work(w, person, active_borrow, other_jobs) else w for w in ws]
+            out["sample"] = {**smp, "work": ws}
+        else:
+            out["sample"] = smp
+    else:
+        out["sample"] = None
+    return out
+
+
+def _self_fleet(fl: dict | None, person: str | None, snap: dict, acc: Access) -> dict | None:
+    """普通用户看到的本人持有服务器视图（#211）：仅保留 holder == person 的 servers 与 mine，
+    顶层 ops=None、holders=[]、quota=None、scope="self"，unknown 仅留本人服务器项。未绑人员或名下无服务器返回 None。"""
+    if not isinstance(fl, dict) or not person or fl.get("error"):
+        return None
+    servers = [_clean_srv(x, person, snap, acc) for x in fl.get("servers") or [] if isinstance(x, dict) and x.get("holder") == person]
+    mine = [_clean_srv(x, person, snap, acc) for x in fl.get("mine") or [] if isinstance(x, dict) and x.get("holder") == person]
+    if not servers and not mine:
+        return None
+    own_ids = {x["id"] for x in servers + mine}
+    borrowed_ids = {x["id"] for x in servers if isinstance(x.get("borrow"), dict) and x["borrow"].get("since") and not x["borrow"].get("returned")}
+    unknown = []
+    for u in fl.get("unknown") or []:
+        if u.get("id") not in own_ids:
+            continue
+        if u.get("id") in borrowed_ids:
+            unknown.append({"id": u["id"], "holder": u.get("holder"), "kind": u.get("kind", "unknown"),
+                            "label": u.get("label"), "mb": u.get("mb"), "n": u.get("n")})
+        else:
+            unknown.append(u)
+    return {"scope": "self", "ops": None, "servers": servers, "mine": mine, "holders": [], "quota": None,
+            "unknown": unknown, "interval": fl.get("interval"), "share": fl.get("share"), "names": fl.get("names")}
+
+
 def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
-    """看的人能看到的全局快照。管理员原样。普通用户按白名单取（#17）：VIEW_KEYS 原样；主机只留给他看的（他能用的、他的项目有车道的），
+    """看的人能看到的全局快照。管理员原样。普通用户按白名单取（#17、#211）：VIEW_KEYS 原样；主机只留给他看的（他能用的、他的项目有车道的），
     整项照给（同一台上别人任务的命令行与日志末尾也在里面：一台主机开给谁，谁就看得到这台上的所有任务，docs/api.md「普通用户看到的」）；
-    项目、已归档的、挪法建议、配色只留他的，登记只留那些主机上他项目的清单（#167）；共享盘取 VIEW_DISK；主备只给 role 与一句通用的话。
-    组内服务器（fleet）、提醒（notices）、给实验会话的消息（wake）、看板服务所在机的体检（hostcheck，#166）给空值，记录的分类去掉组内的那几类。
+    项目、已归档的、挪法建议、配色只留他的，登记只留那些主机上他项目的清单（#167）；
+    共享盘经 disk.person_storage 仅保留总盘概况与本人目录/告警（叠加可见 scanner 与本人项目的 ours）；
+    服务器经 _self_fleet 仅保留持有人是本人的服务器（scope="self"，借用中脱敏对方进程并保留借用人名）；
+    算力池仅对 pool.member(who) 下发 pool.summary 聚合概况与脱敏后的本人项目清单 my_lists，非成员为 None；
+    主备只给 role 与一句通用的话；提醒（notices）、给实验会话的消息（wake）、看板服务所在机的体检（hostcheck，#166）给空值，记录的分类去掉组内的那几类。
     调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上），别人项目的暂停去掉谁下的（by），主人名去掉、只留分组用的 pk（#23）；
     主机状态里别人项目的临时指令同样去掉 by（_ovr_by，#27）。"""
     if who.role == "admin" or not snap:
         return snap
+    from . import pool as PO
     acc = acc or access(who, snap)
+    person, _ = person_of(who.name)
     out = {k: snap[k] for k in VIEW_KEYS if k in snap}
-    out.update(fleet=None, notices=[], wake=[], hostcheck=None,
+    out.update(notices=[], wake=[], hostcheck=None,
                event_cats=[c for c in snap.get("event_cats") or EVENT_CATS if c[0] not in FLEET_CATS and c[0] != "report"],
                access={"own": sorted(acc.projects), "hosts": sorted(acc.allowed)})
     out["hosts"] = [_ovr_by(h, acc.projects) for h in snap.get("hosts") or [] if h.get("id") in acc.hosts]
@@ -1004,14 +1103,17 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
             return {**p, "person": None, **({"paused": {k: v for k, v in pa.items() if k != "by"}} if "by" in pa else {})}
         out["sched"] = {**sc, "projects": [p if p.get("id") in acc.projects else other(p) for p in sc.get("projects") or []]}
     dk = snap.get("disk")
-    out["disk"] = None
-    if isinstance(dk, dict):
-        d = {k: dk[k] for k in VIEW_DISK if k in dk}
+    out["disk"] = DK.person_storage(person, snap)
+    if isinstance(out["disk"], dict) and isinstance(dk, dict):
         if dk.get("scanner") in acc.hosts:
-            d["scanner"] = dk["scanner"]
+            out["disk"]["scanner"] = dk["scanner"]
         if isinstance(dk.get("ours"), dict):
-            d["ours"] = {"dirs": [x for x in dk["ours"].get("dirs") or [] if x.get("p") in acc.projects],
-                         "projects": {k: v for k, v in (dk["ours"].get("projects") or {}).items() if k in acc.projects}}
-        d["alerts"] = [a for a in dk.get("alerts") or [] if a.get("key") in VIEW_DISK_ALERTS]
-        out["disk"] = d
+            out["disk"]["ours"] = {"dirs": [x for x in dk["ours"].get("dirs") or [] if x.get("p") in acc.projects],
+                                   "projects": {k: v for k, v in (dk["ours"].get("projects") or {}).items() if k in acc.projects}}
+    out["fleet"] = _self_fleet(snap.get("fleet"), person, snap, acc)
+    if PO.member(who):
+        ps = PO.summary(snap, own_projects=acc.projects)
+        out["pool"] = {"summary": {k: v for k, v in ps.items() if k != "my_lists"}, "my_lists": ps["my_lists"]}
+    else:
+        out["pool"] = None
     return out

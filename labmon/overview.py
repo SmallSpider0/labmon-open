@@ -505,6 +505,12 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True, pool_tick=
         except Exception:  # noqa: BLE001 — 池出错不挡这一轮的快照（只记服务日志，不弹通知：每轮都会再来）
             snap["pool"] = old.get("pool") or {}
             log(f"算力池这一轮出错\n{traceback.format_exc()}")
+    if isinstance(snap.get("pool"), dict) and "summary" not in snap["pool"]:
+        from . import pool as PO
+        snap["pool"] = {**snap["pool"], "summary": PO.summary(snap, cfg=fleet_cfg)}
+    elif "pool" not in snap and isinstance(fleet, dict) and not fleet.get("error"):
+        from . import pool as PO
+        snap["pool"] = {"lists": {}, "gone": [], "summary": PO.summary(snap, cfg=fleet_cfg)}
     save_json(sd / "snapshot.json", snap)
     write_page("overview.html", snap, sd / "index.html")
     return snap

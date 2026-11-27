@@ -651,7 +651,110 @@ def tick(snap: dict, sw: dict | None = None, t: float | None = None, *, move, fi
         lv["why"] = f"正在借 {srv[sid]['holder']} 的 {sid}"
         _event(sid, srv[sid]["holder"], f"算力池开始借 {srv[sid]['holder']}（{sid}）给 {it['project']} 的 {it['jobs']}"
                + (f"，到 {fmt_time(until, date=False)}" if until else ""), t, act="borrow", project=it["project"])
-    return {"lists": lists, "gone": gone}
+    out = {"lists": lists, "gone": gone}
+    out["summary"] = summary({**snap, "pool": out}, cfg=cfg)
+    return out
+
+
+_SAFE_WHY_PREFIXES = (
+    "还没有在跑的 worker",
+    "队首在等依赖：",
+    "清单暂停中",
+    "项目暂停中",
+    "项目主人不是算力池成员",
+    "这一轮问得够多了",
+    "没问到 worker",
+    "这一轮已往空得出来的服务器",
+    "池里没有借着、空得出来的服务器",
+)
+
+
+def _member_why(v: dict) -> str | None:
+    """普通池成员看自己项目在池里的清单等待原因（#211）：只保留不含他人服务器 ID 与持有人名的安全说明。"""
+    why = v.get("why")
+    if not why:
+        return None
+    if v.get("done"):
+        return POOL_DONE
+    no_borrow = "没有能借的入池服务器" in why
+    tail = "；当前没有可借的入池服务器" if no_borrow else ""
+    head = why.split("；没有能借的入池服务器", 1)[0]
+    if head.startswith("正在借 "):
+        return "算力池正在调度可用服务器"
+    if head.startswith("池里借着的服务器都放不下"):
+        return "池里借着的服务器暂时都放不下" + tail
+    if any(head.startswith(p) for p in _SAFE_WHY_PREFIXES):
+        return head + tail
+    return ("等待算力池调度" if v.get("host") == POOL else "正在重新调度到池内其他服务器") + tail
+
+
+def summary(snap: dict, own_projects: set[str] | None = None, cfg: dict | None = None) -> dict:
+    """共有池聚合概况唯一实现（#211）：与前端原 poolCount 同口径计算入池台数、时段内/休息中/借着/要还/入池自用台数、
+    已放池清单数，并跨池内在线主机聚合总卡数、忙卡数、运行中池任务总数与排队清单总数（不含 done）。
+    own_projects 传入时（普通池成员）附带脱敏后的本人项目清单 my_lists，严禁包含他人项目、他人清单路径与他人服务器明细。"""
+    snap = snap or {}
+    fl = snap.get("fleet") if isinstance(snap.get("fleet"), dict) else {}
+    srvs = fl.get("servers") or []
+    mine = [x for x in fl.get("mine") or [] if (x.get("lend") or {}).get("on") or (x.get("lend") or {}).get("placed")]
+    ls = [x.get("lend") or {} for x in srvs]
+    own_ls = [x.get("lend") or {} for x in mine]
+    lent_ls = [L for L in ls if L.get("lent")]
+    on_ls = [L for L in ls if L.get("on") or L.get("lent")] + [L for L in own_ls if L.get("on")]
+    raw_lists = (snap.get("pool") or {}).get("lists") if isinstance(snap.get("pool"), dict) else {}
+    lists = raw_lists if isinstance(raw_lists, dict) else {}
+    pool_keys = {(x.get("host"), key(q.get("root"), q.get("jobs")))
+                 for x in snap.get("regs") or [] for q in x.get("queues") or [] if q.get("pool")}
+    mine_ids = {x.get("id") for x in mine if x.get("id")}
+    gpus_total, gpus_busy, running_jobs = 0, 0, 0
+    for e in snap.get("hosts") or []:
+        if not e.get("worker_up") or not isinstance(e.get("status"), dict):
+            continue
+        is_lent = bool((e.get("borrow") or {}).get("pool"))
+        is_self = not e.get("borrow") and (e.get("id") in mine_ids or bool((e.get("lend") or {}).get("on") or (e.get("lend") or {}).get("placed")))
+        if not (is_lent or is_self):
+            continue
+        st = e["status"]
+        gpus = (st.get("info") or {}).get("gpus") or []
+        gpus_total += len(gpus)
+        runs = [j for j in st.get("running") or [] if not j.get("hold")]
+        exts = [j for j in st.get("external") or [] if not j.get("hold")]
+        proc_uuids = {p.get("uuid") for p in st.get("gpu_procs") or [] if p.get("uuid") and p.get("owner") != "keepalive"}
+        busy_uuids = {u for j in runs + exts for u in (j.get("gpus") or [])} | proc_uuids
+        gpu_uuids = [g.get("uuid") for g in gpus if g.get("uuid")]
+        gpus_busy += sum(1 for u in gpu_uuids if u in busy_uuids) if gpu_uuids else min(len(gpus), len(busy_uuids))
+        if is_lent:
+            running_jobs += len(runs)
+        else:
+            running_jobs += sum(1 for j in runs if (e.get("id"), key(j.get("root"), j.get("queue"))) in pool_keys)
+    out = {
+        "on": len(on_ls),
+        "open": sum(1 for L in on_ls if L.get("lent") or (L.get("open") and not L.get("rest") and not L.get("bar"))),
+        "rest": sum(1 for L in on_ls if not L.get("lent") and L.get("rest")),
+        "lent": len(lent_ls),
+        "back": sum(1 for L in lent_ls if L.get("returning")),
+        "self": sum(1 for L in own_ls if L.get("on")),
+        "placed": sum(L.get("placed") or 0 for L in own_ls),
+        "gpus_total": gpus_total,
+        "gpus_busy": gpus_busy,
+        "running_jobs": running_jobs,
+        "queued_lists": sum(1 for v in lists.values() if isinstance(v, dict) and not v.get("done")),
+    }
+    if own_projects is not None:
+        my_lists = []
+        for v in sorted((x for x in lists.values() if isinstance(x, dict) and x.get("project") in own_projects),
+                        key=lambda x: x.get("since") or 0):
+            row = {"project": v.get("project"), "root": v.get("root"), "jobs": v.get("jobs"),
+                   "host": POOL if v.get("host") == POOL else None, "since": v.get("since"),
+                   "why": _member_why(v)}
+            if v.get("done"):
+                row["done"] = True
+            if v.get("sleeping"):
+                row["sleeping"] = True
+            if v.get("nofit"):
+                row["nofit"] = True
+            my_lists.append(row)
+        out["my_lists"] = my_lists
+    return out
 
 
 def reclaim(sid: str, who: Ident, ops: bool, move, snap: dict | None = None, ovr=None) -> str:

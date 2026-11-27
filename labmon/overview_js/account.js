@@ -203,9 +203,10 @@ function accountFormPop(k, name, label, fields) {
 }
 // 「我的账号」页头那句能做什么（#15）：浏览器登录的按角色说人话；令牌打开的按令牌的作用域说它能做的事（scope_info 的说明），不列作用域名
 function meCan(M, info) {
-  const fleet = "组内服务器与平台操作只有管理员看得到";
+  const fleet = "他人服务器、人员管理与平台操作只有管理员看得到";
   if (M.account) return M.admin ? `可以管理全部项目、主机与账号${M.ops ? "，也能做平台操作（续租、开关机、换人、借卡）" : `；平台操作：${OPS_NOTE}`}。`
-    : M.write ? `可以查看能用的主机，管理自己的项目（调度、配置、登记与归档）。${fleet}。` : `只能查看，不能改。${fleet}。`;
+    : M.write ? `可以查看能用的主机、本人共享盘与自己持有的服务器，管理自己的项目（调度、配置、登记与归档）。${fleet}。`
+    : `可以查看能用的主机、本人共享盘与自己持有的服务器，不能改项目。${fleet}。`;
   const ss = Object.keys(info).length ? Object.keys(info).filter(s => M.scopes.includes(s)) : M.scopes;
   return `这个令牌能做：${ss.map(s => info[s]?.[1] || info[s]?.[0] || s).join("；")}。`;
 }
@@ -273,7 +274,7 @@ async function lendAct(act, d) {
       if (POP === P) { FFOCUS = P.trigger; popClose(); }
       for (const m of [ME, ACC.me]) if (m && j.servers) m.servers = j.servers;
       LMSG = {id: d.id, m: j.msg}; clearTimeout(LMT); LMT = setTimeout(() => { LMSG = null; render(false); }, 60000);
-      if (ME?.admin) collectNow(true);
+      if (ME?.admin) collectNow(true); else poll();
     } catch (e) { if (POP === P) P.err = e.message || String(e); }
     P.busy = false;
     return render(false);
@@ -295,7 +296,7 @@ async function lendAct(act, d) {
     if (POP === P) { FFOCUS = P.trigger; popClose(); }
     for (const m of [ME, ACC.me]) if (m && j.servers) m.servers = j.servers;
     LMSG = {id: d.id, m: j.msg}; clearTimeout(LMT); LMT = setTimeout(() => { LMSG = null; render(false); }, 60000);
-    if (ME?.admin) collectNow(true);                    // 组内服务器的卡片与抽屉取全局快照
+    if (ME?.admin) collectNow(true); else poll();        // 刷新全局快照里的服务器与算力池状态
   } catch (e) { if (POP === P) P.err = e.message || String(e); }
   P.busy = false;
   render(false);
@@ -305,7 +306,7 @@ function myServersSec(M) {
   const ss = M.servers || [];
   if (!ss.length) return "";
   return dSec("我的服务器", `<div class="sm mut" style="margin-bottom:6px">你持有的组内服务器与自用主机。入池后，时段内组内服务器空着时借给算力池；自用主机不用借，池里的清单直接放上来，和你自己的清单按份额排。</div>
-    <div class="ulist">${ss.map(s => `<div class="urow sm-row"><div class="u">${icon("server")}<div class="t"><b>${esc(s.label || s.id)}</b> <span class="sm mut">${esc(s.id)}${s.pool ? " · " + esc(s.pool) : ""}${s.mine ? " · 自用" : ""}</span>
+    <div class="ulist">${ss.map(s => `<div class="urow sm-row"><div class="u">${icon("server")}<div class="t">${srvById(s.id) ? `<a href="${esc(DH.srv(s.id))}"><b>${esc(s.label || s.id)}</b></a>` : `<b>${esc(s.label || s.id)}</b>`} <span class="sm mut">${esc(s.id)}${s.pool ? " · " + esc(s.pool) : ""}${s.mine ? " · 自用" : ""}</span>
       <div class="sm">${lendSay(s)}</div>${lendMsg(s.id)}</div></div><div class="acts">${lendLent(s) ? reclaimPop(s) : ""}${LIVE ? lendPop(s) : ""}</div></div>`).join("")}</div>`);
 }
 function mePage(tab) {

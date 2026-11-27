@@ -20,6 +20,7 @@ from labmon.config import STALE_PAD_S, STALE_RUNS, cfg_spec, stale_limit
 from labmon.fleet import local_writes
 from labmon import hostcheck as HC
 from labmon.overview import EVENT_CATS, EVENT_KINDS, gpu_busy
+from labmon.pool import summary as pool_summary
 from labmon.users import Access, Ident, view
 
 BAD = "<i id=x>&\"'<!--<script>alert(1)</script>"
@@ -417,7 +418,7 @@ def overview() -> dict:
              {"p": "proj-a", "n": "cpu_pack_s2", "lane": "车道 1", "t0": NOW + 0.5 * H, "t1": NOW + H, "g": [], "st": "plan"}]
     occ_b = [{"p": "proj-b", "n": "beta_eval_s7", "lane": "车道 1", "t0": NOW - H, "t1": NOW + 2 * H, "g": [0], "st": "run"},
              {"p": "proj-b", "n": "beta_eval_s8", "lane": "车道 1", "t0": NOW + 2 * H, "t1": NOW + 4 * H, "g": [0], "st": "plan"}]
-    return {"generated": NOW, "hosts": [a, b], "colors": {"proj-a": "#7F77DD", "proj-b": "#D85A30"}, "notices": [],
+    d = {"generated": NOW, "hosts": [a, b], "colors": {"proj-a": "#7F77DD", "proj-b": "#D85A30"}, "notices": [],
             "lan": {"ok": True, "since": None, "checked": NOW}, "wake": [], "event_kinds": EVENT_KINDS, "event_cats": EVENT_CATS,
             "fleet": _fleet(a), "disk": _disk(), "occ": {"srv-a": occ_a, "srv-b": occ_b}, "regs": _regs(a, b),
             # 算力池（pool.tick，#25）：各待放清单为什么还没放（键「目录|清单」）；在借着的主机上的 since 是这一轮的时刻，没有 why 的是这一轮正放出去
@@ -457,6 +458,8 @@ def overview() -> dict:
                          {"id": "proj-older", "title": None, "t": NOW - 20 * 86400, "regs": [], "skipped": []}],
             "hostcheck": hostcheck(), "server": {"role": "primary", "id": "dashboard-host-a1b2c3", "since": NOW - 86400, "holder": None, "renew": None,
                                                  "until": None, "bad": None, "home": None, "say": ""}}
+    d["pool"]["summary"] = pool_summary(d, cfg={})
+    return d
 
 
 def hostcheck() -> dict:
@@ -1044,12 +1047,22 @@ def overview_dense() -> dict:
 ALL = {"overview": overview, "overview_evil": overview_evil, "overview_sparse": overview_sparse,
        "project": project, "project_evil": project_evil, "project_sparse": project_sparse}
 def overview_user() -> dict:
-    """普通用户只有一台可用主机、一个在用项目和一个已归档项目。"""
+    """普通用户只有一台可用主机、一个在用项目和一个已归档项目（无绑定组内服务器、非池成员）。"""
     return view(Ident("amy", "user", frozenset({"read", "project"}), "session", "k"), overview(),
                 Access({"proj-a", "proj-old"}, {"srv-a"}, {"srv-a"}))
 
 
-EXTRA = {"overview_user": overview_user, "records": records, "records_evil": records_evil, "events": project_events, "events_evil": project_events_evil,
+def overview_user_member() -> dict:
+    """#211：绑定组内人员 OWNER 且为算力池成员的普通用户快照（经真实 users.view 产出）。"""
+    from unittest.mock import patch
+    from labmon import pool as PO, users as U
+    with patch.object(U, "person_of", return_value=("OWNER", None)), patch.object(PO, "member", return_value=True):
+        return view(Ident("amy", "user", frozenset({"read", "project"}), "session", "k"), overview(),
+                    Access({"proj-a", "proj-old"}, {"srv-a"}, {"srv-a"}))
+
+
+EXTRA = {"overview_user": overview_user, "overview_user_member": overview_user_member, "records": records, "records_evil": records_evil,
+         "events": project_events, "events_evil": project_events_evil,
          "project_overdue": project_overdue, "project_longq": project_longq, "project_moved": project_moved, "project_pool_back": project_pool_back, "events_overdue": project_events_overdue,
          "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many,
          "project_deps": project_deps, "project_par10": project_par10}

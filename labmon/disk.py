@@ -422,3 +422,38 @@ def project_storage(pid: str, snap: dict | None = None) -> dict:
             "jobs": pr.get("jobs") or [],
             "at": dk.get("at"), "free": df.get("free"), "total": df.get("total"), "eta": dk.get("eta"), "eta7": dk.get("eta7"),
             "warn_gb": dk.get("warn_gb"), "burst_gb": dk.get("burst_gb"), "bigwrite_gb": dk.get("bigwrite_gb"), "local": local}
+
+
+# 普通用户可见的共享盘字段白名单（#17、#211）：总盘概况与提醒线；不含全组 names、owners_set、正在扫的路径 now 与全组聚合量
+VIEW_DISK = ("root", "df", "eta", "eta7", "hist", "warn_gb", "soon_days", "burst_gb", "at", "units", "pending", "yield")
+VIEW_DISK_ALERTS = ("low", "soon")
+
+
+def person_storage(person: str | None, snap: dict | None = None) -> dict | None:
+    """共享盘按人投影（#211，users.view 与 api.my_disk 共用唯一实现）：
+    保留总盘白名单字段（VIEW_DISK）与总盘告警（low、soon），以及 person 名下 owners 条目、本人颜色与本人告警（burst:<人>、over:<人>）；
+    屏蔽他人目录、公共目录明细、全组名单 names、归属表 owners_set 与正在扫描的路径 now。person 为空时返回总盘概况与空 owners。"""
+    snap = snapshot() if snap is None else snap
+    dk = (snap or {}).get("disk")
+    if not isinstance(dk, dict):
+        return None
+    d = {k: dk[k] for k in VIEW_DISK if k in dk}
+    if "df" not in d and "error" in dk:
+        d["error"] = dk["error"]
+    mine = [o for o in dk.get("owners") or []
+            if person and not o.get("public") and isinstance(o.get("name"), str) and o["name"].casefold() == person.casefold()]
+    names = {o["name"] for o in mine}
+    if person:
+        names.add(person)
+        d["person"] = mine[0]["name"] if mine else person
+    d["owners"] = mine
+    cols = {k: v for k, v in (dk.get("colors") or {}).items() if any(k.casefold() == n.casefold() for n in names)}
+    if cols:
+        d["colors"] = cols
+    cf = {n.casefold() for n in names}
+    d["alerts"] = [a for a in dk.get("alerts") or []
+                   if a.get("key") in VIEW_DISK_ALERTS
+                   or (isinstance(a.get("key"), str) and ":" in a["key"]
+                       and a["key"].split(":", 1)[0] in ("burst", "over")
+                       and a["key"].split(":", 1)[1].casefold() in cf)]
+    return d

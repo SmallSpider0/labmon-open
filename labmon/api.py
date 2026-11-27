@@ -12,11 +12,13 @@ from contextlib import nullcontext
 
 from . import borrow as B
 from . import collect as C
+from . import disk as DK
 from . import fleet as F
 from . import pool as P
 from . import projects as PJ
+from . import users as U
 from . import workerctl as W
-from .config import HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
+from .config import GIB, HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
 from .worker import cpu_line, ka_lines
 from .worker.pure import other_load, other_load_text
 from .records import EVENT_KINDS, project_rows
@@ -463,6 +465,52 @@ def disk(pid: str, psnap: dict | None = None) -> dict:
         room = "，".join(f"{m.get('label') or m['path']} 剩 {m['avail_gb']:.1f} GiB" for m in h.get("mounts") or [] if m.get("avail_gb") is not None)
         o.p(f"  {h.get('label') or hid}：{mine}" + (f"；{room}" if room else ""))
     return o.done(0, data=s)
+
+
+def my_disk(who: U.Ident, snap: dict | None = None) -> dict:
+    """GET /api/disk（#211，labmon disk --me 及无 monitor.toml 回退）：复用 disk.person_storage 排版输出
+    总盘剩余/预计满盘/告警 + 本人名下目录占用、24h/7d 增量、90 天冷数据与各目录明细，不泄露他人目录。"""
+    o = Out()
+    person, _ = U.person_of(who.name)
+    d = DK.person_storage(person, snap)
+    if not d or not d.get("df"):
+        o.p(f"[labmon] 共享盘数据读不了：{d['error']}" if d and d.get("error") else "[labmon] 共享盘的总量与剩余还没读到")
+        return o.done(0, data=d)
+    df = d["df"]
+    free, total = df.get("free"), df.get("total")
+    if total:
+        eta = "，".join(f"按近 {w}的速度约 {x:g} 天满" for w, x in (("24 小时", d.get("eta")), ("7 天", d.get("eta7"))) if x is not None)
+        o.p(f"[labmon] 共享盘剩 {_gib(free)} / 共 {_gib(total)}（{free / total:.0%}）" + (f"；{eta}" if eta else "；近来没在涨")
+            + (f"；索引 {fmt_time(d['at'])}" if d.get("at") else ""))
+    else:
+        o.p("[labmon] 共享盘的总量与剩余还没读到")
+    for a in d.get("alerts") or []:
+        o.p(f"  告警：{a['msg']}")
+    owners = d.get("owners") or []
+    if not person:
+        o.p("账号尚未关联组内人员，暂无本人共享盘目录明细。")
+        return o.done(0, data=d)
+    if not owners:
+        o.p(f"共享盘上暂无归属 {person} 的目录。")
+        return o.done(0, data=d)
+    me = owners[0]
+    grow = "，".join(f"近 {w} {_delta(x) or '没变'}" for w, x in (("24 小时", me.get("d24")), ("7 天", me.get("d7"))) if x is not None)
+    lim = f"；提醒线 {me['limit']:g} GiB" + ("（已超线）" if me.get("over") else "") if me.get("limit") else ""
+    o.p(f"本人（{me['name']}）在共享盘上：合计 {_gib(me.get('b'))}" + (f"（{grow}）" if grow else "") + f"；90 天未改 {_gib(me.get('cold'))}{lim}")
+    if me.get("pending"):
+        o.p(f"  还有 {me['pending']} 个目录没扫到，合计只算扫过的")
+    for u in me.get("units") or []:
+        if u.get("b") is None:
+            o.p(f"  {u.get('u')}  还没扫")
+            continue
+        g = "，".join(f"近 {w} {_delta(u.get(k))}" for w, k in (("24 小时", "d24"), ("7 天", "d7")) if u.get(k))
+        cold = f"90 天未改 {_gib(u['cold'])}" if (u.get("cold") or 0) >= GIB / 20 else ""
+        meta = "，".join(x for x in (g, cold) if x)
+        o.p(f"  {u.get('u')}  {_gib(u.get('b'))}" + (f"（{meta}）" if meta else "") + (f"  {u['n']} 个文件" if u.get("n") else "")
+            + (f"  扫描 {fmt_time(u['t'])}" if u.get("t") else ""))
+        for x in (u.get("top") or [])[:5]:
+            o.p(f"      {x[0]}  {_gib(x[1])}")
+    return o.done(0, data=d)
 
 
 def records(pid: str, host: str | None = None, cat: str | None = None, q: str | None = None, limit: int = 30, see=None) -> dict:

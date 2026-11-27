@@ -138,13 +138,35 @@ function diskBar(K) {
   return `<div class="bar big" style="overflow:hidden">${s}<b style="left:${100 - 100 * K.warn_gb * GIB / T}%" ${tip(`剩余低于 ${K.warn_gb} GiB 告警`)}></b></div>
     <div class="legend">${lg.map(([c, t, cl]) => `<span><i class="dot ${cl}" style="background:${c}"></i>${esc(t)}</span>`).join("")}</div>`;
 }
+function diskBarSelf(K, me) {
+  const T = K.df.total, myB = me?.b || 0, other = Math.max(0, K.df.used - myB);
+  let s = myB > 0 ? seg(100 * myB / T, DKC(me.name), `${me.name}：${GB(myB)} GiB（${(me.dirs || []).map(d => d + "/").join("、")}）`, me.name) : "";
+  if (other > 0) s += seg(100 * other / T, "var(--muted)", `其他已用：${GB(other)} GiB（总已用 − 本人已统计目录）`, "其他已用", "hatch");
+  const lg = [...(myB > 0 ? [[DKC(me.name), `${me.name} ${GB(myB)} GiB`, ""]] : []),
+    ...(other > 0 ? [["var(--muted)", `其他已用 ${GB(other)} GiB`, "hatch"]] : []), ["var(--bad)", `剩 ${K.warn_gb} GiB 告警线`, ""]];
+  return `<div class="bar big" style="overflow:hidden">${s}<b style="left:${100 - 100 * K.warn_gb * GIB / T}%" ${tip(`剩余低于 ${K.warn_gb} GiB 告警`)}></b></div>
+    <div class="legend">${lg.map(([c, t, cl]) => `<span><i class="dot ${cl}" style="background:${c}"></i>${esc(t)}</span>`).join("")}</div>`;
+}
 function diskTab() {
   const K = D.disk;
   if (!K) return `<div class="card empty">还没有共享盘数据：自用主机的 worker 更新以后（labmon worker start &lt;主机&gt;）开始统计。</div>`;
   if (!K.df) return `<div class="card rn-err">${esc(K.error || "共享盘数据读不了")}</div>`;
-  const df = K.df, eta = K.eta ?? K.eta7, al = (K.alerts || []).filter(a => !a.notify);
-  const top = (k, n = 2) => K.owners.filter(o => o[k] > GIB / 20).sort((a, b) => b[k] - a[k]).slice(0, n).map(o => `${esc(o.name)} ${dGB(o[k])}`).join(" · ") || "没有明显增长";
+  const df = K.df, eta = K.eta ?? K.eta7;
   const kpi = (k, v, sub, bad = false) => `<div class="kpi"><div class="k">${k}</div><div class="v" style="${bad ? "color:var(--bad)" : ""}">${v}</div><div class="s">${sub}</div></div>`;
+  if (LIVE && ME && !ME.admin) {
+    const me = (K.owners || [])[0] || null, al = K.alerts || [];
+    const s = `<div class="card"><div class="chd wrap"><b>共享盘</b><span class="sm mut">${esc(K.root)} · 组里各服务器挂的同一块盘；以下为总盘余量与本人目录用量</span></div>
+      <div class="kpis">${kpi("总盘已用", `${GB(df.used)}<small> / ${GB(df.total)} GiB</small>`, `剩 ${GB(df.free)} GiB${eta != null ? `，按近 ${K.eta != null ? "24 小时" : "7 天"}的速度约 ${eta} 天满` : "，最近没在涨"}`, df.free < K.warn_gb * GIB || (K.eta != null && K.eta < K.soon_days))}
+        ${kpi("本人占用", me ? (me.t0 == null ? "待扫描" : `${GB(me.b)}<small> GiB</small>`) : "—", me ? (me.t0 == null ? `还有 ${me.pending} 个目录排着` : `占全盘 ${Math.round(100 * me.b / df.total)}%${me.limit ? ` · 提醒线 ${me.limit} GiB` : ""}`) : "名下暂无目录", !!me?.over)}
+        ${kpi("本人近 24 小时", me && me.t0 != null ? `${dGB(me.d24)}<small> GiB</small>` : "—", me && me.t0 != null ? `近 7 天 ${dGB(me.d7)} GiB` : "—", !!(me && burstOf(me.name)))}
+        ${kpi("本人 90 天没改过", me && me.t0 != null ? `${GB(me.cold)}<small> GiB</small>` : "—", me && me.t0 != null ? `${me.n.toLocaleString()} 个文件` : "—")}</div>
+      ${diskBarSelf(K, me)}<div class="sm mut" style="margin-top:6px">${esc(diskProg(K))}</div>
+      ${al.length ? `<div class="alerts" style="margin-top:8px">${al.map(a => `<div>⚠ ${esc(a.msg)}</div>`).join("")}</div>` : ""}</div>`;
+    return s + (me ? `<div class="card"><div class="chd wrap"><b>本人目录</b><span class="sm mut">按归属汇总的本人共享盘目录（只读）；悬停目录名看里面最大的几项</span></div>${diskOwner(me.name, false)}</div>`
+      : `<div class="card empty">账号尚未关联组内人员或名下暂无目录。</div>`);
+  }
+  const al = (K.alerts || []).filter(a => !a.notify);
+  const top = (k, n = 2) => K.owners.filter(o => o[k] > GIB / 20).sort((a, b) => b[k] - a[k]).slice(0, n).map(o => `${esc(o.name)} ${dGB(o[k])}`).join(" · ") || "没有明显增长";
   let s = `<div class="card"><div class="chd wrap"><b>共享盘</b><span class="sm mut">${esc(K.root)} · 组里各服务器挂的同一块盘；总量与剩余每分钟读 df，按人的用量见下表</span></div>
     <div class="kpis">${kpi("已用", `${GB(df.used)}<small> / ${GB(df.total)} GiB</small>`, `剩 ${GB(df.free)} GiB${eta != null ? `，按近 ${K.eta != null ? "24 小时" : "7 天"}的速度约 ${eta} 天满` : "，最近没在涨"}`, df.free < K.warn_gb * GIB || (K.eta != null && K.eta < K.soon_days))}
       ${kpi("近 24 小时", `${dGB(K.d24)}<small> GiB</small>`, top("d24"), (K.alerts || []).some(a => a.key.startsWith("burst:")))}
@@ -201,7 +223,7 @@ function hostStrip(h) {
   const it = (ic, html, t = "") => `<span class="it" ${t ? tip(t) : ""}>${icon(ic)}<span>${html}</span></span>`;
   const deps = h.status?.local?.jobs || [], bad = deps.filter(r => !r.heal), miss = missW(h);
   let s = "";
-  if (h.borrow) s += it("users", `${esc(borrowText(h.borrow, D.generated))}${!h.borrow.swap && LIVE && D.fleet ? ` <a href="${DH.srv(h.id)}">借用详情</a>` : ""}`
+  if (h.borrow) s += it("users", `${esc(borrowText(h.borrow, D.generated))}${!h.borrow.swap && LIVE && srvById(h.id) ? ` <a href="${DH.srv(h.id)}">借用详情</a>` : ""}`
       + (BMSG?.id === h.id ? `<span class="mut">（${esc(BMSG.msg)}）</span>` : ""),
     h.borrow.swap ? "改约定：labmon borrow " + h.id + " --until …（none 去掉）" : "");
   if (h.lease_end) s += it("hourglass", `${leaseHtml(h.lease_end, "租期")} <span class="mut">${ts(h.lease_end)} 到期</span> ${renewChip(h)}`);

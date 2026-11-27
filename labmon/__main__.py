@@ -10,7 +10,7 @@
     labmon update                                           换成看板在跑的同一版本（看板发的客户端装的才用；#167）
     labmon collect -c monitor.toml                          让看板立即采集这个项目一次，打出结果与链接
     labmon status  [项目 id] [-c monitor.toml] [--json]     项目现状（各主机与卡、车道、运行中、排队的预计开始、失败、计划项、挪法建议、告警；只读）
-    labmon disk    [项目 id] [-c monitor.toml] [--json]     项目的磁盘：共享盘上本项目各目录与增量、整块盘几天满，各主机本地盘上本项目的缓存（只读）
+    labmon disk    [项目 id | --me] [-c monitor.toml] [--json] 磁盘用量：查项目存储，或 --me（及无 monitor.toml 时）查本人共享盘汇总与总盘余量（只读）
     labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   项目的记录（拉起、掉线、续租、失败、临时指令……；只读）
     labmon check   -c monitor.toml [--probe]                 看板校验配置并输出紧凑摘要（--probe 打印完整探针规格 JSON）；末尾列出同步状态与待拉回消息
     labmon wait    -c monitor.toml                          等告警：每轮先与看板上的配置同步，再问看板（长轮询），出现新告警（含借到卡等全局消息）或采集停了即退出（退出码 1）
@@ -637,22 +637,32 @@ READS = {"status": "项目现状：各主机与卡、各车道、运行中（进
 
 def cmd_read(argv: list[str]) -> int:
     """实验会话的只读命令（#52）：labmon status|disk|records [项目 id]，经 GET /api/project/<id>/<命令>（api.status、api.disk、api.records），
-    看板排好版、这里原样打出；--json 打原始数据。项目缺省取 -c 的 monitor.toml（缺省当前目录的）。"""
+    看板排好版、这里原样打出；--json 打原始数据。项目缺省取 -c 的 monitor.toml（缺省当前目录的）。
+    labmon disk 另支持 --me（以及未传项目 id 且当前目录无 monitor.toml 时自动回退）经 GET /api/disk 查本人共享盘汇总（#211）。"""
     what = argv[0]
     ap = argparse.ArgumentParser(prog=f"labmon {what}", description=READS[what])
     ap.add_argument("project", nargs="?", help="项目 id（缺省取 -c 那份 monitor.toml 的 id）")
-    ap.add_argument("-c", "--config", default="monitor.toml", help="项目目录里的配置文件（缺省 monitor.toml）")
+    ap.add_argument("-c", "--config", default=None, help="项目目录里的配置文件（缺省 monitor.toml）")
     ap.add_argument("--json", action="store_true", help="打原始数据（JSON）：status 是项目快照（docs/schema.md），disk 是存储数据，records 是记录行")
+    if what == "disk":
+        ap.add_argument("--me", action="store_true", help="查看本人在共享盘的用量汇总与总盘余量（经 GET /api/disk）")
     if what == "records":
         ap.add_argument("--host", help="只看这台主机的")
         ap.add_argument("--cat", help="只看这一类：link 连接、op 平台操作、config 配置改动、lease 租期、borrow 借用、disk 共享盘、queue 队列……")
         ap.add_argument("-q", help="按词搜（空格分开的几个词都要出现）")
         ap.add_argument("-n", type=int, default=30, help="最多几条（缺省 30）")
     a = ap.parse_args(argv[1:])
+    if what == "disk" and a.me:
+        if a.project or a.config:
+            ap.error("--me 不能和项目 id 或 -c 同用")
+        return client.run("GET", "/api/disk", ap=ap, timeout=60, as_json=a.json)
     pid = a.project
     if not pid:
+        cfg = a.config or "monitor.toml"
+        if what == "disk" and a.config is None and not Path(cfg).is_file():
+            return client.run("GET", "/api/disk", ap=ap, timeout=60, as_json=a.json)
         try:
-            pid = brief(a.config)["id"]
+            pid = brief(cfg)["id"]
         except ConfigError as e:
             print(f"[labmon] 配置错误：{e}（在项目目录里跑，或写项目 id）", file=sys.stderr)
             return 3

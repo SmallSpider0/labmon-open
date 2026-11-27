@@ -170,8 +170,17 @@ async function gdSave() {
   render(false);
 }
 function renewLeave() { RPICK = null; if (FCAP?.pop === "renew") FCAP = null; }     // 离开续租抽屉：勾选与抽屉里取的验证码一起作废，在途的回执经 startOp 的实例比较丢掉
+function canOpenDrawer(r) {
+  if (!r.drw) return false;
+  if (r.kind === "p" || r.kind === "home" || r.kind === "host") return true;
+  if (r.kind !== "fleet") return false;
+  if (!LIVE || ME?.admin) return (D.fleet && !D.fleet.error) || (r.drw.k === "person" && ME?.scopes.includes("admin"));
+  if (r.drw.k === "srv") return !!(D.fleet && !D.fleet.error && srvById(r.drw.id));
+  if (r.drw.k === "pool") return !!D.pool;
+  return false;
+}
 function drawer(r) {
-  const el = document.getElementById("drw"), pane = document.getElementById("drwp"), d = r.kind === "fleet" && (!LIVE || ME?.admin) && ((D.fleet && !D.fleet.error) || (r.drw?.k === "person" && ME?.scopes.includes("admin"))) || r.kind === "p" || r.kind === "home" || r.kind === "host" ? r.drw : null;
+  const el = document.getElementById("drw"), pane = document.getElementById("drwp"), d = canOpenDrawer(r) ? r.drw : null;
   if (!d) {
     if (!DKEY) return;
     const k = DKEY, back = pane.contains(document.activeElement) || document.activeElement === document.body;
@@ -425,7 +434,7 @@ async function poll() {
     if (!r.ok) throw new Error("HTTP " + r.status);
     D = await r.json(); OFFLINE = pollNet(null);
     const a = D.access;                                 // 普通用户的授权与概览由同一次请求取得
-    if (ME && (ME.admin ? a : D.fleet)) return location.reload();   // 角色变了，重新载入完整的身份与入口
+    if (ME && (ME.admin ? !!a : !a)) return location.reload();   // 角色变了，重新载入完整的身份与入口（以 D.access 严格区分管理员与普通用户快照）
     if (ME && a) {
       if (JSON.stringify(ME.own) !== JSON.stringify(a.own) || JSON.stringify(ME.hosts) !== JSON.stringify(a.hosts)) {
         ME = {...ME, own: a.own, hosts: a.hosts};

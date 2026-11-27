@@ -220,6 +220,66 @@ class ReadsTest(unittest.TestCase):
         self.assertIn("第一次采集还没完成", out)
         self.assertEqual(run(["disk", "p1", "--json"])[1].strip(), "null")
 
+    def test_disk_me_and_fallback(self):
+        """#211：labmon disk --me 与无 monitor.toml 时回退 GET /api/disk，仅展示本人共享盘与总盘概况。"""
+        from labmon import fleetboot as FB, users as U
+        board(self)
+        FB.set_person("OWNER", create=True, roster_only=True)
+        FB.set_person("OTHER", create=True, roster_only=True)
+        tok = make_token("amy", role="user", scopes=("read",))
+        with U._edit() as d:
+            d["users"]["amy"]["fleet_person"] = "OWNER"
+        os.environ["LABMON_TOKEN"] = tok
+        self.glob(disk={
+            "root": "/data/share", "at": self.now - 120, "eta": 14.5, "warn_gb": 30,
+            "df": {"total": 1000 * GIB, "used": 400 * GIB, "free": 600 * GIB},
+            "names": ["OWNER", "OTHER"], "now": "/data/share/other/secret",
+            "owners": [
+                {"name": "OWNER", "public": False, "b": 80 * GIB, "d24": 4 * GIB, "d7": 9 * GIB, "cold": 12 * GIB,
+                 "units": [{"u": "owner/proj", "b": 80 * GIB, "d24": 4 * GIB, "d7": 9 * GIB, "n": 100}]},
+                {"name": "OTHER", "public": False, "b": 200 * GIB, "units": [{"u": "other/secret", "b": 200 * GIB}]},
+            ],
+            "alerts": [{"key": "low", "msg": "剩余不足"}, {"key": "burst:OWNER", "msg": "OWNER 涨得快"}, {"key": "burst:OTHER", "msg": "OTHER 涨得快"}],
+        })
+        # 1. labmon disk --me（文本 + JSON）
+        rc, out, err = run(["disk", "--me"])
+        self.assertEqual(rc, 0, err)
+        for s in ("共享盘剩 600 GiB / 共 1000 GiB", "本人（OWNER）在共享盘上：合计 80 GiB", "owner/proj  80 GiB", "OWNER 涨得快"):
+            self.assertIn(s, out)
+        for bad in ("OTHER", "other/secret", "OTHER 涨得快"):
+            self.assertNotIn(bad, out)
+        rc, out, err = run(["disk", "--me", "--json"])
+        self.assertEqual(rc, 0, err)
+        js = json.loads(out)
+        self.assertEqual([o["name"] for o in js["owners"]], ["OWNER"])
+        self.assertNotIn("names", js)
+        # 2. --me 与项目 id / -c 互斥
+        err_buf = io.StringIO()
+        with contextlib.redirect_stderr(err_buf), self.assertRaises(SystemExit) as cm:
+            M.main(["disk", "p1", "--me"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("不能和项目 id", err_buf.getvalue())
+        # 3. 无项目参数且当前目录无 monitor.toml 时自动回退 GET /api/disk
+        empty_dir = self.d / "empty_cwd"
+        empty_dir.mkdir()
+        old_cwd = os.getcwd()
+        try:
+            os.chdir(empty_dir)
+            rc, out, err = run(["disk"])
+        finally:
+            os.chdir(old_cwd)
+        self.assertEqual(rc, 0, err)
+        self.assertIn("本人（OWNER）在共享盘上", out)
+        # 4. 路由登记与备用节点检查
+        self.assertTrue(SV.CLI_READS.fullmatch("/api/disk"))
+        r = SV.route_of("GET", "/api/disk")
+        self.assertEqual((r.scope, r.own, r.admin), ("read", None, False))
+        # 5. 未绑定或无目录人员的降级提示
+        os.environ["LABMON_TOKEN"] = make_token("stranger", role="user", scopes=("read",))
+        rc, out, err = run(["disk", "--me"])
+        self.assertEqual(rc, 0, err)
+        self.assertIn("共享盘上暂无归属 stranger 的目录", out)
+
     def test_records_only_this_project(self):
         board(self)
         t = self.now

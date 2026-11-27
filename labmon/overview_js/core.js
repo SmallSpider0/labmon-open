@@ -223,14 +223,39 @@ function navModel(r) {
       full: `${p.title || p.id}${p.alerts ? `：${p.alerts} 条告警` : ""}${p.no_work_since ? `（${NO_WORK}）` : ""}`,
       sub: p.no_work_since ? NO_WORK : p.generated ? `${ts(p.generated)} 更新` : ""})).concat(archItem(r))},
   ];
-  if (D.fleet) {                // 各台在概况页里，侧栏不逐台列；「更多」里另列概况页的几个选项卡与保活守护
-    const fa = fleetAlerts().length, F = D.fleet;
-    secs.push({id: "fleet", name: "组内服务器", ct: F.servers.length + F.mine.length, sep: true, items: [{k: "fleet", href: "#/fleet", ico: icon("users"), label: "概况", ab: "组内", on: r.kind === "fleet", bad: fa,
-      full: fa ? `组内服务器：${fa} 条提醒` : "组内服务器", sub: `${F.servers.length + F.mine.length} 台`,
-      subs: [["人员", "#/fleet/people", icon("user")], ["共享盘", "#/fleet/disk", icon("db")], ["保活守护", DH.guard(), icon("shield")], ["算力池", DH.pool(), icon("dash")]]}]});
+  const selfView = LIVE && ME && !ME.admin;
+  if (selfView) {               // 普通用户（#211）：按数据有无展示「我的资源」（我的服务器、共享盘；池成员另见算力池），隐藏全组人员与保活守护
+    const F = D.fleet && !D.fleet.error ? D.fleet : null, nSrv = F ? F.servers.length + F.mine.length : 0;
+    const hasDisk = !!D.disk?.df, hasPool = !!D.pool, items = [];
+    if (nSrv) {
+      const fa = fleetAlerts().length;
+      items.push({k: "fleet", href: "#/fleet", ico: icon("server"), label: "我的服务器", ab: "服务器",
+        on: r.kind === "fleet" && r.tab === "slots" && r.drw?.k !== "pool", bad: fa,
+        full: fa ? `我的服务器：${fa} 条提醒` : "我的服务器", sub: `${nSrv} 台`});
+    }
+    if (hasDisk) {
+      const da = (D.disk.alerts || []).filter(a => a.notify).length;
+      items.push({k: "disk", href: "#/fleet/disk", ico: icon("db"), label: "共享盘", ab: "共享盘",
+        on: r.kind === "fleet" && r.tab === "disk", bad: da,
+        full: da ? `共享盘：${da} 条告警` : "本人共享盘用量", sub: `剩 ${GB(D.disk.df.free)} GiB`});
+    }
+    if (hasPool) {
+      const pc = poolCount();
+      items.push({k: "pool", href: DH.pool(), ico: icon("dash"), label: "算力池", ab: "算力池",
+        on: r.kind === "fleet" && r.drw?.k === "pool", bad: 0,
+        full: "算力池聚合概况", sub: pc.on ? `${pc.on} 台入池 · 借着 ${pc.lent}` : "算力池"});
+    }
+    if (items.length) secs.push({id: "myres", name: "我的资源", ct: nSrv || "", sep: true, items});
+  } else {
+    if (D.fleet) {                // 各台在概况页里，侧栏不逐台列；「更多」里另列概况页的几个选项卡与保活守护
+      const fa = fleetAlerts().length, F = D.fleet;
+      secs.push({id: "fleet", name: "组内服务器", ct: F.servers.length + F.mine.length, sep: true, items: [{k: "fleet", href: "#/fleet", ico: icon("users"), label: "概况", ab: "组内", on: r.kind === "fleet", bad: fa,
+        full: fa ? `组内服务器：${fa} 条提醒` : "组内服务器", sub: `${F.servers.length + F.mine.length} 台`,
+        subs: [["人员", "#/fleet/people", icon("user")], ["共享盘", "#/fleet/disk", icon("db")], ["保活守护", DH.guard(), icon("shield")], ["算力池", DH.pool(), icon("dash")]]}]});
+    }
+    if (!D.fleet && LIVE && ME?.admin && ME.scopes.includes("admin")) secs.push({id: "fleet", name: "组内", sep: true, items: [
+      {k: "fleet", href: "#/fleet/people", ico: icon("users"), label: "人员", ab: "人员", on: r.kind === "fleet", full: "组内人员"}]});
   }
-  if (!D.fleet && LIVE && ME?.admin && ME.scopes.includes("admin")) secs.push({id: "fleet", name: "组内", sep: true, items: [
-    {k: "fleet", href: "#/fleet/people", ico: icon("users"), label: "人员", ab: "人员", on: r.kind === "fleet", full: "组内人员"}]});
   const me = LIVE && ME ? {k: "me", href: "#/me", ico: accAv(ME.name, " nv"), label: ME.name, ab: "我", on: r.kind === "me", cls: "me",
     full: `我的账号：${ME.name}（${ME.role_name}，从${ME.entry_name}来）`, sub: `${ME.role_name} · ${ME.entry_name} · 口令、令牌、登录的浏览器`} : null;
   return {top, secs, me};
@@ -260,11 +285,11 @@ function side(r) {
 // 窄屏：底栏放总览、组内、记录与「更多」；「更多」从底部滑出，列全部导航（同侧栏）。在主机页、项目页时「更多」算当前
 let MORE = false;
 function tabbar(r) {
-  const {top, secs, me} = navModel(r), fleet = secs.find(g => g.id === "fleet")?.items[0];
-  const rest = secs.filter(g => g.id !== "fleet").flatMap(g => g.items);
+  const {top, secs, me} = navModel(r), fsec = secs.find(g => g.id === "fleet" || g.id === "myres"), fleet = fsec?.items[0];
+  const rest = secs.filter(g => g !== fsec).flatMap(g => g.items).concat(fsec?.items.slice(1) || []);
   const tab = (x, attr = `href="${x.href}"`) => `<a class="tb${x.on ? " on" : ""}" ${attr} ${x.on ? 'aria-current="page"' : ""}>
     <span class="tbi">${x.ico}${x.bad ? `<span class="tbb">${x.bad > 99 ? "99+" : x.bad}</span>` : x.dot ? `<span class="tbb dot"></span>` : ""}</span><span>${esc(x.label)}</span></a>`;
-  const tabs = [top[0], fleet && {...fleet, label: "组内"}, top.find(x => x.k === "log")].filter(Boolean)
+  const tabs = [top[0], fleet && {...fleet, label: fsec.id === "myres" ? "资源" : "组内"}, top.find(x => x.k === "log")].filter(Boolean)
     .map(x => tab({...x, on: x.on && !MORE}));
   tabs.push(tab({ico: icon("dots"), label: "更多", on: MORE || rest.some(x => x.on) || !!me?.on, dot: rest.some(x => x.bad)}, `href="#" data-more role="button" aria-expanded="${MORE}"`));
   return tabs.join("");
@@ -290,7 +315,10 @@ function topbar(r) {
   } else if (r.kind === "log") {
     title = "记录"; crumb = ""; extra = LIVE ? logTabs(r.f) : "";
   } else if (r.kind === "fleet") {
-    title = "组内服务器"; crumb = "组内"; extra = D.fleet ? fleetTabs(r.tab) : "";
+    const selfView = LIVE && ME && !ME.admin;
+    title = selfView ? "我的资源" : "组内服务器";
+    crumb = selfView ? "资源" : "组内";
+    extra = selfView ? (D.fleet || D.disk?.df ? fleetTabs(r.tab) : "") : (D.fleet ? fleetTabs(r.tab) : "");
   } else if (r.kind === "p") {
     const p = D.projects.find(x => x.id === r.id);
     title = p ? p.title || p.id : r.id; crumb = "项目";
