@@ -295,6 +295,20 @@ function archItem(r) {
   return A.length ? [{href: DH.arch(), on: r.drw?.k === "arch", ico: `<span class="hico">${icon("archive")}</span>`, label: `已归档 ${A.length} 个`, ab: "归档",
     full: `已归档：${A.map(e => e.title || e.id).join("、")}`, sub: A.map(e => e.title || e.id).join("、")}] : [];
 }
+// 按算力池把主机分组（总览主机表、侧边栏主机区与总览时间线池筛选共用）：保持首次出现顺序；未入池主机归入「其他主机」
+function groupHostsByPool(hosts) {
+  const by = new Map(), out = [];
+  for (const h of hosts) {
+    const k = h.pool_id ? "p:" + h.pool_id : "";
+    let g = by.get(k);
+    if (!g) {
+      g = {key: k, id: h.pool_id || "", label: h.pool_id ? (h.pool_label || h.pool_id) : "其他主机", pool: !!h.pool_id, hosts: []};
+      by.set(k, g); out.push(g);
+    }
+    g.hosts.push(h);
+  }
+  return out;
+}
 function side(r) {
   const {top, secs, me} = navModel(r), fold = ST.get("fold", {});
   const mini = document.body.classList.contains("mini");
@@ -302,11 +316,29 @@ function side(r) {
     aria-expanded="${!fold[id]}">${icon("chev")}${name}<span class="ct">${n}</span></div><div class="grp">${body}</div>`;
   const item = x => `<a class="nav ${x.on ? "on" : ""}${x.cls ? " " + x.cls : ""}" href="${x.href}" ${mini ? tip(x.full || x.label) : ""}>
     ${x.ico}<span class="lbl">${esc(x.label)}</span>${x.ab ? `<span class="ab">${esc(x.ab)}</span>` : ""}${x.bad ? `<span class="ct bad">${x.bad}</span>` : ""}</a>`;
+  // 侧边栏「主机」区在主机数 > 6 且存在算力池主机时按池二级折叠（同池默认收起、当前主机所在池自动展开、收起时保留告警红点）
+  const hostBody = g => {
+    if (!g.items.length) return `<div class="nav" style="cursor:default;color:var(--side-mut)"><span class="lbl">${g.empty}</span></div>`;
+    const groups = D.hosts.length > 6 ? groupHostsByPool(D.hosts) : [];
+    if (!groups.some(pg => pg.pool)) return g.items.map(item).join("");
+    const byHref = new Map(g.items.map(x => [x.href, x])), pOpen = ST.get("sidePoolOpen", {});
+    return groups.map(pg => {
+      const xs = pg.hosts.map(h => byHref.get(`#/host/${encodeURIComponent(h.id)}`)).filter(Boolean);
+      if (!pg.pool) return xs.map(item).join("");
+      const open = !!pOpen[pg.id] || xs.some(x => x.on);
+      const bad = xs.reduce((a, x) => a + (x.bad || 0), 0);
+      return `<div class="npool${open ? "" : " fold"}" data-pfold="side:${esc(pg.id)}" role="button" tabindex="0" aria-expanded="${open}" `
+        + `${tip(`算力池：${pg.label}（${xs.length} 台${bad ? `，${bad} 条告警` : ""}）`)}>`
+        + `${icon("chev")}<span class="lbl">${esc(pg.label)}</span>`
+        + `${bad ? `<span class="ct bad">${bad}</span>` : `<span class="ct">${xs.length}</span>`}</div>`
+        + `<div class="npool-grp">${xs.map(item).join("")}</div>`;
+    }).join("");
+  };
   let s = `<a class="brand" href="#/" aria-label="labmon 工作台">${LOGO()}<span class="lbl"><b>labmon</b><small>调度与实验工作台</small></span></a>`;
   // 上段是我们自己的实验（总览、主机、项目），分隔线下是组内服务器；总览单独一项，不另起组
   s += `<div class="top1">${top.map(item).join("")}</div>`;
   for (const g of secs) s += (g.sep ? `<div class="zsep"></div>` : "") + sec(g.id, g.name, g.ct,
-    g.items.map(item).join("") || `<div class="nav" style="cursor:default;color:var(--side-mut)"><span class="lbl">${g.empty}</span></div>`);
+    g.id === "host" ? hostBody(g) : g.items.map(item).join("") || `<div class="nav" style="cursor:default;color:var(--side-mut)"><span class="lbl">${g.empty}</span></div>`);
   s += `<div class="sfoot">${me ? item(me) : ""}<button class="nav" data-side ${mini ? tip("展开侧边栏（[）") : ""} aria-label="${mini ? "展开侧边栏" : "收起侧边栏"}">
     ${icon(mini ? "expand" : "collapse")}<span class="lbl">收起侧边栏</span><span class="kbd">[</span></button></div>`;
   return s;

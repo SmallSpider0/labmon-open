@@ -322,13 +322,29 @@ document.addEventListener("keydown", e => {
     if (e.key === "Escape") { e.preventDefault(); return inp ? e.target.blur() : closeDrw(); }
     if (!inp && (e.key === "ArrowLeft" || e.key === "ArrowRight")) { e.preventDefault(); return stepDrw(e.key === "ArrowLeft" ? -1 : 1); }
   }
-  if ((e.key === "Enter" || e.key === " ") && e.target.matches?.("[tabindex][data-go],[tabindex][data-job],[tabindex][data-drw],[data-sec]")) { e.preventDefault(); e.target.click(); }
+  if ((e.key === "Enter" || e.key === " ") && e.target.matches?.("[tabindex][data-go],[tabindex][data-job],[tabindex][data-drw],[data-sec],[data-pfold]")) { e.preventDefault(); e.target.click(); }
 });
 document.addEventListener("click", e => {
   if (!e.target.closest?.(".popw")) closePop(false);     // 点弹窗外面：等于取消（里面有输入的不关）
   if (e.target.closest?.("[data-now]")) return collectNow();
   const tz = e.target.closest?.("#tlbox [data-tz], #tlbar [data-tl], #tlbar [data-tz], #tlkey [data-tlkey]");
   if (tz) return tlClick(tz);
+  if (e.target.closest?.("[data-tlidle]")) { ST.set("tlIdle", !ST.get("tlIdle", true)); return drawTimeline(); }
+  const tp = e.target.closest?.("[data-tlpool]");
+  if (tp) { TL_POOL = tp.dataset.tlpool || ""; return drawTimeline(); }
+  const pf = e.target.closest?.("[data-pfold]");
+  if (pf) {
+    const v = pf.dataset.pfold || "", i = v.indexOf(":"), kind = v.slice(0, i), key = v.slice(i + 1);
+    if (kind === "tbl") {
+      const f = ST.get("tblPoolFold", {}); f[key] = !f[key]; ST.set("tblPoolFold", f);
+      return render("keep");
+    }
+    if (kind === "side" && !document.body.classList.contains("mini")) {
+      const f = ST.get("sidePoolOpen", {}); f[key] = !f[key]; ST.set("sidePoolOpen", f);
+      return render("keep");
+    }
+    return;
+  }
   if (e.target.closest?.("[data-more]")) { e.preventDefault(); MORE = !MORE; return drawNav(); }      // 窄屏底栏的「更多」
   if (MORE && e.target.closest?.("#tabbar a, #more a")) { MORE = false; drawNav(); }                  // 点了一项：收起面板（同一页不触发换页，这里先收）
   if (e.target.closest?.("[data-dback]")) { const h = DBACK; DBACK = null; return nav(h); }

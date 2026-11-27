@@ -3985,4 +3985,112 @@ ta("overview", "共有型算力池管理员 GUI 新建/编辑/删除与公网/�
   clean(el(AE, "drwp").innerHTML, "#240 恶意候选数据转义");
 });
 
+/* ---------- #257 时间线双刻度轴与工作台多主机（8 台+）浏览效率优化 ---------- */
+t("timeline", "#257 高时间线（H > 400）顶部与底部共用 tlTicks 渲染双刻度轴，矮时间线仅底部刻度", () => {
+  const C = mkCtx(ovSrc, OV, {hash: "#/", filename: "overview.js"});
+  const mkRows = n => Array.from({length: n}, (_, i) => ({key: `r:${i}`, h: 20, gap: 2, sep: false, draw: () => ""}));
+  // 矮时间线（4 行，H <= 400）：仅底部刻度
+  const low = run(C, `tlSvg(document.getElementById("tlbox"), ${JSON.stringify(mkRows(4))}.map(r => ({...r, draw: () => ""})))`);
+  ok(!low.includes("tl-tick-top"), "矮时间线不应出现顶部刻度");
+  ok(low.includes("tl-tick-bot"), "矮时间线应有底部刻度");
+  // 高时间线（22 行，H > 400）：顶部与底部双刻度，且刻度数量与文字完全一致
+  const high = run(C, `tlSvg(document.getElementById("tlbox"), ${JSON.stringify(mkRows(22))}.map(r => ({...r, draw: () => ""})))`);
+  const topTicks = [...high.matchAll(/class="tl-tick tl-tick-top"[^>]*>([^<]+)<\/text>/g)].map(m => m[1]);
+  const botTicks = [...high.matchAll(/class="tl-tick tl-tick-bot"[^>]*>([^<]+)<\/text>/g)].map(m => m[1]);
+  ok(topTicks.length >= 2, "高时间线应渲染顶部刻度：" + topTicks.length);
+  ok(JSON.stringify(topTicks) === JSON.stringify(botTicks), "顶底刻度应完全一致：" + JSON.stringify({topTicks, botTicks}));
+  clean(high, "#257 高时间线双刻度");
+});
+
+t("overview", "#257 多主机（8 台+）：总览时间线隐藏空闲卡与按池筛选、主机表按池分组折叠与 >=4 卡紧凑列、侧边栏 >6 台按池二级折叠", () => {
+  const S = JSON.parse(JSON.stringify(OV));
+  const base = JSON.parse(JSON.stringify(OV.hosts[0]));
+  const mkGpu = (i, used) => ({i, uuid: `GPU-${i}`, name: "GPU-X", used, total: 24576, util: used > 1000 ? 60 : 0});
+  const mkHost = (id, label, poolId, poolLabel, nGpu, up = true, err = null) => {
+    const h = JSON.parse(JSON.stringify(base));
+    h.id = id; h.label = label; h.pool_id = poolId || null; h.pool_label = poolLabel || null;
+    h.worker_up = up; h.error = err;
+    h.status.info.gpus = Array.from({length: nGpu}, (_, i) => mkGpu(i, i === 0 && id === "srv-p1" ? 12000 : 100));
+    h.busy = h.status.info.gpus.map(g => ({i: g.i, now: g.util, m10: g.util, h1: g.util, cov: 3600}));
+    h.status.running = []; h.status.waiting = []; h.status.external = [];
+    return h;
+  };
+  // 构造 8 台主机：alpha 池 4 台（含 1 台 4 卡主机 srv-p1、1 台有告警的 srv-p4），beta 池 3 台，未入池 1 台
+  S.hosts = [
+    mkHost("srv-p1", "节点 P1", "alpha", "Alpha 池", 4, true),
+    mkHost("srv-p2", "节点 P2", "alpha", "Alpha 池", 2, true),
+    mkHost("srv-p3", "节点 P3", "alpha", "Alpha 池", 2, true),
+    mkHost("srv-p4", "节点 P4", "alpha", "Alpha 池", 2, false, "ssh timeout"),
+    mkHost("srv-b1", "节点 B1", "beta", "Beta 池", 2, true),
+    mkHost("srv-b2", "节点 B2", "beta", "Beta 池", 2, true),
+    mkHost("srv-b3", "节点 B3", "beta", "Beta 池", 2, true),
+    mkHost("srv-u1", "独立节点 U1", null, null, 2, true),
+  ];
+  // 仅 srv-p1 的卡 0 与 srv-b1 的卡 0 有任务占用，其余 16 张卡在当前窗口空闲（总计 18 张卡 > 12）
+  S.occ = {
+    "srv-p1": [{p: "proj-a", n: "job_alpha", st: "run", g: [0], t0: NOW - 1800, t1: NOW + 3600}],
+    "srv-b1": [{p: "proj-b", n: "job_beta", st: "plan", g: [0], t0: NOW + 600, t1: NOW + 4200}],
+  };
+  const C = mkCtx(ovSrc, S, {hash: "#/", filename: "overview.js"});
+  const homeHtml = el(C, "view").innerHTML;
+  clean(homeHtml, "#257 多主机总览");
+
+  // 1. 总览主机表：按算力池分组头（带在线/卡数汇总）+ >=4 卡主机紧凑 2 列微条
+  has(homeHtml, 'data-pfold="tbl:alpha"', "alpha 池分组头");
+  has(homeHtml, "在线 3/4 台 · 10 卡", "alpha 池汇总");
+  has(homeHtml, 'data-pfold="tbl:beta"', "beta 池分组头");
+  has(homeHtml, 'class="gpu-grid"', "4 卡主机应使用 2 列紧凑网格");
+  has(homeHtml, 'class="gpu-mini"', "4 卡主机微条");
+  // 点击折叠 alpha 池
+  clickOn(C, "[data-pfold]", {pfold: "tbl:alpha"});
+  const foldedHtml = el(C, "view").innerHTML;
+  has(foldedHtml, "（已折叠）", "折叠后池头提示");
+  ok(!foldedHtml.includes('data-go="#/host/srv-p1"'), "折叠后 alpha 池主机行应隐藏");
+  has(foldedHtml, 'data-go="#/host/srv-b1"', "未折叠的 beta 池主机行仍在");
+  // 再次点击展开
+  clickOn(C, "[data-pfold]", {pfold: "tbl:alpha"});
+  has(el(C, "view").innerHTML, 'data-go="#/host/srv-p1"', "再次点击应重新展开");
+
+  // 2. 总览任务时间线：> 12 行默认隐藏空闲卡（16 张空闲卡）+ 按算力池筛选
+  const ctl1 = el(C, "tlctl").innerHTML, tl1 = el(C, "tlbox").innerHTML;
+  has(ctl1, "已隐藏 16 张空闲卡，点此展开", "默认隐藏空闲卡提示");
+  has(ctl1, 'data-tlpool="alpha"', "按池筛选按钮 alpha");
+  has(ctl1, 'data-tlpool="beta"', "按池筛选按钮 beta");
+  has(tl1, "srv-p1 卡 0", "活跃卡保留");
+  has(tl1, "srv-b1 卡 0", "活跃卡保留");
+  ok(!tl1.includes("srv-p2 卡 0"), "空闲卡已隐藏");
+  // 点击展开空闲卡 -> 18 行全部显示，且高度 > 400 触发双刻度轴
+  clickOn(C, "[data-tlidle]", {});
+  const ctl2 = el(C, "tlctl").innerHTML, tl2 = el(C, "tlbox").innerHTML;
+  has(ctl2, "隐藏空闲卡（16 张）", "展开后切换为隐藏按钮");
+  has(tl2, "srv-p2 卡 0", "展开后显示空闲卡");
+  // 切回隐藏并按 beta 池筛选（beta 池仅 6 张卡 <= 12，不再触发隐藏空闲卡开关，只显示 beta 主机）
+  clickOn(C, "[data-tlidle]", {});
+  clickOn(C, "[data-tlpool]", {tlpool: "beta"});
+  const tlBeta = el(C, "tlbox").innerHTML;
+  has(tlBeta, "srv-b1 卡 0", "beta 池主机保留");
+  ok(!tlBeta.includes("srv-p1 卡 0"), "筛选 beta 池后不显示 alpha 主机");
+
+  // 3. 侧边栏：主机数 > 6 台时按算力池二级折叠（默认收起、保留池内告警红点、选中池内主机自动展开）
+  const side1 = el(C, "side").innerHTML;
+  clean(side1, "#257 侧边栏");
+  has(side1, 'class="npool fold" data-pfold="side:alpha"', "alpha 池在侧边栏默认收起");
+  has(side1, 'class="ct bad">1</span>', "收起时保留 alpha 池告警红点");
+  has(side1, 'href="#/host/srv-u1"', "未入池主机直接列出");
+  // 点击展开 alpha 池
+  clickOn(C, "[data-pfold]", {pfold: "side:alpha"});
+  has(el(C, "side").innerHTML, 'class="npool" data-pfold="side:alpha"', "点击后侧边栏 alpha 池展开");
+  // 导航到 beta 池主机时，即使未手动展开，beta 池自动展开
+  page(C, "#/host/srv-b2");
+  has(el(C, "side").innerHTML, 'class="npool" data-pfold="side:beta"', "当前路由在 beta 池主机时自动展开 beta 池");
+
+  // 4. 恶意池名转义
+  const SE = JSON.parse(JSON.stringify(S));
+  SE.hosts[0].pool_label = "池" + BAD;
+  const CE = mkCtx(ovSrc, SE, {hash: "#/", filename: "overview.js"});
+  clean(el(CE, "view").innerHTML, "#257 恶意池名总览");
+  clean(el(CE, "side").innerHTML, "#257 恶意池名侧栏");
+  clean(el(CE, "tlctl").innerHTML, "#257 恶意池名时间线筛选");
+});
+
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));

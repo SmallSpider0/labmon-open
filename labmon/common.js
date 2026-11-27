@@ -584,12 +584,18 @@ function tlSvg(box, rows, o = {}) {
   const X = t => L + PW * (t - t0) / (t1 - t0);
   const c = {t0, t1, W, L, R, PW, narrow, X, cl: t => Math.max(L, Math.min(W - R, X(t))), win: (a, b) => a != null && b != null && b > t0 && a < t1, seen};
   const rowGap = (r, i) => !i ? 0 : r.sep ? (o.sepGap ?? 4) : (r.gap ?? 2);
-  const top = 14, H = top + rows.reduce((acc, r, i) => acc + rowGap(r, i) + r.h, 0) + 18, tk = tlTicks(t0, t1, Math.min(10, PW / 64));
+  const bodyH = rows.reduce((acc, r, i) => acc + rowGap(r, i) + r.h, 0);
+  const dual = 14 + bodyH + 18 > 400;                     // 高时间线（H > 400）顶部也渲染一行时间刻度，与底部共用 tlTicks
+  const top = dual ? 28 : 14, H = top + bodyH + 18, tk = tlTicks(t0, t1, Math.min(10, PW / 64));
+  const tickLab = (x, y, lab, sty, pos) => `<text class="tl-tick tl-tick-${pos}" x="${x}" y="${y}" text-anchor="middle" style="${sty}">${lab}</text>`;
   let s = "", y = top;
   for (const t of tk.out) {
     const d = new Date(t * 1000), mid = !d.getHours() && !d.getMinutes();
     const lab = mid || tk.st >= 1440 ? tsMD(t) : tsHM(t);
-    s += `<line x1="${X(t)}" x2="${X(t)}" y1="${top - 2}" y2="${H - 16}" stroke="var(--line)"/><text x="${X(t)}" y="${H - 3}" text-anchor="middle" style="${mid && tk.st < 1440 ? "fill:var(--fg)" : ""}">${lab}</text>`;
+    const sty = mid && tk.st < 1440 ? "fill:var(--fg)" : "";
+    s += `<line x1="${X(t)}" x2="${X(t)}" y1="${top - 2}" y2="${H - 16}" stroke="var(--line)"/>`
+      + (dual ? tickLab(X(t), top - 6, lab, sty, "top") : "")
+      + tickLab(X(t), H - 3, lab, sty, "bot");
   }
   let body = "";
   for (let i = 0; i < rows.length; i++) {
