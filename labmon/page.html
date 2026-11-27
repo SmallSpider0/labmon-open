@@ -752,13 +752,14 @@ function hostRow(host, hb, ev, y, h, c) {
   }
   return s;
 }
-// 同机别的项目占卡的情况（工作台 occupancy：已跑的、在跑的、worker 推演的排队），重叠的分道；本项目的车道空着时看这一行就知道卡被谁占着
+// 同机别的项目的占用情况（工作台 occupancy：已跑的、在跑的、worker 推演的排队，含 GPU 与纯 CPU 任务，#244），重叠的分道；本项目的车道空着时看这一行就知道资源被谁占着
 function othersRow(host, oc, lay, y, h, c) {
   const vis = oc.filter(x => c.win(x.t0, x.t1)), who = [...new Set((vis.length ? vis : oc).map(x => x.p))];
-  let s = `<text x="10" y="${y + h / 2 + 4}" style="font-size:10.5px" ${tip(`${host.label} 上别的项目占卡的情况：${who.join("、")}\n实色已跑，描边在跑，淡色是 worker 按同一套放行规则推演的排队；本项目车道上的“让位”就是在等它们`)}>${esc(fit("别的项目", c.L - 16))}</text>`;
+  let s = `<text x="10" y="${y + h / 2 + 4}" style="font-size:10.5px" ${tip(`${host.label} 上别的项目占用情况（含 GPU 与纯 CPU 任务）：${who.join("、")}\n实色已跑，描边在跑，淡色是 worker 按同一套放行规则推演的排队；本项目车道上的“让位”就是在等它们`)}>${esc(fit("别的项目", c.L - 16))}</text>`;
   s += `<rect x="${c.L}" y="${y + h / 2 - .5}" width="${c.PW}" height="1" fill="var(--line)"/>`;
-  return s + occBars(oc, y, h, c, {layout: lay, color: p => EV.colors?.[p] || "var(--faint)", label: x => x.n, pre: x => x.p + " ",
-    text: x => `${x.p}${x.lane ? " " + x.lane : ""} · ${x.n}\n${occState(x)} · ${ts(x.t0)} → ${ts(x.t1)}（${dur(x.t1 - x.t0)}）· 卡 ${x.g.join(",")}`
+  return s + occBars(oc, y, h, c, {layout: lay, color: p => EV.colors?.[p] || "var(--faint)", label: x => x.n,
+    pre: x => x.p + (x.g?.length ? " " : " [CPU] "),
+    text: x => `${x.p}${x.lane ? " " + x.lane : ""} · ${x.n}\n${occState(x)} · ${ts(x.t0)} → ${ts(x.t1)}（${dur(x.t1 - x.t0)}）· ${x.g?.length ? "卡 " + x.g.join(",") : "纯 CPU"}`
       + (x.after ? `\n等 ${afterText(x.after, D.id)} 跑完才轮到` : "")});
 }
 // 一条车道：任务条、空档（标原因）、失败的尝试。gs 是车道名右边画圆点的计划项 id（图上只有一个计划项时为空）

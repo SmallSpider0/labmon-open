@@ -726,6 +726,7 @@ def project_events() -> dict:
     ev_b = [e(NOW - 86400, "borrow", "借来 OWNER（srv-b）：没约定时间，只给 proj-a 用", host="srv-b", who="OWNER"),
             e(NOW - 86400 + 60, "override", "临时指令：续租截止 borrow", host="srv-b", act="add", okind="deadline", target="borrow", until=NOW + 6 * 86400, at=NOW + 6 * 86400)]
     occ = {"srv-a": [{"p": "proj-b", "n": "beta_eval_s0", "lane": "车道 2", "t0": NOW - 7 * H, "t1": NOW - 6 * H, "g": [0], "st": "failed"},
+                     {"p": "proj-b", "n": "beta_cpu_prep", "lane": "车道 3", "t0": NOW - 3 * H, "t1": NOW - H, "g": [], "st": "done"},
                      {"p": "proj-b", "n": "hold_until_data", "lane": "车道 2", "t0": NOW - 30 * 60, "t1": NOW + H, "g": [1], "st": "run"}],
            "srv-b": [{"p": "proj-b", "n": "beta_eval_s7", "lane": "车道 1", "t0": NOW - H, "t1": NOW + 2 * H, "g": [0], "st": "run"},
                      {"p": "proj-b", "n": "beta_eval_s8", "lane": "车道 1", "t0": NOW + 2 * H, "t1": NOW + 4 * H, "g": [0], "st": "plan", "after": [["proj-a", "alpha_eval_s7"]]}]}
