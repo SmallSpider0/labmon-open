@@ -979,5 +979,293 @@ class PoolInfraTest(Base):
         self.assertEqual(got[0][:2], ("rm", "here"))
 
 
+class PoolGuiManagementTest(Base):
+    """Issue #240：管理员 GUI 可视化新建/编辑/删除共有型算力池，含原子写入、强校验与安全红线。"""
+
+    def setUp(self):
+        super().setUp()
+        self.hosts_toml = """# 保留顶部注释
+[[hosts]]
+id = "h1"
+ssh = "root@10.0.0.1"
+data_root = "/data/lab"
+worker_home = "/data/lab/labmon"
+label = "A100-1"
+
+[[hosts]]
+id = "h2"
+ssh = "root@10.0.0.2"
+data_root = "/data/lab"
+worker_home = "/data/lab/labmon"
+label = "A100-2"
+
+[[hosts]]
+id = "h3"
+ssh = "root@10.0.0.3"
+data_root = "/data/other"
+worker_home = "/data/other/labmon"
+label = "异域机"
+
+[[hosts]]
+id = "ind1"
+ssh = "root@10.0.0.4"
+standalone = true
+label = "独立机"
+
+[[hosts]]
+id = "local1"
+label = "看板本机"
+
+[[hosts]]
+id = "ret1"
+ssh = "root@10.0.0.5"
+data_root = "/data/lab"
+worker_home = "/data/lab/labmon"
+returned = "2026-11-20"
+label = "已归还机"
+
+[[hosts]]
+id = "swp1"
+ssh = "root@10.0.0.6"
+data_root = "/data/lab"
+worker_home = "/data/lab/labmon"
+borrow_until = "2026-12-01 18:00"
+borrow_from = "AA"
+label = "借用机"
+
+[fleet]
+interval = 600
+
+[[fleet.servers]]
+id = "fsrv1"
+holder = "AA"
+ssh = "root@10.0.0.9"
+port = 15001
+pool = "P"
+"""
+        (self.d / "hosts.toml").write_text(self.hosts_toml)
+
+    def test_save_edit_remove_pool_atomic_and_events(self):
+        """save_pool / remove_pool 原子改写 hosts.toml，保留原注释与其他段，记录 config 事件。"""
+        res = CF.save_pool("a100", label="A100 共有池", hosts=["h1", "h2"], members=["alice", "Bob"],
+                           exclusive=True, create=True, by="boss")
+        self.assertTrue(res["changed"])
+        self.assertEqual(res["pool"]["host_id"], "pool:a100")
+        self.assertEqual(res["pool"]["members"], ["alice", "bob"])
+        text = (self.d / "hosts.toml").read_text()
+        self.assertIn("# 保留顶部注释", text)
+        self.assertIn("[pools.a100]", text)
+        # 无变动编辑短路不重写
+        res_same = CF.save_pool("a100", label="A100 共有池", hosts=["h1", "h2"], members=["alice", "bob"],
+                                exclusive=True, create=False, by="boss")
+        self.assertFalse(res_same["changed"])
+        # 编辑改开放模式、通配成员、移出 h2（提示下一轮自动撤离）
+        res2 = CF.save_pool("a100", label="A100 开放池", hosts=["h1"], members=["alice", "*"],
+                            exclusive=False, create=False, by="boss")
+        self.assertTrue(res2["changed"])
+        self.assertFalse(res2["pool"]["exclusive"])
+        self.assertEqual(res2["pool"]["members"], ["*"])
+        self.assertEqual(res2["pool"]["hosts"], ["h1"])
+        self.assertIn("h2", res2["msg"])
+        self.assertIn("自动撤离", res2["msg"])
+        # 支持默认池 [pools.pool] 与命名池共存
+        res_def = CF.save_pool("pool", label="默认池", hosts=["h2"], members=[], exclusive=True, create=True, by="boss")
+        self.assertEqual(res_def["pool"]["host_id"], "pool")
+        self.assertEqual(set(CF.pools()), {"a100", "pool"})
+        # 删除两个池
+        msg1 = CF.remove_pool("a100", by="boss", snap={"regs": [], "pool": {"lists": {}}})
+        self.assertIn("已删除", msg1)
+        self.assertEqual(list(CF.pools()), ["pool"])
+        CF.remove_pool("pool", by="boss", snap={"regs": [], "pool": {"lists": {}}})
+        self.assertEqual(CF.pools(), {})
+        self.assertIn("# 保留顶部注释", (self.d / "hosts.toml").read_text())
+        evs = RC.records(cat="config")
+        self.assertTrue(any("新建了共有算力池" in e["msg"] for e in evs), evs)
+        self.assertTrue(any("删除了共有算力池" in e["msg"] for e in evs), evs)
+
+    def test_save_pool_validation_rejects_invalid_inputs(self):
+        """save_pool 复用 pools() 强校验并拦截非法 id、保留名、重名、异域、互斥、独立/借用/本机/归还机与未知账号。"""
+        CF.save_pool("a100", label="已有池", hosts=["h1"], members=["alice"], create=True, by="boss")
+        bad_cases = [
+            # 非法 id / 保留名 / 重名 / 已存在 / 不存在
+            (dict(pid="Bad!", hosts=["h2"], create=True), "不合法"),
+            (dict(pid="new", hosts=["h2"], create=True), "保留名"),
+            (dict(pid="edit", hosts=["h2"], create=True), "保留名"),
+            (dict(pid="h1", hosts=["h2"], create=True), "重名"),
+            (dict(pid="fsrv1", hosts=["h2"], create=True), "重名"),
+            (dict(pid="a100", hosts=["h2"], create=True), "已存在"),
+            (dict(pid="nope", hosts=["h2"], create=False), "找不到"),
+            # 非法主机组合
+            (dict(pid="p2", hosts=[], create=True), "至少选择"),
+            (dict(pid="p2", hosts=["nohost"], create=True), "不在 [[hosts]]"),
+            (dict(pid="p2", hosts=["h1"], create=True), "同时出现"),
+            (dict(pid="p2", hosts=["h2", "h3"], create=True), "worker_home"),
+            (dict(pid="p2", hosts=["ind1"], create=True), "独立主机"),
+            (dict(pid="p2", hosts=["local1"], create=True), "本机或回环"),
+            (dict(pid="p2", hosts=["swp1"], create=True), "借用"),
+            (dict(pid="p2", hosts=["ret1"], create=True), "已归还"),
+            (dict(pid="p2", hosts=["fsrv1"], create=True), "组内服务器"),
+            # 成员账号不存在 / 名称超长
+            (dict(pid="p2", hosts=["h2"], members=["ghost"], create=True), "账号不存在"),
+            (dict(pid="p2", hosts=["h2"], label="x" * 41, create=True), "最多"),
+        ]
+        before = (self.d / "hosts.toml").read_text()
+        for kw, expect in bad_cases:
+            with self.assertRaises(CF.ConfigError, msg=str(kw)) as e:
+                CF.save_pool(**kw, by="boss")
+            self.assertIn(expect, str(e.exception))
+        # 所有失败校验均未污染 hosts.toml
+        self.assertEqual((self.d / "hosts.toml").read_text(), before)
+
+    def test_remove_pool_guards_active_and_pending_lists(self):
+        """有待放或已落机池清单时默认阻止删除并提示条数，force=True 可强制删除；编辑移出主机后下一轮自动撤离。"""
+        CF.save_pool("a100", label="A100 池", hosts=["h1", "h2"], members=["alice"], create=True, by="boss")
+        snap = {
+            "pool": {"lists": {
+                "a100|/data/lab/pa|jobs/q1.txt": {
+                    "pool": "a100", "root": "/data/lab/pa", "jobs": "jobs/q1.txt", "done": False,
+                },
+            }},
+            "regs": [
+                {"host": "pool:a100", "state": "pool", "queues": [
+                    {"root": "/data/lab/pa", "jobs": "jobs/q1.txt", "project": "pa"},
+                ]},
+                {"host": "h2", "state": "active", "queues": [
+                    {"root": "/data/lab/pa", "jobs": "jobs/q2.txt", "project": "pa", "pool": "a100"},
+                ]},
+            ],
+        }
+        with self.assertRaises(CF.ConfigError) as e:
+            CF.remove_pool("a100", force=False, by="boss", snap=snap)
+        self.assertIn("1 条待放清单", str(e.exception))
+        self.assertIn("1 条已落机清单", str(e.exception))
+
+        # 编辑态移出 h2 后，pool.tick 自动撤离 h2 上已落机的本池清单
+        CF.save_pool("a100", label="A100 池", hosts=["h1"], members=["alice"], create=False, by="boss")
+        t = 1_700_000_000.0
+        h1 = make_host_entry("h1", gpus=1, busy_gpus=0, t=t)
+        h2 = make_host_entry("h2", gpus=1, busy_gpus=0,
+                             waiting=[{"name": "j2", "project": "pa", "root": "/data/lab/pa", "queue": "jobs/q2.txt", "since": t - 60}], t=t)
+        moved = []
+        fit_ok = lambda pcfg, it, hs: {"head": "j2", "need": {"ngpu": 1}, "hosts": {h: {"ok": True, "free_cards": 1, "free_vram": 40000, "load": {}} for h in hs}}
+        with mock.patch.object(LS, "primary", return_value=True):
+            P.tick([h1, h2], snap["regs"], {}, t, lan_ok=True,
+                   move_fn=lambda to, it, pid, rsn: moved.append((to, it["src"], rsn)), fit_fn=fit_ok)
+        self.assertTrue(any(src == "h2" and to == "h1" and "移出算力池" in rsn for to, src, rsn in moved), moved)
+
+        # force=True 强制删除成功
+        msg = CF.remove_pool("a100", force=True, by="boss", snap=snap)
+        self.assertIn("已删除", msg)
+        self.assertIn("不受中断", msg)
+        self.assertEqual(CF.pools(), {})
+
+    def test_manage_data_structure(self):
+        """pool.manage_data 准确返回候选主机（含 worker_home / pool_id / 不可入池原因）与普通用户列表（不含管理员）。"""
+        CF.save_pool("a100", label="A100 池", hosts=["h1"], members=["alice"], create=True, by="boss")
+        data = P.manage_data({"regs": [], "pool": {"lists": {}}})
+        by_id = {h["id"]: h for h in data["hosts"]}
+        self.assertTrue(by_id["h1"]["eligible"])
+        self.assertEqual(by_id["h1"]["pool_id"], "a100")
+        self.assertTrue(by_id["h2"]["eligible"])
+        self.assertIsNone(by_id["h2"]["pool_id"])
+        self.assertEqual(by_id["h3"]["worker_home"], "/data/other/labmon")
+        self.assertFalse(by_id["ind1"]["eligible"])
+        self.assertIn("独立主机", by_id["ind1"]["why"])
+        self.assertFalse(by_id["local1"]["eligible"])
+        self.assertFalse(by_id["ret1"]["eligible"])
+        self.assertFalse(by_id["swp1"]["eligible"])
+        self.assertNotIn("fsrv1", by_id)
+        unames = [u["name"] for u in data["users"]]
+        self.assertIn("alice", unames)
+        self.assertNotIn("boss", unames)
+
+    def test_http_routes_security_lan_user_standby(self):
+        """HTTP 接口安全红线：内网管理员读写正常并唤醒采集；普通用户 403；公网（含开启 public_ops 管理员）一律 404；备用机写操作 409。"""
+        import threading
+        import urllib.error
+        import urllib.request
+        from fixtures import board
+
+        srv = board(self, scopes=("admin",), name="boss", role="admin")
+        pub = S.Listener(("127.0.0.1", 0), srv)
+        threading.Thread(target=pub.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
+        self.addCleanup(pub.server_close)
+        self.addCleanup(pub.shutdown)
+
+        # 开启 boss 的公网平台操作，验证池管理仍严格 lan=True 绝不随 public_ops 开放
+        U.set_public_ops("boss", True, "test")
+        admin_tok = make_token("boss", role="admin", scopes=("admin",))
+        user_tok = make_token("alice", role="user", scopes=("read", "project"))
+        lan_base = f"http://127.0.0.1:{srv.server_address[1]}"
+        pub_base = f"http://127.0.0.1:{pub.server_address[1]}"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+        def call(base: str, method: str, path: str, tok: str, body: dict | None = None):
+            data = json.dumps(body).encode() if body is not None else None
+            hdr = {"Authorization": f"Bearer {tok}"}
+            if method == "POST":
+                hdr["Content-Type"] = "application/json"
+            req = urllib.request.Request(base + path, data=data, method=method, headers=hdr)
+            try:
+                with opener.open(req, timeout=5) as resp:
+                    return resp.status, json.loads(resp.read().decode())
+            except urllib.error.HTTPError as e:
+                return e.code, json.loads(e.read().decode())
+
+        with mock.patch.object(LS, "primary", return_value=True):
+            # 1. 内网管理员读取 options、新建、编辑、删除
+            st, data = call(lan_base, "GET", "/api/pools/options", admin_tok)
+            self.assertEqual(st, 200, data)
+            self.assertTrue(any(h["id"] == "h1" for h in data["hosts"]))
+            self.assertTrue(any(u["name"] == "alice" for u in data["users"]))
+
+            srv.overview.wake.clear()
+            st, out = call(lan_base, "POST", "/api/pools/save", admin_tok,
+                           {"id": "a100", "label": "A100 池", "hosts": ["h1", "h2"], "members": ["alice"], "exclusive": True, "create": True})
+            self.assertEqual(st, 200, out)
+            self.assertTrue(srv.overview.wake.is_set())
+            self.assertIn("a100", CF.pools())
+
+            # 2. 普通用户一律 403
+            for method, path, body in (
+                ("GET", "/api/pools/options", None),
+                ("POST", "/api/pools/save", {"id": "p2", "hosts": ["h3"], "members": [], "create": True}),
+                ("POST", "/api/pools/remove", {"id": "a100"}),
+            ):
+                st, err = call(lan_base, method, path, user_tok, body)
+                self.assertEqual(st, 403, f"普通用户应 403：{method} {path} → {st} {err}")
+
+            # 3. 公网入口（即使管理员开启了 public_ops）一律 404
+            for method, path, body in (
+                ("GET", "/api/pools/options", None),
+                ("POST", "/api/pools/save", {"id": "p2", "hosts": ["h3"], "members": [], "create": True}),
+                ("POST", "/api/pools/remove", {"id": "a100"}),
+            ):
+                st, err = call(pub_base, method, path, admin_tok, body)
+                self.assertEqual(st, 404, f"公网入口应 404：{method} {path} → {st} {err}")
+
+            # 4. 校验失败返回 409
+            st, err = call(lan_base, "POST", "/api/pools/save", admin_tok,
+                           {"id": "bad_mix", "hosts": ["h1", "h3"], "members": [], "create": True})
+            self.assertEqual(st, 409, err)
+
+            # 5. 内网管理员正常删除
+            srv.overview.wake.clear()
+            st, out = call(lan_base, "POST", "/api/pools/remove", admin_tok, {"id": "a100"})
+            self.assertEqual(st, 200, out)
+            self.assertTrue(srv.overview.wake.is_set())
+            self.assertEqual(CF.pools(), {})
+
+        # 6. 备用机拦截写操作返回 409（含 standby=True）
+        with mock.patch.object(LS, "primary", return_value=False):
+            st, err = call(lan_base, "POST", "/api/pools/save", admin_tok,
+                           {"id": "sb", "hosts": ["h1"], "members": [], "create": True})
+            self.assertEqual(st, 409, err)
+            self.assertTrue(err.get("standby"))
+            st, err = call(lan_base, "POST", "/api/pools/remove", admin_tok, {"id": "sb"})
+            self.assertEqual(st, 409, err)
+            self.assertTrue(err.get("standby"))
+
+
 if __name__ == "__main__":
     unittest.main()

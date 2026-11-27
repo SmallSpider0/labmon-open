@@ -130,7 +130,7 @@ from . import client as CL
 from .config import CLIENT_HEADER, server as server_conf
 from . import dist as DI
 from . import service as S
-from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, cfg_spec, check_future, home_key, host_pair, host_users, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pool_home, resolve_pool, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
+from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, cfg_spec, check_future, home_key, host_pair, host_users, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pool_home, remove_pool, resolve_pool, save_pool, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
     stale_limit, user_hosts, STALE_PAD_S, STALE_RUNS
 from .records import ReportQuota, cat_of, log_events, project_mine, records, report, report_headers, schedule_project, tell
 from .service import log, notify, rotate_log
@@ -929,6 +929,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._client_tokens(u["tokens"])
                 u["push"] = S.push_view(u["name"]).get("set", False)
             return self._json(200, got)
+        if path == "/api/pools/options":
+            try:
+                return self._json(200, PO.manage_data(snapshot()))
+            except ConfigError as x:
+                return self._json(409, {"error": str(x)})
         if path == "/api/admin/deploy":
             return self._json(200, DP.status())
         if path in ("/api/client/install.sh", "/api/client/wheel", "/api/client/ephemeral.py"):
@@ -1241,6 +1246,34 @@ class Handler(BaseHTTPRequestHandler):
                 msg = set_host_users(a["name"], _strings(body, "hosts"), who.name)
                 self.board.overview.wake.set()
                 log(f"账号：{msg}（{who.name}）")
+                return self._json(200, {"msg": msg})
+            if act == "pools/save":                    # 新建/编辑共有型算力池（#240）：仅内网管理员，严格 admin=True, lan=True
+                LS.need("修改共有算力池配置")
+                pid = s("id").strip()
+                label = body.get("label")
+                if label is not None and not isinstance(label, str):
+                    raise U.Denied(400, "显示名称要是字符串")
+                hosts_in = _strings(body, "hosts")
+                members_in = _strings(body, "members")
+                exclusive = body.get("exclusive", True)
+                if not isinstance(exclusive, bool):
+                    raise U.Denied(400, "exclusive 要是布尔值")
+                create = body.get("create", False)
+                if not isinstance(create, bool):
+                    raise U.Denied(400, "create 要是布尔值")
+                out = save_pool(pid, label=label, hosts=hosts_in, members=members_in, exclusive=exclusive, create=create, by=who.name)
+                self.board.overview.wake.set()
+                log(f"算力池：{out['msg']}（{who.name}）")
+                return self._json(200, out)
+            if act == "pools/remove":                  # 删除共有型算力池（#240）：仅内网管理员，严格 admin=True, lan=True
+                LS.need("删除共有算力池")
+                pid = s("id").strip()
+                force = body.get("force", False)
+                if not isinstance(force, bool):
+                    raise U.Denied(400, "force 要是布尔值")
+                msg = remove_pool(pid, force=force, by=who.name, snap=snapshot())
+                self.board.overview.wake.set()
+                log(f"算力池：{msg}（{who.name}）")
                 return self._json(200, {"msg": msg})
             if act == "hosts/external":
                 out = EH.add_external(body, who)
@@ -2002,6 +2035,8 @@ ROUTES = [
     _R("GET", r"/api/client/(install\.sh|wheel|ephemeral\.py)", "read"),   # 由看板发客户端（#167，dist.py）与临时主机上报脚本（#213）
     _R("GET", r"/api/users", "admin", admin=True, lan=True),          # 账号管理只在内网入口（#17）；自己的口令、令牌照常
     _R("POST", r"/api/users/(add|role|reset|revoke|remove|hosts)", "admin", admin=True, lan=True),
+    _R("GET", r"/api/pools/options", "admin", admin=True, lan=True),  # 共有算力池管理只在内网入口（#240），不随公网平台许可开放
+    _R("POST", r"/api/pools/(save|remove)", "admin", admin=True, lan=True),
     _R("GET", r"/|/index\.html|/overview\.json|/records\.json", "read"),   # 普通用户只看到自己的（users.view、users.visible）
     _R("GET", r"/p/.*", "read", own="path"),                           # 项目页：普通用户只看自己的项目（#167）
     _R("GET", r"/fleet/(op|plan)\.json", "read", admin=True),         # 平台操作进度与向导预览只给管理员

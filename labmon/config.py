@@ -647,6 +647,13 @@ def set_host_users(name: str, hosts: list[str], by: str) -> str:
     return f"{name} {what}"
 
 
+def _find_pool_block(lines: list[str], pid: str) -> list[tuple[int, int, str | None]]:
+    """在 hosts.toml 各行中定位 [pools.<pid>]（兼容引号写法）块。"""
+    return (_blocks(lines, f"[pools.{pid}]")
+            or _blocks(lines, f'[pools."{pid}"]')
+            or _blocks(lines, f"[pools.'{pid}']"))
+
+
 @_hosts_edit
 def remove_pool_member(name: str, by: str) -> list[str]:
     """删除账号时同步移除主机清单 [pools.*].members 里显式列出的该账号（#212，users.remove 调）：
@@ -666,9 +673,7 @@ def remove_pool_member(name: str, by: str) -> list[str]:
         new = [x for x in cur if x.strip().lower() != low]
         if len(new) == len(cur):
             continue
-        bl = (_blocks(lines, f"[pools.{pid}]")
-              or _blocks(lines, f'[pools."{pid}"]')
-              or _blocks(lines, f"[pools.'{pid}']"))
+        bl = _find_pool_block(lines, str(pid))
         if not bl:
             continue
         s, end, _ = bl[0]
@@ -888,6 +893,152 @@ def _guest_tpl(hosts: list[dict]) -> dict:
 
 
 POOL_KEYS = ("label", "hosts", "members", "exclusive")
+POOL_RESERVED_IDS = frozenset({"new", "edit", "options", "save", "remove"})
+
+
+def _check_pools_toml(text: str) -> dict:
+    """整份主机清单与共有算力池校验（save_pool / remove_pool 共用）：先过 _check_hosts_toml，再过 pools() 唯一强校验。"""
+    d = _check_hosts_toml(text)
+    pools(d)
+    return d
+
+
+def _last_pool_end(lines: list[str]) -> int:
+    """找到 hosts.toml 中最后一个 [pools.*] 块的结束行；没有时返回文件末尾。"""
+    end = None
+    for i, l in enumerate(lines):
+        head = re.sub(r"\s*#.*$", "", l.strip())
+        if head.startswith("[pools.") and head.endswith("]"):
+            bl = _blocks(lines, head)
+            if bl:
+                end = max(end or 0, max(e for _, e, _ in bl))
+    return end if end is not None else len(lines)
+
+
+@_hosts_edit
+def save_pool(pid: str, *, label: str | None = None, hosts: list[str], members: list[str] | None = None,
+              exclusive: bool = True, create: bool = False, by: str = "看板") -> dict:
+    """管理员新建或编辑共有型算力池 [pools.<id>]（#240，唯一落盘入口）：
+    走 HOSTS_LOCK 原子改写 hosts.toml，复用 pools() 同套强校验（合法 id、非保留名、同 worker_home、
+    单机单池互斥、禁独立机/借用机/本机入池）并校验显式成员账号存在。返回 {"pool", "changed", "msg"}。"""
+    from .users import account as _account
+    pid = str(pid or "").strip()
+    if not POOL_ID_RE.fullmatch(pid):
+        raise ConfigError("算力池 ID 不合法：须字母开头，仅含字母、数字、_ 或 -，最多 32 位")
+    if pid.lower() in POOL_RESERVED_IDS:
+        raise ConfigError(f"算力池 ID 不能使用保留名 {pid}")
+    if label is not None:
+        if not isinstance(label, str):
+            raise ConfigError("算力池显示名称要是字符串")
+        label = label.strip() or None
+        if label and len(label) > LABEL_MAX:
+            raise ConfigError(f"算力池显示名称最多 {LABEL_MAX} 个字")
+    if not isinstance(hosts, list) or not hosts or not all(isinstance(x, str) and x.strip() for x in hosts):
+        raise ConfigError("至少选择一台常驻集群主机加入算力池")
+    norm_hosts = list(dict.fromkeys(x.strip() for x in hosts))
+    raw_members = [] if members is None else members
+    if not isinstance(raw_members, list) or not all(isinstance(x, str) and x.strip() for x in raw_members):
+        raise ConfigError("池成员要写成账号名列表（或 \"*\"）")
+    norm_members = list(dict.fromkeys(x.strip().lower() for x in raw_members))
+    if "*" in norm_members:
+        norm_members = ["*"]
+    else:
+        missing = [m for m in norm_members if not _account(m)]
+        if missing:
+            raise ConfigError(f"池成员账号不存在：{'、'.join(missing)}（请先在「组内服务器 → 人员」开通账号）")
+    if not isinstance(exclusive, bool):
+        raise ConfigError("提交模式 exclusive 要是布尔值")
+    p = hosts_file()
+    raw = _read_toml(p) if p.exists() else {}
+    raw_pools = raw.get("pools")
+    if raw_pools is not None and not isinstance(raw_pools, dict):
+        raise ConfigError(f"{p} 的 [pools] 要写成 [pools.<id>] 表")
+    existing = raw_pools or {}
+    if create and pid in existing:
+        raise ConfigError(f"算力池 {pid} 已存在")
+    if not create and pid not in existing:
+        raise ConfigError(f"找不到算力池 {pid}")
+    raw_hosts = raw.get("hosts") or []
+    prev_hosts = set((existing.get(pid) or {}).get("hosts") or []) if not create else set()
+    returned_ids = {str(h["id"]) for h in raw_hosts if isinstance(h, dict) and h.get("id") and h.get("returned")}
+    bad_ret = [hid for hid in norm_hosts if hid in returned_ids and hid not in prev_hosts]
+    if bad_ret:
+        raise ConfigError(f"主机 {'、'.join(bad_ret)} 已归还，不能加入共有算力池")
+    old_text = p.read_text() if p.exists() else ""
+    lines = old_text.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    kv = {"label": label, "hosts": norm_hosts, "members": norm_members, "exclusive": exclusive}
+    if create:
+        if any(re.match(r"\s*%s\s*=" % re.escape(pid), l) for s, end, _ in _blocks(lines, "[pools]") for l in lines[s + 1:end]):
+            raise ConfigError(f"{p} 里 [pools] 已含 {pid} 内联定义，请先清理或改写成 [pools.{pid}] 段")
+        at = _last_pool_end(lines)
+        block = [f"[pools.{pid}]\n"] + [f"{k} = {_toml_val(v)}\n" for k, v in kv.items() if v is not None]
+        before = ["\n"] if at > 0 and lines[at - 1].strip() else []
+        after = ["\n"] if at < len(lines) and lines[at].strip() else []
+        new_lines = lines[:at] + before + block + after + lines[at:]
+    else:
+        bl = _find_pool_block(lines, pid)
+        if not bl:
+            raise ConfigError(f"{p} 里的算力池 {pid} 写成了内联表，请改写成 [pools.{pid}] 段后再在页面上编辑")
+        s, end, _ = bl[0]
+        new_lines = lines[:s + 1] + _set_keys(lines[s + 1:end], kv, p) + lines[end:]
+    new_text = "".join(new_lines)
+    parsed = _check_pools_toml(new_text)
+    saved = pools(parsed)[pid]
+    if not create and new_text == old_text:
+        return {"pool": saved, "changed": False, "msg": f"算力池「{saved['label']}」（{saved['host_id']}）配置没有变动"}
+    p.parent.mkdir(parents=True, exist_ok=True)
+    action = "新建" if create else "修改"
+    mode_txt = "独占" if exclusive else "开放"
+    mem_txt = "全部用户" if norm_members == ["*"] else ("、".join(norm_members) if norm_members else "仅管理员")
+    why = f"{by} {action}了共有算力池「{saved['label']}」（{saved['host_id']}，{mode_txt}，主机：{'、'.join(norm_hosts)}，成员：{mem_txt}）"
+    _write_checked(p, new_text, why, {"host": None, "hosts": None}, check=_check_pools_toml)
+    removed_hosts = [h for h in (existing.get(pid) or {}).get("hosts", []) if h not in norm_hosts] if not create else []
+    extra = f"；移出主机 {'、'.join(removed_hosts)} 上待跑的本池清单将在下一轮自动撤离（不中断在跑任务）" if removed_hosts else ""
+    return {"pool": saved, "changed": True, "msg": f"已{action}算力池「{saved['label']}」（{saved['host_id']}）{extra}"}
+
+
+@_hosts_edit
+def remove_pool(pid: str, *, force: bool = False, by: str = "看板", snap: dict | None = None) -> str:
+    """管理员删除共有型算力池 [pools.<id>]（#240，唯一落盘入口）：
+    默认拦截仍有待放或已落机池清单的算力池；force=True 时移除段落（不中断已在主机上运行的任务）。"""
+    from .pool import pool_activity
+    pid = str(pid or "").strip()
+    if not pid:
+        raise ConfigError("请指定要删除的算力池 ID")
+    p = hosts_file()
+    if not p.exists():
+        raise ConfigError(f"找不到算力池 {pid}")
+    raw = _read_toml(p)
+    raw_pools = raw.get("pools")
+    if not isinstance(raw_pools, dict) or pid not in raw_pools:
+        raise ConfigError(f"找不到算力池 {pid}")
+    try:
+        pm = pools(raw)
+        pcfg = pm.get(pid)
+    except ConfigError:
+        pm, pcfg = {}, None
+    act = pool_activity(pid, snap=snap, pool_map=pm)
+    if (act["pending"] or act["placed"]) and not force:
+        bits = [x for x in (f"{act['pending']} 条待放清单" if act["pending"] else "",
+                            f"{act['placed']} 条已落机清单" if act["placed"] else "") if x]
+        raise ConfigError(f"算力池 {pid} 仍有 {' 和 '.join(bits)}：请先撤回或等待跑完后再删除，或勾选强制删除")
+    lines = p.read_text().splitlines(keepends=True)
+    bl = _find_pool_block(lines, pid)
+    if not bl:
+        raise ConfigError(f"{p} 里的算力池 {pid} 写成了内联表，请手动从 hosts.toml 移除")
+    s, end, _ = bl[0]
+    while s > 0 and not lines[s - 1].strip():
+        s -= 1
+    sep = ["\n"] if s > 0 and end < len(lines) and lines[end].strip() else []
+    new_text = "".join(lines[:s] + sep + lines[end:])
+    label = (pcfg or {}).get("label") or pid
+    phid = (pcfg or {}).get("host_id") or (POOL if pid == POOL else f"{POOL_PREFIX}{pid}")
+    why = f"{by} 删除了共有算力池「{label}」（{phid}）" + ("（强制）" if force and (act["pending"] or act["placed"]) else "")
+    _write_checked(p, new_text, why, {"host": None, "hosts": None}, check=_check_pools_toml)
+    tail = "（在跑任务不受中断，已落机清单留在原主机继续跑完；待放目录残留清单可用 labmon worker rm 清理）" if (act["pending"] or act["placed"]) else ""
+    return f"已删除算力池「{label}」（{phid}）{tail}"
 
 
 def pools(data: dict | None = None) -> dict[str, dict]:

@@ -389,7 +389,8 @@ async function probeNow(id) {
 const DH = {srv: id => "#/fleet/srv/" + encodeURIComponent(id), person: n => "#/fleet/people/" + encodeURIComponent(n), new: p => "#/fleet/new/" + encodeURIComponent(p), guard: () => "#/fleet/guard",
   renew: (id = "") => "#/fleet/renew" + (id ? "/" + encodeURIComponent(id) : ""),
             proj: id => `#/p/${encodeURIComponent(id)}/manage`, arch: () => "#/archived", assign: id => `#/host/${encodeURIComponent(id)}/assign`,
-            ext: (id = "") => id ? "#/ext/" + encodeURIComponent(id) : "#/ext/new"};
+            ext: (id = "") => id ? "#/ext/" + encodeURIComponent(id) : "#/ext/new",
+            pool: (id = "") => id ? "#/pool/edit/" + encodeURIComponent(id) : "#/pool/new"};
 let DKEY = null, DLAST = "";
 const dHead = (av, title, sub, right = "", mark = "", status = "") => { const b = dBack();
   return `<header class="dh">${b ? `<button class="ib" data-dback aria-label="返回${esc(b)}" ${tip(`返回「${b}」`)}>${icon("chevl")}</button>` : ""}${av}
@@ -398,7 +399,7 @@ const dHead = (av, title, sub, right = "", mark = "", status = "") => { const b 
 // 从一个抽屉里点开另一个（服务器、人、保活守护）：记下来路，只记一级，返回键回去；关掉抽屉或从页面上点开的就清掉
 let DBACK = null;
 const dBack = () => { const d = DBACK && route(DBACK).drw;
-  return !d || DBACK === location.hash ? "" : d.k === "guard" ? "保活守护" : d.k === "renew" ? "续租" : d.k === "proj" ? "管理" : d.k === "arch" ? "已归档" : d.k === "ext" ? (d.id || "外部主机") : d.k === "srv" ? srvById(d.id)?.holder || d.id : d.k === "new" ? "开新的" : d.id === "+" ? "新的人" : d.id; };
+  return !d || DBACK === location.hash ? "" : d.k === "guard" ? "保活守护" : d.k === "renew" ? "续租" : d.k === "proj" ? "管理" : d.k === "arch" ? "已归档" : d.k === "ext" ? (d.id || "外部主机") : d.k === "pool" ? (d.id ? `编辑 ${d.id}` : "新建算力池") : d.k === "srv" ? srvById(d.id)?.holder || d.id : d.k === "new" ? "开新的" : d.id === "+" ? "新的人" : d.id; };
 const dNav = (ids, id) => ids.length > 1 && ids.includes(id) ? `<span class="dnav"><button class="ib" data-dnav="-1" aria-label="上一个" ${tip("上一个（←）")}>${icon("chevl")}</button><button class="ib" data-dnav="1" aria-label="下一个" ${tip("下一个（→）")}>${icon("chevr")}</button></span>` : "";
 const dSec = (title, body, extra = "", id = "") => `<section class="card"${id ? ` id="${id}"` : ""}><div class="chd wrap"><b>${title}</b>${extra}</div>${body}</section>`;
 const kvHtml = kv => `<div class="kv">${kv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("")}</div>`;

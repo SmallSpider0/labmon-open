@@ -125,6 +125,33 @@ def build(out: Path, kind: str = "normal", who=None) -> list[str]:
                 listing["person_choices"] = U.free_people({u["name"]: {"fleet_person": u["fleet_person"]} for u in listing["users"]})
                 listing["people"] = sorted(registered)
             (out / "api" / "users.json").write_text(json.dumps(listing, ensure_ascii=False))
+            if entry == "lan":
+                # 仅内网管理员离线预览提供 /api/pools/options 假数据，验证新建/编辑抽屉交互且零 404（#240）
+                p_list = (snap.get("pool") or {}).get("pools") or []
+                pool_opts = {
+                    "pools": [{"id": p["id"], "host_id": p["host_id"], "label": p["label"],
+                               "hosts": [h["id"] for h in p.get("hosts") or []], "members": list(p.get("members") or []),
+                               "exclusive": bool(p.get("exclusive")), "worker_home": "/data/me/labmon",
+                               "pending": p.get("pending", 0), "placed": p.get("placed", 0)} for p in p_list],
+                    "hosts": [
+                        {"id": "srv-a", "label": "srv-a（A6000）", "worker_home": "/data/me/labmon", "returned": False,
+                         "standalone": False, "borrow": False, "share_host": True, "eligible": True, "why": "",
+                         "pool_id": p_list[0]["id"] if p_list else None, "pool_label": p_list[0]["label"] if p_list else None},
+                        {"id": "srv-c", "label": "srv-c（A6000 备用）", "worker_home": "/data/me/labmon", "returned": False,
+                         "standalone": False, "borrow": False, "share_host": True, "eligible": True, "why": "",
+                         "pool_id": None, "pool_label": None},
+                        {"id": "srv-other", "label": "srv-other（异域集群）", "worker_home": "/data/other/labmon", "returned": False,
+                         "standalone": False, "borrow": False, "share_host": True, "eligible": True, "why": "",
+                         "pool_id": None, "pool_label": None},
+                        {"id": "srv-ext", "label": "ext-4090（独立机）", "worker_home": "~/.local/share/labmon/work/labmon", "returned": False,
+                         "standalone": True, "borrow": False, "share_host": True, "eligible": False, "why": "独立主机不共享集群 worker_home，不可入池",
+                         "pool_id": None, "pool_label": None},
+                    ],
+                    "users": [{"name": u["name"], "fleet_person": u.get("fleet_person")} for u in listing["users"] if u.get("role") != "admin"],
+                    "error": None,
+                }
+                (out / "api" / "pools").mkdir(parents=True, exist_ok=True)
+                (out / "api" / "pools" / "options.json").write_text(json.dumps(pool_opts, ensure_ascii=False))
         (out / "login.html").write_text(C.render_page("login.html", {"empty": False, "entry": entry, "entry_name": U.ENTRIES[entry], "next": "",
                                                                      "pw_min": U.PW_MIN, "lock_min": U.LOCK_S // 60, "fails": U.FAIL_MAX}))
     if not who or ident.role == "admin":
@@ -165,7 +192,7 @@ def build(out: Path, kind: str = "normal", who=None) -> list[str]:
 
 class Handler(SimpleHTTPRequestHandler):
     """静态目录，另把看板服务的几个无扩展名的路由对到文件上（/login、/api/me、/api/users）。"""
-    ALIAS = {"/login": "/login.html", "/api/me": "/api/me.json", "/api/users": "/api/users.json"}
+    ALIAS = {"/login": "/login.html", "/api/me": "/api/me.json", "/api/users": "/api/users.json", "/api/pools/options": "/api/pools/options.json"}
     prefix = ""                                     # --prefix：上面几条也挂在前缀下
 
     def translate_path(self, path):
