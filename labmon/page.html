@@ -205,7 +205,21 @@ const jobFrac = j => j.progress ? j.progress[0] / j.progress[1] : j.dur_min ? Ma
 const runFrac = j => { const a = jobT0(j), e = jobT1(j); return a != null && e > a ? Math.max(0, Math.min(1, (NOW - a) / (e - a))) : 0; };
 // 各类任务的 实际/估时（worker 的 duration 给的依据；依据里没写比值的补上）
 const ratioText = x => `${x.cls}：${x.src}${x.src.includes("×") ? "" : `，约 ×${f1(x.k, 2)}`}`;
-const HIST = host => (D.history || []).filter(r => r.host === host && r.ok !== false);
+// 多主机/多卡调色板（唯一实现，#259）：GPU、显存、CPU 与单机资源小图共用
+const CC = ["var(--accent)", "#1D9E75", "#D85A30", "#7F77DD", "#D4537E", "#BA7517", "#639922", "#888780"];
+// 按 host 预建历史索引（#259）：初始化与 setData 时重建，消除重复全表扫描 D.history
+let HIST_MAP = new Map();
+function rebuildHist(d) {
+  HIST_MAP = new Map();
+  for (const r of d?.history || []) {
+    if (r.ok === false) continue;
+    let a = HIST_MAP.get(r.host);
+    if (!a) { a = []; HIST_MAP.set(r.host, a); }
+    a.push(r);
+  }
+}
+rebuildHist(D);
+const HIST = host => HIST_MAP.get(host) || [];
 // 主机 CPU 实时占用格式化（唯一实现，#208）：
 // 对无 h.cpu 的旧快照回退读 h.cpu_pct / cgroup.cpu_quota（#208 于 2026-11-27 部署后活跃项目采过一轮即不再产生，2026-12-27 后可删，见 docs/concepts.md「现有的兼容代码」）
 const CPU_HIGH_PCT = 85;
@@ -231,15 +245,34 @@ function cpuView(h) {
   return {has, used, quota, cpus, pct, thr, throttled, alert, high, level, core, pctStr, short, thrStr, tip: tipLines.join("\n")};
 }
 
-/* ---------- 折线小图：悬停显示十字线与数值 ---------- */
+/* ---------- 折线小图与悬停收敛：悬停显示十字线与数值 ---------- */
 const CH = {};
 let chN = 0;
-// 单条曲线的面积用渐变：贴着曲线最深、往下淡到透明（数据平稳时不会成一块实心方块）；底部一条淡的基线；mean 画这段的平均虚线
-function chart({series, t0, t1, ymax, ymin = 0, fmt = v => f1(v), H = 46, thr = null, area = true, mean = false}) {
+// 超长悬停收敛（#259）：超 8 项按关注度排序，超 12 行截断并提示其余见下方资源区
+const TIP_SORT_N = 8, TIP_MAX_N = 12;
+function clipTipLines(items, {sortKey = null, unit = "项", max = TIP_MAX_N} = {}) {
+  const arr = items.length > TIP_SORT_N && sortKey ? [...items].sort((a, b) => sortKey(b) - sortKey(a)) : items;
+  if (arr.length <= max) return arr.map(x => typeof x === "string" ? x : x.text);
+  return [...arr.slice(0, max).map(x => typeof x === "string" ? x : x.text), `… 另 ${arr.length - max} ${unit}，其余见下方资源区`];
+}
+// 单条曲线的面积用渐变：贴着曲线最深、往下淡到透明（数据平稳时不会成一块实心方块）；底部一条淡的基线；mean 画这段的平均虚线；band 画多机最小/最大半透明包络带
+function chart({series, t0, t1, ymax, ymin = 0, fmt = v => f1(v), H = 46, thr = null, area = true, mean = false, band = null, hoverSeries = null}) {
   const W = 300, id = "ch" + chN++, gap = (D.interval || 120) * 3.5;
-  ymax = Math.max(ymax ?? 0, ...series.flatMap(s => s.pts.map(p => p[1])), thr ?? 0, ymin + 1e-9);
+  ymax = Math.max(ymax ?? 0, ...series.flatMap(s => s.pts.map(p => p[1])), ...(band?.pts || []).map(p => p[2]), thr ?? 0, ymin + 1e-9);
   const X = t => (t - t0) / (t1 - t0) * W, Y = v => H - 2 - (H - 6) * (v - ymin) / (ymax - ymin);
   let s = "";
+  if (band?.pts?.length) {
+    const bpts = band.pts.filter(p => p[0] >= t0 && p[1] != null && p[2] != null);
+    let bsegs = [], bcur = [];
+    bpts.forEach((p, i) => { if (i && p[0] - bpts[i - 1][0] > gap) { bsegs.push(bcur); bcur = []; } bcur.push(p); });
+    if (bcur.length) bsegs.push(bcur);
+    for (const sg of bsegs) {
+      if (sg.length < 2) continue;
+      const top = sg.map((p, i) => (i ? "L" : "M") + X(p[0]).toFixed(1) + "," + Y(p[2]).toFixed(1)).join("");
+      const bot = [...sg].reverse().map(p => "L" + X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1)).join("");
+      s += `<path class="ch-band" d="${top}${bot}Z" fill="${band.color}" fill-opacity=".18"/>`;
+    }
+  }
   for (const se of series) {
     const pts = se.pts.filter(p => p[0] >= t0 && p[1] != null);
     if (!pts.length) continue;
@@ -251,25 +284,59 @@ function chart({series, t0, t1, ymax, ymin = 0, fmt = v => f1(v), H = 46, thr = 
       if (area && series.length === 1) s += `<path d="${l}L${X(sg[sg.length - 1][0]).toFixed(1)},${H}L${X(sg[0][0]).toFixed(1)},${H}Z" fill="url(#${id}g)"/>`;
       d += l;
     }
-    s += `<path d="${d}" fill="none" stroke="${se.color}" stroke-width="1.5" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
+    s += `<path d="${d}" fill="none" stroke="${se.color}" stroke-width="${se.w || 1.5}" vector-effect="non-scaling-stroke" stroke-linejoin="round"/>`;
     if (mean) { const m = avg(pts.map(p => p[1])); s += `<line x1="0" x2="${W}" y1="${Y(m)}" y2="${Y(m)}" stroke="var(--muted)" stroke-opacity=".7" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>`; }
   }
   s = `<line x1="0" x2="${W}" y1="${Y(ymin)}" y2="${Y(ymin)}" stroke="var(--faint)" stroke-opacity=".5" vector-effect="non-scaling-stroke"/>` + s;
   if (area && series.length === 1) s = `<defs><linearGradient id="${id}g" x1="0" y1="0" x2="0" y2="1"><stop offset="0" style="stop-color:${series[0].color};stop-opacity:.28"/>`
     + `<stop offset="1" style="stop-color:${series[0].color};stop-opacity:0"/></linearGradient></defs>` + s;
   if (thr != null) s += `<line x1="0" x2="${W}" y1="${Y(thr)}" y2="${Y(thr)}" stroke="var(--bad)" stroke-dasharray="4 3" vector-effect="non-scaling-stroke"/>`;
-  CH[id] = {series, t0, t1, fmt};
+  CH[id] = {series: hoverSeries || series, band, t0, t1, fmt};
   return `<svg class="ch" id="${id}" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" style="height:${H}px">${s}
     <line class="xh" x1="0" x2="0" y1="0" y2="${H}" stroke="var(--muted)" vector-effect="non-scaling-stroke" visibility="hidden"/></svg>`;
+}
+// 多机摘要折线图（GPU 与 CPU 共用唯一实现，#259）：按时间桶聚合为 最小/最大包络带 + 平均线，异常时额外叠画最多 2 条异常线
+function summaryChart(allSeries, {t0, t1, ymax = 100, H = 22, fmt = v => f1(v, 0) + "%", color = "var(--accent)", extras = []} = {}) {
+  const step = Math.max(D.interval || 120, Math.floor((t1 - t0) / 60));
+  const buckets = new Map();
+  for (let i = 0; i < allSeries.length; i++) {
+    for (const p of allSeries[i].pts) {
+      if (p[0] < t0 || p[0] > t1 || p[1] == null) continue;
+      const b = Math.floor((p[0] - t0) / step);
+      let m = buckets.get(b);
+      if (!m) { m = new Map(); buckets.set(b, m); }
+      let a = m.get(i);
+      if (!a) { a = [0, 0]; m.set(i, a); }
+      a[0] += p[1]; a[1] += 1;
+    }
+  }
+  const keys = [...buckets.keys()].sort((a, b) => a - b);
+  const bandPts = [], avgPts = [];
+  for (const b of keys) {
+    const vals = [...buckets.get(b).values()].map(([s, n]) => s / n);
+    if (!vals.length) continue;
+    const t = Math.min(t1, t0 + (b + 0.5) * step);
+    bandPts.push([t, Math.min(...vals), Math.max(...vals)]);
+    avgPts.push([t, vals.reduce((a, x) => a + x, 0) / vals.length]);
+  }
+  const drawSeries = [{name: "平均", color, w: 1.6, pts: avgPts}, ...extras.slice(0, 2)];
+  return chart({series: drawSeries, band: {color, pts: bandPts}, hoverSeries: allSeries, t0, t1, ymax, H, area: false, fmt});
 }
 function chartHover(svg, e) {
   const c = CH[svg.id]; if (!c) return null;
   const r = svg.getBoundingClientRect(), f = Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), t = c.t0 + f * (c.t1 - c.t0);
   const xh = svg.querySelector(".xh"); xh.setAttribute("x1", f * 300); xh.setAttribute("x2", f * 300); xh.setAttribute("visibility", "visible");
-  const lines = c.series.map(se => {
+  const tol = (c.t1 - c.t0) / 40, hits = [];
+  for (const se of c.series) {
     let best = null; for (const p of se.pts) if (p[1] != null && (!best || Math.abs(p[0] - t) < Math.abs(best[0] - t))) best = p;
-    return best && Math.abs(best[0] - t) < (c.t1 - c.t0) / 40 ? `${se.name ? se.name + "  " : ""}${c.fmt(best[1])}` : null;
-  }).filter(Boolean);
+    if (best && Math.abs(best[0] - t) < tol) hits.push({val: best[1], prio: se.prio || 0, text: `${se.name ? se.name + "  " : ""}${c.fmt(best[1])}`});
+  }
+  const lines = [];
+  if (c.band && hits.length > 1) {
+    const vs = hits.map(x => x.val);
+    lines.push(`平均 ${c.fmt(avg(vs))}（最小 ${c.fmt(Math.min(...vs))} – 最大 ${c.fmt(Math.max(...vs))}）`);
+  }
+  lines.push(...clipTipLines(hits, {sortKey: x => x.prio * 1000 + x.val}));
   return ts(t) + (lines.length ? "\n" + lines.join("\n") : "\n无数据");
 }
 
@@ -280,7 +347,17 @@ function topline() {
   const age = Date.now() / 1000 - NOW, stale = age > (D.thresholds?.stale_s ?? 420);   // 与 labmon wait 的 collector_stale 同一门槛（config.stale_limit，缺省配置是 7 分钟）
   const gone = D.hosts.filter(h => h.returned && !retShown(h));
   const pl = poolLanes().filter(l => l.unfinished);
-  const hosts = D.hosts.filter(h => !gone.includes(h) && (!h.pool || pl.some(l => l.host === h.id) || !h.ok)).map(h => {
+  const visibleHosts = D.hosts.filter(h => !gone.includes(h) && (!h.pool || pl.some(l => l.host === h.id) || !h.ok));
+  // 同池且正常在线、无借用、无严重 CPU 限流告警的主机 > 4 台时聚合为紧凑摘要，异常/离线/借用/已归还主机单独前置（#259）
+  const isPoolNorm = h => !h.pool && !h.returned && !h.ephemeral && h.ok && !h.stale && !h.borrow && !!h.pool_label && !cpuView(h).alert;
+  const poolNorm = new Map();
+  for (const h of visibleHosts) if (isPoolNorm(h)) {
+    let a = poolNorm.get(h.pool_label);
+    if (!a) { a = []; poolNorm.set(h.pool_label, a); }
+    a.push(h);
+  }
+  const aggPools = new Set([...poolNorm.entries()].filter(([, a]) => a.length > 4).map(([k]) => k));
+  const renderHost = h => {
     if (h.pool) {
       const ph = pl.filter(l => l.host === h.id);
       return `<span class="nw ${h.ok ? "mut" : ""}" style="${h.ok ? "" : "color:var(--bad)"}" ${tip("交给算力池、还没放到哪台的清单：看板挑一台算力池服务器放过去\n" + (ph.map(l => `${laneName(l, D.hosts)}：${laneState(l)}`).join("\n") || "") + (h.ok ? "" : "\n" + (h.error || "这一轮没读到池里的清单")))}>${esc(h.label || "算力池")}里待放 ${ph.length} 条清单</span>`;
@@ -292,8 +369,27 @@ function topline() {
     }
     const cv = h.ok ? cpuView(h) : null;
     const pt = h.pool_label ? "\n" + poolBadgeTip(h) : "";
-    return `<span class="nw" ${tip((h.ok ? "探针正常" + (cv?.has ? "\n" + cv.tip : "") : h.error || "失败") + pt)}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}"></span> ${esc(h.label)}</span>${h.pool_label ? " " + poolBadge(h) : ""}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}`;
-  }).join(" ")
+    const bad = !h.ok || !!h.stale || !!cv?.alert;
+    return `<span class="nw" ${tip((h.ok ? "探针正常" + (cv?.has ? "\n" + cv.tip : "") : h.error || "失败") + pt)}><span class="cdot" style="background:${bad ? "var(--bad)" : "var(--ok)"}"></span> ${esc(h.label)}</span>${h.pool_label ? " " + poolBadge(h) : ""}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}`;
+  };
+  const renderPoolAgg = label => {
+    const list = poolNorm.get(label);
+    const lines = list.map(h => {
+      const cv = cpuView(h);
+      return `${h.label}：在线${cv.has ? " · CPU " + cv.short + (cv.thrStr ? " " + cv.thrStr : "") : ""}`;
+    });
+    return `<span class="nw" ${tip(`共有算力池：${label}（${list.length} 台在线）\n` + lines.join("\n"))}><span class="cdot" style="background:var(--ok)"></span> ${poolBadge(list[0])} ${esc(label)}（${list.length} 台在线）</span>`;
+  };
+  let hostParts;
+  if (aggPools.size) {
+    const isTopFirst = h => h.pool || h.returned || !h.ok || h.stale || !!h.borrow || !!cpuView(h).alert;
+    const singles = visibleHosts.filter(h => !(isPoolNorm(h) && aggPools.has(h.pool_label)));
+    const first = singles.filter(isTopFirst), rest = singles.filter(h => !isTopFirst(h));
+    hostParts = [...first.map(renderHost), ...rest.map(renderHost), ...[...aggPools].map(renderPoolAgg)];
+  } else {
+    hostParts = visibleHosts.map(renderHost);
+  }
+  const hosts = hostParts.join(" ")
     + (gone.length ? ` <span class="nw mut" ${tip(gone.map(h => `${h.label}：${ts(h.returned)} 归还`).join("\n") + "\n它们的车道照常显示结果")}>已还 ${gone.length} 台</span>` : "");
   // 嵌在看板里：标题、更新时间、立即采集与连不上的提示都在看板顶栏上（看板经 embedState 取），这里只留主机与告警
   const title = `<div class="project-title">${LIVE ? '<a class="sm" href="../../" style="color:var(--accent);text-decoration:none">← 全局调度</a>' : ""}<h1 ${tip(D.title)}>${esc(D.title)}</h1></div>`;
@@ -329,49 +425,109 @@ function kpis() {
   else if (holding) sub += " · 含暂停";
   out.push(`<div class="kpi" ${lt ? tip("各车道预计完成：\n" + lt + (paused.length ? "\n已暂停（不计入）：" + paused.map(l => laneName(l, D.hosts)).join("、") : "") + (holding ? "\n含暂停任务，" + (holdGuess(D.jobs) ? "没写 after= 的时长按估时猜" : "按它等的任务预计结束算") : "")) : ""}><div class="k">全部完成${busy.length > 1 ? ` · 最晚 ${esc(laneName(busy[0], D.hosts))}` : ""}</div>
     <div class="v">${end ? ts(end) : "—"}${rebalMark(D.rebalance)}</div>${meter}<div class="s">${sub}</div></div>`);
-  // GPU 与显存：逐卡显示（多主机时用主机 id 区分），两张卡片的颜色一一对应
+  // GPU 与显存：≤ 3 卡逐卡显示，≥ 4 卡自动切换多机摘要模式（#259）；使用顶层唯一调色板 CC，同台主机三卡同色
   const gl = D.hosts.flatMap(h => h.ok ? (h.gpus || []).map(g => ({...g, host: h})) : []);
+  const hostColorIdx = new Map();
+  gl.forEach((g, k) => { if (!hostColorIdx.has(g.host.id)) hostColorIdx.set(g.host.id, k); });
   if (gl.length) {
-    const CC = ["var(--accent)", "#1D9E75", "#D85A30", "#7F77DD", "#D4537E", "#BA7517", "#639922", "#888780"];
     const multi = D.hosts.filter(h => (h.gpus || []).length).length > 1;
+    const gpuSum = gl.length >= 4;
     const gname = g => multi ? hostShort(g.host) + ((g.host.gpus || []).length > 1 ? "·" + g.index : "") : "GPU" + g.index;
     const dot = (k, txt) => `<span class="nw"><span class="cdot" style="background:${CC[k % CC.length]}"></span> ${txt}</span>`;
     // 利用率：近 1 小时的吃满程度（只有保活时按 0，worker 的 10 秒样本，#51），utilText 出字；曲线是各卡近 10 分钟平均
     const series = gl.map((g, k) => ({name: gl.length > 1 ? gname(g) : "", color: CC[k % CC.length],
       pts: HIST(g.host.id).filter(r => r.busy && r.busy[g.index] != null).map(r => [r.t, r.busy[g.index]])}));
     const ut = g => utilText(gpuBusy(g.host, g.index), g.util), U = utilText(utilAvg(gl.map(g => gpuBusy(g.host, g.index)), gl.map(g => g.util)));
+    const gval = g => { const b = gpuBusy(g.host, g.index); return b?.h1 ?? b?.m10 ?? b?.now ?? g.util ?? null; };
     const mine = utilMine(D.gpu_mine);
     // 卡与显存是整台主机的（含同机别的项目与 labmon 之外的进程）：本项目没任务在跑时写明，免得看成自己的
     const whole = "整台主机的数字，含同机别的项目与 labmon 之外的进程；本项目在跑 " + D.jobs.filter(j => j.status === "running" && !j.hold).length + " 个任务\n";
     // 是不是别人在用按此刻值判（只有保活时按 0）：近 1 小时平均里有本项目刚跑完的负载（#54 审查）
     const notMine = !D.jobs.some(j => j.status === "running" && !j.hold) && (avg(gl.map(g => gpuBusy(g.host, g.index)?.now ?? g.util)) || 0) > 5;
-    const sub = [gl.length > 1 ? gl.map((g, k) => dot(k, `${esc(gname(g))} ${ut(g).big}`)).join(" · ") : esc(U.sub), mine ? esc(mine.sub) : "",
-      notMine ? "本项目没有任务在跑：是别的项目或进程在用" : ""].filter(Boolean);
-    out.push(`<div class="kpi" ${tip(whole + U.tip + "\n\n" + gl.map(g => `${g.host.label} GPU${g.index} ${g.name}\n  利用率 ${ut(g).big}（${ut(g).span}）${ut(g).sub ? " · " + ut(g).sub : ""} · ${f1(g.temp, 0)}°C · ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n") + (mine ? "\n\n" + mine.tip : ""))}>
+    let sub;
+    if (gpuSum) {
+      const ranked = gl.map(g => ({g, v: gval(g), t: ut(g)})).filter(x => x.v != null).sort((a, b) => b.v - a.v);
+      const hi = ranked[0], lo = ranked[ranked.length - 1];
+      const ext = hi && lo ? (hi.g === lo.g || Math.round(hi.v) === Math.round(lo.v)
+        ? `全卡 ${hi.t.big}`
+        : `最高 ${esc(gname(hi.g))} ${hi.t.big} · 最低 ${esc(gname(lo.g))} ${lo.t.big}`) : "";
+      // 多机摘要模式下保底保留「非本项目在跑」与「本项目近 24 小时」，绝不被 2 行截断吞掉
+      sub = notMine
+        ? [`<span style="color:var(--warn)">本项目没有任务在跑：是别的项目或进程在用</span>`, mine ? esc(mine.sub) : ext].filter(Boolean)
+        : [ext, mine ? esc(mine.sub) : ""].filter(Boolean);
+    } else {
+      sub = [gl.length > 1 ? gl.map((g, k) => dot(k, `${esc(gname(g))} ${ut(g).big}`)).join(" · ") : esc(U.sub), mine ? esc(mine.sub) : "",
+        notMine ? "本项目没有任务在跑：是别的项目或进程在用" : ""].filter(Boolean);
+    }
+    const gTipItems = gl.map(g => ({
+      val: gval(g) ?? -1,
+      text: `${g.host.label} GPU${g.index} ${g.name}\n  利用率 ${ut(g).big}（${ut(g).span}）${ut(g).sub ? " · " + ut(g).sub : ""} · ${f1(g.temp, 0)}°C · ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`,
+    }));
+    const gChart = gpuSum
+      ? summaryChart(series, {t0: since, t1: NOW, ymax: 100, H: 22, color: "var(--accent)", fmt: v => f1(v, 0) + "%"})
+      : chart({series, t0: since, t1: NOW, ymax: 100, H: 22, area: gl.length === 1, fmt: v => f1(v, 0) + "%"});
+    out.push(`<div class="kpi" ${tip(whole + U.tip + "\n\n" + clipTipLines(gTipItems, {sortKey: x => x.val, unit: "卡"}).join("\n") + (mine ? "\n\n" + mine.tip : ""))}>
       <div class="k">GPU 利用率 · ${gl.length} 卡 · 整机</div><div class="v">${U.big.replace("%", "")}<small>%${U.span && U.span !== "此刻" ? " " + U.span : ""}${gl.length > 1 ? " 平均" : ""}</small></div>
-      ${chart({series, t0: since, t1: NOW, ymax: 100, H: 22, area: gl.length === 1, fmt: v => f1(v, 0) + "%"})}
+      ${gChart}
       ${sub.length ? `<div class="s">${sub.join("<br>")}</div>` : ""}</div>`);
     const used = sum(gl.map(g => g.mem_used)) / 1024, tot = sum(gl.map(g => g.mem_total)) / 1024;     // 显存探针给的是 MiB
     const procs = D.hosts.flatMap(h => (h.gpu_procs || []).map(p => ({...p, host: h})));
-    // 每张卡一段，段宽按该卡总显存，段内填色为已用；一眼看出哪张卡还有余量
-    const segs = gl.map((g, k) => {
-      const f = g.mem_used / g.mem_total, c = f > 0.9 ? "var(--bad)" : CC[k % CC.length];
-      return `<span class="sg" style="flex:${g.mem_total}"><i style="width:${f * 100}%;background:${c}"></i></span>`;
-    }).join("");
-    out.push(`<div class="kpi" ${tip(whole + gl.map(g => `${g.host.label} GPU${g.index}：已用 ${f1(g.mem_used / 1024)} / ${f1(g.mem_total / 1024, 0)} GiB，余 ${f1((g.mem_total - g.mem_used) / 1024)} GiB`).join("\n")
-      + "\n" + (procs.map(p => `${multi ? hostShort(p.host) + " " : ""}PID ${p.pid}  ${f1(p.mem / 1024)} GiB  ${(p.cmd || "").slice(0, 60)}`).join("\n") || "无 GPU 进程"))}>
-      <div class="k">显存${gl.length > 1 ? " · 逐卡" : ""} · 整机</div><div class="v">${f1(used, 0)}<small> / ${f1(tot, 0)} GiB</small></div>
-      <div class="segs">${segs}</div>
-      <div class="s">${gl.length > 1 ? gl.map((g, k) => dot(k, `${esc(gname(g))} 余${f1((g.mem_total - g.mem_used) / 1024, 0)}G`)).join(" · ")
-        : `${procs.length} 个进程 · 余 ${f1(tot - used, 0)} GiB`}</div></div>`);
+    let memFull = 0, memUse = 0, memIdle = 0;
+    for (const g of gl) {
+      const f = g.mem_total ? g.mem_used / g.mem_total : 0;
+      if (f > 0.9) memFull++; else if (f > 0.1) memUse++; else memIdle++;
+    }
+    // ≤ 8 卡保留逐卡分段条；> 8 卡改为总显存进度条 + 分桶摘要，避免 3px 间隙吃掉段宽（#259）
+    let memBar;
+    if (gl.length > 8) {
+      const fullUsed = sum(gl.filter(g => g.mem_total && g.mem_used / g.mem_total > 0.9).map(g => g.mem_used)) / 1024;
+      const normUsed = Math.max(0, used - fullUsed);
+      memBar = `<div class="meter">${tot > 0 && fullUsed > 0 ? `<i style="width:${Math.min(100, fullUsed / tot * 100)}%;background:var(--bad)"></i>` : ""}${tot > 0 && normUsed > 0 ? `<i style="width:${Math.min(100, normUsed / tot * 100)}%;background:var(--accent)"></i>` : ""}</div>`;
+    } else {
+      const segs = gl.map((g, k) => {
+        const f = g.mem_used / g.mem_total, c = f > 0.9 ? "var(--bad)" : CC[k % CC.length];
+        return `<span class="sg" style="flex:${g.mem_total}"><i style="width:${f * 100}%;background:${c}"></i></span>`;
+      }).join("");
+      memBar = `<div class="segs">${segs}</div>`;
+    }
+    let memSub;
+    if (gpuSum) {
+      const byFree = [...gl].sort((a, b) => (a.mem_total - a.mem_used) - (b.mem_total - b.mem_used));
+      const tight = byFree[0], loose = byFree[byFree.length - 1];
+      const ext = `最紧 ${esc(gname(tight))} 余${f1((tight.mem_total - tight.mem_used) / 1024, 0)}G · 最多 ${esc(gname(loose))} 余${f1((loose.mem_total - loose.mem_used) / 1024, 0)}G`;
+      memSub = gl.length > 8
+        ? `${memFull ? `<span style="color:var(--bad);font-weight:600">满载(>90%) ${memFull}</span>` : "满载(>90%) 0"} · 在用 ${memUse} · 空闲 ${memIdle}<br>${ext}`
+        : `${memFull ? `<span style="color:var(--bad);font-weight:600">${memFull} 卡 >90%</span> · ` : ""}${ext}`;
+    } else {
+      memSub = gl.length > 1 ? gl.map((g, k) => dot(k, `${esc(gname(g))} 余${f1((g.mem_total - g.mem_used) / 1024, 0)}G`)).join(" · ")
+        : `${procs.length} 个进程 · 余 ${f1(tot - used, 0)} GiB`;
+    }
+    const mCardItems = gl.map(g => ({
+      val: g.mem_total ? g.mem_used / g.mem_total : 0,
+      text: `${g.host.label} GPU${g.index}：已用 ${f1(g.mem_used / 1024)} / ${f1(g.mem_total / 1024, 0)} GiB，余 ${f1((g.mem_total - g.mem_used) / 1024)} GiB`,
+    }));
+    const mProcItems = procs.map(p => ({
+      val: p.mem || 0,
+      text: `${multi ? hostShort(p.host) + " " : ""}PID ${p.pid}  ${f1(p.mem / 1024)} GiB  ${(p.cmd || "").slice(0, 60)}`,
+    }));
+    out.push(`<div class="kpi" ${tip(whole + clipTipLines(mCardItems, {sortKey: x => x.val, unit: "卡"}).join("\n")
+      + "\n" + (mProcItems.length ? clipTipLines(mProcItems, {sortKey: x => x.val, unit: "个进程"}).join("\n") : "无 GPU 进程"))}>
+      <div class="k">显存${gl.length > 8 ? ` · ${gl.length} 卡` : gl.length > 1 ? " · 逐卡" : ""} · 整机</div><div class="v">${f1(used, 0)}<small> / ${f1(tot, 0)} GiB</small></div>
+      ${memBar}
+      <div class="s">${memSub}</div></div>`);
   }
-  // CPU 占用：整机容器 CPU 实时核数/配额与百分比，限流或高占用给出清晰颜色提示（#208）
+  // CPU 占用：整机容器 CPU 实时核数/配额与百分比，限流或高占用给出清晰颜色提示（#208）；≥ 4 台切换多机摘要模式，异常主机前置（#259）
   const cl = D.hosts.filter(h => h.ok && !h.pool && !h.returned).map(h => ({h, c: cpuView(h)})).filter(x => x.c.has);
   if (cl.length) {
-    const CC = ["var(--cpu)", "#D85A30", "#7F77DD", "#1D9E75", "#D4537E", "#BA7517", "#639922", "#888780"];
-    const dot = (k, txt) => `<span class="nw"><span class="cdot" style="background:${CC[k % CC.length]}"></span> ${txt}</span>`;
-    const series = cl.map(({h}, k) => ({name: cl.length > 1 ? hostShort(h) : "", color: CC[k % CC.length],
-      pts: HIST(h.id).filter(r => r.cpu_pct != null).map(r => [r.t, Math.min(100, Math.max(0, r.cpu_pct))])}));
+    const cpuSum = cl.length >= 4;
+    const cpuColor = (h, k) => cl.length === 1 ? "var(--cpu)" : CC[(hostColorIdx.get(h.id) ?? k) % CC.length];
+    const dot = (h, k, txt) => `<span class="nw"><span class="cdot" style="background:${cpuColor(h, k)}"></span> ${txt}</span>`;
+    const series = cl.map(({h, c}, k) => ({
+      name: cl.length > 1 ? hostShort(h) : "",
+      color: cpuColor(h, k),
+      prio: c.alert ? 3 : c.throttled ? 2 : c.high ? 1 : 0,
+      pts: HIST(h.id).filter(r => r.cpu_pct != null).map(r => [r.t, Math.min(100, Math.max(0, r.cpu_pct))]),
+    }));
     const pcts = cl.map(x => x.c.pct).filter(v => v != null);
     const avgPct = pcts.length ? avg(pcts) : null;
     const worst = cl.some(x => x.c.level === "bad") ? "bad" : cl.some(x => x.c.level === "warn") ? "warn" : "";
@@ -384,15 +540,46 @@ function kpis() {
         : c.high ? ` <span style="color:var(--warn);font-weight:600">高占用</span>` : "";
       const val = cl.length > 1 ? (c.pctStr || c.core || "—") : c.short;
       const txt = `${cl.length > 1 ? esc(hostShort(h)) + " " : "CPU "}<span style="${c.level ? `color:var(--${c.level})` : ""}">${esc(val)}</span>${tag}`;
-      return cl.length > 1 ? dot(k, txt) : txt;
+      return cl.length > 1 ? dot(h, k, txt) : txt;
     };
+    let cChart, cSub;
+    if (cpuSum) {
+      const extras = cl.map((x, k) => ({x, se: series[k]}))
+        .filter(({x}) => x.c.alert || x.c.throttled || x.c.high)
+        .sort((a, b) => (b.se.prio - a.se.prio) || ((b.x.c.thr ?? 0) - (a.x.c.thr ?? 0)) || ((b.x.c.pct ?? 0) - (a.x.c.pct ?? 0)))
+        .slice(0, 2)
+        .map(({x, se}) => ({...se, color: x.c.alert ? "var(--bad)" : "var(--warn)", w: 1.6}));
+      cChart = summaryChart(series, {t0: since, t1: NOW, ymax: 100, H: 22, color: "var(--cpu)", extras, fmt: v => f1(v, 0) + "%"});
+      const thrH = cl.filter(x => x.c.alert || x.c.throttled).sort((a, b) => (b.c.alert - a.c.alert) || ((b.c.thr ?? 0) - (a.c.thr ?? 0)));
+      const hiH = cl.filter(x => !x.c.alert && !x.c.throttled && x.c.high).sort((a, b) => (b.c.pct ?? 0) - (a.c.pct ?? 0));
+      const fmtNames = xs => xs.slice(0, 2).map(x => esc(hostShort(x.h))).join("、") + (xs.length > 2 ? " 等" : "");
+      const warnParts = [];
+      if (thrH.length) {
+        const col = thrH.some(x => x.c.alert) ? "var(--bad)" : "var(--warn)";
+        warnParts.push(`<span style="color:${col};font-weight:600">${thrH.length} 台限流（${fmtNames(thrH)}）</span>`);
+      }
+      if (hiH.length) warnParts.push(`<span style="color:var(--warn);font-weight:600">${hiH.length} 台高占用（${fmtNames(hiH)}）</span>`);
+      const byPct = cl.filter(x => x.c.pct != null).sort((a, b) => b.c.pct - a.c.pct);
+      const ext = byPct.length >= 2
+        ? `最高 ${esc(hostShort(byPct[0].h))} ${f1(byPct[0].c.pct, 0)}% · 最低 ${esc(hostShort(byPct[byPct.length - 1].h))} ${f1(byPct[byPct.length - 1].c.pct, 0)}%`
+        : byPct.length === 1 ? `最高 ${esc(hostShort(byPct[0].h))} ${f1(byPct[0].c.pct, 0)}%` : "";
+      cSub = warnParts.length ? [warnParts.join(" · "), ext].filter(Boolean).join("<br>") : ext;
+    } else {
+      cChart = chart({series, t0: since, t1: NOW, ymax: 100, H: 22, area: cl.length === 1, fmt: v => f1(v, 0) + "%"});
+      cSub = cl.map(item).join(" · ");
+    }
+    const cTipItems = cl.map(({c}) => ({
+      prio: c.alert ? 3 : c.throttled ? 2 : c.high ? 1 : 0,
+      val: c.pct ?? -1,
+      text: c.tip,
+    }));
     const ctip = "整台主机的容器 CPU 占用（含同机别的项目与 labmon 之外的进程）；按容器配额换算，无配额时按可用核数换算\n\n"
-      + cl.map(({c}) => c.tip).join("\n\n");
+      + clipTipLines(cTipItems, {sortKey: x => x.prio * 1000 + x.val, unit: "台"}).join("\n\n");
     out.push(`<div class="kpi" ${tip(ctip)}>
       <div class="k">CPU 占用${cl.length > 1 ? ` · ${cl.length} 台` : ""} · 整机</div>
       <div class="v" style="${worst ? `color:var(--${worst})` : ""}">${big}</div>
-      ${chart({series, t0: since, t1: NOW, ymax: 100, H: 22, area: cl.length === 1, fmt: v => f1(v, 0) + "%"})}
-      <div class="s">${cl.map(item).join(" · ")}</div></div>`);
+      ${cChart}
+      <div class="s">${cSub}</div></div>`);
   }
   // 任务
   const real = D.jobs.filter(j => !j.hold);
@@ -607,7 +794,7 @@ function drawTimeline() {
   const foldDone = D.lanes.some(l => !l.done_lane && l.unfinished) || D.lanes.filter(l => l.done_lane).length > 6;   // 有未完成车道或已跑完超过 6 条时默认折起已跑完的无编号车道（#164）
   let hidden = 0, hiddenDone = 0;
   const att = D.attempts || [], extra = [...new Set([...D.jobs, ...att].map(j => j.host).filter(id => id && !D.hosts.some(h => h.id === id)))].map(hostOf);
-  const shown = [...D.hosts.filter(h => !h.pool), ...extra].map(h => {
+  const allShown = [...D.hosts.filter(h => !h.pool), ...extra].map(h => {
     const lanes = D.lanes.filter(l => l.host === h.id && !l.missing), ran = (l, hid) => att.some(x => x.lane === l.id && (x.host || l.host) === hid && win(x.t0, x.t1));
     const vis = [];
     for (const l of lanes) {
@@ -623,6 +810,14 @@ function drawTimeline() {
     hidden += left.length - away.length;
     return [h, [...vis, ...away.map(l => ({...l, away: h.id}))]];
   }).filter(([, vis]) => vis.length);
+  // 主机数 ≥ 6 台时提供轻量主机筛选（全部 / 仅运行中 / 单台，#259）
+  const hostFilterOn = allShown.length >= 6;
+  const hostRunning = ([, vis]) => vis.some(l => rowJobs(l, l.away || l.host).some(j => j.status === "running"));
+  let hf = hostFilterOn ? LS.get("tlhost", "all") : "all";
+  if (hf.startsWith("h:") && !allShown.some(([h]) => h.id === hf.slice(2))) hf = "all";
+  const shown = !hostFilterOn || hf === "all" ? allShown
+    : hf === "run" ? allShown.filter(hostRunning)
+    : allShown.filter(([h]) => h.id === hf.slice(2));
   // 车道名右边用计划项配色的圆点标出这段时间里它跑的计划项：图上不止一个计划项时才画（只有一个时标题旁已列出）
   const gsOf = l => laneGroups(rowJobs(l, l.away || l.host).filter(j => win(jobT0(j), jobT1(j))));
   const multi = tlLockFlag("multi", new Set(shown.flatMap(([, vis]) => vis.flatMap(gsOf))).size > 1);
@@ -649,13 +844,25 @@ function drawTimeline() {
   const pool = poolLanes().filter(left).map(l => `<div class="sm mut" style="margin-top:2px" ${tip("交给算力池、还没放到哪台：放到某台后这条车道跟到那台画；已经跑过的按实际跑的主机画")}>${esc(laneName(l, D.hosts))}（${left(l)} 个任务）不在图上：${esc(laneState(l))}</div>`).join("");
   const hideMsg = [hiddenDone ? `${hiddenDone} 条已跑完` : "", hidden ? `${hidden} 条这段时间没有任务` : ""].filter(Boolean).join("、");
   const hasDone = foldDone && D.lanes.some(l => l.done_lane);
-  const more = pool + (hideMsg || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? (hasDone ? "收起已跑完与这段时间没有任务的车道" : "收起这段时间没有任务的车道") : `另有 ${hideMsg}的车道，显示`}</span></div>` : "");
+  const emptyHf = hostFilterOn && !shown.length ? `<div class="sm mut" style="margin-top:4px">当前筛选下没有主机，<span class="more" data-tlhf="all">显示全部 ${allShown.length} 台</span></div>` : "";
+  const more = emptyHf + pool + (hideMsg || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? (hasDone ? "收起已跑完与这段时间没有任务的车道" : "收起这段时间没有任务的车道") : `另有 ${hideMsg}的车道，显示`}</span></div>` : "");
   // 左栏要多宽（#108）：主机短名（入池主机留出角标宽）、车道名（从 x=18 起，右边留计划项圆点）都写得下；tlSvg 再按上限截
   const lw = Math.max(0, ...shown.flatMap(([h, vis]) => [textW(hostShort(h)) + (h.pool_label ? POOL_BADGE_W + 4 : 0) + 8,
     ...vis.map(l => 26 + 7 * Math.min(4, multi ? gsOf(l).length : 0) + textW(laneLabel(l) + laneTail(l, packOf(l).n > 1)))]));
   const seen = tlShow(box, rows, {markers: D.markers, more, under: depLines, lw, items: () => tlItems(gcolor([...used][0]))});
   const bar = document.getElementById("tlbar");
-  if (bar && seen.has("dep")) bar.innerHTML = `<button class="btn${depShow ? " on" : ""}" data-tldep aria-pressed="${depShow}" ${tip(depShow ? "已显示平时常驻的关键依赖虚线，点击隐藏（悬停任务条时仍高亮上下游）" : "已隐藏平时常驻的依赖线，点击显示（悬停任务条时仍高亮上下游）")}>依赖线</button>` + bar.innerHTML;
+  if (bar) {
+    let pre = "";
+    if (hostFilterOn) {
+      const runN = allShown.filter(hostRunning).length, selHost = hf.startsWith("h:") ? hf.slice(2) : "";
+      const opts = `<option value="all"${!selHost ? " selected" : ""}>按主机…</option>`
+        + allShown.map(([h]) => `<option value="h:${esc(h.id)}"${selHost === h.id ? " selected" : ""}>${esc(hostShort(h))}</option>`).join("");
+      pre += `<div class="seg"><button data-tlhf="all" class="${hf === "all" ? "on" : ""}">全部 ${allShown.length}</button><button data-tlhf="run" class="${hf === "run" ? "on" : ""}">仅运行中 ${runN}</button></div>`
+        + `<select class="btn" data-tlhsel aria-label="按主机筛选时间线">${opts}</select>`;
+    }
+    if (seen.has("dep")) pre += `<button class="btn${depShow ? " on" : ""}" data-tldep aria-pressed="${depShow}" ${tip(depShow ? "已显示平时常驻的关键依赖虚线，点击隐藏（悬停任务条时仍高亮上下游）" : "已隐藏平时常驻的依赖线，点击显示（悬停任务条时仍高亮上下游）")}>依赖线</button>`;
+    if (pre) bar.innerHTML = pre + bar.innerHTML;
+  }
   const lg = document.getElementById("tllegend");
   if (lg) lg.innerHTML = D.groups.filter(g => used.has(g.id)).map(g => `<span class="nw"><span class="dot" style="background:${g.color}"></span> ${esc(g.label)}</span>`).join(" &nbsp;");   // 只列这段时间图上有的
 }
@@ -1070,8 +1277,7 @@ function resourcesCard() {
     }
     const H = HIST(h.id), cg = h.cgroup || {}, gp = h.gpus || [], tiles = [], chips = [];
     if (gp.length) {
-      const cols = ["var(--accent)", "#1D9E75", "#D85A30", "#7F77DD", "#D4537E", "#BA7517", "#639922", "#888780"];
-      const series = gp.map((g, k) => ({name: gp.length > 1 ? "GPU" + g.index : "", color: cols[k % cols.length], pts: H.filter(r => r.busy && r.busy[k] != null).map(r => [r.t, r.busy[k]])}));
+      const series = gp.map((g, k) => ({name: gp.length > 1 ? "GPU" + g.index : "", color: CC[k % CC.length], pts: H.filter(r => r.busy && r.busy[k] != null).map(r => [r.t, r.busy[k]])}));
       const U = utilText(utilAvg(gp.map(g => gpuBusy(h, g.index)), gp.map(g => g.util)));
       tiles.push(tile(`GPU 利用率${gp.length > 1 ? " · " + gp.length + " 卡" : ""}`, `${U.big}${U.span ? `<span class="mut" style="font-weight:400"> ${U.span}</span>` : ""}`, chart({series, t0, t1: NOW, ymax: 100, fmt: v => f1(v, 0) + "%"}),
         U.tip + "\n曲线是各卡近 10 分钟平均\n\n" + gp.map(g => g.backend === "mps"
@@ -1123,8 +1329,20 @@ function resourcesCard() {
   const card = `<div class="card" style="margin-top:10px"><div class="row"><span class="hd">资源</span><span class="sm mut hide-sm">整台主机的数字，含同机别的项目与 labmon 之外的进程</span><span class="sp"></span>
     <div class="seg">${[6, 24].map(v => `<button data-rw="${v}" class="${v === hrs ? "on" : ""}">${v} 小时</button>`).join("")}</div></div>
     ${out.join("")}</div>`;
-  // 嵌在工作台里时主机资源与主机页重复，默认收起
-  return EMBED ? `<details class="res" ${SS.get("resOpen", false) ? "open" : ""}><summary>资源（主机按任务的明细见工作台的主机页）</summary>${card}</details>` : card;
+  // 嵌在工作台里时主机资源与主机页重复，默认收起；独立项目页主机数 ≥ 4 时也默认折叠，并提示告警台数（#259）
+  if (EMBED) return `<details class="res" ${SS.get("resOpen", false) ? "open" : ""}><summary>资源（主机按任务的明细见工作台的主机页）</summary>${card}</details>`;
+  const activeHosts = D.hosts.filter(h => !h.pool && (!h.returned || retShown(h)));
+  if (activeHosts.length >= 4) {
+    const hostWarn = h => !h.ok || !!h.stale || !!cpuView(h).level
+      || (h.mounts || []).some(m => m.min_gb != null && m.avail_gb < m.min_gb)
+      || (h.gpus || []).some(g => g.unacct_paused);
+    const warnHosts = activeHosts.filter(h => !h.returned && hostWarn(h));
+    const wtxt = warnHosts.length
+      ? ` · <span style="color:var(--bad)">${warnHosts.length} 台有告警（${warnHosts.slice(0, 3).map(h => esc(hostShort(h))).join("、")}${warnHosts.length > 3 ? " 等" : ""}）</span>`
+      : "";
+    return `<details class="res" ${SS.get("resOpen", false) ? "open" : ""}><summary>资源 · ${activeHosts.length} 台主机${wtxt}（点此展开/收起）</summary>${card}</details>`;
+  }
+  return card;
 }
 
 // 项目根下一个目录的叫法（storage.dirs 的 name）：「.」是项目根本层的文件，空串是还没拆开时的整个项目目录（collect.dir_name 同一口径）
@@ -1239,13 +1457,14 @@ function redraw() {
 document.addEventListener("selectionchange", () => { if (PENDING) redraw(); });
 document.addEventListener("focusout", () => setTimeout(() => { if (PENDING) redraw(); }));
 document.addEventListener("click", e => {
-  const t = e.target.closest("[data-tl],[data-tz],[data-tlall],[data-tldep],[data-rw],[data-rv],[data-f],[data-g],[data-more],[data-now],[data-tlkey],[data-gsq],rect.j");
+  const t = e.target.closest("[data-tl],[data-tz],[data-tlall],[data-tldep],[data-tlhf],[data-rw],[data-rv],[data-f],[data-g],[data-more],[data-now],[data-tlkey],[data-gsq],rect.j");
   if (!t) { if (e.target.closest?.("#tlbox")) depHover(null); return; }      // 点时间线空白处：取消依赖高亮（触屏）
   if (t.matches("[data-gsq]")) { e.preventDefault(); gsqClick(t.dataset.gsq); }      // 不让外面的 <details> 自己开合
   else if (t.matches("[data-now]")) collectNow();
   else if (t.matches("[data-tl],[data-tz],[data-tlkey]")) tlClick(t);
   else if (t.dataset.tlall) { LS.set("tlall", !LS.get("tlall", false)); drawTimeline(); }
   else if (t.matches("[data-tldep]")) { LS.set("tldep", !LS.get("tldep", true)); drawTimeline(); }
+  else if (t.dataset.tlhf) { LS.set("tlhost", t.dataset.tlhf); drawTimeline(); }
   else if (t.dataset.rw) { LS.set("rw", +t.dataset.rw); rerender(); }
   else if (t.dataset.rv) { LS.set("runview", t.dataset.rv); rerender(); }
   else if (t.dataset.f) { LS.set("filter", t.dataset.f); rerender(); }
@@ -1267,6 +1486,10 @@ document.addEventListener("click", e => {
     }
   }
 });
+document.addEventListener("change", e => {
+  const t = e.target.closest?.("[data-tlhsel]");
+  if (t) { LS.set("tlhost", t.value || "all"); drawTimeline(); }
+});
 document.addEventListener("toggle", e => { if (e.target.matches?.("details")) saveView(); }, true);
 // 鼠标悬停任务条高亮它的上下游（depHover）；触屏、触控笔由点击（tapTwice）管，拖动平移时不换
 document.addEventListener("pointerover", e => {
@@ -1276,7 +1499,7 @@ document.addEventListener("pointerover", e => {
 });
 window.addEventListener("beforeunload", saveView);
 let rt; window.addEventListener("resize", () => { clearTimeout(rt); rt = setTimeout(drawTimeline, 150); });
-function setData(d) { D = d; NOW = d.generated; GROUPS = Object.fromEntries((d.groups || []).map(g => [g.id, g])); }
+function setData(d) { D = d; NOW = d.generated; GROUPS = Object.fromEntries((d.groups || []).map(g => [g.id, g])); rebuildHist(d); }
 let lastDraw = Date.now();
 // 不自动重试：打开页面时首次渲染等着它，连不上就先用页面里的快照画；没取到（EVOK 为假）由下一轮定时取数补（#177）
 let EVOK = false;
