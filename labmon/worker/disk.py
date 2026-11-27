@@ -511,13 +511,17 @@ class WorkDisk(Disk):
         )
 
         def _mapped_pid(u_path):
-            un = os.path.normpath(u_path).rstrip("/")
-            if un.endswith("/."):
-                un = un[:-2] or "/"
+            # 区分仅统计本层文件的 "/." 平层单位（如 projects/.）与整棵目录：平层单位绝不做后代匹配，避免把父目录当成整个项目目录
+            raw_u = u_path.rstrip("/")
+            flat = raw_u.endswith("/.")
+            un = os.path.normpath(raw_u[:-2] or "/") if flat else os.path.normpath(raw_u)
+            un = un.rstrip("/")
             for root_p, p_id in pmap:
                 if un == root_p or un.startswith(root_p + "/"):
                     return p_id, root_p
-            # 若整个 projects/<dir> 尚未拆分子目录而登记根在其下，也归属到该登记项目
+            if flat or un == base or un == os.path.join(base, "projects"):
+                return None, None
+            # 仅对 projects/<目录> 及以下的整棵目录允许后代匹配，防止扩大可回收目录范围
             hits = [p_id for root_p, p_id in pmap if root_p.startswith(un + "/")]
             if len(set(hits)) == 1:
                 return hits[0], un

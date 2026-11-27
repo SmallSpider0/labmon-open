@@ -172,6 +172,18 @@ class StandaloneHistAndCrossHostTest(unittest.TestCase):
                 self.assertEqual(projs, {"proj-a"})
                 self.assertEqual(payload["rows"][0]["gpu"], "RTX 4090")
                 self.assertNotIn("proj-b", projs)
+                # 回归：_to_worker 下发给普通用户外部机的 eta.json 与 sched.json 也按归属过滤，绝不泄露 proj-b 的运行任务与预计结束
+                projs_meta = [
+                    {"id": "proj-a", "running": [{"id": "a_run", "eta_ts": now + 600, "eta_source": "progress"}]},
+                    {"id": "proj-b", "running": [{"id": "secret_job", "eta_ts": now + 900, "eta_source": "progress"}]},
+                ]
+                _, for_h = O._to_worker(projs_meta, now, {"weight": {"proj-a": 1.0, "proj-b": 2.0}, "owner": {"proj-a": "ha", "proj-b": "hb"}}, {})
+                put_amy = for_h(h_amy)
+                self.assertIn("proj-a|a_run", put_amy["eta.json"]["jobs"])
+                self.assertNotIn("proj-b|secret_job", put_amy["eta.json"]["jobs"])
+                self.assertNotIn("proj-b|secret_job", put_amy["eta.json"]["prog"])
+                self.assertNotIn("proj-b", put_amy["sched.json"]["weight"])
+                self.assertNotIn("proj-b", put_amy["sched.json"]["owner"])
 
                 # 测试 overview.fetch 的 put 走 stdin 落盘（本机执行，大载荷 > 200 KB 不撞 ARG_MAX）
                 wh = Path(td) / "wh"
@@ -263,6 +275,17 @@ class DiskGateWorkDiskCleanTest(unittest.TestCase):
             self.assertIsNotNone(got)
             self.assertIn("本地盘空间不足", got[0])
             self.assertEqual(len(S["jobs"]), 1)
+            # 回归：磁盘闸门开启时，带 needs= 依赖拷贝的任务也必须先被闸门拦截，绝不启动 stage_bg 拷贝写爆盘
+            src_f = d / "master.bin"
+            src_f.write_bytes(b"m" * 1024)
+            dst_f = local / "cache" / "p1" / "master.bin"
+            req_needs = dict(req, needs=[f"{dst_f}<{src_f}"], cmd="echo hi",
+                             q={"key": "k1", "par": 1, "gpus": None, "root": str(data_root / "projects/p1"), "project": "p1", "env": None})
+            with mock.patch.object(w, "stage_bg", side_effect=AssertionError("disk_gate 开启时不该启动 stage_bg")):
+                got_n = w.place(req_needs, S)
+            self.assertIsNotNone(got_n)
+            self.assertIn("本地盘空间不足", got_n[0])
+            self.assertFalse(dst_f.exists())
 
     def test_workdisk_no_symlink_escape_and_reclaimable_and_clean_local(self):
         with tempfile.TemporaryDirectory() as td:
@@ -303,6 +326,7 @@ class DiskGateWorkDiskCleanTest(unittest.TestCase):
             wd.ix = {
                 "t": now,
                 "units": {
+                    str(data_root / "projects/."): {"b": 4096, "m": now - 20 * 86400, "t": now},
                     str(data_root / "projects/folder-name/code"): {"b": 3 * m.GIB, "m": now - 20 * 86400, "t": now},
                 },
             }
@@ -310,6 +334,7 @@ class DiskGateWorkDiskCleanTest(unittest.TestCase):
             self.assertIn("proj-a", wk_mapped["projects"])
             self.assertNotIn("folder-name", wk_mapped["projects"])
             self.assertEqual(wk_mapped["projects"]["proj-a"]["b"], 3 * m.GIB)
+            # projects/. 平层单位绝不能覆盖 projects/folder-name/code，避免整个 projects/ 被标成可回收
             self.assertEqual(wk_mapped["projects"]["proj-a"]["dir"], "projects/folder-name/code")
             # host_work_disk 生成可回收路径必须使用真实目录 dir，绝不拿项目 ID 反推成 projects/proj-a
             e_mapped = {

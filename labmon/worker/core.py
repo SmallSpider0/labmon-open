@@ -956,6 +956,9 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         def pre():
             if gate:
                 return gate
+            # 磁盘闸门必须在启动 needs 本地依赖拷贝之前拦截，避免空间不足时 stage_bg 继续拷贝写满磁盘
+            if (self.disk_gate or {}).get("on"):
+                return self.disk_gate.get("why") or "磁盘闸门：本地盘空间不足，暂停放新任务；请运行 labmon disk 查看并清理缓存或旧运行目录"
             if r["kind"] == "queue" and r.get("needs"):
                 cp = [m for c in _Q.check_needs(r, self.qenv(r["q"])) for m in c["copy"]]
                 why = (cp or (r["key"], r["name"]) in self.stagers) and self.stage_bg(r, cp)   # 拷完的那一轮 cp 已空，也要收结果
@@ -964,8 +967,6 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if self.gate:
                 m = self.info["mem"]
                 return "内存闸门：收不回的内存 %.0f / %.0f GiB 超过 %d%%，暂停放行" % (m["anon"], m["limit"], _C.GATE * 100)
-            if (self.disk_gate or {}).get("on"):
-                return self.disk_gate.get("why") or "磁盘闸门：本地盘空间不足，暂停放新任务；请运行 labmon disk 查看并清理缓存或旧运行目录"
             return None
         cards, why, res = _S.place(x, S, _C.time.time(), pre)
         r["code"] = S["code"]

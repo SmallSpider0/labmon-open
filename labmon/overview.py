@@ -405,6 +405,18 @@ def _expire(t: float) -> None:
             log(f"到期的暂停、优先没删掉（不影响生效）：{e}")
 
 
+def _host_allowed_projects(h: dict) -> set[str] | None:
+    """外部主机归属普通用户时，返回其名下允许下发历史/eta/sched 的项目集合；管理员或无普通归属主返回 None（不限）。"""
+    owner = h.get("owner")
+    if not owner:
+        return None
+    acc = U.account(owner)
+    if acc and acc.get("role") == "admin":
+        return None
+    want = acc["name"] if acc else owner
+    return {pid for pid in registered() if U.owner_of(pid) == want}
+
+
 def _hist_payload(h: dict, projects: list[dict], t: float, snap: dict | None = None) -> dict | None:
     """为独立主机裁剪并拼装跨机同类历史载荷 hist_shared.json（唯一实现，#114）：
     只筛选该机已登记队列所属项目（尚无登记时取当前活跃项目）；若该机归属普通用户，强制按其名下项目过滤，绝不泄露他人项目历史。
@@ -413,13 +425,7 @@ def _hist_payload(h: dict, projects: list[dict], t: float, snap: dict | None = N
         return None
     hid = str(h["id"])
     snap = snap or {}
-    allowed: set[str] | None = None
-    owner = h.get("owner")
-    if owner:
-        acc = U.account(owner)
-        if not acc or acc.get("role") != "admin":
-            want = acc["name"] if acc else owner
-            allowed = {pid for pid in registered() if U.owner_of(pid) == want}
+    allowed = _host_allowed_projects(h)
     reg_pids = {q.get("project") for r in snap.get("regs") or [] if r.get("host") == hid for q in r.get("queues") or [] if q.get("project")}
     reg_pids.update(q.get("project") for e in snap.get("hosts") or [] if e.get("id") == hid
                     for q in (e.get("status") or {}).get("queues") or [] if q.get("project"))
@@ -491,6 +497,16 @@ def _to_worker(projects: list[dict], t: float, sw: dict, snap: dict | None = Non
     def for_host(h: dict) -> dict:
         sh = dict(sw)
         standalone = is_standalone(h)
+        allowed = _host_allowed_projects(h) if standalone else None
+        if allowed is not None:
+            # 普通用户归属外部机：eta.json 与 sched.json 仅保留本人获准项目，绝不泄露他人项目名、任务名或预计结束时刻
+            for k in ("weight", "pause", "focus", "owner"):
+                if isinstance(sh.get(k), dict):
+                    sh[k] = {p: v for p, v in sh[k].items() if p in allowed}
+            h_jobs = {k: v for k, v in jobs.items() if k.partition("|")[0] in allowed}
+            h_prog = [k for k in by_prog if k.partition("|")[0] in allowed]
+        else:
+            h_jobs, h_prog = jobs, by_prog
         if standalone:
             sh["standalone"] = True
         for k in ("disk_warn_gb", "disk_stop_gb", "disk_quota_gb"):
@@ -499,8 +515,8 @@ def _to_worker(projects: list[dict], t: float, sw: dict, snap: dict | None = Non
         # 独立主机或配置了 cpu_quota 时显式下发 cpu_quota（清空为 null 也能覆盖启动环境变量 LABMON_CPU_QUOTA）
         if standalone or h.get("cpu_quota") is not None:
             sh["cpu_quota"] = h.get("cpu_quota")
-        out = {"eta.json": {"t": round(t + _CLOCK.get(h["id"], 0)), "jobs": jobs, "prog": by_prog},
-               "sched.json": sh, "returned.json": gone}
+        out = {"eta.json": {"t": round(t + _CLOCK.get(h["id"], 0)), "jobs": h_jobs, "prog": h_prog},
+               "sched.json": sh, "returned.json": {"hosts": []} if standalone else gone}
         hp = _hist_payload(h, projects, t, snap)
         if hp is not None:
             out["hist_shared.json"] = hp
