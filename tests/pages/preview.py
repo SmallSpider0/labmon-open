@@ -41,7 +41,8 @@ KINDS = {"normal": ("overview", "project", "records", "project_events"),
          "longq": ("overview", "project_longq", "records", "project_events"),
          "moved": ("overview", "project_moved", "records", "project_events"),
          "deps": ("overview", "project_deps", "records", "project_events"),
-         "par10": ("overview", "project_par10", "records", "project_events")}
+         "par10": ("overview", "project_par10", "records", "project_events"),
+         "ephemeral": ("overview_ephemeral", "project_ephemeral", "records", "project_events")}
 
 
 AS = {"admin": ("boss", "lan"), "public": ("boss", "public"), "user": ("amy", "lan"), "empty": ("carol", "lan")}     # --as：用哪个假账号、从哪个入口来

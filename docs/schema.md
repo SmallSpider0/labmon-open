@@ -37,11 +37,12 @@
                                                 // 无 worker 或过期时回退探针 cgroup 差分；pct 按 0–100% 封顶（有 quota 按 quota，无 quota 按 cpus 换算）；旧快照没有该字段
     "cpu_pct": 72.9, "loadavg": [14.8, 15.4, 15.9],
     "mounts": [{"path": "/tmp", "label": "容器 /tmp", "total_gb": 1024.0, "avail_gb": 24.9, "used_pct": 97.6,
-                "min_gb": 10}],                 // 容量与 min_gb 都是 GiB（2^30）；disk_low 按 min_gb 与配置的 max_used_pct 判
+                "min_gb": 10, "kind": "cloud|local"}],   // 容量与 min_gb 都是 GiB（2^30）；disk_low 按 min_gb 与配置的 max_used_pct 判；临时主机的挂载点带 kind（cloud 云盘默认 min_gb=1.0 并出 ephemeral_disk_low，local 为实例本地盘，#213）
+    "ephemeral": false, "instance_id": null,    // 推模式临时主机时 ephemeral=true 并带 instance_id，不经 SSH 探测、不计入实验室共享盘（#213）
     "checks": [{"id": "keepalive", "label": "GPU 保活在跑", "state": "ok|fail|na", "out": "…", "detail": ["…"]}]
   }],                                           // 有交给算力池的清单时另有一项 {"id": "pool", "label": "算力池", "pool": true, "ok", "error"}（#24）：ok 是代读它的在用主机这轮读到了，其余字段都没有
 
-  "lanes": [{                                   // 一条车道 = 一条清单（一次一行；写了 `# labmon: par=N` 的同时至多 N 行，#147）
+  "lanes": [{                                   // 一条车道 = 一条清单（一次一行；写了 `# labmon: par=N` 的同时至多 N 行，#147）；推模式临时主机为 type="ephemeral"、ephemeral=true（#213）
     "id": "r9_a6000", "label": "车道 2", "host": "29", "type": "gpu_queue",   // 自动发现的车道 id 为 <队列 id>:<清单名>；只在 worker 登记里有的为 <目录末级名>/<清单>（#94）
                                                  // label：同机照配置顺序编号的车道名，配置里写了 label（用途）的接在后面；24 小时内全成功跑完的非 monitor.toml 写明车道不占号（叫“已跑完”，带 done_lane: true，#164）
     "alive": true, "pid": 6341, "missing": false, "stale": false, "started": true,   // started=false：从没启动过，不报 lock_dead
@@ -92,6 +93,7 @@
                                                  // 暂停任务写了依赖时 eta_ts 取 worker 推演的（依赖都满足的时刻），dur_src、eta_source 写“等 X、Y 跑完”，
                                                  // dur_min 是推演里它从开始到放行的分钟数
     "eta_ts": 1793808791,                        // 运行中或排队任务的推算结束时间
+    "artifact_dir": null,                        // 可选（#213）：推模式临时主机任务声明的云盘产物/checkpoint 目录路径，用于悬停、详情与断线续跑提示
     "last_line": "PROGRESS 50/2000 …", "log_mtime": 1793775964.9    // last_line、progress 只看这一次的输出（日志里最后一行分隔之后），逐字出现过的行跳过，还没输出时为 null
   }],
 
@@ -269,6 +271,7 @@
 | `overview/maint.json` | 计划维护（`labmon server maint`，#165）：`{until 到何时（epoch 秒；提前结束写 null）, by 谁开的, t 何时开的}`，到期自然失效；`/healthz` 的 `maint_until`、体检与全局快照的 `hostcheck.maint` 经 `maint.until` 读它 |
 | `overview/borrow.json` | 借用的提醒与看板的记忆（`borrow.check` 写，字段见 `labmon/borrow.py` 头部）；算力池借的那台另有 `pool` 子项（#25，`pool._mem` 写，再借时保留）：`{started 借来时的容器启动时刻, since 借来的时刻, busy 最近一次有池任务在跑, rest 休息到几点, rest_why, fail 最近一次借不成, fail_day 那天通知过管理员, nofit [[卡数, 单卡显存, 到期]], want 为哪个形状借的 {ngpu, vram}}` |
 | `overview/tell.jsonl` | 页面上的改动给实验会话的消息（7 天，`records.tell` 写）：`{t, what（move、rm、restore、pause、resume、config、borrow（改借用约定，#127）；看板升级时的 upgrade）, project, msg}`（算力池放、搬、回池只记事件、不写这里，#88）；`records.told` 每轮并进全局快照的 `wake`（#121） |
+| `overview/ephemeral/<主机>.json` | 推模式临时主机状态（`labmon/ephemeral.py`，#213；绝不写进 `hosts.toml`）：`{host_id, label, project, instance_id, state online\|down, ttl_s, first_seen, last_seen, down_at, down_reason, lost_jobs, gpus, cpu_pct, cpu_count, mem, storage, jobs, pushed_by}`；离线满 7 天连同 `series/<主机>.jsonl` 自动清理，保留 30 天 `usage/<主机>.jsonl` |
 
 状态根目录的 `server.json`（`lease.py`，#163，不进备份）：`{id 这台看板服务（机器名-随机串）, primary 本机标记（读不到租约时照它）, role, since, t, homes {worker_home: {holder, renew, ttl, now 共享盘此刻的时刻, at 本机读到的时刻, bad}}}`。
 每个 `worker_home` 下的 `labmon_server.json` 是服务租约本身：`{holder 持有的看板服务 id（释放后为空串）, renew 最后续约（共享盘时钟的 epoch 秒）, ttl 秒}`，旁边 `labmon_server.json.lock` 是互斥用的锁（它的修改时刻就是读共享盘时钟用的）；worker 不读它们。

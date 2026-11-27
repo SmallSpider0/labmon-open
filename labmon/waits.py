@@ -228,6 +228,9 @@ def job_state(snap: dict | None, name: str, rows: list[tuple[str, dict]]) -> dic
         if j["status"] == "done":
             return {"st": "done", "text": f"成功{at}{took}（{where(ln)}）{log}"}
         how = f"被信号终止（退出码 {j['killed']}）" if j.get("killed") else "失败"
+        if ln.get("type") == "ephemeral":
+            art = f"；产物目录 {j['artifact_dir']}（确认旧实例已离线后可在新实例从 ckpt/latest.pt 续跑）" if j.get("artifact_dir") else ""
+            return {"st": "failed", "text": f"{how}{at}{took}（{where(ln)}）{art}"}
         redo = f"；要重跑删掉 {ln.get('state_dir') or '状态目录'}/{name}.failed"
         return {"st": "failed", "text": f"{how}{at}{took}（{where(ln)}）{log}{redo}"}
     rs = [(h, r) for h, r in rows if r.get("st") in ("done", "failed")]

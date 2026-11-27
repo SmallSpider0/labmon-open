@@ -278,6 +278,10 @@ function topline() {
   const hosts = D.hosts.filter(h => !gone.includes(h) && (!h.pool || pl.length || !h.ok)).map(h => {
     if (h.pool) return `<span class="nw ${h.ok ? "mut" : ""}" style="${h.ok ? "" : "color:var(--bad)"}" ${tip("交给算力池、还没放到哪台的清单：看板挑一台入池的服务器放过去\n" + (pl.map(l => `${laneName(l, D.hosts)}：${laneState(l)}`).join("\n") || "") + (h.ok ? "" : "\n" + (h.error || "这一轮没读到池里的清单")))}>算力池里待放 ${pl.length} 条清单</span>`;
     if (h.returned) return `<span class="nw mut" ${tip(`已归还（${ts(h.returned)}），不再连接；还有任务没跑完`)}><span class="cdot" style="background:var(--faint)"></span> ${esc(h.label)} · 已归还</span>`;
+    if (h.ephemeral) {
+      const cv = h.ok ? cpuView(h) : null;
+      return `<span class="nw" ${tip(h.ok ? "临时主机在线" + (cv?.has ? "\n" + cv.tip : "") : h.error || "临时主机已离线")}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--faint)"}"></span> ${esc(h.label)} <span class="badge b-mute">临时</span></span>`;
+    }
     const cv = h.ok ? cpuView(h) : null;
     return `<span class="nw" ${tip(h.ok ? "探针正常" + (cv?.has ? "\n" + cv.tip : "") : h.error || "失败")}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}"></span> ${esc(h.label)}</span>${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}`;
   }).join(" ")
@@ -805,6 +809,7 @@ function laneRow(l, hb, gs, y, h, c, used, pk) {
       + (j.deps && !j.hold ? `\n${j.status === "queued" ? `等 ${afterText(j.deps, D.id)} 跑完才开始` : "依赖 " + afterText(j.deps, D.id)}` : "") + (j.progress ? `\n进度 ${j.progress[0]}/${j.progress[1]}` : "")
       + (j.dur_min ? `\n预计 ${dur(j.dur_min * 60)}` : "") + (j.overrun_min ? ` · 已超 ${dur(j.overrun_min * 60)}` : "") + (j.actual_min != null ? ` · 实际 ${dur(j.actual_min * 60)}` : "")
       + (j.status === "running" && !j.hold && j.eta_source ? `\n预计结束依据：${j.eta_source}` : "") + (j.host ? `\n${awayText(j)}（${l.pool ? "清单已交回算力池" : "清单已搬到 " + hostShort(hostOf(l.host))}）` : "")
+      + (j.artifact_dir ? `\n产物目录：${j.artifact_dir}` : "")
       + (j.last_line ? "\n" + j.last_line.slice(0, 90) : "");
     const yy = y + 3 + th * k;
     (c.pos ||= {})[j.id] = {x0: c.X(a0), x1: c.X(e0), y: yy + bh / 2, yt: y, yb: y + h, r};     // 依赖连线（depLines）从这里取
@@ -927,7 +932,7 @@ function runningCard() {
         <span class="sm nw">已等 <b>${dur(j.elapsed_min * 60)}</b>${j.deps ? ` · 预计 ${tsNear(j.eta_ts)} 放行` : ""}</span></div>
       <div class="sm mut ell" style="margin-top:3px">${esc(j.last_line || "等条件放行")}</div></div>`;
     const f = jobFrac(j), sp = (j.speed || []).filter(p => p[0] >= NOW - 6 * 3600);
-    return `<div class="job" ${tip(`${j.id}（${jobLane(j, l)}）\n开始 ${ts(j.start_ts)} · 已用 ${dur(j.elapsed_min * 60)}\n预计结束依据：${j.eta_source}` + (j.last_line ? "\n" + j.last_line : ""))}>
+    return `<div class="job" ${tip(`${j.id}（${jobLane(j, l)}）\n开始 ${ts(j.start_ts)} · 已用 ${dur(j.elapsed_min * 60)}\n预计结束依据：${j.eta_source}` + (j.artifact_dir ? `\n产物目录：${j.artifact_dir}` : "") + (j.last_line ? "\n" + j.last_line : ""))}>
       <div class="row"><span class="dot" style="background:${gcolor(j.group)}"></span><span class="mono ell">${esc(j.id)}</span><span class="sm mut ell hide-sm">${esc(jobLane(j, l))}</span><span class="sp"></span>
         <span class="sm nw">${j.overrun_min ? `<span style="color:var(--warn)">超估时 <b>+${dur(j.overrun_min * 60)}</b></span> · 估 ${dur(j.dur_min * 60)}` : `剩 <b>${dur(j.remaining_min * 60)}</b> · ${tsNear(j.eta_ts)}`}</span></div>
       <div class="row" style="margin-top:4px"><div class="meter" style="flex:1;margin:0"><i class="${j.overrun_min ? "ovr" : ""}" style="width:${f * 100}%;background-color:${gcolor(j.group)}"></i></div>
@@ -957,6 +962,7 @@ function runCompact(run) {
     const tt = `${j.id}（${ln}）\n开始 ${ts(j.start_ts)} · 已用 ${dur(j.elapsed_min * 60)}` + (j.progress ? `\n进度 ${j.progress[0]}/${j.progress[1]}` : "")
       + (sp.length >= 2 ? `\n速度 现在 ${f1(j.rate_per_min, 1)} · 近 ${dur(NOW - sp[0][0])} 均 ${f1(avg(sp.map(p => p[1])), 1)} 步/分` : "")
       + (j.hold ? holdLine(j) || "\n等条件放行" : j.suspended ? "\n进程被 SIGSTOP 挂起，kill -CONT 恢复" : j.eta_source ? `\n预计结束 ${ts(j.eta_ts)}（依据：${j.eta_source}）` : "")
+      + (j.artifact_dir ? `\n产物目录：${j.artifact_dir}` : "")
       + (j.last_line ? "\n" + j.last_line : "");
     const right = j.hold ? `<span style="color:var(--warn)">⏸ 已等 ${dur(j.elapsed_min * 60)}</span>` : j.suspended ? `<span style="color:var(--warn)">⏸ 挂起 · 停在 ${tsNear(j.log_mtime)}</span>`
       : j.overrun_min ? `<span style="color:var(--warn)">超估时 +${dur(j.overrun_min * 60)}</span>` : `剩 <b>${dur(j.remaining_min * 60)}</b> · ${tsNear(j.eta_ts)}`;
@@ -1029,18 +1035,20 @@ function resourcesCard() {
       line(H.filter(r => r.ram).map(r => [r.t, r.ram / GIB]), 0, v => f1(v) + " GiB"), `进程 ${f1((cg.mem_rss || 0) / GIB)} GiB · 含缓存 ${f1((cg.mem_used || 0) / GIB)} GiB`));
     for (const m of h.mounts || []) {     // 采集给的是 GB（历史曲线也是），换成 GiB
       const low = m.min_gb != null && m.avail_gb < m.min_gb;
-      tiles.push(tile(esc(m.label), `<span style="${low ? "color:var(--bad)" : ""}">余 ${f1(m.avail_gb)} GiB</span>`,
+      const kindNote = m.kind === "cloud" ? "\n云盘存储（不计入实验室共享盘）" : m.kind === "local" ? "\n实例本地盘（回收清空）" : "";
+      const mLabel = esc(m.label) + (m.kind === "cloud" ? " · 云盘" : m.kind === "local" && h.ephemeral ? " · 本地" : "");
+      tiles.push(tile(mLabel, `<span style="${low ? "color:var(--bad)" : ""}">余 ${f1(m.avail_gb)} GiB</span>`,
         line(H.filter(r => r.disk && r.disk[m.path] != null).map(r => [r.t, r.disk[m.path]]), 0, v => "余 " + f1(v) + " GiB", {color: low ? "var(--bad)" : "var(--muted)", thr: m.min_gb != null ? m.min_gb : null}),
-        `${m.path}\n总 ${f1(m.total_gb, 0)} GiB · 已用 ${f1(m.used_pct, 1)}%${m.min_gb != null ? " · 告警线 " + f1(m.min_gb, 0) + " GiB（红虚线）" : ""}`));
+        `${m.path}\n总 ${f1(m.total_gb, 0)} GiB · 已用 ${f1(m.used_pct, 1)}%${m.min_gb != null ? " · 告警线 " + f1(m.min_gb, 0) + " GiB（红虚线）" : ""}${kindNote}`));
     }
     for (const c of h.checks || []) {
       const col = c.state === "ok" ? "var(--ok)" : c.state === "fail" ? "var(--faint)" : "var(--line)";
       chips.push(`<span class="chip" ${tip([c.out, ...(c.detail || [])].filter(Boolean).join("\n") || "无输出")}><span class="cdot" style="background:${col}"></span> ${esc(c.label)}：${c.state === "ok" ? "是" : c.state === "fail" ? "否" : "不适用"}</span>`);
     }
-    // 共享盘各服务器挂的是同一块，只在第一台主机上写一次；本地盘按主机
-    const sg = D.storage || {}, sh = h === D.hosts.find(x => !x.pool) ? sg.dirs || [] : [], loc = sg.local?.[h.id], lb = loc ? (loc.cache || 0) + (loc.scratch || 0) : 0;
+    // 共享盘各服务器挂的是同一块，只在第一台非临时主机上写一次；本地盘按主机
+    const sg = D.storage || {}, sh = !h.ephemeral && h === D.hosts.find(x => !x.pool && !x.ephemeral) ? sg.dirs || [] : [], loc = h.ephemeral ? null : sg.local?.[h.id], lb = loc ? (loc.cache || 0) + (loc.scratch || 0) : 0;
     if (sh.length || loc) chips.push(storageChip(sg, sh, loc, lb));
-    const head = `<span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}" ${tip(h.ok ? "探针正常" : h.error || "失败")}></span> ${esc(h.label)}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}${h.stale ? ` <span class="sm" style="color:var(--bad)">（显示 ${ts(h.last_ok)} 的数据）</span>` : ""}`;
+    const head = `<span class="cdot" style="background:${h.ok ? "var(--ok)" : h.ephemeral ? "var(--faint)" : "var(--bad)"}" ${tip(h.ephemeral ? (h.ok ? "临时主机在线" : h.error || "临时主机已离线") : h.ok ? "探针正常" : h.error || "失败")}></span> ${esc(h.label)}${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : ""}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}${h.stale ? ` <span class="sm" style="color:var(--bad)">（显示 ${ts(h.last_ok)} 的数据）</span>` : ""}`;
     out.push(block(head, chips, tiles.length ? tiles : [`<div class="sm mut">没有数据</div>`]));
   }
   const card = `<div class="card" style="margin-top:10px"><div class="row"><span class="hd">资源</span><span class="sm mut hide-sm">整台主机的数字，含同机别的项目与 labmon 之外的进程</span><span class="sp"></span>
@@ -1089,7 +1097,7 @@ function jobDetails() {
       ${js.slice(0, lim).map(j => {
         const est = j.dur_min == null ? "—" : j.est_min == null || Math.abs(j.dur_min - j.est_min) > .5
           ? `<span style="border-bottom:1px dotted var(--muted)" ${tip((j.est_min != null ? "清单估时 " + dur(j.est_min * 60) + "，" : "清单没写估时，") + "预计按" + j.dur_src)}>${dur(j.dur_min * 60)}</span>` : dur(j.est_min * 60);
-        return `<tr id="job-${esc(j.id)}" class="${j.status === "running" ? "run" : ""}"><td class="mono"><span class="dot" style="background:${gcolor(j.group)}"></span> ${esc(j.id)}</td>
+        return `<tr id="job-${esc(j.id)}" class="${j.status === "running" ? "run" : ""}"><td class="mono"><span class="dot" style="background:${gcolor(j.group)}"></span> ${esc(j.id)}${j.artifact_dir ? `<div class="sm mut ell" style="max-width:260px" ${tip("产物目录：" + j.artifact_dir)}>产物：${esc(j.artifact_dir)}</div>` : ""}</td>
         <td>${badge(...stOf(j))}${j.host ? ` <span class="sm mut nw">${esc(awayText(j))}</span>` : ""}</td><td class="r">${est}</td><td class="r">${j.actual_min != null ? dur(j.actual_min * 60) : j.elapsed_min != null ? dur(j.elapsed_min * 60) : "—"}</td>
         <td class="r hide-sm">${tsNear(jobT0(j))}</td><td class="r">${tsNear(jobT1(j))}</td><td class="mono mut ell hide-sm" style="max-width:340px" ${j.last_line ? tip(j.last_line) : ""}>${esc(j.last_line || "")}</td></tr>`; }).join("")}
       ${hidden ? `<tr><td colspan="7"><span class="more" data-more="${esc(l.id)}">还有 ${hidden} 个，全部显示</span></td></tr>` : ""}

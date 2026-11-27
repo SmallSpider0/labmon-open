@@ -127,6 +127,7 @@ const regMsg = () => RMSG ? `<div class="rn-state">${esc(RMSG)}</div>` : "";
 // 借来的主机只能勾“只给谁用”里的项目。勾选记在 ADOPT（换了主机就重来）
 let ADOPT = null;                                         // {host, sel: {登记 id: 勾没勾}, busy, err}
 function adoptSrc(h) {
+  if (h.ephemeral) return null;
   const me = (D.regs || []).find(x => x.host === h.id);
   if (!canWrite() || !me || me.standalone || h.standalone || me.state !== "active" || me.stale || !Array.isArray(me.queues) || me.queues.length || !h.status) return null;
   const src = D.regs.filter(x => !x.standalone && (x.state === "returned" || x.state === "unlisted") && nrm(x.home) === nrm(me.home) && (x.queues || []).some(q => q.project));
@@ -182,7 +183,7 @@ async function adoptGo(hid) {
 // 单项目用短确认浮窗（popConfirm）；多项目用右侧抽屉（#/host/<id>/assign，窄屏底部升起，底部固定操作栏，AGENTS.md「页面二级操作」）。
 let AMSG = null, APICK = null;                            // AMSG：{host, msg}（一分钟后收起）；APICK：{host, to, busy, err}（抽屉内选择状态）
 function assignSrc(h) {
-  if (!LIVE || !canUseHost(h.id) || (h.borrow && !h.borrow.swap) || !h.status) return null;
+  if (h.ephemeral || !LIVE || !canUseHost(h.id) || (h.borrow && !h.borrow.swap) || !h.status) return null;
   if ((h.status.queues || []).length) return null;
   const me = (D.regs || []).find(x => x.host === h.id);
   if (me && (me.state !== "active" || me.stale || (me.queues || []).length)) return null;

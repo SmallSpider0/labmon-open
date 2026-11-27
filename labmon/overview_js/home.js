@@ -122,13 +122,17 @@ function home() {
     (D.hosts.map(h => {
       const info = h.status?.info, gs = info?.gpus || [], m = info?.mem;
       const gb = gs.map(g => { const U = utilText(gpuBusy(h, g.i), g.util); return `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB\n${U.tip}`)}><div class="bar thin" style="flex:1"><i style="width:${100 * g.used / g.total}%;background:var(--accent)"></i></div><span class="sm num nw">${pct(g.used, g.total)}%<span class="mut"> · ${U.big}</span></span></div>`; }).join("");
-      const sx = h.standalone ? null : sharedParts();
-      const sb = h.standalone ? `<span class="sm mut" ${tip("独立主机不挂集群共享盘")}>—</span>` : sx ? `<div class="row" style="flex-wrap:nowrap">${sharedBar(sx, true)}<span class="sm num nw" style="${sx.dk.free < sx.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(sx.dk.free)}${sx.dk.eta_days != null && sx.dk.eta_days < 7 ? ` · ${sx.dk.eta_days} 天满` : ""}</span></div>` : "—";
+      const sx = (h.ephemeral || h.standalone) ? null : sharedParts();
+      const ephSto = h.ephemeral ? (h.storage || []).map(x => {
+        const low = x.kind === "cloud" && x.avail_gb < 1;
+        return `<span class="sm nw" style="${low ? "color:var(--bad);font-weight:600" : ""}" ${tip(`${x.kind === "cloud" ? "云盘（不计入实验室共享盘）" : "实例本地盘（回收清空）"}\n${x.path}：剩 ${g1(x.avail_gb)} / ${g1(x.total_gb)} GiB`)}>${esc(x.label)} 剩 ${g1(x.avail_gb)} GiB</span>`;
+      }).join(" · ") || `<span class="sm mut">无共享盘</span>` : null;
+      const sb = h.ephemeral ? ephSto : h.standalone ? `<span class="sm mut" ${tip("独立主机不挂集群共享盘")}>—</span>` : sx ? `<div class="row" style="flex-wrap:nowrap">${sharedBar(sx, true)}<span class="sm num nw" style="${sx.dk.free < sx.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(sx.dk.free)}${sx.dk.eta_days != null && sx.dk.eta_days < 7 ? ` · ${sx.dk.eta_days} 天满` : ""}</span></div>` : "—";
       const mb = m ? `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1"><i style="width:${100 * m.used / m.limit}%;background:${m.used / m.limit >= 0.9 ? "var(--bad)" : "var(--accent)"}"></i><b style="left:90%"></b></div><span class="sm num nw">${g1(m.used)} / ${g1(m.limit)}</span></div>` : "—";
-      return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b>${standaloneBadge(h)}</td><td>${workerBadge(h)}</td>
+      return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b>${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : standaloneBadge(h)}</td><td>${workerBadge(h)}</td>
         <td>${gb || "—"}</td><td>${mb}</td><td>${sb}</td><td class="r nw">${info?.cpu_used != null ? g1(info.cpu_used) : "—"} <span class="mut">/ ${info?.cpu_quota ? g1(info.cpu_quota) : info?.nproc ?? "—"}</span>${thrTag(h) ? `<div>${thrTag(h)}</div>` : ""}</td>
         <td class="r">${jobsOf(h).length}</td><td class="r">${(h.status?.waiting || []).length}</td>
-        <td class="sm nw" ${info?.started ? tip(`容器 ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : ""}>${h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${renewChip(h)}</td></tr>`;
+        <td class="sm nw" ${!h.ephemeral && info?.started ? tip(`容器 ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : ""}>${h.ephemeral ? `<span class="mut">临时实例</span>` : h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${h.ephemeral ? "" : renewChip(h)}</td></tr>`;
     }).join("") || `<tr><td colspan="9" class="empty">主机清单里没有在用的主机。</td></tr>`) + `</table></div></div>`;
   s += schedCard() + tasksCard(D.hosts, jobs, allw, true);
   const pEnd = id => Math.max(0, ...D.hosts.flatMap(h => planLanes(h).filter(l => l.project === id).flatMap(l => l.jobs.map(j => j.t1 || 0))));   // 这个项目在各主机推演里最晚的结束
@@ -306,7 +310,8 @@ function jobsTable(rows, showHost) {
     const u = j.use || {}, t0 = j.t0, wg = u.with_gpu || [], key = jobKey(j), open = OPEN.has(key);
     const ex = j.excl ? (wg.length ? `<span class="badge b-bad" ${tip("独占任务运行期间同卡出现过：" + wg.join("、"))}>独占被打扰</span>`
                                    : `<span class="badge b-ok">独占${j.excl === "host" ? "整机" : "卡"}</span>`) : "";
-    const old = j.src !== "worker" ? `<span class="badge b-mute" ${tip("旧 gpu_queue.sh 在跑：只统计用量，不归 worker 管")}>旧队列</span>`
+    const old = j.kind === "ephemeral" ? ""
+      : j.src !== "worker" ? `<span class="badge b-mute" ${tip("旧 gpu_queue.sh 在跑：只统计用量，不归 worker 管")}>旧队列</span>`
       : j.kind === "slot" ? `<span class="badge b-mute" ${tip("项目自己的监督进程申请的单元（labmon_worker.py slot）")}>单元</span>` : "";
     const pr = j.prog?.progress, e = etaOf(j);
     const prog = pr ? `<div class="prog"><div class="bar"><i style="width:${100 * pr[0] / pr[1]}%;background:${color(j.project)}"></i></div><span class="sm num nw">${pr[0]}/${pr[1]}</span></div>`
@@ -339,9 +344,10 @@ function jobDetail(j) {
   const u = j.use || {}, p = j.prog || {}, wg = u.with_gpu || [], wh = u.with_host || [], e = etaOf(j);
   const kv = [
     ["命令", j.cmd ? `<code>${esc(j.cmd)}</code>` : `<span class="mut">（没有记录）</span>`],
-    j.kind === "slot" ? ["来源", `${esc(j.project)} 的单元申请`] : ["队列", `<code>${esc(j.root)}/${esc(j.queue)}</code>${j.src === "worker" ? "" : `<span class="mut">（旧 gpu_queue.sh）</span>`}`],
+    j.kind === "ephemeral" ? ["来源", `${esc(j.project)} 的临时主机上报`] : j.kind === "slot" ? ["来源", `${esc(j.project)} 的单元申请`] : ["队列", `<code>${esc(j.root)}/${esc(j.queue)}</code>${j.src === "worker" ? "" : `<span class="mut">（旧 gpu_queue.sh）</span>`}`],
+    ...(j.artifact_dir ? [["产物目录", `<code>${esc(j.artifact_dir)}</code>`]] : []),
     ["日志", j.log ? `<code>${j.root ? esc(j.root) + "/" : ""}${esc(j.log)}</code>` : "—"],
-    ["进程", `PID ${esc(j.pid)}，${u.nproc ?? "?"} 个进程，开始于 ${ts(j.t0)}`],
+    j.kind === "ephemeral" ? ["开始", ts(j.t0)] : ["进程", `PID ${esc(j.pid)}，${u.nproc ?? "?"} 个进程，开始于 ${ts(j.t0)}`],
     // 有进度行、还算不出速度（进度刚开始、刚换段、这段不打进度）写“暂无速度”，没有进度行才写“没有进度行”（#17 维护者定）
     ["速度", p.rate_per_min ? `${g1(p.rate_per_min)} 步/分（预计结束依据：${esc(p.eta_source || "—")}）`
       : e ? `${p.progress ? `暂无速度（进度 ${esc(p.progress[0])}/${esc(p.progress[1])}）` : "没有进度行"}，预计结束依据：${esc(e.src)}` : "—"],
@@ -485,7 +491,20 @@ function resCard(h) {
       sp(r => r.cpu != null ? 100 * r.cpu / q : null),
       `容器里 nproc 显示 ${info.nproc ?? "—"} 个逻辑核，那是宿主机的；配额${info.cpu_quota ? " " + g1(info.cpu_quota) + " 核" : "读不到，不记 CPU 账"}\n放行按 CPU 记账：任务要的核数取清单的 cpus=，否则同类近 5 次峰值 ×1.1，都没有按 1 核；放不下的等着，原因写「CPU 不够」\n任务里的 $LABMON_CPUS 是开跑时给它记的核数（估计封顶到上限），不随之后的回收变；没设的 OMP/MKL/OPENBLAS 线程数缺省同它${psiT("cpu")}`);
   }
-  const x = sharedParts();
+  const x = h.ephemeral ? null : sharedParts();
+  if (h.ephemeral) {
+    for (const d of h.storage || []) {
+      const used = Math.max(0, (d.total_gb || 0) - (d.avail_gb || 0));
+      const pctUsed = d.total_gb > 0 ? Math.min(100, 100 * used / d.total_gb) : 0;
+      const low = d.kind === "cloud" && d.avail_gb < 1;
+      const kindTag = d.kind === "cloud" ? "云盘" : "本地盘";
+      s += row(`${esc(d.label)} <span class="mut sm">[${kindTag}]</span>`,
+        big(`<i style="width:${pctUsed}%;background:var(${low ? "--bad" : "--accent"});opacity:.65"></i>`),
+        `<span style="${low ? "color:var(--bad);font-weight:600" : ""}">剩 ${g1(d.avail_gb)} / ${g1(d.total_gb)} GiB</span>`,
+        `<span class="sm mut">${d.kind === "cloud" ? "不计入实验室共享盘" : "实例回收清空"}</span>`,
+        `${d.path}\n${d.kind === "cloud" ? "云盘存储（不计入实验室共享盘；剩余低于 1 GiB 标红告警）" : "实例本地高速盘（回收后清空）"}`);
+    }
+  }
   if (x) {
     const pts = (D.disk.hist || []).filter(r => r[0] >= now - 7 * 86400).map(r => [r[0], x.dk.total - r[1] / GIB]), dg = "d:" + h.id;
     SPKG[dg] = {t0: now - 7 * 86400, t1: now, at: t => { const r = nearest(pts, t, r => r[0]); return r ? `${ts(r[0])}：剩 ${g1(r[1])} GiB` : ""; }};

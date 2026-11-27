@@ -105,7 +105,8 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `GET /api/admin/deploy` | `deploy`，只给管理员 |
 | `GET /api/admin/backup`（冷备，回 `.tar.gz`） | `backup`，只给管理员，只在内网入口（#17） |
 | `POST /api/admin/deploy`、`/api/worker/start` | `deploy`，只给管理员，只在内网入口 |
-| `GET /api/hosts`、`GET /api/client/install.sh`、`GET /api/client/wheel` | `read` |
+| `GET /api/hosts`、`GET /api/client/install.sh`、`GET /api/client/wheel`、`GET /api/client/ephemeral.py` | `read` |
+| `POST /api/ephemeral/push`（推模式临时主机心跳上报，#213） | `project`；校验 `project` 归属（`users.need_project`），单请求 ≤ 128 KiB，仅主服务可写 |
 | `GET /api/project/<id>/(status\|disk\|records)`（实验会话的只读命令，#52） | `read`；普通用户只看自己的项目（`users.need_project`） |
 | `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
 | `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit)`、`/api/override/(pause\|resume)`（[命令行](#命令行162)） | `project`；普通用户只改自己下的暂停，项目级的与带 `--host` 的同一条（`users.need_pause`，#16、#27） |
@@ -342,3 +343,38 @@ labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # �
 ### 管理员公网平台操作（#275）
 
 账号详情「公网平台操作」可按管理员开启或关闭，设置本身从内网入口修改（POST `/api/users/public-ops`，`name`、布尔 `enabled`）。本机也可执行 `labmon user public-ops <账号> on|off`。其余账号默认关闭；降为普通用户会清除此许可，再升管理员仍需重新开启。旧会话及令牌下一次请求生效，令牌仍需 admin 作用域。公网获准操作包括续租、探测、开关机、换人、保活、借还；代码部署、worker代码推送和池管理仍沿原入口限制。维护者部署时按生产实际账号启用，不在代码中按名字自动赋权。
+
+### 推模式临时主机（#213）
+
+面向 Google Colab 等无 SSH 入口、无实验室共享盘的短生命周期 GPU 实例。采用纯推模式监控上报，不另起远程队列调度、文件同步或源码版本服务。
+
+- **下载零依赖客户端**：`GET /api/client/ephemeral.py`（`read` 作用域，与 `install.sh` 同属免租约只读静态分发），返回 `labmon/labmon_ephemeral.py`（Python 3.8+ 纯标准库，支持 CLI `run` 与 Notebook `track()` 上下文管理器）。
+- **上报心跳与任务状态**：`POST /api/ephemeral/push`（`project` 作用域，`Authorization: Bearer <令牌>`，公网/内网入口均可用，备用看板回 409 `standby`）。
+  - 请求体须为 JSON 对象，上限 **128 KiB**（超限回 413）：
+    ```jsonc
+    {
+      "host_id": "colab-t4-01",        // 仅允许 [A-Za-z0-9._-]，最长 48 字符，不可与 hosts.toml 重名
+      "label": "Colab T4 #1",          // 可选，最长 64 字符
+      "instance_id": "inst-a1b2c3",    // 实例唯一标识（换实例即换 id），最长 64 字符
+      "project": "proj-a",             // 须为已登记且未归档项目，且调用者有写权限
+      "ttl_s": 180,                    // 心跳超时期限（秒），服务端钳制在 90–600
+      "client_t": 1793776260.0,        // 可选，客户端时钟，用于对齐任务时间戳偏移
+      "closing": false,                // true 表示优雅退出，立即标 down 且不报 ephemeral_down
+      "gpus": [{"index": 0, "name": "Tesla T4", "mem_used": 8192, "mem_total": 15360, "util": 88}],
+      "cpu_pct": 42.0, "cpu_count": 2,
+      "mem": {"used_gb": 5.4, "limit_gb": 12.7},
+      "storage": [                     // 可选，最多 4 项，仅 os.statvfs 元数据，绝不写入 disk.py
+        {"path": "/content/drive/MyDrive", "label": "Google Drive", "kind": "cloud", "total_gb": 15.0, "avail_gb": 12.4},
+        {"path": "/content", "label": "Colab 本地盘", "kind": "local", "total_gb": 78.2, "avail_gb": 52.0}
+      ],
+      "jobs": [{                       // 最多 64 项
+        "id": "colab_s1", "status": "running", "gpus": [0],
+        "start_ts": 1793774460.0, "end_ts": null, "rc": null, "est_min": 90.0,
+        "progress": [30, 100], "last_line": "PROGRESS 30/100 loss=0.42",
+        "artifact_dir": "/content/drive/MyDrive/labmon/proj-a/runs/colab_s1"   // 可选，最长 256 字符
+      }]
+    }
+    ```
+  - **配额与限流**：单项目最多 **5 台**同时在线临时主机（超限回 429）；同一 `host_id` 两次上报至少间隔 **5 秒**（超限回 429，`closing: true` 与包含任务终态跃迁的心跳放行）；跨项目抢占在线 `host_id` 回 409；项目已归档回 409。
+  - **响应**：`{"ok": true, "server_t": ..., "host_id": "...", "next_s": 30, "warnings": ["duplicate_job:<job_id>"], "project": "..."}`。当同项目存在 ≥ 2 台在线临时实例同时上报相同 `job_id` 为 `running` 时返回 `warnings`，并在项目快照中生成 `ephemeral_dup:` 告警。
+  - **超时结转与清理**：在线超过 `ttl_s`（看板重启宽限取 `max(last_seen, RUNNING["started"])`）自动标 `down`，将残留 `running` 任务结转为 `failed`（`rc=-1`），复用 `overview._keep_usage` 写入 `overview/usage/<host_id>.jsonl` 并生成 `ephemeral_down:` 告警；离线满 1 小时（无丢失任务）总览隐藏卡片，离线满 7 天自动清理状态文件与 `series`，保留 30 天用量历史。

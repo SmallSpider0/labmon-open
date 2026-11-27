@@ -860,7 +860,8 @@ def access(who: Ident, snap: dict | None = None) -> Access:
     allowed = {str(h["id"]) for h in user_hosts() if "id" in h and me in host_users(h)}
     snap = snapshot() if snap is None else snap
     lanes = {str(ln.get("host")) for p in (snap or {}).get("projects") or [] if p.get("id") in projects for ln in p.get("lanes") or [] if ln.get("host")}
-    return Access(projects, allowed, allowed | lanes)
+    ephs = {str(h["id"]) for h in (snap or {}).get("hosts") or [] if h.get("ephemeral") and h.get("project") in projects}
+    return Access(projects, allowed, allowed | lanes | ephs)
 
 
 def need_project(who: Ident, pid: str, new_ok: bool = False) -> None:

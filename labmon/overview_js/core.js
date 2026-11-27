@@ -87,6 +87,10 @@ function projCell(j) {
 // 借来的约定挡住两边都要：这里写给用户的那句（borrow.late_say），会话的那份在项目告警 borrow_cut 里
 function alertsOf(h) {
   const out = [], add = (to, msg) => out.push({to, msg});
+  if (h.ephemeral) {
+    if (h.health?.state === "down" && h.health.why) add("user", `${h.label}（临时主机）：${h.health.why}`);
+    return out;
+  }
   const hl = h.health || {};
   if (hl.state === "lan") {}                     // 本机不在内网：不是这台的问题，页顶统一说
   else if (hl.state === "down") add("user", `${h.label}：掉线 ${dur(D.generated - hl.since)}。${hl.why}`);
@@ -133,6 +137,9 @@ function standaloneBadge(h) {
   return ` <span class="badge b-mute" ${tip(`${pk}：不共享集群盘，不可借用、不可入池、不支持跨机搬登记`)}>独立</span>`;
 }
 function workerBadge(h) {
+  if (h.ephemeral) return h.worker_up
+    ? `<span class="badge b-ok" ${tip(`临时主机推模式心跳，${Math.round(h.age ?? 0)} 秒前上报`)}>临时在线</span>`
+    : `<span class="badge b-mute" ${tip(h.error || "临时主机已离线")}>临时离线</span>`;
   const st = h.status;
   return h.lan_off ? `<span class="badge b-mute" ${tip("本机不在内网，下面是离开前的数据")}>本机不在内网</span>` : h.error ? `<span class="badge b-bad">连不上</span>` : !st ? `<span class="badge b-mute">无 worker</span>`
     : h.worker_up ? `<span class="badge b-ok" ${tip(`PID ${st.pid}，${Math.round(h.age)} 秒前更新`)}>worker 运行中</span>`
@@ -145,7 +152,9 @@ const leaseSoon = end => !!end && leaseLeft(end) < 86400;
 const leaseRem = end => leaseLeft(end) > 0 ? `剩 ${dur(leaseLeft(end))}` : "已过";
 const leaseText = h => !h.lease_end ? "" : "租期" + leaseRem(h.lease_end);
 const leaseHtml = (end, pre = "") => leaseLeft(end) > 0 ? `${pre}剩 <b style="${leaseSoon(end) ? "color:var(--bad)" : ""}">${dur(leaseLeft(end))}</b>` : `<b style="color:var(--bad)">${pre}已过</b>`;
-function hostDot(h) { const o = renewOp(h.id); return h.lan_off ? "var(--faint)" : o?.error ? "var(--bad)" : o?.active ? "var(--warn)"
+function hostDot(h) {
+  if (h.ephemeral) return h.worker_up ? (forUser(alertsOf(h)).length ? "var(--warn)" : "var(--ok)") : h.health?.why ? "var(--bad)" : "var(--faint)";
+  const o = renewOp(h.id); return h.lan_off ? "var(--faint)" : o?.error ? "var(--bad)" : o?.active ? "var(--warn)"
   : h.error || !h.status || !h.worker_up ? "var(--bad)" : forUser(alertsOf(h)).length ? "var(--warn)" : "var(--ok)"; }
 
 /* ---------- 左侧导航与顶栏 ---------- */
@@ -216,12 +225,12 @@ function setIcon(n) {
 function navModel(r) {
   const n = allAlerts().length + projAlerts().length;
   const hal = h => forUser(alertsOf(h)).length;
-  const hostState = h => h.lan_off ? "本机不在内网" : h.error ? "连不上" : !h.status || !h.worker_up ? "worker 不在" : hal(h) ? "有告警" : "正常";
+  const hostState = h => h.ephemeral ? (h.worker_up ? "临时在线" : "临时离线") : h.lan_off ? "本机不在内网" : h.error ? "连不上" : !h.status || !h.worker_up ? "worker 不在" : hal(h) ? "有告警" : "正常";
   const top = [{k: "home", href: "#/", ico: icon("dash"), label: "总览", on: r.kind === "home", bad: n, full: n ? `总览：${n} 条告警` : "总览"}];
   if (LIVE) top.push({k: "log", href: "#/log", ico: icon("clock"), label: "记录", on: r.kind === "log", full: "记录：事件、平台操作、配置改动", sub: "事件、平台操作、配置改动"});
   const secs = [
     {id: "host", name: "主机", ct: D.hosts.length, empty: "没有在用的主机", items: D.hosts.map(h => ({href: `#/host/${encodeURIComponent(h.id)}`, on: r.kind === "host" && r.id === h.id,
-      ico: `<span class="hico">${icon("server")}<span class="cdot" style="background:${hostDot(h)}"></span></span>`, label: h.label, bad: hal(h), ab: short(h.label),
+      ico: `<span class="hico">${icon(h.ephemeral ? "cloud" : "server")}<span class="cdot" style="background:${hostDot(h)}"></span></span>`, label: h.label, bad: hal(h), ab: short(h.label),
       full: `${h.label}（${hostState(h)}）：运行 ${jobsOf(h).length}，等待 ${(h.status?.waiting || []).length}${hal(h) ? `，${hal(h)} 条告警` : ""}`,
       sub: `${hostState(h)} · 运行 ${jobsOf(h).length} · 等待 ${(h.status?.waiting || []).length}`}))},
     {id: "proj", name: "项目", ct: D.projects.length, items: D.projects.map(p => ({href: `#/p/${encodeURIComponent(p.id)}`, on: r.kind === "p" && r.id === p.id,

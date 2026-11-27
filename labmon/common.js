@@ -340,8 +340,8 @@ function alertBox(al, open = false) {
 }
 // 主机的名字只有三种写法：短名 hostShort（表格的主机列、小图与时间线的行名、车道名、KPI 的注；直接借来的叫「借 EVA」，其余用 id）；
 // 全名 h.label（主机清单里写的，借来的是「节点（借 EVA）」：告警、标题、悬停里的整句话）；组内服务器 fName「使用人（id）」（overview.html）
-// pool：项目快照里的算力池（#24）；borrow.pool：算力池借来的主机（#25）
-const hostShort = h => h.pool ? h.label || "算力池" : h.borrow?.pool ? `池 ${h.borrow.holder}` : h.borrow && !h.borrow.swap ? `借 ${h.borrow.holder}` : h.id;
+// pool：项目快照里的算力池（#24）；ephemeral：推模式临时主机（#213）；borrow.pool：算力池借来的主机（#25）
+const hostShort = h => h.pool ? h.label || "算力池" : h.ephemeral ? `临时 ${h.id}` : h.borrow?.pool ? `池 ${h.borrow.holder}` : h.borrow && !h.borrow.swap ? `借 ${h.borrow.holder}` : h.id;
 // 车道名：车道的 label（采集时按主机编号的“车道 N”，接可选的用途），后面接清单名（清单文件名去掉扩展名，#47：登记多了好认），
 // 页面上有几台真主机时前面加主机短名。lane {host: 主机 id, label, queue?: 清单路径}，hosts 是页面上的主机表；laneLabel 不带主机（时间线行挂在主机表头下面）。
 // 算力池（#89）不是主机、不算进“几台”：池里待放的车道总写「算力池」在前，免得和真主机的“车道 1”混在一起

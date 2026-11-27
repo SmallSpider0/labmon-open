@@ -193,7 +193,7 @@ html { scroll-behavior: smooth; }
     <a href="#bounds">不做的事</a>
     <a href="#docs">文档</a>
     <div class="sub"><span>算法：</span>
-      <a href="#a-place">准入</a><a href="#a-order">放行顺序</a><a href="#a-sim">推演</a><a href="#a-dep">依赖与占位</a><a href="#a-gang">成组起跑</a><a href="#a-par">并行清单</a><a href="#a-est">估计与时长</a><a href="#a-eta">按进度估结束</a><a href="#a-io">CPU 与读写</a><a href="#a-borrow">借用</a><a href="#a-rebal">负载均衡提示</a><a href="#a-ka">保活</a><a href="#a-renew">续租</a><a href="#a-down">掉线判定</a>
+      <a href="#a-place">准入</a><a href="#a-order">放行顺序</a><a href="#a-sim">推演</a><a href="#a-dep">依赖与占位</a><a href="#a-gang">成组起跑</a><a href="#a-par">并行清单</a><a href="#a-est">估计与时长</a><a href="#a-eta">按进度估结束</a><a href="#a-io">CPU 与读写</a><a href="#a-borrow">借用</a><a href="#a-rebal">负载均衡提示</a><a href="#a-ka">保活</a><a href="#a-renew">续租</a><a href="#a-down">掉线判定</a><a href="#a-ephemeral">临时主机</a>
     </div>
   </nav>
 </header>
@@ -1118,6 +1118,57 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <li><b>连接</b>：所有 ssh 走 ControlMaster 复用（<code>ControlPersist=15m</code>），每个 sshd 只保持一条长连接；服务器对短时间大量新连接限流，会失联约 10 分钟。</li>
       </ul>
       <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/workbench.md#连通内网与租期">workbench.md「连通、内网与租期」</a></p>
+    </div></details>
+  </div>
+
+  <!-- 推模式临时主机 -->
+  <div class="algo" id="a-ephemeral">
+    <h3>推模式临时主机（Colab 与云盘存储）<span class="tag">ephemeral.py · labmon_ephemeral.py</span></h3>
+    <p class="prose">Google Colab 等临时 GPU 实例没有 SSH 入口、不挂实验室共享盘，几小时就可能被回收。labmon 用推模式监控接入它们：实例上跑零依赖的 <code>labmon_ephemeral.py</code>（包装 CLI 命令或 Notebook 的 <code>track()</code>），每 30 秒携带项目令牌向 <code>POST /api/ephemeral/push</code> 上报 GPU、内存、任务进度、云盘产物路径 <code>artifact_dir</code> 与 <code>os.statvfs</code> 磁盘余量；看板把它们无缝画进工作台、项目时间线与 <code>labmon wait</code>。</p>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 760 190" role="img" aria-label="Colab 实例运行训练并把 checkpoint 原子写回 Google Drive，同时通过 labmon_ephemeral.py 每 30 秒推送心跳到看板；超过 180 秒无心跳则结转残留任务并发 ephemeral_down 告警，多实例撞车报 ephemeral_dup，云盘余量低于 1 GiB 标红并报 ephemeral_disk_low">
+          <defs><marker id="a13" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+          <rect class="node-o" x="20" y="28" width="210" height="84" rx="6"/>
+          <text class="t" x="34" y="52">Colab 临时实例</text>
+          <text class="s" x="34" y="72">labmon_ephemeral.py（零依赖）</text>
+          <text class="s" x="34" y="90">本地 /content 跑 · statvfs 读余量</text>
+
+          <rect class="band" x="20" y="130" width="210" height="44" rx="6"/>
+          <text class="t" x="34" y="150">Google Drive 云盘</text>
+          <text class="s" x="34" y="166">数据、checkpoint、artifact_dir</text>
+          <path class="edge-d" d="M125,112 V130"/>
+
+          <rect class="node-k" x="295" y="28" width="210" height="146" rx="6"/>
+          <text class="t" x="309" y="52">看板 ephemeral.py</text>
+          <text class="s" x="309" y="74">overview/ephemeral/*.json</text>
+          <text class="s" x="309" y="94">不写 hosts.toml · 不污染 disk.py</text>
+          <text class="s" x="309" y="114">TTL 180s 超时自动结转 failed</text>
+          <text class="s" x="309" y="134">多实例同 job_id → ephemeral_dup</text>
+          <text class="s" x="309" y="154">云盘 &lt; 1 GiB → 标红 + 告警</text>
+
+          <rect class="node-r" x="550" y="28" width="190" height="146" rx="6"/>
+          <text class="t" x="564" y="52">统一视图与等待</text>
+          <text class="s" x="564" y="76">· 工作台标「临时」</text>
+          <text class="s" x="564" y="98">· 项目时间线与进度外推</text>
+          <text class="s" x="564" y="120">· labmon wait --job 唤醒</text>
+          <text class="s" x="564" y="142">· status / disk 独立分区</text>
+
+          <path class="edge" d="M230,70 H293" marker-end="url(#a13)"/>
+          <text class="lbl" x="261" y="60" text-anchor="middle">HTTPS Push</text>
+          <text class="s" x="261" y="86" text-anchor="middle">每 30s</text>
+          <path class="edge" d="M505,100 H548" marker-end="url(#a13)"/>
+        </svg>
+      </div>
+      <figcaption>不另建远程队列调度、文件传输或源码同步服务：代码、环境与 Google Drive 读写仍由实验会话按 <code>skills/lab-experiments/colab.md</code> 管，labmon 只负责状态汇聚、时间线、余量提醒与断连告警。</figcaption>
+    </figure>
+    <details><summary>细节：配额、防僵尸收起与云盘防呆</summary><div class="in">
+      <ul>
+        <li><b>鉴权与配额</b>：复用项目令牌（<code>project</code> 作用域），校验项目归属；单请求上限 128 KiB，单实例 5 秒节流（终态与优雅退出放行），单项目最多 5 台同时在线，不与 <code>hosts.toml</code> 主机重名。</li>
+        <li><b>超时与防僵尸</b>：默认 180 秒无心跳（钳制 90–600 秒；看板重启给足宽限）判 <code>down</code>，残留 <code>running</code> 任务自动结转 <code>failed</code> 并写入 <code>usage/&lt;host&gt;.jsonl</code>、发 <code>ephemeral_down:</code>（附 <code>artifact_dir</code>）；离线 1 小时自动从总览隐去卡片，满 7 天清理状态与曲线、保留 30 天用量历史。</li>
+        <li><b>云盘隔离与防呆</b>：启动前强制校验 <code>--drive-root</code> 确为独立挂载点，防止未挂载时把 checkpoint 误写进会随回收清空的 <code>/content</code> 本地盘；<code>storage[]</code> 仅用 <code>os.statvfs</code> 读 4 项以内元数据，绝不写入实验室共享盘统计 <code>disk.py</code>。</li>
+      </ul>
+      <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/api.md#推模式临时主机213">api.md「推模式临时主机」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/skills/lab-experiments/colab.md">skills/lab-experiments/colab.md</a></p>
     </div></details>
   </div>
 </section>

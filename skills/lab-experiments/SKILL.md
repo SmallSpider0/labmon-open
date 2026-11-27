@@ -6,7 +6,7 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 # 实验室服务器实验
 
 工具是 labmon，shell 里直接敲 `labmon`（`~/.config/labmon/client.toml` 指定看板地址）。
-细则在同目录：清单写法 [lists.md](lists.md)，告警逐条怎么办 [alerts.md](alerts.md)，客户端进程等待差异 [sessions.md](sessions.md)。项目自己的 `AGENTS.md` 比这里优先。
+细则在同目录：清单写法 [lists.md](lists.md)，告警逐条怎么办 [alerts.md](alerts.md)，客户端进程等待差异 [sessions.md](sessions.md)，Google Colab 等临时算力与云盘存储 [colab.md](colab.md)。项目自己的 `AGENTS.md` 比这里优先。
 原则是**快**：不加快照哈希、逐次确认等流程，只守下面会真出事的规则。
 
 ## 红线
@@ -97,6 +97,14 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 - 清单任务须能随时中断重排（禁止 `--gpus`、`--stop boundary`、`gang=` 及占位任务），代码与数据须在共享盘。
 - 交付后照常挂 `labmon wait`，调度迁移不打扰会话；满 2 小时未调度报 `pool_wait:` 时可考虑转回自用主机。
 - 撤回用 `labmon worker rm pool <目录> <清单>`；转回自用主机直接在自用主机 `worker add`。禁止直接向借给池的主机登记或执行 fit。
+
+## 临时算力（Colab 等无共享盘主机）
+
+Google Colab 等无 SSH 入口、无实验室共享盘的短生命周期 GPU 实例走推模式监控上报，详细模板与检查表见 [colab.md](colab.md)：
+- **获取客户端**：从看板 `GET /api/client/ephemeral.py` 下载零依赖单文件 `labmon_ephemeral.py`；令牌优先放 Colab Secrets（`LABMON_TOKEN`），绝不写进 Notebook 代码或云盘明文。
+- **两层存储与防呆**：热数据放 `/content/work/`，只读压缩包与每个任务独占的 checkpoint/产物放 Google Drive `CLOUD_ROOT/runs/<job_id>/`（原子 `os.replace` 回写）；启动必带 `--drive-root` 与 `--artifact-dir`，防未挂载误写本地盘。
+- **防撞与监控**：多实例务必分配不同 `--host` 与 `--job`；用 `labmon_ephemeral.py run` 或 Notebook `track()` 上报（照常输出 `PROGRESS k/N`），看板统一接入时间线、`labmon status`/`disk` 独立分区与 `labmon wait --job`。
+- **断连与告警**：遇 `ephemeral_down:` 按提示中的 `artifact_dir` 在新实例续跑；遇 `ephemeral_dup:` 立刻停掉重复实例；遇 `ephemeral_disk_low:` 清理云盘旧产物（不涉及实验室共享盘）。
 
 ## 结束一个项目
 

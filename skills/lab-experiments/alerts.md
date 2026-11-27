@@ -52,6 +52,12 @@
 - `pool_wait:<项目>:<车道>`：算力池中等待调度超过 2 小时。若带 `:nofit` 说明池内暂无合适卡；可继续等待或手动改挂至自用主机。
 - `borrow_idle:<主机>:<起点>`：借用主机空置超过半小时。及时追加任务或告知用户提前归还。
 
+## 临时主机（Colab 等）
+
+- `ephemeral_down:<主机>:<实例>`：推模式临时主机超过 TTL 无心跳离线，看板已将残留 `running` 任务结转为 `failed`。按告警中给出的 `artifact_dir` 检查云盘 checkpoint 完整性，在新实例挂载 Google Drive 后以 `--resume` 续跑（细则见 [colab.md](colab.md)）。
+- `ephemeral_dup:<项目>:<任务>`：同一项目有两台以上在线临时实例同时上报相同 `job_id` 为 `running`，存在互写覆盖云盘产物风险。立即核对各实例分工并停掉多余的重复实例。
+- `ephemeral_disk_low:<主机>:<路径>`：临时主机上报的云盘剩余空间低于 1 GiB。用 `labmon disk` 查看临时主机存储区，及时清理旧 checkpoint 或中间产物，避免写盘失败。
+
 ## 挪法建议
 
 - `rebalance:<项目>:<目标>:<原主机>/<清单>/<第一行>`：系统推演出更优调度方案。

@@ -1061,9 +1061,161 @@ def overview_user_member() -> dict:
                     Access({"proj-a", "proj-old"}, {"srv-a"}, {"srv-a"}))
 
 
+def overview_ephemeral() -> dict:
+    """#213 临时主机（Google Colab 等推模式节点）：两台在线（一台云盘正常、一台云盘 < 1 GiB 标红）、一台心跳超时离线。"""
+    d = overview()
+    art1 = "/content/drive/MyDrive/labmon/proj-a/runs/colab_s1"
+    art0 = "/content/drive/MyDrive/labmon/proj-a/runs/colab_s0"
+    art_lost = "/content/drive/MyDrive/labmon/proj-a/runs/colab_lost_1"
+    root1 = "ephemeral/colab-t4-01"
+    st1 = {
+        "t": NOW - 12, "pid": 0, "host": "colab-t4-01", "ephemeral": True,
+        "info": {
+            "gpus": [{"i": 0, "uuid": "ephemeral-colab-t4-01-gpu-0", "name": "Tesla T4", "total": 15360.0, "used": 8192.0, "free": 7168.0, "util": 88.0}],
+            "nproc": 2, "mem": {"used": 5.4, "limit": 12.7, "anon": 5.4, "src": "ephemeral"},
+            "cpu_quota": 2.0, "cpu_used": 1.3, "started": NOW - 2 * H,
+            "press": {"thr": None, "psi": None, "nfs": None, "disk": None},
+        },
+        "gpu_procs": [], "overrides": [], "waiting": [], "external": [],
+        "running": [{
+            "kind": "ephemeral", "root": root1, "queue": "ephemeral", "project": "proj-a",
+            "name": "colab_s1", "pid": 0, "gpus": ["ephemeral-colab-t4-01-gpu-0"],
+            "tag": None, "hold": False, "stop": None, "cmd": None, "est": None, "acct": None, "log": None,
+            "tail": ["PROGRESS 30/100 loss=0.42"], "est_min": 90.0, "excl": None, "wait": 0.0,
+            "link": "proj-a", "t0": NOW - 1800, "artifact_dir": art1,
+            "use": {"t": NOW - 12, "nproc": 1, "ram": 5.4, "ram_peak": 5.4, "vram": 8192.0, "vram_peak": 8192.0, "cores": 1.3, "with_host": [], "with_gpu": []},
+            "prog": {"progress": [30, 100], "eta_ts": NOW + 3600, "eta_source": "近期速度", "rate_per_min": 1.1, "dur_min": 90.0},
+        }],
+        "queues": [{"root": root1, "jobs": "ephemeral", "project": "proj-a", "empty": False, "ephemeral": True}],
+        "plan": {"t": NOW - 12, "lanes": [{"root": root1, "queue": "ephemeral", "project": "proj-a", "kind": "ephemeral", "stuck": None, "stuck_dep": None,
+                                           "jobs": [{"name": "colab_s1", "t0": int(NOW - 1800), "t1": int(NOW + 3600), "gpus": [0], "run": True}]}]},
+        "gpu_busy": {"ephemeral-colab-t4-01-gpu-0": {"now": 88.0, "m10": 86.0, "h1": 84.0, "cov": 1800}},
+        "share": None, "disk": None, "storage": None, "keepalive": None, "kafight": None, "watchdogs": None, "throttle": None,
+    }
+    h1 = {
+        "id": "colab-t4-01", "label": "Colab T4 #1", "ephemeral": True, "project": "proj-a", "instance_id": "inst-t4-01",
+        "error": None, "status_error": None, "status": st1, "log": [],
+        "done": [{"min": 40.0, "kind": "ephemeral", "root": root1, "queue": "ephemeral", "project": "proj-a", "name": "colab_s0",
+                  "rc": "0", "gpus": ["ephemeral-colab-t4-01-gpu-0"], "link": "proj-a", "t0": int(NOW - 4800), "t1": int(NOW - 2400),
+                  "artifact_dir": art0, "with_host": [], "with_gpu": []}],
+        "lan_off": False, "auto": False, "platform": None, "borrow": None, "clock": int(NOW), "stopped": None, "age": 12.0, "worker_up": True,
+        "storage": [{"path": "/content/drive/MyDrive", "label": "Google Drive", "kind": "cloud", "total_gb": 15.0, "avail_gb": 12.4},
+                    {"path": "/content", "label": "Colab 本地盘", "kind": "local", "total_gb": 78.2, "avail_gb": 52.0}],
+        "health": {"state": "ok", "fails": 0, "since": None, "why": None},
+        "series": _series(12, 12.7, 1),
+        "busy": [{"i": 0, "now": 88.0, "m10": 86.0, "h1": 84.0, "cov": 1800, "d1": 84.0, "d1cov": 1800}],
+    }
+    st2 = copy.deepcopy(st1)
+    st2["host"] = "colab-t4-02"
+    st2["running"] = []
+    st2["queues"] = [{"root": "ephemeral/colab-t4-02", "jobs": "ephemeral", "project": "proj-a", "empty": True, "ephemeral": True}]
+    st2["plan"] = {"t": NOW - 15, "lanes": []}
+    h2 = {
+        "id": "colab-t4-02", "label": "Colab T4 低余量", "ephemeral": True, "project": "proj-a", "instance_id": "inst-t4-02",
+        "error": None, "status_error": None, "status": st2, "log": [], "done": [],
+        "lan_off": False, "auto": False, "platform": None, "borrow": None, "clock": int(NOW), "stopped": None, "age": 15.0, "worker_up": True,
+        "storage": [{"path": "/content/drive/MyDrive", "label": "Google Drive", "kind": "cloud", "total_gb": 15.0, "avail_gb": 0.6}],
+        "health": {"state": "ok", "fails": 0, "since": None, "why": None},
+        "series": _series(6, 12.7, 1),
+        "busy": [{"i": 0, "now": 5.0, "m10": 5.0, "h1": 5.0, "cov": 600, "d1": 5.0, "d1cov": 600}],
+    }
+    st3 = copy.deepcopy(st2)
+    st3["host"] = "colab-l4-down"
+    h3 = {
+        "id": "colab-l4-down", "label": "Colab L4 离线", "ephemeral": True, "project": "proj-a", "instance_id": "inst-l4-down",
+        "error": "心跳超时（临时主机可能已失联或被回收）", "status_error": None, "status": st3, "log": [],
+        "done": [{"min": 22.0, "kind": "ephemeral", "root": "ephemeral/colab-l4-down", "queue": "ephemeral", "project": "proj-a", "name": "colab_lost_1",
+                  "rc": "-1", "gpus": ["ephemeral-colab-l4-down-gpu-0"], "link": "proj-a", "t0": int(NOW - 2100), "t1": int(NOW - 780),
+                  "artifact_dir": art_lost, "with_host": [], "with_gpu": []}],
+        "lan_off": False, "auto": False, "platform": None, "borrow": None, "clock": int(NOW), "stopped": None, "age": 780.0, "worker_up": False,
+        "storage": [{"path": "/content/drive/MyDrive", "label": "Google Drive", "kind": "cloud", "total_gb": 15.0, "avail_gb": 9.8}],
+        "health": {"state": "down", "fails": 1, "since": NOW - 780, "why": "心跳超时（临时主机可能已失联或被回收）"},
+    }
+    d["hosts"].extend([h1, h2, h3])
+    d["occ"]["colab-t4-01"] = [
+        {"p": "proj-a", "n": "colab_s0", "lane": "临时 · Colab T4 #1", "t0": int(NOW - 4800), "t1": int(NOW - 2400), "g": [0], "st": "done"},
+        {"p": "proj-a", "n": "colab_s1", "lane": "临时 · Colab T4 #1", "t0": int(NOW - 1800), "t1": int(NOW + 3600), "g": [0], "st": "run"},
+    ]
+    return d
+
+
+def project_ephemeral() -> dict:
+    """#213 项目页临时主机与 Drive 共享存储：在线正常、在线云盘 < 1 GiB 标红、心跳超时离线 + 三类告警与 artifact_dir。"""
+    d = project()
+    art1 = "/content/drive/MyDrive/labmon/proj-a/runs/colab_s1"
+    art0 = "/content/drive/MyDrive/labmon/proj-a/runs/colab_s0"
+    art_lost = "/content/drive/MyDrive/labmon/proj-a/runs/colab_lost_1"
+    d["hosts"].extend([
+        {"id": "colab-t4-01", "label": "Colab T4 #1", "ephemeral": True, "instance_id": "inst-t4-01",
+         "ok": True, "error": None, "borrow": None, "stale": False, "last_ok": NOW - 12,
+         "gpus": [{"index": 0, "name": "Tesla T4", "util": 88.0, "mem_used": 8192.0, "mem_total": 15360.0, "temp": None, "power": None, "power_limit": None}],
+         "gpu_procs": [], "cgroup": {"mem_used": int(5.4 * 2 ** 30), "mem_limit": int(12.7 * 2 ** 30), "mem_rss": int(5.4 * 2 ** 30)},
+         "cpu": {"used": 1.3, "quota": 2.0, "cpus": 2, "pct": 65.0, "thr": None, "throttled": False, "throttle_alert": False, "throttle_for": 0},
+         "cpu_pct": 65.0, "loadavg": None,
+         "mounts": [{"path": "/content/drive/MyDrive", "label": "Google Drive", "kind": "cloud", "total_gb": 15.0, "avail_gb": 12.4, "used_pct": 17.3, "min_gb": 1.0},
+                    {"path": "/content", "label": "Colab 本地盘", "kind": "local", "total_gb": 78.2, "avail_gb": 52.0, "used_pct": 33.5, "min_gb": None}],
+         "checks": []},
+        {"id": "colab-t4-02", "label": "Colab T4 低余量", "ephemeral": True, "instance_id": "inst-t4-02",
+         "ok": True, "error": None, "borrow": None, "stale": False, "last_ok": NOW - 15,
+         "gpus": [{"index": 0, "name": "Tesla T4", "util": 5.0, "mem_used": 256.0, "mem_total": 15360.0, "temp": None, "power": None, "power_limit": None}],
+         "gpu_procs": [], "cgroup": {"mem_used": int(2.1 * 2 ** 30), "mem_limit": int(12.7 * 2 ** 30), "mem_rss": int(2.1 * 2 ** 30)},
+         "cpu": {"used": 0.2, "quota": 2.0, "cpus": 2, "pct": 10.0, "thr": None, "throttled": False, "throttle_alert": False, "throttle_for": 0},
+         "cpu_pct": 10.0, "loadavg": None,
+         "mounts": [{"path": "/content/drive/MyDrive", "label": "Google Drive", "kind": "cloud", "total_gb": 15.0, "avail_gb": 0.6, "used_pct": 96.0, "min_gb": 1.0}],
+         "checks": []},
+        {"id": "colab-l4-down", "label": "Colab L4 离线", "ephemeral": True, "instance_id": "inst-l4-down",
+         "ok": False, "error": "心跳超时（临时主机可能已失联或被回收）", "borrow": None, "stale": False, "last_ok": NOW - 780,
+         "gpus": [], "gpu_procs": [], "cgroup": {}, "cpu": None, "cpu_pct": None, "loadavg": None,
+         "mounts": [{"path": "/content/drive/MyDrive", "label": "Google Drive", "kind": "cloud", "total_gb": 15.0, "avail_gb": 9.8, "used_pct": 34.7, "min_gb": 1.0}],
+         "checks": []},
+    ])
+    d["lanes"].extend([
+        {"id": "ephemeral:colab-t4-01", "label": "临时 · Colab T4 #1", "host": "colab-t4-01", "type": "ephemeral",
+         "ephemeral": True, "alive": True, "pid": None, "missing": False, "stale": False, "started": True,
+         "paused": None, "managed": False, "waiting": None, "held": None, "held_t": None, "dep": None, "head": None,
+         "stuck": None, "cpu_wait": None, "par": 1, "running_n": 1, "bad": {}, "holding": False, "has_hold": False,
+         "state_dir": None, "logs_dir": None, "returned": None, "read_via": None, "pool": False, "frozen_at": None,
+         "fs_skew": None, "root": "ephemeral/colab-t4-01", "queue": "ephemeral", "overrun": False,
+         "total": 2, "done": 1, "failed": 0, "unfinished": 1, "no_gpu": 0, "eta_ts": NOW + 3600},
+        {"id": "ephemeral:colab-l4-down", "label": "临时 · Colab L4 离线", "host": "colab-l4-down", "type": "ephemeral",
+         "ephemeral": True, "alive": False, "pid": None, "missing": False, "stale": False, "started": True,
+         "paused": None, "managed": False, "waiting": None, "held": None, "held_t": None, "dep": None, "head": None,
+         "stuck": None, "cpu_wait": None, "par": 1, "running_n": 0, "bad": {}, "holding": False, "has_hold": False,
+         "state_dir": None, "logs_dir": None, "returned": None, "read_via": None, "pool": False, "frozen_at": None,
+         "fs_skew": None, "root": "ephemeral/colab-l4-down", "queue": "ephemeral", "overrun": False,
+         "total": 1, "done": 0, "failed": 1, "unfinished": 0, "no_gpu": 0, "eta_ts": None},
+    ])
+    d["jobs"].extend([
+        {"id": "colab_s0", "lane": "ephemeral:colab-t4-01", "group": "colab_", "status": "done", "hold": False,
+         "est_min": 45.0, "dur_min": 40.0, "dur_src": "清单估时", "start_ts": NOW - 4800, "end_ts": NOW - 2400, "actual_min": 40.0,
+         "artifact_dir": art0},
+        {"id": "colab_s1", "lane": "ephemeral:colab-t4-01", "group": "colab_", "status": "running", "hold": False,
+         "est_min": 90.0, "dur_min": 90.0, "dur_src": "近期速度", "start_ts": NOW - 1800, "elapsed_min": 30.0,
+         "remaining_min": 60.0, "eta_ts": NOW + 3600, "eta_source": "近期速度", "progress": [30, 100], "rate_per_min": 1.1,
+         "speed": [[NOW - 600, 1.0], [NOW - 60, 1.1]], "last_line": "PROGRESS 30/100 loss=0.42", "artifact_dir": art1},
+        {"id": "colab_lost_1", "lane": "ephemeral:colab-l4-down", "group": "colab_", "status": "failed", "hold": False,
+         "est_min": 60.0, "dur_min": 60.0, "dur_src": "清单估时", "start_ts": NOW - 2100, "end_ts": NOW - 780, "actual_min": 22.0,
+         "artifact_dir": art_lost},
+    ])
+    d["groups"].append({"id": "colab_", "label": "colab_*", "color": "#378ADD", "auto": True, "done_when": None,
+                        "status": "有失败", "total": 3, "done": 1, "failed": 1, "running": 1, "queued": 0,
+                        "eta_ts": NOW + 3600, "ratios": []})
+    d["alerts"].extend([
+        {"key": "ephemeral_down:colab-l4-down:inst-l4-down", "to": "both",
+         "msg": f"临时主机 Colab L4 离线（colab-l4-down）心跳超时离线，中断任务：colab_lost_1；可在新实例挂载云盘后从 {art_lost} 续跑",
+         "page": "临时主机 Colab L4 离线（colab-l4-down）心跳超时离线，中断任务：colab_lost_1"},
+        {"key": "ephemeral_dup:proj-a:colab_s1", "to": "agent",
+         "msg": "任务 colab_s1 正在多台临时主机同时运行（Colab T4 #1、Colab T4 低余量），可能互写覆盖共享云盘产物"},
+        {"key": "ephemeral_disk_low:colab-t4-02:/content/drive/MyDrive", "to": "agent",
+         "msg": "临时主机 Colab T4 低余量（colab-t4-02）云盘 Google Drive（/content/drive/MyDrive）剩余仅 0.6 GiB（低于 1.0 GiB），请清理旧产物避免写盘失败"},
+    ])
+    return d
+
+
 EXTRA = {"overview_user": overview_user, "overview_user_member": overview_user_member, "records": records, "records_evil": records_evil,
          "events": project_events, "events_evil": project_events_evil,
          "project_overdue": project_overdue, "project_longq": project_longq, "project_moved": project_moved, "project_pool_back": project_pool_back, "events_overdue": project_events_overdue,
          "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many,
-         "project_deps": project_deps, "project_par10": project_par10}
+         "project_deps": project_deps, "project_par10": project_par10,
+         "overview_ephemeral": overview_ephemeral, "project_ephemeral": project_ephemeral}
 
