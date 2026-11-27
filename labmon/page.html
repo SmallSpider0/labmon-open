@@ -116,6 +116,9 @@ svg rect.j { cursor: pointer; }
 .b-warn { background: color-mix(in srgb, var(--warn) 16%, transparent); color: var(--warn); }
 .b-bad { background: color-mix(in srgb, var(--bad) 16%, transparent); color: var(--bad); }
 .b-mute { background: color-mix(in srgb, var(--muted) 16%, transparent); color: var(--muted); }
+.b-pool { padding: 0 4px; border-radius: 4px; font-size: 10px; font-weight: 600; line-height: 15px; vertical-align: 1px;
+          background: color-mix(in srgb, var(--accent) 13%, transparent); color: var(--accent);
+          border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent); }
 details.jobs, details.res { margin-top: 10px; }
 details.jobs > summary, details.res > summary { cursor: pointer; color: var(--muted); font-weight: 600; font-size: 12px; padding: 4px 0; }
 details.lane { margin-top: 8px; }
@@ -271,8 +274,6 @@ function chartHover(svg, e) {
 }
 
 /* ---------- 顶栏与告警 ---------- */
-// 共有算力池小徽标（#251）：顶栏主机项与资源卡标题共用唯一实现
-const poolBadge = h => h.pool_label ? `<span class="badge b-mute" ${tip(`所属共有算力池：${h.pool_label}`)}>池 · ${esc(h.pool_label)}</span>` : "";
 // 告警按受众分（#142，common.js 的 forUser、alertBox）：给用户的算条数、进红框，只给实验会话的折在下面一行
 function topline() {
   const al = forUser(D.alerts);
@@ -290,7 +291,7 @@ function topline() {
       return `<span class="nw" ${tip(h.ok ? "临时主机在线" + (cv?.has ? "\n" + cv.tip : "") : h.error || "临时主机已离线")}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--faint)"}"></span> ${esc(h.label)} <span class="badge b-mute">临时</span></span>`;
     }
     const cv = h.ok ? cpuView(h) : null;
-    const pt = h.pool_label ? `\n所属共有算力池：${h.pool_label}` : "";
+    const pt = h.pool_label ? "\n" + poolBadgeTip(h) : "";
     return `<span class="nw" ${tip((h.ok ? "探针正常" + (cv?.has ? "\n" + cv.tip : "") : h.error || "失败") + pt)}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}"></span> ${esc(h.label)}</span>${h.pool_label ? " " + poolBadge(h) : ""}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}`;
   }).join(" ")
     + (gone.length ? ` <span class="nw mut" ${tip(gone.map(h => `${h.label}：${ts(h.returned)} 归还`).join("\n") + "\n它们的车道照常显示结果")}>已还 ${gone.length} 台</span>` : "");
@@ -649,8 +650,8 @@ function drawTimeline() {
   const hideMsg = [hiddenDone ? `${hiddenDone} 条已跑完` : "", hidden ? `${hidden} 条这段时间没有任务` : ""].filter(Boolean).join("、");
   const hasDone = foldDone && D.lanes.some(l => l.done_lane);
   const more = pool + (hideMsg || showAll ? `<div class="sm mut" style="margin-top:2px"><span class="more" data-tlall="1">${showAll ? (hasDone ? "收起已跑完与这段时间没有任务的车道" : "收起这段时间没有任务的车道") : `另有 ${hideMsg}的车道，显示`}</span></div>` : "");
-  // 左栏要多宽（#108）：主机短名、车道名（从 x=18 起，右边留计划项圆点）都写得下；tlSvg 再按上限截
-  const lw = Math.max(0, ...shown.flatMap(([h, vis]) => [textW(hostShort(h)) + 8,
+  // 左栏要多宽（#108）：主机短名（入池主机留出角标宽）、车道名（从 x=18 起，右边留计划项圆点）都写得下；tlSvg 再按上限截
+  const lw = Math.max(0, ...shown.flatMap(([h, vis]) => [textW(hostShort(h)) + (h.pool_label ? POOL_BADGE_W + 4 : 0) + 8,
     ...vis.map(l => 26 + 7 * Math.min(4, multi ? gsOf(l).length : 0) + textW(laneLabel(l) + laneTail(l, packOf(l).n > 1)))]));
   const seen = tlShow(box, rows, {markers: D.markers, more, under: depLines, lw, items: () => tlItems(gcolor([...used][0]))});
   const bar = document.getElementById("tlbar");
@@ -753,12 +754,15 @@ function hostRow(host, hb, ev, y, h, c) {
   const gpuS = hostSeries(H.filter(p => p.busy), D.util_hourly?.[host.id], p => avg(p.busy), c, long);
   const cpuS = hostSeries(H.filter(p => p.cpu_pct != null), D.cpu_hourly?.[host.id], p => p.cpu_pct, c, long);
   const ub = y + (ev ? h - 15 : h - 2), Y = v => ub - (ub - y - 3) * v / 100;     // 利用率的底边与高度（GPU 与 CPU 同轴 0–100%；ev 时底边事件带下方留 4px 呼吸间距，#247）
-  const cv = cpuView(host);
-  let s = `<text class="lab" x="0" y="${y + (ub - y) / 2 + 5}" style="font-weight:600" ${tip(`${host.label}`
-    + (host.pool_label ? `\n所属共有算力池：${host.pool_label}` : "")
+  const cv = cpuView(host), cy = y + (ub - y) / 2, bw = host.pool_label ? POOL_BADGE_W + 4 : 0;
+  const htxt = fit(hostShort(host), Math.max(24, c.L - 6 - bw));
+  const bx = Math.min(c.L - 4 - POOL_BADGE_W, textW(htxt) + 4);
+  let s = `<text class="lab" x="0" y="${cy + 5}" style="font-weight:600" ${tip(`${host.label}`
+    + (host.pool_label ? "\n" + poolBadgeTip(host) : "")
     + `\n蓝底蓝线：整机 GPU 平均利用率（含同机别的项目${long ? "，每小时平均" : ""}）\n青绿线：整机 CPU 占用率（同轴，按容器配额或可用核数换算）`
     + (cv.has ? `\n此刻 CPU ${cv.short}${cv.thrStr ? " · " + cv.thrStr : ""}` : "")
-    + (ev ? "\n底边色带：连不上、drain、暂停、续租截止、labmon 没在采集；竖线是换容器、续租与作废重排" : ""))}>${esc(fit(hostShort(host), c.L - 6))}</text>`;
+    + (ev ? "\n底边色带：连不上、drain、暂停、续租截止、labmon 没在采集；竖线是换容器、续租与作废重排" : ""))}>${esc(htxt)}</text>`
+    + poolBadge(host, {x: bx, y: cy + 0.5});
   s += `<g clip-path="url(#tlclip)">`;
   for (const sg of gpuS.segs) {
     const l = sg.map((p, i) => (i ? "L" : "M") + c.X(p[0]).toFixed(1) + "," + Y(p[1]).toFixed(1)).join("");
