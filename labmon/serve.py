@@ -130,7 +130,7 @@ from . import client as CL
 from .config import CLIENT_HEADER, server as server_conf
 from . import dist as DI
 from . import service as S
-from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, cfg_spec, check_future, home_key, host_pair, host_users, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pool_home, pool_id_of, remove_pool, resolve_pool, save_pool, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
+from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, cfg_spec, check_future, home_key, host_pair, host_users, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pool_home, pool_id_of, pools as list_pools, remove_pool, resolve_pool, save_pool, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
     stale_limit, user_hosts, STALE_PAD_S, STALE_RUNS
 from .records import ReportQuota, cat_of, log_events, project_mine, records, report, report_headers, schedule_project, tell
 from .service import log, notify, rotate_log
@@ -1278,7 +1278,16 @@ class Handler(BaseHTTPRequestHandler):
                 create = body.get("create", False)
                 if not isinstance(create, bool):
                     raise U.Denied(400, "create 要是布尔值")
-                out = save_pool(pid, label=label, hosts=hosts_in, members=members_in, exclusive=exclusive, create=create, by=who.name, snap=snapshot())
+                snap = snapshot()
+                old_pm = {}
+                if not create:
+                    try:
+                        old_pm = list_pools()
+                    except ConfigError:
+                        old_pm = {}
+                out = save_pool(pid, label=label, hosts=hosts_in, members=members_in, exclusive=exclusive, create=create, by=who.name, snap=snap)
+                if out.get("changed"):
+                    PO.tell_saved(out["pool"], create=create, old_pool=old_pm.get(pid), old_pools=old_pm, snap=snap)
                 self.board.overview.wake.set()
                 log(f"算力池：{out['msg']}（{who.name}）")
                 return self._json(200, out)
@@ -1288,7 +1297,15 @@ class Handler(BaseHTTPRequestHandler):
                 force = body.get("force", False)
                 if not isinstance(force, bool):
                     raise U.Denied(400, "force 要是布尔值")
-                msg = remove_pool(pid, force=force, by=who.name, snap=snapshot())
+                snap = snapshot()
+                try:
+                    old_pm = list_pools()
+                except ConfigError:
+                    old_pm = {}
+                old_pool = old_pm.get(pid)
+                msg = remove_pool(pid, force=force, by=who.name, snap=snap)
+                if old_pool:
+                    PO.tell_removed(old_pool, old_pools=old_pm)
                 self.board.overview.wake.set()
                 log(f"算力池：{msg}（{who.name}）")
                 return self._json(200, {"msg": msg})

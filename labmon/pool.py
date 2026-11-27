@@ -18,8 +18,10 @@ from pathlib import Path
 from . import config as CF
 from . import health as HL
 from . import lease as LS
+from . import projects as PJ
 from . import users as U
 from . import workerctl as W
+from .records import tell
 from .state import load_json, save_json, snapshot, state_dir
 from .worker.pure import POOL, is_pool_id, other_load, other_load_text, person_use, pool_host_id, same_list
 from .worker.sched import fair_key
@@ -179,6 +181,48 @@ def _proj_member(pid_proj: str, pcfg: dict) -> bool:
     if not acc or acc.get("role") == "admin":
         return True
     return owner.lower() in pcfg["members"]
+
+
+def _pool_entry(pcfg: dict, pool_map: dict[str, dict]) -> str:
+    """对外展示的提交入口：全配置仅 1 个池时用默认入口 pool，多池时用 pool:<id>（或 pool）。"""
+    return POOL if len(pool_map) <= 1 else pcfg["host_id"]
+
+
+def tell_saved(pcfg: dict, *, create: bool, old_pool: dict | None = None,
+               old_pools: dict[str, dict] | None = None, snap: dict | None = None) -> None:
+    """共有池新建/修改成功后，经 records.tell 通知相关未归档项目的实验会话（#249）：
+    仅通知项目主人为管理员或属于该池 members 的未归档项目，严格不向非成员项目泄露；
+    改池移除原成员时，若其名下未归档项目此刻在原池仍有待放或已落机清单，仅发送脱敏提示告知原池已调整。"""
+    try:
+        pm = CF.pools()
+    except CF.ConfigError:
+        pm = {pcfg["id"]: pcfg}
+    entry = _pool_entry(pcfg, pm)
+    action = "新建" if create else "修改"
+    hosts_txt = "、".join(pcfg["hosts"])
+    if pcfg.get("exclusive", True):
+        msg = f"{action}了共有算力池「{pcfg['label']}」（入口 {entry}，主机：{hosts_txt}，独占模式）：后续清单请改投 {entry}"
+    else:
+        msg = f"{action}了共有算力池「{pcfg['label']}」（入口 {entry}，主机：{hosts_txt}，开放模式）：可经 {entry} 提交，也可直投池内单机"
+    active_projs: set[str] = set()
+    if not create and old_pool:
+        _, _, active_projs = _scan_pool_activity(pcfg["id"], snap=snap, pool_map=old_pools or {pcfg["id"]: old_pool})
+    for proj_id in PJ.project_ids():
+        if _proj_member(proj_id, pcfg):
+            tell(proj_id, "pool", msg)
+        elif not create and old_pool and proj_id in active_projs and _proj_member(proj_id, old_pool):
+            old_entry = _pool_entry(old_pool, old_pools or {pcfg["id"]: old_pool})
+            tell(proj_id, "pool", f"共有算力池「{old_pool['label']}」（{old_entry}）已调整，当前账号已不在该池成员列表，请检查原池待放或在跑清单")
+
+
+def tell_removed(old_pool: dict, *, old_pools: dict[str, dict] | None = None) -> None:
+    """共有池删除成功后，经 records.tell 仅通知原池成员或管理员名下未归档项目（#249）。"""
+    old_entry = _pool_entry(old_pool, old_pools or {old_pool["id"]: old_pool})
+    hosts_txt = "、".join(old_pool["hosts"])
+    msg = f"移除了共有算力池「{old_pool['label']}」（原入口 {old_entry}，原主机：{hosts_txt}）：后续请改投其他可用主机或算力池"
+    for proj_id in PJ.project_ids():
+        if _proj_member(proj_id, old_pool):
+            tell(proj_id, "pool", msg)
 
 
 def _free_gpu_count(st: dict) -> int:
@@ -661,11 +705,12 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
     return {"pools": out_pools, "lists": out_lists}
 
 
-def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dict] | None = None) -> dict:
-    """统计共有算力池 pid 当前未完成的待放清单与已落机活跃清单条数（remove_pool 与 manage_data 共用）。"""
+def _scan_pool_activity(pid: str, *, snap: dict | None = None,
+                        pool_map: dict[str, dict] | None = None) -> tuple[int, int, set[str]]:
+    """共有算力池 pid 未完成待放与已落机清单的唯一扫描实现：返回 (待放条数, 已落机条数, 涉及项目集合)。"""
     snap = snapshot() if snap is None else snap
     if not isinstance(snap, dict):
-        return {"pending": 0, "placed": 0}
+        return 0, 0, set()
     if pool_map is None:
         try:
             pool_map = CF.pools()
@@ -678,6 +723,7 @@ def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dic
         match_phids.add(POOL)
     pend_keys: set[str] = set()
     done_keys: set[str] = set()
+    projs: set[str] = set()
     for v in ((snap.get("pool") or {}).get("lists") or {}).values():
         if isinstance(v, dict) and v.get("pool") == pid and v.get("root") and v.get("jobs"):
             rk = key(v["root"], v["jobs"])
@@ -685,6 +731,8 @@ def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dic
                 done_keys.add(rk)
             else:
                 pend_keys.add(rk)
+                if v.get("project"):
+                    projs.add(str(v["project"]))
     placed = 0
     for x in snap.get("regs") or []:
         xh = str(x.get("host") or "")
@@ -695,13 +743,23 @@ def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dic
                     rk = key(q["root"], q["jobs"])
                     if rk not in done_keys:
                         pend_keys.add(rk)
+                        if q.get("project"):
+                            projs.add(str(q["project"]))
             continue
         if is_pool_id(xh):
             continue
         for q in qs:
             if _reg_pool_id(q) == pid and not q.get("empty") and not q.get("sleeping"):
                 placed += 1
-    return {"pending": len(pend_keys), "placed": placed}
+                if q.get("project"):
+                    projs.add(str(q["project"]))
+    return len(pend_keys), placed, projs
+
+
+def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dict] | None = None) -> dict:
+    """统计共有算力池 pid 当前未完成的待放清单与已落机活跃清单条数（remove_pool 与 manage_data 共用）。"""
+    pending, placed, _ = _scan_pool_activity(pid, snap=snap, pool_map=pool_map)
+    return {"pending": pending, "placed": placed}
 
 
 def manage_data(snap: dict | None = None) -> dict:
