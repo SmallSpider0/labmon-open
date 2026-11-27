@@ -2249,6 +2249,20 @@ t("timeline", "#247 历史多道并发但当前窗口仅 1 道时 othersRow 紧�
   run(PD, "TL.lk = null; drawTimeline()");
   const hDrag2 = run(PD, 'TL.last.rows.get("occ:srv-a")');
   ok(hDrag2 === 16, `松手后应按当前可见 1 道收紧为 16px，实际 ${hDrag2}`);
+  // 同一次拖动先往前滑出 A、滑入与 A 重叠的 B，再不松手拖回同时看到 A 与 B 时，B 不得复用 A 的道号导致重叠遮盖
+  const abOcc = [
+    {p: "proj-b", n: "ov_A", lane: "车道 1", t0: NOW - 4 * H, t1: NOW - 2 * H, g: [0], st: "done"},
+    {p: "proj-b", n: "ov_B", lane: "车道 1", t0: NOW - 3 * H, t1: NOW, g: [0], st: "done"},
+  ];
+  const PAB = pjCtx(clone(PJ), {...EVN, occ: {"srv-a": abOcc}});
+  run(PAB, `TL.v = {a: ${-5 * H}, b: ${-3.5 * H}}; drawTimeline()`);           // 仅见 A（k=0）
+  run(PAB, `tlLock(); TL.v = {a: ${-1.5 * H}, b: ${H}}; drawTimeline()`);      // 拖到仅见 B（应避开 A 的道 0 → k=1）
+  run(PAB, `TL.v = {a: ${-4 * H}, b: ${-H}}; drawTimeline()`);                 // 不松手拖回同时见 A 与 B
+  const yOf = name => {
+    const m = el(PAB, "tlbox").innerHTML.match(new RegExp(`<rect x="[^"]+" y="([^"]+)"[^>]*data-tip="[^"]*${name}`));
+    ok(m, "找不到 " + name); return +m[1];
+  };
+  ok(yOf("ov_A") !== yOf("ov_B") && run(PAB, 'TL.last.rows.get("occ:srv-a")') >= 26, `同次拖动往返后 A 与 B 不应撞在同一道：yA=${yOf("ov_A")}, yB=${yOf("ov_B")}`);
   // 2. 主机表头事件带（ev）底部留出微间距：hostRow 高 36px，事件带画在 y + 23（高 8px），距行底留 5px
   const evH = run(P, `TL.v = {a: ${-6 * H}, b: ${18 * H}}; drawTimeline(); TL.last.rows.get("host:srv-a")`);
   ok(evH === 36, `有事件的主机表头应为 36px，实际 ${evH}`);

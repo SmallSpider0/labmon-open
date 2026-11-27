@@ -566,7 +566,7 @@ const occKey = x => `${x.p}\0${x.lane || ""}\0${x.n}\0${x.t0}\0${x.t1}`;
 function ocPack(hid, visOc) {
   if (!TL.lk) {
     const n = visOc.length ? tlPack(visOc) : 1;
-    OC_LAST.set(hid, {n, ks: new Map(visOc.map(x => [occKey(x), x.k]))});
+    OC_LAST.set(hid, {n, ks: new Map(visOc.map(x => [occKey(x), {k: x.k, t0: x.t0, t1: x.t1}]))});
     return tlRowLayout(n, OCC_OTHER_LAY);
   }
   let lk = OC_LK.get(hid);
@@ -575,16 +575,17 @@ function ocPack(hid, visOc) {
     lk = prev ? {n: prev.n, ks: new Map(prev.ks)} : {n: 1, ks: new Map()};
     OC_LK.set(hid, lk);
   }
-  const fixed = [], fresh = [];
+  const taken = [...lk.ks.values()], fresh = [];
   for (const x of visOc) {
-    const k = lk.ks.get(occKey(x));
-    if (k != null) { x.k = k; fixed.push(x); } else fresh.push(x);
+    const hit = lk.ks.get(occKey(x));
+    if (hit) x.k = hit.k; else fresh.push(x);
   }
   fresh.sort((a, b) => (a.t0 - b.t0) || (a.t1 - b.t1) || String(a.n ?? "").localeCompare(String(b.n ?? "")));
   for (const x of fresh) {
     let k = 0;
-    while (fixed.some(a => a.k === k && a.t1 > x.t0 + 1 && x.t1 > a.t0 + 1)) k++;
-    x.k = k; lk.ks.set(occKey(x), k); fixed.push(x);
+    while (taken.some(a => a.k === k && a.t1 > x.t0 + 1 && x.t1 > a.t0 + 1)) k++;
+    const rec = {k, t0: x.t0, t1: x.t1};
+    x.k = k; lk.ks.set(occKey(x), rec); taken.push(rec);
   }
   lk.n = Math.max(lk.n, ...visOc.map(x => (x.k || 0) + 1));
   return tlRowLayout(lk.n, OCC_OTHER_LAY);
