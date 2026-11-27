@@ -173,6 +173,7 @@ function renewLeave() { RPICK = null; if (FCAP?.pop === "renew") FCAP = null; } 
 function canOpenDrawer(r) {
   if (!r.drw) return false;
   if (r.kind === "p" || r.kind === "home" || r.kind === "host") return true;
+  if (r.kind === "pool") return LIVE && !!ME?.admin;
   if (r.kind !== "fleet") return false;
   if (!LIVE || ME?.admin) return (D.fleet && !D.fleet.error) || (r.drw.k === "person" && ME?.scopes.includes("admin"));
   if (r.drw.k === "srv") return !!(D.fleet && !D.fleet.error && srvById(r.drw.id));
@@ -188,6 +189,7 @@ function drawer(r) {
     if (k.startsWith("renew:")) renewLeave();
     if (k.startsWith("assign:")) APICK = null;
     if (k.startsWith("ext:")) extLeave();
+    if (k.startsWith("pool:")) poolLeave();
     pane.querySelector(".secret")?.remove();
     DKEY = null; DLAST = ""; DBACK = null;
     el.classList.remove("on"); el.setAttribute("aria-hidden", "true"); document.documentElement.classList.remove("drw-on");
@@ -201,8 +203,9 @@ function drawer(r) {
   if (DKEY?.startsWith("renew:") && d.k !== "renew") renewLeave();     // 切到别的抽屉也算离开续租
   if (DKEY?.startsWith("assign:") && d.k !== "assign") APICK = null;
   if (DKEY?.startsWith("ext:") && (d.k !== "ext" || DKEY !== key)) extLeave();
+  if (DKEY?.startsWith("pool:") && (d.k !== "pool" || DKEY !== key)) poolLeave();
   const html = d.k === "srv" ? srvDrawer(d.id) : d.k === "new" ? newDrawer(d.id) : d.k === "guard" ? guardDrawer() : d.k === "renew" ? renewDrawer(d.id) : d.k === "proj" ? projDrawer(d.id)
-    : d.k === "assign" ? assignDrawer(d.id) : d.k === "arch" ? archDrawer() : d.k === "ext" ? extHostDrawer(d.id) : directoryDrawer(d);
+    : d.k === "assign" ? assignDrawer(d.id) : d.k === "arch" ? archDrawer() : d.k === "ext" ? extHostDrawer(d.id) : d.k === "pool" ? poolDrawer(d.id) : directoryDrawer(d);
   const section = d.section || "";
   const previous = pane.dataset.section;
   if (html !== DLAST || key !== DKEY) {
@@ -243,6 +246,7 @@ document.addEventListener("change", e => {               // 批量续租的勾�
   if ("assignto" in d && APICK && !APICK.busy) { APICK.to = d.assignto; APICK.err = null; return render(false); }   // 给项目用：抽屉内选项目
   if ("adopt" in d && ADOPT) { ADOPT.sel[d.adopt] = t.checked; return render(false); }    // 接上卡的勾选
   if ("extf" in d) return extInput(t, "change");
+  if ("plf" in d) return poolInput(t, "change");
   const sel = d.rsel, ack = d.rack;
   if (!RPICK || (!sel && !ack) || FCAP?.pop === "renew" || RPICK.busy) return;      // 输验证码、提交中不改（同 renewDrawer 的 lock）
   const set = sel ? RPICK.sel : RPICK.ack, id = sel || ack;
@@ -262,6 +266,7 @@ document.addEventListener("input", e => {               // 输入框的值先记
   if (e.target.classList?.contains("when-in")) whenInput(e.target);
   if (e.target.dataset?.cf && e.target.type !== "checkbox") cfgInput(e.target, "input");
   if (e.target.dataset?.extf && e.target.type !== "checkbox") extInput(e.target, "input");
+  if (e.target.dataset?.plf && e.target.type !== "checkbox") poolInput(e.target, "input");
   if (e.target.dataset?.popField && POP?.draft) POP.draft[e.target.dataset.popField] = e.target.value;
 });
 
@@ -399,6 +404,8 @@ document.addEventListener("click", e => {
   const ps = e.target.closest?.("button[data-pop-seg]");
   if (ps && POP?.draft && !ps.disabled) { POP.draft[ps.dataset.popSeg] = ps.dataset.val; return render(false); }
   if (e.target.closest?.("[data-alexp]")) { AL_EXP = !AL_EXP; return render(false); }
+  const plb = e.target.closest?.("[data-pl]");
+  if (plb) { if (!plb.disabled) poolAct(plb.dataset.pl, plb.dataset); return; }
   const fm = e.target.closest?.("[data-fman]");
   if (fm && LANOFF() && fm.dataset.fman === "go") return noNet(e, fm);
   if (fm) { if (!fm.disabled) manageAct(fm.dataset.fman, fm.dataset); return; }

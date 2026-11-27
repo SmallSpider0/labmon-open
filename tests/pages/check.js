@@ -2436,7 +2436,7 @@ function accCtx(snap, me, hash = "#/", extra = {}) {
   return O;
 }
 
-t("auth", "共有型算力池入口与旧借用池隔离（#212）：有共有池时侧栏与 #/pool 正常展示，无池快照不显示入口；项目管理抽屉不再出现旧池字样", () => {
+t("auth", "共有型算力池入口与旧借用池隔离（#212、#240）：管理员空池态侧栏常驻并显示空态新建入口，普通用户非池成员严格隐藏；项目管理抽屉不再出现旧池字样", () => {
   const O = accCtx(OV, ADMIN_ME);
   has(side(O), 'href="#/pool"', "有共有池时侧栏该有算力池入口");
   const html = page(O, "#/p/proj-a/manage");
@@ -2444,10 +2444,14 @@ t("auth", "共有型算力池入口与旧借用池隔离（#212）：有共有�
   has(html, "等着放到某台"); has(html, "从算力池撤回");
   const pp = page(O, "#/pool"); clean(pp, "管理员 #/pool");
   has(pp, "共有算力池"); has(pp, "amy、bob"); has(pp, "alpha_pool_s1");
-  // 无共有池的快照（sparse）不显示侧栏算力池入口，直接访问 #/pool 给出空提示
+  // 无共有池的快照（sparse）：管理员侧栏常驻算力池入口并显示空态新建；普通用户非池成员严格隐藏
   const S = accCtx(OVS, ADMIN_ME);
-  ok(!side(S).includes('href="#/pool"'), "无共有池时侧栏不该出现算力池");
-  has(page(S, "#/pool"), "没有可用的共有型算力池");
+  has(side(S), 'href="#/pool"', "管理员无共有池时侧栏应常驻算力池入口（#240）");
+  const spAdmin = page(S, "#/pool");
+  has(spAdmin, "还没有配置共有型算力池"); has(spAdmin, 'data-drw="#/pool/new"');
+  const SU = accCtx(OVS, USER_ME);
+  ok(!side(SU).includes('href="#/pool"'), "普通用户非池成员无共有池时侧栏不该出现算力池");
+  has(page(SU, "#/pool"), "没有可用的共有型算力池");
 });
 
 t("auth", "普通用户：侧栏没有组内服务器与「管理」，有「我」；没有立即采集、调度按钮与平台操作；组内页只说要管理员；记录没有平台操作这类", () => {
@@ -3741,6 +3745,121 @@ ta("overview", "#241 补齐 4 处前端实用入口：Colab 引导、本地工�
   // 只读普通用户不显示添加外部主机
   const E3 = mkCtx(ovSrc, emptySnap, {hash: "#/", filename: "overview.js", me: {...meEmpty, write: false, scopes: ["read"]}});
   ok(!page(E3, "#/").includes("添加外部主机"), "只读用户空态不应显示添加外部主机");
+});
+
+ta("overview", "共有型算力池管理员 GUI 新建/编辑/删除与公网/普通用户权限隔离（#240）", async () => {
+  const OPTS = {
+    pools: [{id: "shared", host_id: "pool", label: "共有算力池", hosts: ["srv-a"], members: ["amy", "bob"], exclusive: false, worker_home: "/data/me/labmon", pending: 1, placed: 1},
+            {id: "otherp", host_id: "pool:otherp", label: "另一个池", hosts: ["srv-busy"], members: ["bob"], exclusive: true, worker_home: "/data/me/labmon", pending: 0, placed: 0}],
+    hosts: [
+      {id: "srv-a", label: "srv-a（A6000）", worker_home: "/data/me/labmon", returned: false, standalone: false, borrow: false, share_host: true, eligible: true, why: "", pool_id: "shared", pool_label: "共有算力池"},
+      {id: "srv-c", label: "srv-c（同域空闲）", worker_home: "/data/me/labmon", returned: false, standalone: false, borrow: false, share_host: true, eligible: true, why: "", pool_id: null, pool_label: null},
+      {id: "srv-busy", label: "srv-busy（他池）", worker_home: "/data/me/labmon", returned: false, standalone: false, borrow: false, share_host: true, eligible: true, why: "", pool_id: "otherp", pool_label: "另一个池"},
+      {id: "srv-diff", label: "srv-diff（异域）", worker_home: "/data/other/labmon", returned: false, standalone: false, borrow: false, share_host: true, eligible: true, why: "", pool_id: null, pool_label: null},
+      {id: "srv-ind", label: "srv-ind（独立）", worker_home: "~/.local/work/labmon", returned: false, standalone: true, borrow: false, share_host: true, eligible: false, why: "独立主机不共享集群 worker_home，不可入池", pool_id: null, pool_label: null},
+    ],
+    users: [{name: "amy", fleet_person: "OWNER"}, {name: "bob", fleet_person: "PERSON3"}],
+    error: null,
+  };
+  // 1. 空池态：管理员侧栏始终显示「算力池」，打开 #/pool 显示空态与「+ 新建算力池」；非池成员普通用户严格隐藏
+  const S0 = JSON.parse(JSON.stringify(OV)); S0.pool = null;
+  const A0 = accCtx(S0, ADMIN_ME);
+  page(A0, "#/pool");
+  has(el(A0, "side").innerHTML, 'href="#/pool"', "管理员空池态侧栏必须常驻算力池入口");
+  const p0 = [el(A0, "top").innerHTML, el(A0, "view").innerHTML].join("\n");
+  clean(p0, "#240 管理员空池态");
+  has(p0, "还没有配置共有型算力池"); has(p0, 'data-drw="#/pool/new"');
+  const U0 = accCtx(S0, {...OWNER_ME, admin: false, pools: [], pool_member: false});
+  page(U0, "#/");
+  ok(!el(U0, "side").innerHTML.includes('href="#/pool"'), "非池成员普通用户侧栏不应显示算力池");
+  page(U0, "#/pool/new");
+  ok(!run(U0, "DKEY"), "普通用户不能打开算力池管理抽屉");
+
+  // 2. 普通池成员：#/pool 无新建、无编辑按钮
+  const UM = accCtx(OV, {...OWNER_ME, admin: false, pools: ["pool"], pool_member: true});
+  const umHtml = page(UM, "#/pool");
+  clean(umHtml, "#240 普通池成员视图");
+  ok(!umHtml.includes("新建算力池") && !umHtml.includes('data-drw="#/pool/edit/'), "普通池成员不应出现新建或编辑按钮");
+
+  // 3. 公网管理员（即便 ops=true）：新建与编辑按钮灰显并提示仅内网可改，抽屉只读不发请求
+  const PUB = accCtx(OV, {...ADMIN_ME, entry: "public", ops: true});
+  let pubFetched = false;
+  PUB.fetch = () => { pubFetched = true; return Promise.resolve({ok: false, status: 404, json: async () => ({})}); };
+  const pubHtml = page(PUB, "#/pool");
+  clean(pubHtml, "#240 公网管理员算力池页");
+  ok(/disabled[^>]*>\+ 新建算力池/.test(pubHtml), "公网管理员新建按钮必须灰显禁用");
+  ok(/disabled[^>]*>.*编辑/.test(pubHtml), "公网管理员编辑按钮必须灰显禁用");
+  has(tips(pubHtml), "仅内网入口可新建、编辑或删除算力池");
+  const pubDrw = page(PUB, "#/pool/new");
+  clean(pubDrw, "#240 公网管理员新建抽屉只读");
+  ok(!pubFetched, "公网管理员打开抽屉不应请求 /api/pools/options");
+  ok(!pubDrw.includes('data-pl="save"'), "公网管理员抽屉不应出现保存按钮");
+
+  // 4. 内网管理员新建/编辑/删除全流程：无 <select>、2 项分段按钮、异域与他池主机标灰、popConfirm 删除
+  const A = accCtx(OV, ADMIN_ME);
+  run(A, `POSTED = []; collectNow = () => {};`);
+  A.fetch = (u, o) => {
+    if (u.startsWith("api/pools/options")) return Promise.resolve({ok: true, json: async () => OPTS});
+    A.POSTED.push([u, o?.body ? JSON.parse(o.body) : null]);
+    return Promise.resolve({ok: true, json: async () => ({msg: "操作成功"})});
+  };
+  page(A, "#/pool/new");
+  await new Promise(r => setTimeout(r, 0));
+  const drwNew = el(A, "drwp").innerHTML;
+  clean(drwNew, "#240 新建算力池抽屉");
+  ok(!/<select\b/i.test(drwNew), "新建/编辑算力池抽屉绝不使用 <select>");
+  has(drwNew, 'class="seg form-seg"');
+  has(drwNew, 'role="radiogroup"'); has(drwNew, "独占模式"); has(drwNew, "开放模式");
+  has(drwNew, '<footer class="dft">');
+  has(drwNew, "已归属「另一个池」"); has(drwNew, "独立主机不共享集群 worker_home");
+  has(drwNew, "管理员默认有权使用所有算力池"); has(drwNew, "全部普通用户");
+  // 勾选 srv-c 后，异域 srv-diff 自动标灰并显示 worker_home 不同原因
+  run(A, `poolInput({dataset: {plf: "id"}, value: "gpu2"}, "change");
+    poolInput({dataset: {plf: "label"}, value: "GPU 池 2"}, "change");
+    poolInput({dataset: {plf: "host", v: "srv-c"}, checked: true}, "change");
+    poolInput({dataset: {plf: "member", v: "amy"}, checked: true}, "change");
+    poolAct("mode", {v: "0"});`);
+  const afterPick = el(A, "drwp").innerHTML;
+  clean(afterPick, "#240 选机后异域主机标灰");
+  has(afterPick, "worker_home 不同"); has(afterPick, "已锁定共享目录");
+  await run(A, `poolAct("save", {})`);
+  const saved = run(A, "POSTED[0]");
+  ok(saved && saved[0] === "api/pools/save" && saved[1].id === "gpu2" && saved[1].create === true && saved[1].exclusive === false
+     && saved[1].hosts[0] === "srv-c" && saved[1].members[0] === "amy", "保存载荷不对：" + JSON.stringify(saved));
+
+  // 编辑态：ID 只读，删除走 popConfirm，有活跃清单时默认禁用确认、勾强制删除后提交 api/pools/remove
+  page(A, "#/pool/edit/shared");
+  await new Promise(r => setTimeout(r, 0));
+  const drwEdit = el(A, "drwp").innerHTML;
+  clean(drwEdit, "#240 编辑算力池抽屉");
+  ok(!/<select\b/i.test(drwEdit), "编辑抽屉也不使用 <select>");
+  ok(/data-plf="id"[^>]*readonly/.test(drwEdit), "编辑态池 ID 必须只读");
+  // 有未完成清单的池即使取消勾选原机，仍锁定原共享域防止误切到异域
+  run(A, `poolInput({dataset: {plf: "host", v: "srv-a"}, checked: false}, "change")`);
+  has(el(A, "drwp").innerHTML, "有未完成清单时不可切换", "有未完成清单的池清空勾选后仍应锁定原共享域");
+  run(A, `poolInput({dataset: {plf: "host", v: "srv-a"}, checked: true}, "change")`);
+  has(drwEdit, 'data-pl="delask"');
+  run(A, `poolAct("delask", {})`);
+  const drwDel = el(A, "drwp").innerHTML;
+  clean(drwDel, "#240 删除二次确认弹窗");
+  has(drwDel, "1 条待放清单"); has(drwDel, "1 条已落机清单");
+  ok(/data-pl="delgo"[^>]*disabled/.test(drwDel), "有活跃清单未勾强制删除时确认按钮应禁用");
+  run(A, `poolInput({dataset: {plf: "forceDel"}, checked: true}, "change")`);
+  ok(!/data-pl="delgo"[^>]*disabled/.test(el(A, "drwp").innerHTML), "勾选强制删除后确认按钮应可点");
+  await run(A, `poolAct("delgo", {})`);
+  const removed = run(A, "POSTED[1]");
+  ok(removed && removed[0] === "api/pools/remove" && removed[1].id === "shared" && removed[1].force === true, "删除载荷不对：" + JSON.stringify(removed));
+
+  // 5. 恶意字符串在候选主机名、worker_home、成员名中全部转义
+  const EVIL_OPTS = JSON.parse(JSON.stringify(OPTS));
+  EVIL_OPTS.hosts[1].label = "机" + BAD;
+  EVIL_OPTS.hosts[3].worker_home = "/d/" + BAD;
+  EVIL_OPTS.users[0].fleet_person = "人" + BAD;
+  const AE = accCtx(OVE, ADMIN_ME);
+  AE.fetch = () => Promise.resolve({ok: true, json: async () => EVIL_OPTS});
+  page(AE, "#/pool/new");
+  await new Promise(r => setTimeout(r, 0));
+  clean(el(AE, "drwp").innerHTML, "#240 恶意候选数据转义");
 });
 
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));

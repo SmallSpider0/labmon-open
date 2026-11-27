@@ -105,6 +105,22 @@ def locate(root: str, jobs: str, snap: dict | None = None, pid: str | None = Non
     return fallback
 
 
+def reg_home(hid: str, root: str | None = None, jobs: str | None = None, snap: dict | None = None) -> str | None:
+    """从快照 regs 里查目标主机/池入口 hid（优先精确匹配 root+jobs）对应的共享域 worker_home；找不到返回 None。
+    用于强制删除命名池后，按残留登记的共享域精准代办 worker rm，避免跨共享域误连。"""
+    snap = snapshot() if snap is None else snap
+    fallback = None
+    for x in (snap or {}).get("regs") or []:
+        if str(x.get("host") or "") != str(hid):
+            continue
+        h = x.get("home") or None
+        if root and jobs and any(same_list(q, root, jobs) for q in x.get("queues") or []):
+            return h
+        if fallback is None and h:
+            fallback = h
+    return fallback
+
+
 # ---------- 合并各在线 worker 汇报的 pool_heads ----------
 def _heads(hosts: list[dict], home: str, hmap: dict[str, dict]) -> dict[tuple[str, str], dict]:
     """合并同一 worker_home 下各在线 worker 的 pool_heads：按 (无 err 优先, pool_t 较晚) 逐条择优（#86、#99 PR #93）。
@@ -643,6 +659,124 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
     if LS.primary():
         save_json(state_file(), {"t": round(t), "wait_since": wait_since, "moved_at": moved_at, "down_state": down_state})
     return {"pools": out_pools, "lists": out_lists}
+
+
+def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dict] | None = None) -> dict:
+    """统计共有算力池 pid 当前未完成的待放清单与已落机活跃清单条数（remove_pool 与 manage_data 共用）。"""
+    snap = snapshot() if snap is None else snap
+    if not isinstance(snap, dict):
+        return {"pending": 0, "placed": 0}
+    if pool_map is None:
+        try:
+            pool_map = CF.pools()
+        except CF.ConfigError:
+            pool_map = {}
+    pcfg = pool_map.get(pid)
+    phid = pcfg["host_id"] if pcfg else (POOL if pid == POOL else f"pool:{pid}")
+    match_phids = {phid}
+    if pid == POOL or len(pool_map) <= 1:
+        match_phids.add(POOL)
+    pend_keys: set[str] = set()
+    done_keys: set[str] = set()
+    for v in ((snap.get("pool") or {}).get("lists") or {}).values():
+        if isinstance(v, dict) and v.get("pool") == pid and v.get("root") and v.get("jobs"):
+            rk = key(v["root"], v["jobs"])
+            if v.get("done") or v.get("sleeping"):
+                done_keys.add(rk)
+            else:
+                pend_keys.add(rk)
+    placed = 0
+    for x in snap.get("regs") or []:
+        xh = str(x.get("host") or "")
+        qs = x.get("queues") or []
+        if xh in match_phids:
+            for q in qs:
+                if q.get("root") and q.get("jobs") and not q.get("empty") and not q.get("sleeping"):
+                    rk = key(q["root"], q["jobs"])
+                    if rk not in done_keys:
+                        pend_keys.add(rk)
+            continue
+        if is_pool_id(xh):
+            continue
+        for q in qs:
+            if _reg_pool_id(q) == pid and not q.get("empty") and not q.get("sleeping"):
+                placed += 1
+    return {"pending": len(pend_keys), "placed": placed}
+
+
+def manage_data(snap: dict | None = None) -> dict:
+    """管理员 GUI 新建/编辑算力池所需的候选数据（GET /api/pools/options，仅内网管理员调用，绝不下发给普通用户）。
+    实时读取 hosts.toml 与 users.json，返回当前池定义、候选 [[hosts]]（含 worker_home 与已归属池）与已开通普通账号列表。"""
+    snap = snapshot() if snap is None else snap
+    hf = CF.hosts_file()
+    raw = CF._read_toml(hf) if hf.exists() else {}
+    pool_error = None
+    try:
+        pm = CF.pools(raw)
+    except CF.ConfigError as e:
+        pm, pool_error = {}, str(e)
+    host_to_pool: dict[str, dict] = {}
+    for pcfg in pm.values():
+        for hid in pcfg["hosts"]:
+            host_to_pool[hid] = pcfg
+    hosts_out: list[dict] = []
+    for raw_h in raw.get("hosts") or []:
+        if not isinstance(raw_h, dict) or not raw_h.get("id"):
+            continue
+        h = dict(raw_h)
+        if h.get("borrow_until"):
+            h["borrow"] = {"holder": h.get("borrow_from"), "swap": True}
+        hd = CF.host_defaults(h)
+        hid = hd["id"]
+        returned = bool(hd.get("returned"))
+        standalone = CF.is_standalone(hd)
+        borrowed = bool(hd.get("borrow"))
+        shared_ok = CF.share_host(hd)
+        why = ""
+        if returned:
+            why = "主机已归还"
+        elif borrowed:
+            why = "借用主机不可入池"
+        elif not shared_ok:
+            why = "本机或回环 SSH 不可入池"
+        elif standalone:
+            why = "独立主机不共享集群 worker_home，不可入池"
+        owner_pool = host_to_pool.get(hid)
+        hosts_out.append({
+            "id": hid,
+            "label": hd.get("label") or hid,
+            "worker_home": hd["worker_home"],
+            "returned": returned,
+            "standalone": standalone,
+            "borrow": borrowed,
+            "share_host": shared_ok,
+            "eligible": not why,
+            "why": why,
+            "pool_id": owner_pool["id"] if owner_pool else None,
+            "pool_label": owner_pool["label"] if owner_pool else None,
+        })
+    pools_out: list[dict] = []
+    for pid, pcfg in pm.items():
+        act = pool_activity(pid, snap=snap, pool_map=pm)
+        pools_out.append({
+            "id": pid,
+            "host_id": pcfg["host_id"],
+            "label": pcfg["label"],
+            "hosts": list(pcfg["hosts"]),
+            "members": list(pcfg["members"]),
+            "exclusive": bool(pcfg["exclusive"]),
+            "worker_home": pcfg["worker_home"],
+            "pending": act["pending"],
+            "placed": act["placed"],
+        })
+    users_map = U._read()["users"]
+    links = U.people_of(users_map)
+    users_out = [
+        {"name": k, "fleet_person": links.get(k, (None, None))[0]}
+        for k, u in sorted(users_map.items(), key=lambda x: x[0].lower())
+        if u.get("role") != "admin"
+    ]
+    return {"pools": pools_out, "hosts": hosts_out, "users": users_out, "error": pool_error}
 
 
 # ---------- 权限裁剪与命令行状态排版 ----------

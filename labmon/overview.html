@@ -311,6 +311,14 @@ tr.sch-pp td { background: var(--soft); }          /* 调度卡按人分组时�
 .rp-ack { display: block; margin-top: 4px; }
 .dft { flex: none; padding: 10px 16px calc(10px + env(safe-area-inset-bottom)); background: var(--card); border-top: 1px solid var(--line); }
 .dft > .rn:first-child { margin-top: 0; }
+.dft .pop { top: auto; bottom: calc(100% + 6px); }
+.pl-list { display: flex; flex-direction: column; gap: 2px; }
+.pl-row { display: flex; align-items: flex-start; gap: 8px; padding: 7px 8px; border-radius: 7px; cursor: pointer; }
+.pl-row:hover:not(.mut) { background: var(--soft); }
+.pl-row.mut { cursor: default; opacity: .68; }
+.pl-row input { margin: 3px 0 0; flex: none; }
+.pl-m { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.pl-t { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
 /* 选一个将来的时刻（whenPick：借卡的约定、改约定、优先的到期）：标题、日期框 + 时、分两个下拉、小签（现在、往后加、清空）、一句到几点 */
 .when { display: grid; justify-items: start; gap: 6px; margin: 10px 0 8px; }
 .when-in { font: inherit; font-size: 13px; min-height: 32px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 7px;

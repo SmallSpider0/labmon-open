@@ -1544,7 +1544,8 @@ class AuthTest(unittest.TestCase):
         self.assertEqual(route_of("GET", "/whatever").scope, "read")
         for path in ("/fleet/op/renew", "/fleet/probe/x", "/renew/a/cancel"):
             self.assertTrue(route_of("POST", path).ops, path)
-        self.assertEqual({r.path.pattern for r in ROUTES if r.method == "GET" and r.lan}, {r"/api/admin/backup", r"/api/users"})   # 只在内网入口的读：冷备与账号管理（#17）
+        self.assertEqual({r.path.pattern for r in ROUTES if r.method == "GET" and r.lan},
+                         {r"/api/admin/backup", r"/api/users", r"/api/pools/options"})   # 只在内网入口的读：冷备、账号与算力池管理（#17、#240）
         self.assertEqual((login_url("/"), login_url("/p/a/"), login_url("/p/a")), ("login?next=", "../../login?next=p/a/", "../login?next=p/a"))
         for bad in ("//evil.example", "https://evil.example", "/abs", "../x", "a\\b", "p/../../x"):
             self.assertEqual(safe_next(bad), "", bad)

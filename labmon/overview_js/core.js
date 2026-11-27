@@ -16,6 +16,9 @@ function route(h = location.hash) {
   if (h === "#/archived") return {kind: "home", drw: {k: "arch", id: ""}};
   const ext = h.match(/^#\/ext\/([^/]+)$/);
   if (ext) return {kind: "home", drw: {k: "ext", id: ext[1] === "new" ? "" : dec(ext[1])}};
+  if (h === "#/pool/new") return {kind: "pool", drw: {k: "pool", id: ""}};
+  const pe = h.match(/^#\/pool\/edit\/([^/]+)$/);
+  if (pe) return {kind: "pool", drw: {k: "pool", id: dec(pe[1])}};
   if (h === "#/pool") return {kind: "pool"};
   const account = h.match(/^#\/me(?:\/(security|tokens|push))?$/);
   if (account) return {kind: "me", tab: account[1] || "overview"};
@@ -70,11 +73,11 @@ addEventListener("popstate", () => {
 addEventListener("hashchange", onRoute);              // 地址栏里改的
 function closeDrw() {
   const r = route();
-  if (r.drw) nav(r.kind === "p" ? "#/p/" + encodeURIComponent(r.id) : r.kind === "host" ? "#/host/" + encodeURIComponent(r.id) : r.kind === "home" ? "#/" : r.tab === "slots" ? "#/fleet" : "#/fleet/" + r.tab);
+  if (r.drw) nav(r.kind === "p" ? "#/p/" + encodeURIComponent(r.id) : r.kind === "host" ? "#/host/" + encodeURIComponent(r.id) : r.kind === "pool" ? "#/pool" : r.kind === "home" ? "#/" : r.tab === "slots" ? "#/fleet" : "#/fleet/" + r.tab);
 }
 function stepDrw(dir) {
   const d = route().drw;
-  if (!d || d.k === "new" || d.k === "guard" || d.k === "renew" || d.k === "proj" || d.k === "arch" || d.k === "assign" || d.k === "account" || d.k === "ext" || d.id === "+") return;
+  if (!d || d.k === "new" || d.k === "guard" || d.k === "renew" || d.k === "proj" || d.k === "arch" || d.k === "assign" || d.k === "account" || d.k === "ext" || d.k === "pool" || d.id === "+") return;
   const ids = d.k === "srv" ? srvOrder() : peopleOrder(), k = ids.indexOf(d.id);
   if (k >= 0 && ids.length > 1) nav(DH[d.k](ids[(k + dir + ids.length) % ids.length]));
 }
@@ -237,12 +240,12 @@ function navModel(r) {
   const hal = h => forUser(alertsOf(h)).length;
   const hostState = h => h.ephemeral ? (h.worker_up ? "临时在线" : "临时离线") : h.lan_off ? "本机不在内网" : h.error ? "连不上" : !h.status || !h.worker_up ? "worker 不在" : hal(h) ? "有告警" : "正常";
   const top = [{k: "home", href: "#/", ico: icon("dash"), label: "总览", on: r.kind === "home", bad: n, full: n ? `总览：${n} 条告警` : "总览"}];
-  if (D.pool?.pools?.length || D.pool?.error) {
-    const ps = D.pool.pools || [], pbad = (D.pool.error ? 1 : 0) + Object.values(D.pool.lists || {}).filter(x => x.nofit).length;
+  if (D.pool?.pools?.length || D.pool?.error || (LIVE && ME?.admin)) {
+    const ps = D.pool?.pools || [], pbad = (D.pool?.error ? 1 : 0) + Object.values(D.pool?.lists || {}).filter(x => x.nofit).length;
     const pPend = ps.reduce((a, p) => a + (p.pending || 0), 0), pFree = ps.reduce((a, p) => a + (p.free_gpus || 0), 0), pGpus = ps.reduce((a, p) => a + (p.gpus || 0), 0);
     top.push({k: "pool", href: "#/pool", ico: icon("zap"), label: "算力池", ab: "算力池", on: r.kind === "pool", bad: pbad,
-      full: D.pool.error ? `算力池：配置有误` : `共有算力池 ${ps.length} 个：空 ${pFree}/${pGpus} 张卡，待放 ${pPend} 条`,
-      sub: D.pool.error ? "配置有误" : `${ps.length} 个池 · 空 ${pFree}/${pGpus} 卡 · 待放 ${pPend}`});
+      full: D.pool?.error ? "算力池：配置有误" : ps.length ? `共有算力池 ${ps.length} 个：空 ${pFree}/${pGpus} 张卡，待放 ${pPend} 条` : "算力池：尚未配置共有型算力池",
+      sub: D.pool?.error ? "配置有误" : ps.length ? `${ps.length} 个池 · 空 ${pFree}/${pGpus} 卡 · 待放 ${pPend}` : "尚未配置 · 点击管理"});
   }
   if (LIVE) top.push({k: "log", href: "#/log", ico: icon("clock"), label: "记录", on: r.kind === "log", full: "记录：事件、平台操作、配置改动", sub: "事件、平台操作、配置改动"});
   const secs = [
@@ -340,6 +343,7 @@ function topbar(r) {
     title = h ? h.label : r.id; crumb = "主机"; extra = h ? workerBadge(h) : "";
   } else if (r.kind === "pool") {
     title = "算力池"; crumb = "调度";
+    extra = poolNewBtn("mini-btn pri");
   } else if (r.kind === "log") {
     title = "记录"; crumb = ""; extra = LIVE ? logTabs(r.f) : "";
   } else if (r.kind === "fleet") {

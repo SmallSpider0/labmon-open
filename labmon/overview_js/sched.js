@@ -157,8 +157,30 @@ function personBar(ps) {
     `${who(ps[0])} 名下近期用量合计 ${g1(use)} 卡·时（含已归档的项目），占 ${Math.round(u)}%；份额按人算，近期在用的 ${n} 人各应得 ${Math.round(d)}%\n竖线是应得的位置`)}><i style="width:${u}%;background:var(--muted)"></i><b class="due" style="left:${d}%"></b></div>
     <span class="sm num nw">${Math.round(u)}% <span class="mut">/ ${Math.round(d)}%</span></span></div>`;
 }
-// 共有型算力池：总览紧凑卡片（poolSummaryCard）与独立页（poolPage，#/pool）。数据来自全局快照的 D.pool（pool.tick / pool.summary）；
-// 非池成员的 D.pool 为 null（不可见），普通池成员仅见所属池聚合与本人待放清单（不含 members 列表）。
+// 共有型算力池：总览紧凑卡片（poolSummaryCard）、独立页（poolPage，#/pool）与管理员新建/编辑抽屉（poolDrawer，#/pool/new、#/pool/edit/<id>）。
+// 池管理严格仅限内网管理员（canPoolManage），公网灰显提示不开放；非池成员普通用户 D.pool 为 null 且隐藏入口。
+const canPoolManage = () => LIVE && !!ME?.admin && ME.entry === "lan" && !!ME.scopes?.includes("admin");
+const POOL_LAN_TIP = "仅内网入口可新建、编辑或删除算力池（不随公网平台操作开放）";
+const POOL_ID_RE = /^[A-Za-z][A-Za-z0-9_-]{0,31}$/;
+const POOL_RESERVED = new Set(["new", "edit", "options", "save", "remove"]);
+let PM = null, PMSG = null, PM_TMR = 0;
+
+function poolMsg(m) {
+  PMSG = m;
+  clearTimeout(PM_TMR);
+  PM_TMR = setTimeout(() => { PMSG = null; render(false); }, 60000);
+}
+function poolNewBtn(cls = "pri") {
+  if (!LIVE || !ME?.admin) return "";
+  if (canPoolManage()) return `<button class="btn ${cls}" type="button" data-drw="#/pool/new">+ 新建算力池</button>`;
+  const mini = cls.includes("mini-btn") ? " mini-btn" : "";
+  return `<button class="btn${mini}" type="button" disabled ${tip(POOL_LAN_TIP)}>+ 新建算力池</button>`;
+}
+function poolEditBtn(pid) {
+  if (!LIVE || !ME?.admin) return "";
+  if (canPoolManage()) return `<button class="btn mini-btn" type="button" data-drw="${esc(DH.pool(pid))}">${icon("pencil")}编辑</button>`;
+  return `<button class="btn mini-btn" type="button" disabled ${tip(POOL_LAN_TIP)}>${icon("pencil")}编辑</button>`;
+}
 function poolSummaryCard() {
   const P = D.pool;
   if (!P) return "";
@@ -180,16 +202,21 @@ function poolSummaryCard() {
 }
 
 function poolPage() {
-  const P = D.pool;
-  if (!P) return `<div class="card empty">当前没有可用的共有型算力池（或你的账号不在任何共有池成员列表中）。</div>`;
-  if (P.error) return `<div class="alerts"><div>⚠ 共有算力池配置错误：${esc(P.error)}</div></div>`;
+  const P = D.pool, admin = LIVE && !!ME?.admin, msg = PMSG ? `<div class="rn-state" style="margin-bottom:12px">${esc(PMSG)}</div>` : "";
+  if (!P || (!P.error && !(P.pools || []).length)) {
+    if (!admin) return `<div class="card empty">当前没有可用的共有型算力池（或你的账号不在任何共有池成员列表中）。</div>`;
+    return msg + `<div class="card"><div class="chd wrap"><b>共有型算力池</b><span class="sp"></span>${poolNewBtn("pri")}</div>
+      <div class="rn-note">还没有配置共有型算力池。将多台共用同一 <code>worker_home</code> 的常驻集群主机组成算力池后，组员只需经 <code>pool</code>（或 <code>pool:&lt;id&gt;</code>）提交清单，看板自动按人公平份额即时落机、空闲窃取与异常撤离。</div>
+      ${!canPoolManage() ? `<div class="sm mut" style="margin-top:8px">${POOL_LAN_TIP}</div>` : ""}</div>` + schedCard();
+  }
+  if (P.error) return msg + `<div class="alerts"><div>⚠ 共有算力池配置错误：${esc(P.error)}</div></div>`
+    + (admin ? `<div class="card"><div class="rn">${poolNewBtn("pri")}<span class="sm mut">${canPoolManage() ? "可在内网新建或修复算力池配置，或检查 hosts.toml 中的 [pools.*] 段。" : POOL_LAN_TIP}</span></div></div>` : "");
   const ps = P.pools || [], lists = Object.values(P.lists || {}).filter(v => !v.done), now = D.generated;
-  if (!ps.length) return `<div class="card empty">hosts.toml 中尚未配置共有型算力池（<code>[pools.&lt;id&gt;]</code>）。</div>`;
   const totOnline = ps.reduce((a, p) => a + (p.online || 0), 0), totHosts = ps.reduce((a, p) => a + (p.total || 0), 0);
   const totFree = ps.reduce((a, p) => a + (p.free_gpus || 0), 0), totGpus = ps.reduce((a, p) => a + (p.gpus || 0), 0);
   const totRun = ps.reduce((a, p) => a + (p.running || 0), 0), totQ = ps.reduce((a, p) => a + (p.queued || 0), 0);
   const totPend = lists.length, nofitN = lists.filter(v => v.nofit).length;
-  let s = `<div class="kpis">
+  let s = msg + `<div class="kpis">
     <div class="kpi"><div class="k">共有算力池</div><div class="v">${ps.length}<small> 个</small></div><div class="s">${ps.map(p => esc(p.host_id)).join(" · ")}</div></div>
     <div class="kpi"><div class="k">在线主机</div><div class="v">${totOnline}<small> / ${totHosts} 台</small></div><div class="s">运行 ${totRun} · 排队 ${totQ}</div></div>
     <div class="kpi"><div class="k">空闲 GPU</div><div class="v">${totFree}<small> / ${totGpus} 张</small></div><div class="s">空闲主机自动触发空闲窃取</div></div>
@@ -197,7 +224,7 @@ function poolPage() {
   for (const p of ps) {
     const pLists = lists.filter(v => v.pool === p.id).sort((a, b) => (a.since || 0) - (b.since || 0));
     const memTag = Array.isArray(p.members)
-      ? `<span class="sm mut">成员：${p.members.includes("*") ? "全部用户（*）" : esc(p.members.join("、") || "无")}</span>` : "";
+      ? `<span class="sm mut">成员：${p.members.includes("*") ? "全部用户（*）" : esc(p.members.join("、") || "仅管理员")}</span>` : "";
     const modeTag = p.exclusive
       ? `<span class="badge b-mute" ${tip("独占模式：禁止对池内单台主机直接 worker add，请经池入口提交")}>独占 · 仅经 ${esc(p.host_id)}</span>`
       : `<span class="badge b-ok" ${tip("开放模式：既可经池入口提交也可直投单台")}>开放 · 允许直投</span>`;
@@ -222,13 +249,265 @@ function poolPage() {
     }).join("");
     const metaParts = [memTag, `<span class="sm mut">已落机 ${p.placed} 条 · 待放 ${p.pending} 条</span>`].filter(Boolean);
     s += `<div class="card"><div class="chd wrap"><b>${esc(p.label)}</b><code class="sm">${esc(p.host_id)}</code>${modeTag}<span class="sp"></span>
-      <span class="sm mut">在线 ${p.online}/${p.total} 台 · 空 ${p.free_gpus}/${p.gpus} 卡</span></div>
+      <span class="sm mut">在线 ${p.online}/${p.total} 台 · 空 ${p.free_gpus}/${p.gpus} 卡</span>${poolEditBtn(p.id)}</div>
       <div class="row wrap" style="gap:4px 12px;margin:-4px 0 8px">${metaParts.join("")}</div>
       <div class="scroll"><table><tr><th>主机</th><th>状态</th><th class="r">空闲 / 总 GPU</th><th class="r">运行</th><th class="r">排队</th><th>租期</th></tr>${hRows}</table></div>
       ${pLists.length ? `<div class="sub">待放清单（${pLists.length} 条）</div><div class="scroll"><table><tr><th>项目</th><th>清单</th><th>队首</th><th class="r">待跑</th><th class="r">已等</th><th>状态 / 原因</th></tr>${lRows}</table></div>`
         : `<div class="sm mut" style="margin-top:8px">当前没有待放清单。提交命令：<code>labmon worker add ${esc(p.host_id)} ROOT JOBS --project &lt;项目&gt;</code></div>`}</div>`;
   }
   return s + schedCard();
+}
+
+function poolLeave() {
+  PM = null;
+  if (POP?.k === "pl-del") popClose();
+}
+function poolFillForm(st, p) {
+  const mems = Array.isArray(p?.members) ? p.members.map(x => String(x).toLowerCase()) : [];
+  const all = mems.includes("*");
+  const hs = (p?.hosts || []).map(h => typeof h === "string" ? h : h.id).filter(Boolean);
+  st.form = {
+    id: p ? p.id : "",
+    label: p ? (p.label || "") : "",
+    exclusive: p ? p.exclusive !== false : true,
+    hosts: new Set(hs),
+    members: new Set(all ? [] : mems),
+    allMembers: all,
+    forceDel: false,
+  };
+  st.origHosts = new Set(hs);
+}
+async function poolLoadOpts(st) {
+  const visit = st.visit;
+  st.loading = true; st.optsErr = null;
+  try {
+    const r = await api("api/pools/options", {cache: "no-store"});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+    if (PM !== st || st.visit !== visit) return;
+    st.opts = j;
+    if (!st.isNew && !st.dirty) {
+      const p = (j.pools || []).find(x => x.id === st.id);
+      if (p) poolFillForm(st, p);
+    }
+  } catch (e) {
+    if (PM === st && st.visit === visit) st.optsErr = "读取候选主机与成员失败：" + (e.message || e);
+  }
+  if (PM === st && st.visit === visit) { st.loading = false; render(false); }
+}
+function poolValidation(st) {
+  const f = st.form, pid = f.id.trim();
+  if (st.isNew) {
+    if (!pid) return "请填写算力池 ID";
+    if (!POOL_ID_RE.test(pid)) return "池 ID 须字母开头，仅含字母、数字、_ 或 -，最多 32 位";
+    if (POOL_RESERVED.has(pid.toLowerCase())) return `池 ID 不能使用保留名 ${pid}`;
+    if ((st.opts?.pools || D.pool?.pools || []).some(p => p.id === pid)) return `算力池 ${pid} 已存在`;
+    if ((st.opts?.hosts || []).some(h => h.id === pid)) return `池 ID 不能与主机 ${pid} 重名`;
+  }
+  if (f.label.trim().length > 40) return "显示名称最多 40 个字";
+  if (!f.hosts.size) return "至少选择一台同 worker_home 的常驻集群主机";
+  return "";
+}
+function poolDrawer(id) {
+  const isNew = !id;
+  if (!PM || PM.isNew !== isNew || PM.id !== id) {
+    const snapP = !isNew ? (D.pool?.pools || []).find(x => x.id === id) : null;
+    PM = {id, isNew, visit: Date.now(), loading: false, opts: null, optsErr: null, busy: false, err: null, dirty: false, form: null, origHosts: new Set()};
+    poolFillForm(PM, snapP);
+    if (canPoolManage()) poolLoadOpts(PM);
+  }
+  const st = PM, f = st.form, can = canPoolManage(), dis = !can || st.busy || st.loading ? " disabled" : "";
+  const curPool = !isNew ? ((st.opts?.pools || []).find(x => x.id === id) || (D.pool?.pools || []).find(x => x.id === id)) : null;
+  if (!isNew && !curPool && !st.loading) {
+    return dHead(`<span class="fav">${icon("zap")}</span>`, `编辑算力池 · ${esc(id)}`, "找不到这个算力池")
+      + `<div class="db"><div class="card empty">hosts.toml 中没有算力池 <code>${esc(id)}</code>（可能已被删除）。</div></div>`
+      + `<footer class="dft"><div class="rn"><button class="btn" type="button" data-dclose>关闭</button></div></footer>`;
+  }
+  const pidTrim = f.id.trim();
+  const entryPreview = pidTrim ? (pidTrim === "pool" ? "pool" : `pool:${pidTrim}`) : "pool:<id>";
+  const basic = `<div class="aform">
+      <label>算力池 ID<input class="ain" data-plf="id" value="${esc(f.id)}" placeholder="如 a100 或 pool" maxlength="32" autocomplete="off"${isNew ? dis : " readonly"}></label>
+      <label>显示名称（可选）<input class="ain" data-plf="label" value="${esc(f.label)}" placeholder="如 A100 共有池（留空默认用池 ID）" maxlength="40" autocomplete="off"${dis}></label>
+    </div>
+    <div class="sm mut" style="margin-top:6px">${isNew ? `字母开头，仅含字母、数字、_ 或 -；提交入口将为 <code id="plentry">${esc(entryPreview)}</code>（填 <code>pool</code> 为默认池）。` : `提交入口：<code>${esc(entryPreview)}</code>（池 ID 创建后不可更改）。`}</div>
+    <div style="margin-top:10px">
+      <div class="sm mut" style="margin-bottom:5px">提交模式</div>
+      <div class="seg form-seg" role="radiogroup" aria-label="提交模式">
+        <button type="button" role="radio" aria-checked="${f.exclusive}" class="${f.exclusive ? "on" : ""}" data-pl="mode" data-v="1"${dis}>独占模式</button>
+        <button type="button" role="radio" aria-checked="${!f.exclusive}" class="${!f.exclusive ? "on" : ""}" data-pl="mode" data-v="0"${dis}>开放模式</button>
+      </div>
+      <div class="sm mut" style="margin-top:5px">${f.exclusive
+        ? "推荐：禁止对池内单台主机直接 <code>worker add</code>，所有任务统一经池入口公平调度。"
+        : "开放：既可经池入口提交，也允许有权限的用户直投池内单台主机。"}</div>
+    </div>`;
+
+  // 池内主机复选列表：按已选主机自动锁定 worker_home，异域或已归属他池主机自动标灰说明原因；
+  // 编辑已有池且仍有未完成清单时，保持锁定原池共享域（与后端 save_pool 一致，防误切域丢待放清单）
+  const pendingN = curPool?.pending || 0, placedN = curPool?.placed || 0, hasAct = pendingN > 0 || placedN > 0;
+  const lockedHome = !isNew && hasAct && curPool?.worker_home ? curPool.worker_home : null;
+  const allHosts = st.opts?.hosts || [];
+  let targetHome = lockedHome;
+  if (!targetHome) for (const h of allHosts) if (f.hosts.has(h.id) && h.worker_home) { targetHome = h.worker_home; break; }
+  const hostState = h => {
+    const checked = f.hosts.has(h.id);
+    if (h.pool_id && h.pool_id !== (isNew ? "" : id)) return {checked, disabled: true, why: `已归属「${h.pool_label || h.pool_id}」（单机单池互斥）`, ord: 2};
+    if (!h.eligible && !checked) return {checked, disabled: true, why: h.why || "不可入池", ord: 3};
+    if (targetHome && h.worker_home !== targetHome && !checked) {
+      const rsn = lockedHome ? `与原池共享域不同（${h.worker_home}），有未完成清单时不可切换` : `worker_home 不同（${h.worker_home}，当前已选 ${targetHome}）`;
+      return {checked, disabled: true, why: rsn, ord: 2};
+    }
+    return {checked, disabled: false, why: h.returned ? "已归还（取消勾选即可移出池）" : "", ord: checked ? 0 : 1};
+  };
+  const sortedHosts = [...allHosts].sort((a, b) => hostState(a).ord - hostState(b).ord || a.id.localeCompare(b.id));
+  const hostRows = sortedHosts.map(h => {
+    const s = hostState(h), lock = !can || st.busy || s.disabled;
+    return `<label class="pl-row${s.disabled ? " mut" : ""}">
+      <input type="checkbox" data-plf="host" data-v="${esc(h.id)}"${s.checked ? " checked" : ""}${lock ? " disabled" : ""}>
+      <span class="pl-m"><span class="pl-t"><b>${esc(h.label || h.id)}</b><code class="sm">${esc(h.id)}</code><span class="chip">${esc(h.worker_home || "—")}</span></span>
+      ${s.why ? `<span class="sm mut">${esc(s.why)}</span>` : ""}</span></label>`;
+  }).join("");
+  const removedHosts = !isNew ? [...st.origHosts].filter(x => !f.hosts.has(x)) : [];
+  const hostsBody = st.loading ? `<div class="empty">正在读取主机清单…</div>`
+    : st.optsErr ? `<div class="rn-err">${esc(st.optsErr)}</div>`
+    : !can ? `<div class="empty">${POOL_LAN_TIP}</div>`
+    : (hostRows ? `<div class="pl-list">${hostRows}</div>` : `<div class="empty">主机清单里还没有可加入算力池的常驻集群主机。</div>`)
+      + (removedHosts.length ? `<div class="rn-state">已取消勾选 ${esc(removedHosts.join("、"))}：移出主机不会中断在跑任务，该主机上待跑的本池清单将在下一轮自动撤离到池内其他健康主机。</div>` : "");
+  const hostsExtra = targetHome ? `<span class="sm mut">已锁定共享目录 <code>${esc(targetHome)}</code></span>` : `<span class="sm mut">同池主机须共用同一 worker_home</span>`;
+
+  // 池成员复选列表：管理员默认有权，此处配置普通用户或 *
+  const users = st.opts?.users || [];
+  const extraMems = [...f.members].filter(m => !users.some(u => u.name.toLowerCase() === m));
+  const userItems = [...users, ...extraMems.map(name => ({name, fleet_person: null, unknown: true}))];
+  const memRows = userItems.map(u => {
+    const low = u.name.toLowerCase(), ck = f.allMembers || f.members.has(low), lock = !can || st.busy || f.allMembers;
+    return `<label class="pl-row${f.allMembers ? " mut" : ""}">
+      <input type="checkbox" data-plf="member" data-v="${esc(low)}"${ck ? " checked" : ""}${lock ? " disabled" : ""}>
+      <span class="pl-m"><span class="pl-t"><b>${esc(u.name)}</b>${u.fleet_person ? `<span class="sm mut">${esc(u.fleet_person)}</span>` : ""}${u.unknown ? `<span class="badge b-warn">账号不存在</span>` : ""}</span></span></label>`;
+  }).join("");
+  const memBody = st.loading ? `<div class="empty">正在读取账号列表…</div>`
+    : !can ? `<div class="empty">${POOL_LAN_TIP}</div>`
+    : `<div class="sm mut" style="margin-bottom:6px">管理员默认有权使用所有算力池，此处仅配置普通用户成员。</div>
+       <div class="pl-list">
+         <label class="pl-row"><input type="checkbox" data-plf="allMembers"${f.allMembers ? " checked" : ""}${dis}>
+           <span class="pl-m"><span class="pl-t"><b>全部普通用户（<code>*</code>）</b></span><span class="sm mut">允许所有已开通的普通用户经池入口提交任务</span></span></label>
+         ${memRows || `<div class="empty">还没有已开通的普通用户账号（可在「组内服务器 → 人员」开通）。</div>`}
+       </div>`;
+
+  // 固定底栏 + 编辑态 popConfirm 删除确认
+  const vErr = can && !st.loading ? poolValidation(st) : "";
+  const delOpen = !isNew && popIs("pl-del", id);
+  const delWarn = hasAct ? `<div class="rk-need"><div>该算力池当前仍有 ${[pendingN ? `${pendingN} 条待放清单` : "", placedN ? `${placedN} 条已落机清单` : ""].filter(Boolean).join("、")}。</div>
+    <label class="sm pop-ck"><input type="checkbox" data-plf="forceDel"${f.forceDel ? " checked" : ""}${st.busy ? " disabled" : ""}> 强制删除（不中断已在主机上运行的任务，已落机清单留在原主机继续跑完）</label></div>` : "";
+  const delPop = !isNew && can ? popConfirm(
+    `<button class="btn danger" type="button" data-pl="delask"${st.busy ? " disabled" : ""}>删除算力池</button>`,
+    delOpen,
+    !delOpen ? "" : `<div class="rk-say"><b>删除算力池「${esc(curPool?.label || id)}」（<code>${esc(entryPreview)}</code>）</b>：将从 <code>hosts.toml</code> 移除该池配置。</div>
+      ${delWarn}${POP?.err ? `<div class="rn-err">${esc(POP.err)}</div>` : ""}`,
+    `<button class="btn pri dz" type="button" data-pl="delgo"${st.busy || (hasAct && !f.forceDel) ? " disabled" : ""}>${st.busy ? "删除中…" : "确认删除"}</button>`,
+    true
+  ) : "";
+  const foot = can
+    ? `<div class="rn"><button class="btn pri" type="button" data-pl="save"${st.busy || st.loading || !!vErr ? " disabled" : ""}>${st.busy ? "保存中…" : isNew ? "新建算力池" : "保存"}</button>
+       <button class="btn" type="button" data-dclose${st.busy ? " disabled" : ""}>关闭</button>
+       <span class="sm mut" id="plverr">${esc(vErr)}</span><span class="sp"></span>${delPop}</div>${st.err ? `<div class="rn-err">${esc(st.err)}</div>` : ""}`
+    : `<div class="rn"><button class="btn" type="button" data-dclose>关闭</button><span class="sm mut">${POOL_LAN_TIP}</span></div>`;
+  return dHead(`<span class="fav">${icon("zap")}</span>`, isNew ? "新建算力池" : `编辑算力池 · ${esc(curPool?.label || id)}`,
+      isNew ? "组合同共享盘常驻集群主机，提供统一公平调度入口" : `${esc(entryPreview)} · 改完自动写入 hosts.toml 并唤醒采集`)
+    + `<div class="db">${dSec("基本设置", basic)}${dSec("池内主机", hostsBody, hostsExtra)}${dSec("池成员", memBody)}</div>`
+    + `<footer class="dft">${foot}</footer>`;
+}
+function poolInput(t, how) {
+  if (!PM || !canPoolManage()) return;
+  const k = t.dataset.plf, f = PM.form;
+  PM.err = null;
+  if (k === "id" || k === "label") {
+    f[k] = t.value; PM.dirty = true;
+    if (how === "input") {
+      PENDING = true;
+      const err = poolValidation(PM), sb = document.querySelector('[data-pl="save"]'), ve = document.getElementById("plverr"), en = document.getElementById("plentry");
+      if (sb) sb.disabled = PM.busy || PM.loading || !!err;
+      if (ve) ve.textContent = err;
+      if (en && k === "id") { const p = f.id.trim(); en.textContent = p ? (p === "pool" ? "pool" : `pool:${p}`) : "pool:<id>"; }
+      return;
+    }
+  } else if (k === "host") {
+    const v = t.dataset.v;
+    t.checked ? f.hosts.add(v) : f.hosts.delete(v);
+    PM.dirty = true;
+  } else if (k === "allMembers") {
+    f.allMembers = t.checked;
+    PM.dirty = true;
+  } else if (k === "member") {
+    const v = t.dataset.v;
+    t.checked ? f.members.add(v) : f.members.delete(v);
+    PM.dirty = true;
+  } else if (k === "forceDel") {
+    f.forceDel = t.checked;
+  }
+  render(false);
+}
+async function poolAct(act, d) {
+  if (!PM || !canPoolManage() || PM.busy) return;
+  const st = PM, f = st.form, visit = st.visit;
+  if (act === "mode") {
+    f.exclusive = d.v === "1"; st.dirty = true; st.err = null;
+    return render(false);
+  }
+  if (act === "delask" && !st.isNew) {
+    f.forceDel = false;
+    popToggle("pl-del", st.id);
+    return render(false);
+  }
+  if (act === "save") {
+    const verr = poolValidation(st);
+    if (verr) { st.err = verr; return render(false); }
+    st.busy = true; st.err = null; render(false);
+    try {
+      const payload = {
+        id: st.isNew ? f.id.trim() : st.id,
+        label: f.label.trim() || null,
+        hosts: [...f.hosts],
+        members: f.allMembers ? ["*"] : [...f.members],
+        exclusive: !!f.exclusive,
+        create: st.isNew,
+      };
+      const r = await postJSON("api/pools/save", payload);
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      if (PM === st && st.visit === visit) {
+        poolLeave();
+        poolMsg(j.msg || "已保存算力池配置");
+        closeDrw();
+        return collectNow(true);
+      }
+    } catch (e) {
+      if (PM === st && st.visit === visit) { st.busy = false; st.err = e.message || String(e); render(false); }
+    }
+    return;
+  }
+  if (act === "delgo" && !st.isNew) {
+    st.busy = true; st.err = null;
+    if (POP?.k === "pl-del") POP.err = null;
+    render(false);
+    try {
+      const r = await postJSON("api/pools/remove", {id: st.id, force: !!f.forceDel});
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      if (PM === st && st.visit === visit) {
+        poolLeave();
+        poolMsg(j.msg || "已删除算力池");
+        closeDrw();
+        return collectNow(true);
+      }
+    } catch (e) {
+      if (PM === st && st.visit === visit) {
+        st.busy = false;
+        if (POP?.k === "pl-del") POP.err = e.message || String(e);
+        else st.err = e.message || String(e);
+        render(false);
+      }
+    }
+  }
 }
 
 function schedCard() {
