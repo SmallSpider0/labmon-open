@@ -726,7 +726,7 @@ class AdmissionUnitTest(UnitBase):
         # #112：fit 与 worker status 每台都写配额与已记的核（cpu_line），status 的运行行写这个任务记几核
         info = dict(info, cpu_quota=4.0, nproc=64)
         self.hosts.status("t", info=info, room=room, running=[running_job("r", "b", acct={"ram": 1.0, "vram": 0, "cpu": 2.0})])
-        line = "CPU：配额 4 核，nproc 报的 64 是宿主机的核数；labmon 在跑 1 个任务记 2 核，labmon 之外占 0.5 核，还能给新任务 1.5 核"
+        line = "CPU：配额 4 核（为 GPU 保底留 1 核，纯 CPU 上限 3 核），nproc 报的 64 是宿主机的核数；labmon 在跑 1 个任务记 2 核，labmon 之外占 0.5 核，还能给新任务 1.5 核（纯 CPU 最多 0.5 核）"
         self.assertIn("\n" + line + "\n", fit("x_s1"))
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
@@ -8970,6 +8970,279 @@ class WorkerPackageTest(unittest.TestCase):
                                cwd=td, env=env, capture_output=True, text=True)
             self.assertEqual(r.returncode, 0, r.stderr)
             self.assertIn("worker：未运行", r.stdout)
+
+
+class GpuCpuReserveTest(unittest.TestCase):
+    """Issue #225：GPU 主机保底 CPU 核、纯 CPU 自动封顶与降 nice、纯 CPU 超核时的 GPU 有限弹性放行。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.d = Path(self.tmp.name).resolve()
+        self.m = load_worker({"LABMON_HOME": str(self.d / "home"), "LABMON_LOCAL": str(self.d / "local"),
+                              "LABMON_SLOTS": str(self.d / "slots"), "LABMON_TICK": "1"})
+        self.now = 1_000_000.0
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def card(self, i, free=45000.0, total=46068.0, other=0.0):
+        return {"i": i, "uuid": "GPU-%s" % chr(97 + i), "total": total, "free": free, "keep": 0.0, "other": other, "ka": False}
+
+    def job(self, name="j", ngpu=1, cpus=1, cpu_src="提示值", vram=1.0, ram=1.0, dur=60.0, excl=None, hold=False, allowed=None):
+        return {"key": "k:" + name, "lane": "k:" + name, "name": name, "project": "pa", "ngpu": ngpu,
+                "vram": vram if ngpu else 0.0, "src": "提示值", "ram": ram, "ram_src": "提示值",
+                "cpus": cpus, "cpu_src": cpu_src, "excl": excl, "tag": None, "dur": dur,
+                "hold": hold, "deps": [], "deps_any": [], "allowed": allowed, "cards": float(ngpu), "gang": None}
+
+    def ran(self, name, gpus=(), cpu=1.0, ngpu=None, project="pa", hold=False, t1=None):
+        ng = len(gpus) if ngpu is None else ngpu
+        return {"key": "r:" + name, "lane": "r:" + name, "name": name, "project": project, "t0": self.now - 60, "t1": t1,
+                "gpus": list(gpus), "vram": {u: 1024.0 for u in gpus}, "ram": 1.0, "cpu": float(cpu),
+                "excl": None, "tag": None, "hold": hold, "ngpu": ng, "use": {"cores": float(cpu)}, "cards": float(ng)}
+
+    def snap(self, cards, jobs=(), cpu_cap=17, cpu_room=None, owner=(), gp=(), ext=()):
+        return {"cards": [dict(c) for c in cards], "limit": 100.0, "room": 90.0, "margin": 8.0,
+                "cpu_cap": cpu_cap, "cpu_room": float(cpu_cap) if cpu_room is None and cpu_cap is not None else cpu_room,
+                "jobs": [dict(j) for j in jobs], "ext": list(ext), "gp": list(gp), "cpu": None, "holds": {}, "tags": {},
+                "owner": set(owner), "who": "labmon 之外的进程", "kept": False, "cut": None, "brief": False,
+                "gholds": {}, "gangs": {}, "gfirst": {}}
+
+    def test_reserve_limit_and_nice_pure_helpers(self):
+        # 唯一实现纯函数边界：17 核 1 卡留 2 核、16 核 2 卡留 4 核、3 核 1 卡配额太小不扣、无 GPU 机不扣不降 nice
+        c1, c2, c4 = [self.card(0)], [self.card(0), self.card(1)], [self.card(i) for i in range(4)]
+        self.assertEqual(self.m.gpu_cpu_reserve(c1, 17), 2)
+        self.assertEqual(self.m.gpu_cpu_reserve(c2, 16), 4)
+        self.assertEqual(self.m.gpu_cpu_reserve(c4, 17), 4)       # cap // 4 封顶
+        self.assertEqual(self.m.gpu_cpu_reserve(c1, 3), 0)        # 小配额不过度挤压纯 CPU
+        self.assertEqual(self.m.gpu_cpu_reserve([], 17), 0)       # 无 GPU 主机不扣保底
+        self.assertEqual(self.m.gpu_cpu_reserve(c1, None), 0)     # 无 CPU 配额不扣
+        self.assertEqual(self.m.cpu_limit(17, ngpu=0, cards=c1), 15)
+        self.assertEqual(self.m.cpu_limit(17, ngpu=1, cards=c1), 17)
+        self.assertEqual(self.m.cpu_limit(17, ngpu=0, cards=[]), 17)
+        self.assertEqual(self.m.cpu_give(16, 17, ngpu=0, cards=c1), 15)
+        self.assertEqual(self.m.cpus_export(16, 17, ngpu=0, cards=c1), 15)
+        self.assertEqual(self.m.cpu_give(16, 17, ngpu=0, cards=[]), 16)
+        self.assertEqual(self.m.cpu_only_nice(0, c1), self.m.CPU_ONLY_NICE)
+        self.assertEqual(self.m.cpu_only_nice(1, c1), 0)
+        self.assertEqual(self.m.cpu_only_nice(0, []), 0)
+        self.assertEqual(self.m.cpu_only_nice(0, c1, hold=True), 0)
+
+    def test_17core_1gpu_cpu_only_caps_at_15_and_gpu_enters_immediately(self):
+        # 17 核 1 卡：纯 CPU 申明 cpus=16 自动封顶为 15 核（不报 nofit_cpu），后续 GPU 2 核秒进，再来的纯 CPU 1 核被保底核挡住；
+        # 超过整机容器配额 17（如 cpus=20）仍报 nofit_cpu；无 GPU 机 16 核原样放行不扣保底。
+        S = self.snap([self.card(0)], cpu_cap=17)
+        cpu16 = self.job("c16", ngpu=0, cpus=16, cpu_src="提示值")
+        n, src = self.m.cpu_need(cpu16, S)
+        self.assertEqual(n, 15)
+        self.assertIn("为 GPU 保底留 2 核，封顶为 15 核", src)
+        cs, why, res = self.m.place(cpu16, S, self.now)
+        self.assertEqual((cs, why, res), ([], None, False))
+        # 按 acct_job 记账进快照：记 15 核
+        S["jobs"].append(self.m.acct_job(cpu16, cs, self.now, self.now + 3600, S["cpu_cap"], S["cards"]))
+        self.assertEqual(S["jobs"][0]["cpu"], 15.0)
+        # 再来纯 CPU 1 核：被 2 核 GPU 保底挡住（正常排队 code=cpu）
+        c1 = self.job("c1", ngpu=0, cpus=1, cpu_src="提示值")
+        cs2, why2, res2 = self.m.place(c1, S, self.now)
+        self.assertIsNone(cs2)
+        self.assertTrue(res2)
+        self.assertEqual(S["code"], "cpu")
+        self.assertIn("为 GPU 预留 2 核", why2)
+        # GPU 任务要 2 核：直接秒进（不需要弹性放行，本来就留了 2 核）
+        g2 = self.job("g2", ngpu=1, cpus=2, cpu_src="提示值")
+        csg, whyg, resg = self.m.place(g2, S, self.now)
+        self.assertEqual([c["uuid"] for c in csg], ["GPU-a"])
+        self.assertIsNone(whyg)
+        self.assertFalse(resg)
+        self.assertIsNone(S.get("flex"))
+        # 超整机容器配额 17 的纯 CPU 申明仍报 nofit_cpu
+        S_empty = self.snap([self.card(0)], cpu_cap=17)
+        cs_big, why_big, res_big = self.m.place(self.job("c20", ngpu=0, cpus=20, cpu_src="提示值"), S_empty, self.now)
+        self.assertIsNone(cs_big)
+        self.assertFalse(res_big)
+        self.assertEqual(S_empty["code"], "nofit_cpu")
+        self.assertIn("容器配额只有 17 核", why_big)
+        # 无 GPU 主机：纯 CPU 16 核不扣保底，后续纯 CPU 1 核照进
+        S_nogpu = self.snap([], cpu_cap=17)
+        self.assertEqual(self.m.cpu_need(cpu16, S_nogpu), (16, "提示值"))
+        cs_ng, _, _ = self.m.place(cpu16, S_nogpu, self.now)
+        self.assertEqual(cs_ng, [])
+        S_nogpu["jobs"].append(self.m.acct_job(cpu16, cs_ng, self.now, None, S_nogpu["cpu_cap"], S_nogpu["cards"]))
+        self.assertEqual(S_nogpu["jobs"][0]["cpu"], 16.0)
+        self.assertEqual(self.m.place(c1, S_nogpu, self.now)[0], [])
+
+    def test_multi_cpu_only_and_gpu_already_using_reserve(self):
+        # 多个纯 CPU 任务合占不越过 15 核；当在跑 GPU 任务已占 >= 2 核时，不重复扣保底、不浪费余核
+        S = self.snap([self.card(0)], [self.ran("c1", [], cpu=6.0, ngpu=0), self.ran("c2", [], cpu=6.0, ngpu=0)], cpu_cap=17)
+        self.assertEqual(self.m.cpu_free_for(self.job("c3", ngpu=0, cpus=4), S), (3.0, 2.0))
+        self.assertIsNone(self.m.place(self.job("c3", ngpu=0, cpus=4), S, self.now)[0])
+        self.assertEqual(self.m.place(self.job("c3", ngpu=0, cpus=3), S, self.now)[0], [])
+        # 8 核 1 卡、GPU 已用 6 核（>= 2 核保底）：剩余 2 核纯 CPU 可直接用
+        S_gpu = self.snap([self.card(0)], [self.ran("g", ["GPU-a"], cpu=6.0, ngpu=1)], cpu_cap=8)
+        self.assertEqual(self.m.cpu_free_for(self.job("c2", ngpu=0, cpus=2), S_gpu), (2.0, 0.0))
+        self.assertEqual(self.m.place(self.job("c2", ngpu=0, cpus=2), S_gpu, self.now)[0], [])
+
+    def test_gpu_flex_admission_and_anti_oversell_guards(self):
+        # 17 核 1 卡：纯 CPU 实测超核占 16.8 核（cpu_free=0.2），GPU 空闲：
+        # 1 核或 2 核 GPU 任务在保底 2 核范围内弹性放行并带 S["flex"] 说明；
+        # 超保底（4 核）、累计已达 2 核、目标卡非空、非纯 CPU 挤满、外部占满、整机独占均不触发弹性放行。
+        S = self.snap([self.card(0)], [self.ran("c_over", [], cpu=16.8, ngpu=0)], cpu_cap=17)
+        self.assertAlmostEqual(self.m.cpu_free(S), 0.2, 2)
+        cs, why, res = self.m.place(self.job("g1", ngpu=1, cpus=1), S, self.now)
+        self.assertEqual([c["uuid"] for c in cs], ["GPU-a"])
+        self.assertIsNone(why)
+        self.assertFalse(res)
+        self.assertIn("弹性放行", S["flex"])
+        self.assertIn("1/2 核", S["flex"])
+        # 超保底核（要 3 核 > 2 核）：拒绝
+        cs3, why3, res3 = self.m.place(self.job("g3", ngpu=1, cpus=3), S, self.now)
+        self.assertIsNone(cs3)
+        self.assertTrue(res3)
+        self.assertIsNone(S["flex"])
+        self.assertIn("CPU 不够", why3)
+        # 整机独占：拒绝弹性放行
+        self.assertIsNone(self.m.place(self.job("gx", ngpu=1, cpus=1, excl="host"), S, self.now)[0])
+        # 卡上已有 GPU 任务（卡不空闲）：不弹性放行同卡硬塞
+        S_busy_card = self.snap([self.card(0)], [self.ran("c_over", [], cpu=16.8, ngpu=0), self.ran("g0", ["GPU-a"], cpu=1.0, ngpu=1)], cpu_cap=17)
+        self.assertIsNone(self.m.place(self.job("g_more", ngpu=1, cpus=1), S_busy_card, self.now)[0])
+        # 2 卡 16 核（rsv=4）：卡 0 忙着 2 核，纯 CPU 超核到 13.8 核，卡 1 空闲 -> 2 核 GPU 弹性放行到卡 1（共 4/4 核），再来 1 核超过 4 核拒绝
+        S2 = self.snap([self.card(0), self.card(1)],
+                       [self.ran("g0", ["GPU-a"], cpu=2.0, ngpu=1), self.ran("c_over", [], cpu=13.8, ngpu=0)], cpu_cap=16)
+        cs_c1, _, _ = self.m.place(self.job("g_c1", ngpu=1, cpus=2), S2, self.now)
+        self.assertEqual([c["uuid"] for c in cs_c1], ["GPU-b"])
+        self.assertIn("4/4 核", S2["flex"])
+        S2["jobs"].append(self.m.acct_job(self.job("g_c1", ngpu=1, cpus=2), cs_c1, self.now, None, S2["cpu_cap"], S2["cards"]))
+        self.assertIsNone(self.m.place(self.job("g_over", ngpu=1, cpus=1), S2, self.now)[0])
+        # 非纯 CPU 挤满（GPU 自己占满 16.8 核，无纯 CPU 任务）：不弹性放行
+        S_gpu_full = self.snap([self.card(0), self.card(1)], [self.ran("g_big", ["GPU-a"], cpu=16.8, ngpu=1)], cpu_cap=17)
+        self.assertIsNone(self.m.place(self.job("g_wait", ngpu=1, cpus=1), S_gpu_full, self.now)[0])
+        # 借来主机/外部进程占满（cpu_room=0.5 < n=1）：不弹性放行，绝不挤占外部或对方预留
+        S_ext = self.snap([self.card(0)], [self.ran("c_over", [], cpu=16.0, ngpu=0)], cpu_cap=17, cpu_room=0.5)
+        self.assertIsNone(self.m.place(self.job("g1", ngpu=1, cpus=1), S_ext, self.now)[0])
+
+    def test_simulate_fit_and_offers_consistent_with_place(self):
+        # 推演（simulate）、fit（FitHost.open）与真放行（place）共用同一套纯函数，结论一致
+        S = self.snap([self.card(0)], [self.ran("c_over", [], cpu=16.8, ngpu=0, t1=self.now + 3600)], cpu_cap=17)
+        # 1) 推演：1 核 GPU 任务在 t=now 立刻弹性放行，3 核 GPU 任务排在纯 CPU 结束（t=now+3600）之后
+        q_g1 = {"key": "q1", "kind": "queue", "project": "pb", "allowed": None, "since": self.now, "jobs": [self.job("g1", ngpu=1, cpus=1, dur=30.0)]}
+        q_g3 = {"key": "q3", "kind": "queue", "project": "pc", "allowed": None, "since": self.now, "jobs": [self.job("g3", ngpu=1, cpus=3, dur=30.0)]}
+        out, stuck = self.m.simulate(self.now, S, [q_g1, q_g3], set())
+        self.assertEqual(stuck, {})
+        by_name = {e["name"]: e["t0"] for e in out}
+        self.assertEqual(by_name["g1"], self.now)
+        self.assertEqual(by_name["g3"], self.now + 3600)
+        # 2) 推演：空 17 核 1 卡机上纯 CPU 申明 16 核与 GPU 2 核同时在 t=now 放行，纯 CPU 记 15 核、第二个纯 CPU 排在其后
+        S0 = self.snap([self.card(0)], [], cpu_cap=17)
+        q_c1 = {"key": "qc1", "kind": "queue", "project": "pa", "allowed": None, "since": self.now, "jobs": [self.job("c16", ngpu=0, cpus=16, dur=60.0)]}
+        q_c2 = {"key": "qc2", "kind": "queue", "project": "pa", "allowed": None, "since": self.now, "jobs": [self.job("c2", ngpu=0, cpus=1, dur=10.0)]}
+        q_g2 = {"key": "qg2", "kind": "queue", "project": "pb", "allowed": None, "since": self.now, "jobs": [self.job("g2", ngpu=1, cpus=2, dur=30.0)]}
+        out2, stuck2 = self.m.simulate(self.now, S0, [q_c1, q_c2, q_g2], set())
+        self.assertEqual(stuck2, {})
+        t0s = {e["name"]: e["t0"] for e in out2}
+        self.assertEqual((t0s["c16"], t0s["g2"], t0s["c2"]), (self.now, self.now, self.now + 3600))
+        # 3) FitHost.open 与真放行一致：17 核 1 卡空机，纯 CPU cpus=16（有历史记录避免 solo_host）放行并记 15 核，随后 GPU 2 核放得下
+        st = {"t": self.now, "info": {"gpus": [{"i": 0, "uuid": "GPU-a", "name": "fake", "total": 46068.0, "free": 45000.0}],
+                                      "mem": {"limit": 100.0}, "cpu_quota": 17.0, "nproc": 64},
+              "room": {"ram": 90.0, "margin": 8.0, "gpus": {"GPU-a": 45000.0}, "cpu": 17.0, "cpu_cap": 17, "other_cpu": 0.0, "keep": {}, "owner": []},
+              "running": [], "external": [], "gpu_procs": [], "limits": {}, "overrides": [], "util10": {}}
+        hist = [usage_row("c16", "pa", 100, 700, ram_peak=1.0, cores_peak=15.0, gpus=[]),
+                usage_row("g2", "pb", 100, 700, ram_peak=1.0, vram_peak=2048.0, cores_peak=2.0, gpus=["GPU-a"])]
+        fh = self.m.FitHost("t", st, hist, {})
+        q_cpu = {"key": "q_cpu", "root": str(self.d), "jobs": "q.txt", "project": "pa", "gpus": None, "_host": "t"}
+        q_gpu = {"key": "q_gpu", "root": str(self.d), "jobs": "g.txt", "project": "pb", "gpus": None, "_host": "t"}
+        r1, e1, x1 = fh.req(q_cpu, "c16", "true   # gpus=0 cpus=16 ram=1", None)
+        say1, why1 = fh.open(r1, e1, x1, self.now)
+        self.assertIsNone(why1)
+        self.assertIn("15 核", say1)
+        self.assertEqual(fh.S["jobs"][0]["cpu"], 15.0)
+        r2, e2, x2 = fh.req(q_gpu, "g2", "true   # gpus=1 cpus=2 vram=2 ram=1", None)
+        say2, why2 = fh.open(r2, e2, x2, self.now)
+        self.assertIsNone(why2)
+        self.assertIn("卡 0", say2)
+        # 4) FitHost 在纯 CPU 实测超核 16.8 核时也能对 1 核 GPU 任务弹性放行
+        st_over = dict(st, room=dict(st["room"], cpu=0.2),
+                       running=[{"name": "c_over", "project": "pa", "t0": self.now - 60, "gpus": [], "acct": {"ram": 1.0, "vram": 0, "cpu": 16.8}, "use": {"cores": 16.8}}])
+        fh_over = self.m.FitHost("t", st_over, hist, {})
+        r3, e3, x3 = fh_over.req(q_gpu, "g2", "true   # gpus=1 cpus=2 vram=2 ram=1", None)
+        say3, why3 = fh_over.open(r3, e3, x3, self.now)
+        self.assertIsNone(why3)
+        self.assertIn("卡 0", say3)
+
+    def test_start_and_slot_apply_capped_labmon_cpus_and_nice(self):
+        # 17 核 1 卡启动纯 CPU 清单任务：LABMON_CPUS 自动封顶 15 且进程 nice 提升 +10；
+        # 无 GPU 机启动纯 CPU：LABMON_CPUS 保持 16 且不降 nice；
+        # 缺少 nice 命令与 setpriority 权限受限时静默降级不崩启动；单元申请 .ok 带 nice 并在 exec 前应用。
+        w = self.m.Worker("t")
+        os.makedirs(w.p.dir, exist_ok=True)
+        root = self.d / "proj"
+        (root / "jobs").mkdir(parents=True)
+        (root / "state").mkdir()
+        (root / "logs").mkdir()
+        q = {"key": "q", "root": str(root), "jobs": "jobs/q.txt", "jobs_path": str(root / "jobs" / "q.txt"),
+             "state": str(root / "state"), "logs": str(root / "logs"), "env": None, "project": "pa", "gpus": None, "stop": "term", "par": 1}
+        base_nice = os.nice(0)
+        py_cmd = "%s -c 'import os; print(os.environ[\"LABMON_CPUS\"], os.nice(0))'" % sys.executable
+
+        def run_one(name, gpus_info, ngpu=0, cpus=16):
+            w.info = {"gpus": gpus_info, "cpu_quota": 17.0, "mem": {"limit": 100.0, "anon": 5.0}}
+            job = {"key": name, "name": name, "cmd": py_cmd + " > %s.out" % name, "ngpu": ngpu, "vram": 0.0, "ram": 1.0,
+                   "cpus": cpus, "excl": None, "tag": None, "est": {"vram": 0.0, "ram": 1.0, "cpus": cpus, "cpu_src": "提示值"}}
+            w.running.clear()
+            (root / "state" / "current").unlink(missing_ok=True)
+            self.assertIsNone(w.start(q, job, [{"i": 0, "uuid": "GPU-a"}] if ngpu else []))
+            t = time.time()
+            while not (root / "state" / (name + ".rc")).exists() and time.time() - t < 10:
+                time.sleep(0.05)
+            self.assertEqual((root / "state" / (name + ".rc")).read_text().strip(), "0")
+            parts = (root / (name + ".out")).read_text().strip().split()
+            return int(parts[0]), int(parts[1])
+
+        gpu_list = [{"i": 0, "uuid": "GPU-a", "name": "fake", "total": 46068.0, "free": 45000.0}]
+        # GPU 主机 + 纯 CPU 16 核 -> 封顶 15 核、nice +10
+        cpus_gpu_host, nice_gpu_host = run_one("cpu_on_gpu", gpu_list, ngpu=0, cpus=16)
+        self.assertEqual(cpus_gpu_host, 15)
+        self.assertGreaterEqual(nice_gpu_host, min(19, base_nice + self.m.CPU_ONLY_NICE))
+        # GPU 主机 + GPU 任务 16 核 -> 不封顶、不降 nice
+        cpus_gpu_job, nice_gpu_job = run_one("gpu_on_gpu", gpu_list, ngpu=1, cpus=16)
+        self.assertEqual(cpus_gpu_job, 16)
+        self.assertEqual(nice_gpu_job, base_nice)
+        # 无 GPU 主机 + 纯 CPU 16 核 -> 不封顶、不降 nice
+        cpus_no_gpu, nice_no_gpu = run_one("cpu_on_cpu", [], ngpu=0, cpus=16)
+        self.assertEqual(cpus_no_gpu, 16)
+        self.assertEqual(nice_no_gpu, base_nice)
+        # 缺少 nice 命令且 setpriority 报权限拒绝时，任务依然正常启动成功
+        with mock.patch("shutil.which", return_value=None), mock.patch("os.setpriority", side_effect=PermissionError("denied")):
+            cpus_fb, nice_fb = run_one("cpu_fallback", gpu_list, ngpu=0, cpus=16)
+        self.assertEqual(cpus_fb, 15)
+        self.assertEqual(nice_fb, base_nice)
+        # 单元申请 grant：GPU 机纯 CPU 写 nice=10 与封顶 cpus=15 到 .ok；无 GPU 机不写 nice
+        os.makedirs(self.m.SLOTS, exist_ok=True)
+        w.info = {"gpus": gpu_list, "cpu_quota": 17.0}
+        r_slot = {"key": "slot:s1", "id": "s1", "pid": os.getpid(), "project": "pa", "name": "sc1", "ngpu": 0,
+                  "est": {"vram": 0.0, "ram": 1.0, "cpus": 16, "cpu_src": "提示值"}}
+        w.grant(r_slot, [])
+        ok1 = json.loads((Path(self.m.SLOTS) / "s1.ok").read_text())
+        self.assertEqual((ok1["cpus"], ok1["nice"]), (15, self.m.CPU_ONLY_NICE))
+        w.info = {"gpus": [], "cpu_quota": 17.0}
+        r_slot2 = dict(r_slot, key="slot:s2", id="s2", name="sc2")
+        w.grant(r_slot2, [])
+        ok2 = json.loads((Path(self.m.SLOTS) / "s2.ok").read_text())
+        self.assertEqual(ok2["cpus"], 16)
+        self.assertNotIn("nice", ok2)
+
+    def test_cpu_line_shows_gpu_reserve_only_when_gpu_present(self):
+        # cpu_line 在有 GPU 主机展示保底核与纯 CPU 上限及剩余；无 GPU 主机保持原格式
+        st_gpu = {"info": {"cpu_quota": 17.0, "nproc": 64, "gpus": [{"i": 0, "uuid": "GPU-a"}]},
+                  "room": {"cpu": 2.0, "cpu_cap": 17},
+                  "running": [{"name": "c16", "gpus": [], "acct": {"cpu": 15.0}}]}
+        line = self.m.cpu_line(st_gpu)
+        self.assertIn("为 GPU 保底留 2 核，纯 CPU 上限 15 核", line)
+        self.assertIn("还能给新任务 2 核（纯 CPU 最多 0 核）", line)
+        # GPU 任务已用满 2 核保底时不再重复附括号
+        st_gpu_used = dict(st_gpu, room={"cpu": 11.0, "cpu_cap": 17},
+                           running=[{"name": "g6", "gpus": ["GPU-a"], "acct": {"cpu": 6.0}}])
+        line2 = self.m.cpu_line(st_gpu_used)
+        self.assertIn("为 GPU 保底留 2 核，纯 CPU 上限 15 核", line2)
+        self.assertNotIn("纯 CPU 最多", line2)
 
 
 if __name__ == "__main__":

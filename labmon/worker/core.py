@@ -306,36 +306,51 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             script = ("echo %d > /proc/self/oom_score_adj 2>/dev/null; " % _C.GUEST_ADJ if self.guest() else "") \
                 + 'set -a; [ -n "$1" ] && . "$1"; set +a; ( eval "$2" ); echo $? > "$3"'
             args = ["bash", "-c", script, "labmon-job:" + job["name"], q["env"] or "", job["cmd"], rcf]
+            nice_inc = _S.cpu_only_nice(job["ngpu"], self.info.get("gpus") or (), _C.is_hold(job["name"]))
+            use_nice_cmd = bool(nice_inc and shutil.which("nice"))
+            if use_nice_cmd:
+                args = ["nice", "-n", str(nice_inc)] + args
             with open(os.path.join(lg, job["name"] + ".log"), "a") as out:
                 out.write("===== %s labmon 开始（GPU %s）=====\n" % (_C.now_str(), ",".join(str(c["i"]) for c in gpus) or "无"))   # 分隔行，见 START_RE
                 out.flush()
                 pr = subprocess.Popen(args,
                                       cwd=q["root"], env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
                                       start_new_session=True)
+            if nice_inc and not use_nice_cmd:
+                try:
+                    cur_nice = os.getpriority(os.PRIO_PROCESS, pr.pid)
+                    os.setpriority(os.PRIO_PGRP, pr.pid, min(19, cur_nice + nice_inc))
+                except (AttributeError, OSError):
+                    pass
             t0 = _C.time.time()
             # 一行一个在跑的任务（并行清单有几行，#147）；放行的主机：别的主机据此不动它（run_elsewhere）
             cf = os.path.join(st, "current")
             _C.write(cf, "".join(l + "\n" for l in (_C.read(cf) or "").splitlines() if l.split()) + "%s %d %s %s\n" % (job["name"], pr.pid, _C.now_str(t0), self.host))
             self.par_note(q["key"], t0, 1)            # 往上加行的：加行门槛的间隔从这次开跑算；补位的不算（par_gate，#176）
         gtxt = "，".join("GPU %d %s" % (c["i"], c["uuid"]) for c in gpus)
-        self.qlog(q, "开始 %s" % job["name"] + ("（%s）" % gtxt if gtxt else ""))
+        notes = ([gtxt] if gtxt else []) + ([job["flex"]] if job.get("flex") else []) + (["降优先级 nice +%d" % nice_inc] if nice_inc else [])
+        self.qlog(q, "开始 %s" % job["name"] + ("（%s）" % "；".join(notes) if notes else ""))
         k = _Q.run_key(q, job["name"])
         self.running[k] = dict(job, kind="queue", key=k, pid=pr.pid, t0=t0, q=q, gpus=[c["uuid"] for c in gpus], use={},
                                       project=q["project"], stop=q["stop"], oom0=_M.oom_kills(), fc0=_M.num(_M.cg("memory/memory.failcnt")))
-        self.event("start", "开始 %s%s%s" % (job["name"], "（%s）" % gtxt if gtxt else "",
-                                           "，独占%s" % {"gpu": "卡", "host": "整机"}[job["excl"]] if job.get("excl") else ""),
+        ev_extra = ("；" + job["flex"] if job.get("flex") else "") + ("，降优先级 nice +%d" % nice_inc if nice_inc else "")
+        self.event("start", "开始 %s%s%s%s" % (job["name"], "（%s）" % gtxt if gtxt else "",
+                                              "，独占%s" % {"gpu": "卡", "host": "整机"}[job["excl"]] if job.get("excl") else "", ev_extra),
                    name=job["name"], project=q["project"], queue=q["jobs"])
         return None
 
     def grant(self, r, gpus):
         """放行一次单元申请：写 .ok（含选中的卡），申请方据此设 CUDA_VISIBLE_DEVICES 后 exec 原命令。"""
         base = os.path.join(_C.SLOTS, r["id"])
+        nice_inc = _S.cpu_only_nice(r["ngpu"], self.info.get("gpus") or (), _C.is_hold(r["name"]))
         _C.write(base + ".ok", json.dumps({"gpus": [c["uuid"] for c in gpus], "t": _C.time.time(), "cpus": self.cpus_for(r),
-                                        **({"adj": _C.GUEST_ADJ} if self.guest() else {})}))
+                                        **({"adj": _C.GUEST_ADJ} if self.guest() else {}),
+                                        **({"nice": nice_inc} if nice_inc else {})}))
         if os.path.exists(base + ".why"):
             os.remove(base + ".why")
         self.running[r["key"]] = dict(r, t0=_C.time.time(), gpus=[c["uuid"] for c in gpus], use={}, pstart=_C.pstart(r["pid"]))
-        self.event("grant", "放行 %s 的单元 %s（%s）" % (r["project"], r["name"], "，".join("GPU %d" % c["i"] for c in gpus) or "不用 GPU"),
+        extra = ("；" + r["flex"] if r.get("flex") else "") + ("，降优先级 nice +%d" % nice_inc if nice_inc else "")
+        self.event("grant", "放行 %s 的单元 %s（%s）%s" % (r["project"], r["name"], "，".join("GPU %d" % c["i"] for c in gpus) or "不用 GPU", extra),
                    name=r["name"], project=r["project"])
 
     def lane(self, k):
@@ -905,6 +920,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             return None
         cards, why, res = _S.place(x, S, _C.time.time(), pre)
         r["code"] = S["code"]
+        r["flex"] = S.get("flex")
         if cards is None:
             return why, res
         return (launch or self.launch)(r, cards)

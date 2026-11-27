@@ -64,6 +64,7 @@ NFS 共享盘（如 `/root/data1`）数据持久；容器本地盘在续租或�
   - 容器配额计算以 `labmon worker status <主机>` 的 CPU 配额与可用核为准，不看宿主机 `nproc`。
   - 多线程或自定义 DataLoader 的任务首次运行务必声明 `cpus=`（建议取配额 ÷ 计划并发车道数）。若未设置且无历史，worker 默认仅按 1 核记账。
   - 任务代码应读取环境变量 `$LABMON_CPUS` 来设置线程数和 worker 进程数；worker 默认会将 `OMP_NUM_THREADS` 等设为 `$LABMON_CPUS`。
+  - 带 GPU 的主机会自动为 GPU 任务预留保底 CPU 核（每卡 2 核、至多容器配额 `1/4`）；纯 CPU（`gpus=0`）声明核数超过纯 CPU 上限时会自动封顶并导出封顶后的 `$LABMON_CPUS`，启动时自动降优先级（`nice +10`），不会因此卡死，无需为了绕过排队填 `cpus=0` 或私自后台起进程。
   - 跑满 3 次实测峰值不到一半时 worker 会自动收敛记账，不必逐行手工修改。
 
 ## 排到哪台、开不开并行

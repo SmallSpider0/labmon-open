@@ -198,7 +198,7 @@ class FitHost:
                 "；它单跑时利用率约 %d%%" % e["util"] if e["util"] is not None else "", "；同卡 %d 条时约要 %.0f 分钟（%s）" % (k, d["min"], d["src"]) if d else "")
         else:
             say = "不用 GPU，内存要 %.0f GiB（%s）、%d 核（%s）" % (rneed, rsrc, need, csrc)
-        S["jobs"].append(_S.acct_job(x, cs, t, None, S["cpu_cap"]))
+        S["jobs"].append(_S.acct_job(x, cs, t, None, S["cpu_cap"], S["cards"]))
         self.lanes.append((r["name"], [y["i"] for y in cs]))
         if hint:                                          # 没有实测的不与别的同卡（同一次 fit 后面分的也算）
             self.solo.update({y["uuid"]: r["name"] for y in cs})

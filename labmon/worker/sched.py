@@ -45,11 +45,11 @@ def cut_min(x):
     return x["cut"] if "cut" in x else x["dur"] and x["dur"] * _C.DUR_MARGIN
 
 
-def acct_job(x, cs, t, t1, cap):
-    """开跑的（推演里）或留着资源的（成组成员，place）任务在快照 jobs 里的记账：显存按估计值记在选中的卡 cs 上（MB）、内存（GiB）、核数（cpu_give 封顶到 cap）。
-    t、t1 是开始与预计结束（不知道为 None）。simulate 的 launch 与 place 的成组留资源共用。"""
+def acct_job(x, cs, t, t1, cap, cards=()):
+    """开跑的（推演里）或留着资源的（成组成员，place）任务在快照 jobs 里的记账：显存按估计值记在选中的卡 cs 上（MB）、内存（GiB）、核数（cpu_give 封顶到该任务的上限）。
+    t、t1 是开始与预计结束（不知道为 None）。simulate 的 launch、place 的成组留资源、fit 与 offers 的 lane_room 共用。"""
     return {"key": x["key"], "lane": x.get("lane") or x["key"], "name": x["name"], "project": x["project"], "t0": t, "t1": t1, "gpus": [c["uuid"] for c in cs],
-            "vram": {c["uuid"]: x["vram"] * 1024 for c in cs}, "ram": x["ram"], "cpu": float(cpu_give(x["cpus"], cap)),
+            "vram": {c["uuid"]: x["vram"] * 1024 for c in cs}, "ram": x["ram"], "cpu": float(cpu_give(x["cpus"], cap, x["ngpu"], cards)),
             "excl": x["excl"], "tag": x["tag"], "hold": x["hold"], "ngpu": x["ngpu"], "use": {}, "cards": x["cards"]}
 
 
@@ -97,28 +97,146 @@ def ram_free(S):
     return None if S["room"] is None else S["room"] - sum(j["ram"] for j in S["jobs"])
 
 
+def job_ngpu(j):
+    """任务或请求用几张 GPU（占位任务为 0）：优先读显式 ngpu；否则有 gpus 字段时按其长度认；都没写时按默认 1 张 GPU。"""
+    if j.get("hold") or _C.is_hold(j.get("name")):
+        return 0
+    if "ngpu" in j and j["ngpu"] is not None:
+        return int(j["ngpu"])
+    if "gpus" in j and j["gpus"] is not None:
+        return len(j["gpus"])
+    return 1
+
+
+def gpu_cpu_reserve(cards, cap):
+    """有 GPU 的主机为 GPU 任务预留的保底 CPU 核数（真放行、推演、fit、offers、开跑导出与记账共用，#225）：
+    无 CPU 配额或无 GPU（cards 为空或 0）为 0；有卡为 min(max(2, 卡数 × 2), cap // 4)。"""
+    if cap is None or cap <= 0:
+        return 0
+    n = cards if isinstance(cards, int) else len(cards or ())
+    return min(max(_C.GPU_CPU_RESERVE_PER_CARD, n * _C.GPU_CPU_RESERVE_PER_CARD), cap // _C.GPU_CPU_RESERVE_DIV) if n > 0 else 0
+
+
+def cpu_limit(cap, ngpu=1, cards=()):
+    """任务在这台主机上的 CPU 核数封顶上限（#225）：没设配额为 None；GPU 任务（ngpu > 0）取配额上限 cap；
+    纯 CPU 任务（ngpu == 0）在有 GPU 的主机上扣掉 GPU 保底核数（gpu_cpu_reserve），至少为 1。"""
+    if cap is None:
+        return None
+    if (ngpu or 0) > 0:
+        return cap
+    return max(1, cap - gpu_cpu_reserve(cards, cap))
+
+
+def cpu_only_nice(ngpu, cards, hold=False):
+    """GPU 主机上启动非占位纯 CPU 任务时的 nice 增量（清单 Worker.start 与单元 Worker.grant / slot_main 共用，#225）：
+    有 GPU 且不用卡返回 CPU_ONLY_NICE（10）；无 GPU 机、GPU 任务与占位任务返回 0。"""
+    if hold or (ngpu or 0) > 0:
+        return 0
+    n = cards if isinstance(cards, int) else len(cards or ())
+    return _C.CPU_ONLY_NICE if n > 0 else 0
+
+
 def cpu_free(S):
     """快照里还能给新任务多少核（同 ram_free）：labmon 任务全停时还能给的（cpu_room）减去在跑任务的记账；读不到配额为 None（不记 CPU）。"""
     return None if S["cpu_room"] is None else S["cpu_room"] - sum(j["cpu"] for j in S["jobs"])
 
 
+def cpu_room_for(x, S):
+    """labmon 全停时能给请求 x 的核数（nofit、cpu_need 共用，#225）：读不到配额为 None；
+    GPU 任务取 S["cpu_room"]；纯 CPU 任务在有 GPU 的主机上扣除 GPU 保底核数（gpu_cpu_reserve）。"""
+    if S["cpu_room"] is None:
+        return None
+    if job_ngpu(x) > 0:
+        return S["cpu_room"]
+    return S["cpu_room"] - gpu_cpu_reserve(S["cards"], S["cpu_cap"])
+
+
+def cpu_free_for(x, S):
+    """快照里此刻还能给请求 x 多少核与尚未填满的 GPU 保底核数 (cores, rsv_left)（place、fit、推演共用，#225）：
+    读不到配额为 (None, 0.0)。GPU 任务沿用 cpu_free(S)；纯 CPU 任务在有 GPU 保底时，
+    若在跑 GPU 任务已记核数不足 rsv，则扣掉尚未填满的 (rsv - gpu_used) 给 GPU 保底（等价于 cpu_room - cpu_only_used - max(gpu_used, rsv)）；
+    在跑 GPU 任务已用满或超过 rsv 时不重复扣除，不浪费余核。"""
+    cores = cpu_free(S)
+    if cores is None:
+        return None, 0.0
+    if job_ngpu(x) > 0:
+        return cores, 0.0
+    rsv = gpu_cpu_reserve(S["cards"], S["cpu_cap"])
+    if rsv <= 0:
+        return cores, 0.0
+    gpu_used = sum(j["cpu"] for j in S["jobs"] if not j["hold"] and job_ngpu(j) > 0)
+    rsv_left = max(0.0, rsv - gpu_used)
+    return cores - rsv_left, rsv_left
+
+
+def gpu_cpu_flex(x, S, n, blocked=()):
+    """纯 CPU 实测超核挤满 cpu_free 且 GPU 空闲时的有限弹性放行（真放行、推演、fit、offers 共用，#225）：
+    纯 CPU 任务在 GPU 主机已自动降 nice，若其超核把记账挤满而 GPU 空着，允许低核 GPU 任务在保底核范围内放行。
+    返回 (可用空闲卡 UUID 集合, 原因说明)，不满足为 (None, None)。硬护栏：
+    - 仅限非占位、非整机独占的 GPU 任务（ngpu > 0, n > 0），且主机有配额与保底核（rsv > 0）；
+    - 确实存在纯 CPU 任务挤占 GPU 保底区（cpu_only_used > max(0, cpu_room - rsv)）；
+    - 在跑与新放行 GPU 任务总记账核数不超过保底核（gpu_used + n <= rsv，防无限超卖），且不超过 cpu_room（不挤占外部进程或借来主机预留）；
+    - 至少有 ngpu 张真正空闲且显存够的卡（无非占位 labmon 任务、无旧 gpu_queue.sh、无外部 GPU 进程、不在 owner/blocked 中）。"""
+    if job_ngpu(x) <= 0 or x.get("excl") == "host" or n <= 0:
+        return None, None
+    cap, room = S["cpu_cap"], S["cpu_room"]
+    rsv = gpu_cpu_reserve(S["cards"], cap)
+    if cap is None or room is None or rsv <= 0:
+        return None, None
+    gpu_used = sum(j["cpu"] for j in S["jobs"] if not j["hold"] and job_ngpu(j) > 0)
+    cpu_only_used = sum(j["cpu"] for j in S["jobs"] if not j["hold"] and job_ngpu(j) == 0)
+    if cpu_only_used <= max(0.0, room - rsv) + 1e-6:
+        return None, None
+    if gpu_used + n > rsv + 1e-6 or gpu_used + n > room + 1e-6:
+        return None, None
+    busy = ({u for j in S["jobs"] if not j["hold"] for u in j["gpus"]}
+            | {u for j in S["ext"] for u in j.get("gpus") or []}
+            | {g["uuid"] for g in S["gp"] if g.get("owner") == "other"}
+            | {c["uuid"] for c in S["cards"] if c.get("other", 0) > 0}
+            | set(S["owner"]) | set(blocked))
+    free = card_free(S)
+    idle = {c["uuid"] for c in S["cards"]
+            if (x["allowed"] is None or c["i"] in x["allowed"])
+            and c["uuid"] not in busy
+            and free.get(c["uuid"], 0.0) >= card_need(x, c)}
+    if len(idle) < x["ngpu"]:
+        return None, None
+    note = "纯 CPU 实测占 %.1f 核挤满配额，GPU 空闲：按保底 %d 核弹性放行（GPU 共 %g/%d 核）" % (cpu_only_used, rsv, round(gpu_used + n, 1), rsv)
+    return idle, note
+
+
 def cpu_need(x, S):
-    """请求 x 放行要几个核与原因里写的来源（place、nofit、fit 用）：estimate 给的 cpus；按历史估的（不是 cpus= 写的）超过 labmon 全停时能给的
-    （cpu_room，已扣 labmon 之外的与给对方留的），按这整份算，来源里写明估计与封顶后的核数（同 card_need：一次吃满配额的峰值 ×1.1 比配额还大，
-    不封顶就永远排不上；没有别的 labmon 任务时照放）。写了 cpus=0 的（与占位任务）是 0：不记账，CPU 再紧也不挡它。"""
+    """请求 x 放行要几个核与原因里写的来源（place、nofit、fit 用）：estimate 给的 cpus；
+    写了 cpus=0 的（与占位任务）是 0：不记账，CPU 再紧也不挡它。
+    有 GPU 主机上的纯 CPU 任务（ngpu == 0）：清单写的提示值若未超容器总配额 cpu_cap、仅超扣除 GPU 保底核后的纯 CPU 上限
+    cpu_only_cap，像 cpu_give 一样自动封顶为 cpu_only_cap（不会因写 cpus=16 永远 nofit_cpu 卡死，#225）；超过 cpu_cap 仍不封顶（报 nofit_cpu）。
+    按历史估的（不是 cpus= 写的）超过 labmon 全停时能给该任务的核数（cpu_room_for），按这整份封顶（不超过 cpu_limit），来源里写明估计与封顶后的核数。"""
     n, src = x["cpus"], x["cpu_src"]
-    if src == "提示值" or S["cpu_room"] is None:
+    if n <= 0 or S["cpu_room"] is None:
         return n, src
-    m = max(1, int(S["cpu_room"] + 1e-6))
-    return (n, src) if n <= m else (m, "%s；估计 %d 核，封顶为 %d 核（labmon 全停时能给的）" % (src, n, m))
+    ngpu, cap = job_ngpu(x), S["cpu_cap"]
+    rsv = 0 if ngpu > 0 else gpu_cpu_reserve(S["cards"], cap)
+    lim = cpu_limit(cap, ngpu, S["cards"])
+    if src == "提示值":
+        if rsv > 0 and lim is not None and cap is not None and lim < n <= cap:
+            return lim, "%s；声明 %d 核，为 GPU 保底留 %d 核，封顶为 %d 核" % (src, n, rsv, lim)
+        return n, src
+    room = cpu_room_for(x, S)
+    m = max(1, int(room + 1e-6))
+    if lim is not None:
+        m = min(m, lim)
+    if n <= m:
+        return n, src
+    note = "为 GPU 保底留 %d 核，纯 CPU 上限" % rsv if rsv > 0 and lim is not None and m == lim and int(room + 1e-6) >= lim else "labmon 全停时能给的"
+    return m, "%s；估计 %d 核，封顶为 %d 核（%s）" % (src, n, m, note)
 
 
-def cpu_held(S, cores, n):
+def cpu_held(S, cores, n, rsv_left=0.0):
     """因记账不够放不下时：原因代码与“核被谁记着”的说明（place、fit 用）。返回 (code, held 文字)。
     还没回收的在跑任务（开跑不满 CPU_WARM_S，记的是估计）记账比此刻实测多出的核（多 0.5 核以上的才列）加回去就够 n 核的是 cpu_est
     （记账挡住、实际空着，满 10 分钟会回收，要告警），否则 cpu（核真被用着，正常排队）。已回收的记账就是近期窗口核数的峰值，
     此刻在两次冒尖之间低于它也不算“记得多”（#86）。推演里开跑的任务没有实测，原因只要短的、也不告警，口径不影响。
-    S 要 jobs[{cpu 记账核数, use}]、cpu_cap、cpu_room、kept。"""
+    S 要 jobs[{cpu 记账核数, use}]、cpu_cap、cpu_room、kept；rsv_left 是为 GPU 留着、尚未被 GPU 任务用满的保底核数（纯 CPU 被挡时写明）。"""
     run = [j for j in S["jobs"] if j["cpu"] > 0]
     over = [j for j in run if (j.get("use") or {}).get("cores") is not None and not cpu_warm(j["use"])
             and j["cpu"] - j["use"]["cores"] >= 0.5]   # 还没量到核数的（刚开跑、推演里的）与已回收的不算
@@ -129,6 +247,8 @@ def cpu_held(S, cores, n):
         held += "，其中 %d 个记账比实测多（实测共 %.1f 核）" % (len(over), sum(j["use"]["cores"] for j in over))
     if out >= 0.1:
         held += "%slabmon 之外%s占 %.1f" % ("；" if held else "：", "与给对方的预留" if S["kept"] else "", out)
+    if rsv_left >= 0.1:
+        held += "%s为 GPU 预留 %g 核" % ("；" if held else "：", round(rsv_left, 1))
     return ("cpu_est" if over and cores + spare >= n - 1e-6 else "cpu"), held
 
 
@@ -144,16 +264,18 @@ def cpu_threads(e):
     return e.get("cpus_set") or e.get("cpus", _C.CPU_DEFAULT)
 
 
-def cpus_export(cpus, cap):
+def cpus_export(cpus, cap, ngpu=1, cards=()):
     """开跑时导出的 LABMON_CPUS（给这个任务的核数）：cpu_give 再至少 1。Worker.cpus_for 与判开跑核数给多给少（cpu_fit）共用。"""
-    return max(1, cpu_give(cpus, cap))
+    return max(1, cpu_give(cpus, cap, ngpu, cards))
 
 
-def cpu_give(cpus, cap):
-    """开跑后给任务的核数：估计（estimate 的 cpus）封顶到记账上限（cpu_cap，配额向下取整；读不到配额不封顶）。运行中的记账（Worker.acct、
-    推演里开跑的）与导出的 LABMON_CPUS（再至少 1）都取它：历史是各主机一起看的，在核多的主机上量到的峰值可能比这台的配额还大，
+def cpu_give(cpus, cap, ngpu=1, cards=()):
+    """开跑后给任务的核数：估计（estimate 的 cpus）封顶到该任务在这台主机上的上限（cpu_limit：GPU 任务为 cpu_cap，
+    纯 CPU 任务在有 GPU 的主机上扣掉 GPU 保底核数，#225；读不到配额不封顶）。运行中的记账（Worker.acct、
+    推演与 fit 的 acct_job）与导出的 LABMON_CPUS（再至少 1）都取它：历史是各主机一起看的，在核多的主机上量到的峰值可能比这台的配额还大，
     照原样导出等于又让任务按宿主机的核数开进程。"""
-    return cpus if cap is None else min(cpus, cap)
+    lim = cpu_limit(cap, ngpu, cards)
+    return cpus if lim is None else min(cpus, lim)
 
 
 def hold_until(S, cards, t):
@@ -183,7 +305,7 @@ WHY = {
     "nofit_cpu": ("放不下（要的核数比容器配额还多）",
                   "放不下：要 %(cpus)d 核（%(src)s），这台容器配额只有 %(cap)d 核；换配额大的主机或少开进程"),
     "cpu_other": ("CPU 不够（labmon 之外占着）",
-                  "CPU 不够：要 %(cpus)d 核（%(src)s），配额 %(cap)d 核里 labmon 之外与给对方的预留此刻占 %(busy).1f 核，labmon 的任务全停也不够；"
+                  "CPU 不够：要 %(cpus)d 核（%(src)s），配额 %(cap)d 核里 labmon 之外与给对方的预留此刻占 %(busy).1f 核%(note)s，labmon 的任务全停也不够；"
                   "先等它们退下，一直占着再换主机或少开进程"),
     "cpu": ("CPU 不够", "CPU 不够：要 %(cpus)d 核（%(src)s），按记账只剩 %(left).1f 核（配额 %(cap)d%(held)s）"),
     "cpu_est": ("CPU 不够（记账比实测多）", "CPU 不够：要 %(cpus)d 核（%(src)s），按记账只剩 %(left).1f 核（配额 %(cap)d%(held)s）；"
@@ -236,9 +358,12 @@ def nofit(x, S):
                 if enough:
                     return why_of(S, "nofit_vram_count", vram=x["vram"], src=x["src"], ngpu=ngpu, count=enough)
                 return why_of(S, "nofit_vram", vram=x["vram"], src=x["src"], ngpu=ngpu, max=max(c["total"] for c in cs) / 1024)
-    n, src = cpu_need(x, S) if S["cpu_room"] is not None else (0, None)
-    if n > 0 and n > S["cpu_room"] + 1e-6:      # 要的比配额还多才是真放不下；没超配额、只是 labmon 之外与给对方的预留占着的另说（cpu_other：等它们退下）
-        return why_of(S, "nofit_cpu" if n > S["cpu_cap"] else "cpu_other", cpus=n, src=src, cap=S["cpu_cap"], busy=S["cpu_cap"] - S["cpu_room"])
+    room_cpu = cpu_room_for(x, S)
+    n, src = cpu_need(x, S) if room_cpu is not None else (0, None)
+    if n > 0 and n > room_cpu + 1e-6:           # 要的比配额还多才是真放不下；没超配额、只是 labmon 之外、预留或 GPU 保底核占着的另说（cpu_other：等它们退下）
+        rsv = 0 if job_ngpu(x) > 0 else gpu_cpu_reserve(S["cards"], S["cpu_cap"])
+        return why_of(S, "nofit_cpu" if n > S["cpu_cap"] else "cpu_other", cpus=n, src=src, cap=S["cpu_cap"],
+                      busy=S["cpu_cap"] - S["cpu_room"], note="，另为 GPU 保底留 %d 核" % rsv if rsv > 0 else "")
     return None
 
 
@@ -268,6 +393,7 @@ def place(x, S, t, pre=None):
         S2 = dict(S, jobs=S["jobs"] + [h["job"] for h in hs]) if hs else S
         got = _place(x, S2, t, pre)
         S["code"] = S2["code"]
+        S["flex"] = S2.get("flex")
         return got
     cs, why, res = try_(held)
     low = [h for h in held if gk and until is not None and h["gang"] != gk and h["gang"] > gk]
@@ -288,7 +414,7 @@ def place(x, S, t, pre=None):
         return None, why_of(S, "gang_unk", gang=x["gang"]), False
     gh[x["key"]] = {"key": x["key"], "gang": gk, "name": x["name"], "x": x, "cards": cs, "until": until, "seen": t,
                     "t": mine["t"] if mine and mine["name"] == x["name"] else t,
-                    "job": acct_job(x, cs, t, until + x["dur"] * 60 if x["dur"] is not None else None, S["cpu_cap"])}
+                    "job": acct_job(x, cs, t, until + x["dur"] * 60 if x["dur"] is not None else None, S["cpu_cap"], S["cards"])}
     return None, why_of(S, "gang_hold", gang=x["gang"], at=_C.now_str(until)[5:16]), False
 
 
@@ -313,6 +439,7 @@ def _place(x, S, t, pre=None):
     挡着的是 labmon 之外的进程（借来的主机上多半是对方）时不留、也不算卡在资源上：留着它们也不会走，只会把别的任务一起堵住。"""
     w = lambda code, **kw: why_of(S, code, **kw)
     S["code"] = None
+    S["flex"] = None
     if x["hold"] and not x["ngpu"]:
         return [], None, False
     if x["ngpu"] and any(card_need(x, c) < need_mb(x["vram"]) for c in S["cards"]):
@@ -351,11 +478,16 @@ def _place(x, S, t, pre=None):
     ram, rsrc = ram_need(x, S)
     if room_gib is not None and ram + S["margin"] > room_gib:
         return None, w("ram", ram=ram, src=rsrc, margin=S["margin"], left=max(0.0, room_gib)), True
-    cores = cpu_free(S)
+    cores, rsv_left = cpu_free_for(x, S)
     n, src = cpu_need(x, S) if cores is not None else (0, None)
+    flex_note = None
     if n > 0 and n > cores + 1e-6:            # 记账可能超过可放的（实测比估计多、labmon 之外的变多），这时 cpus=0 的照放
-        code, held = cpu_held(S, cores, n)
-        return None, w(code, held=held, cpus=n, src=src, left=max(0.0, cores), cap=S["cpu_cap"], warm=_C.CPU_WARM_S // 60), True
+        idle_u, flex_note = gpu_cpu_flex(x, S, n, blocked)
+        if idle_u is not None:
+            mine = [c for c in mine if c["uuid"] in idle_u]
+        else:
+            code, held = cpu_held(S, cores, n, rsv_left)
+            return None, w(code, held=held, cpus=n, src=src, left=max(0.0, cores), cap=S["cpu_cap"], warm=_C.CPU_WARM_S // 60), True
     kept = "，已扣给对方的预留" if S["kept"] else ""
     if x["excl"] == "gpu" and x["ngpu"] > 0:
         if not mine:
@@ -369,6 +501,7 @@ def _place(x, S, t, pre=None):
                        key=lambda c: (c["uuid"] not in keep, c["keep"], -free[c["uuid"]]))   # 先挑上一轮留的；多卡时先挑没给对方留的
         if len(empty) >= x["ngpu"]:
             S["holds"].pop(x["key"], None)
+            S["flex"] = flex_note
             return empty[:x["ngpu"]], None, False
         if len(cand) < x["ngpu"]:
             S["holds"].pop(x["key"], None)
@@ -384,6 +517,7 @@ def _place(x, S, t, pre=None):
     free = card_free(S)                                      # MB
     ok = sorted((c for c in mine if free[c["uuid"]] >= card_need(x, c)), key=lambda c: -free[c["uuid"]])
     if len(ok) >= x["ngpu"]:
+        S["flex"] = flex_note
         return ok[:x["ngpu"]], None, False
     if not S["cards"]:                        # 不是资源等待，不成屏障：不然 30 分钟后连不用卡的任务也让位
         return None, w("no_gpu"), False
@@ -744,9 +878,16 @@ def cpu_line(st):
     if not q:
         return "CPU：容器没设配额，不按核记账" + ("（%s）" % host if host else "")
     cap = room.get("cpu_cap") or _M.cpu_cap(q)
+    cards = info.get("gpus") or ()
+    rsv = gpu_cpu_reserve(cards, cap)
     run = [j for j in st.get("running") or [] if (j.get("acct") or {}).get("cpu")]
     used = sum(j["acct"]["cpu"] for j in run)
-    s = "CPU：配额 %g 核%s" % (round(q, 2), "（按 %d 核记账）" % cap if abs(q - cap) > 1e-6 else "")
+    bits = []
+    if abs(q - cap) > 1e-6:
+        bits.append("按 %d 核记账" % cap)
+    if rsv > 0:
+        bits.append("为 GPU 保底留 %d 核，纯 CPU 上限 %d 核" % (rsv, cpu_limit(cap, 0, cards)))
+    s = "CPU：配额 %g 核%s" % (round(q, 2), "（%s）" % "；".join(bits) if bits else "")
     s += "，%s" % host if host else ""
     s += "；labmon 在跑 %d 个任务记 %g 核" % (len(run), round(used, 1)) if run else "；labmon 没有任务记着核"
     free = room.get("cpu")
@@ -755,10 +896,15 @@ def cpu_line(st):
         if out >= 0.1:
             s += "，labmon 之外%s占 %g 核" % ("与给对方的预留" if (st.get("guest") or {}).get("keep") else "", round(out, 1))
         s += "，还能给新任务 %g 核" % max(0.0, round(free, 1))
+        if rsv > 0:
+            gpu_used = sum(j["acct"]["cpu"] for j in run if job_ngpu(j) > 0)
+            rsv_left = max(0.0, rsv - gpu_used)
+            if rsv_left >= 0.1:
+                s += "（纯 CPU 最多 %g 核）" % max(0.0, round(free - rsv_left, 1))
     return s
 
 
-def cpu_fit(j, cap, util, room=None):
+def cpu_fit(j, cap, util, room=None, cards=()):
     """在跑的任务 j（状态 running 的形状：name、gpus、est、use）开跑时给的核数是给少了还是给多了（#46；#37 的“被 CPU 卡住”也是它）。
     从开始量窗口核数起满 CPU_WARM_S（cpu_warm）才判；给的核数 give 是开跑时导出的 LABMON_CPUS（cpus_export(cpu_threads)）；util 各卡近 UTIL_WIN_S 的利用率 {uuid: %}。
     - low（给少了、被 CPU 卡住）：近 CPU_WARM_S 各 1 分钟窗口核数（use.pks）的平均不少于 give × CPU_BOUND_FRAC，且所用的卡里有利用率低于 UTIL_LOW 的
@@ -771,7 +917,7 @@ def cpu_fit(j, cap, util, room=None):
     u, e = j.get("use") or {}, j.get("est")
     if _C.is_hold(j.get("name")) or not e or not cpu_warm(u):
         return None
-    give = cpus_export(cpu_threads(e), cap)
+    give = cpus_export(cpu_threads(e), cap, job_ngpu(j), cards)
     avg = round(sum(x[1] for x in u["pks"]) / len(u["pks"]), 2)
     peak = u.get("cores_peak") or max(x[1] for x in u["pks"])
     out = {"avg": avg, "peak": peak, "give": give}
@@ -793,7 +939,7 @@ def gpu_slack(cards, jobs, th, cap):
     low = {u for u, v in util.items() if v is not None and v < _C.UTIL_LOW}
     bound = {}
     for j in jobs:
-        b = cpu_fit(j, cap, util)
+        b = cpu_fit(j, cap, util, cards=cards)
         for u in j.get("gpus") or []:
             if b and b["how"] == "low" and u in low:
                 bound.setdefault(u, []).append((j["name"], b["avg"], b["give"]))
@@ -812,7 +958,7 @@ class SchedMixin:
         CPU 超用只是被限流变慢。写了 cpus=0 的给 0 核，回收后仍是 0。"""
         e, u = j.get("est") or {"ram": 0.0, "vram": 0.0}, j.get("use") or {}
         vb = u.get("vram_by") or {}
-        give = float(cpu_give(e.get("cpus", _C.CPU_DEFAULT), _M.cpu_cap(self.info.get("cpu_quota"))))
+        give = float(cpu_give(e.get("cpus", _C.CPU_DEFAULT), _M.cpu_cap(self.info.get("cpu_quota")), job_ngpu(j), self.info.get("gpus") or ()))
         if cpu_warm(u):
             give = min(give, max(1.0, max(x[1] for x in u["pks"])))
         return {"ram": max(e["ram"], u.get("ram") or 0.0),
@@ -820,9 +966,9 @@ class SchedMixin:
                 "cpu": 0.0 if _C.is_hold(j["name"]) else max(give, u.get("cores") or 0.0)}
 
     def cpus_for(self, j):
-        """开跑时导出的 LABMON_CPUS：给的核数（cpu_threads：一般就是估计核数，按实测收小了记账的仍按清单的 cpus=）封顶到配额（cpu_give），
+        """开跑时导出的 LABMON_CPUS：给的核数（cpu_threads：一般就是估计核数，按实测收小了记账的仍按清单的 cpus=）封顶到该任务在这台的上限（cpu_give），
         至少 1（写 cpus=0 的不记账，也给 1）。"""
-        return cpus_export(cpu_threads(j["est"]), _M.cpu_cap(self.info.get("cpu_quota")))
+        return cpus_export(cpu_threads(j["est"]), _M.cpu_cap(self.info.get("cpu_quota")), job_ngpu(j), self.info.get("gpus") or ())
 
     def mem_room(self):
         """labmon 的任务全停时容器内存还能放多少（GiB）：上限 − labmon 之外收不回的内存 − 借来的主机上给对方留着、对方还没用上的部分。
@@ -1201,7 +1347,7 @@ class SchedMixin:
         fit 开车道（gpu_slack）要的是此刻的样子，照旧现算，不用这份。"""
         for j in self.running.values():
             if not j.get("cpu_fit"):
-                j["cpu_fit"] = cpu_fit(j, S["cpu_cap"], util, cpu_budget(S, j))
+                j["cpu_fit"] = cpu_fit(j, S["cpu_cap"], util, cpu_budget(S, j), S["cards"])
 
     def io_suspect(self, now):
         """读写拥塞嫌疑（只记录、不拦，#4 维护者定）：在跑的任务已跑过同类历史预计时长（duration 的 same）的 SLOW_RATIO 倍，

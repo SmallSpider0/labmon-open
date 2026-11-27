@@ -15,6 +15,7 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 - **不扫盘**：禁止跑 du、find 遍历共享盘（抢 NFS IO）。用量统一用 `labmon disk` 查看。
 - **ssh 不轮询与打包传输**：严禁定时 ssh 查状态；短时间频繁新建连接会被限流约 10 分钟。多文件一条连接 tar：上传 `tar czf - 文件… | ssh … "tar xzf - -C 目标"`，取回 `ssh … 'cd 目录 && tar cf - 文件' | tar xf -`。经 ssh 起后台进程：先 `cd`，再单独执行 `setsid nohup … > /dev/null 2>&1 < /dev/null &`。
 - **不自己 kill 正在跑的任务**：会记成失败；停法见「暂停与让路」。
+- **不绕过 labmon 调度与 CPU 记账**：严禁因排队或资源紧张绕过 labmon 直接 ssh/后台起训练或计算进程，也严禁把耗核任务的清单写成 `cpus=0` 逃避 CPU 记账（`cpus=0` 仅限几乎不占核的轻量监督/等待脚本）；带 GPU 的主机会自动为 GPU 预留保底 CPU 核并将纯 CPU 任务自动封顶、降优先级，遇排队异常用 `labmon report` 上报。
 - **GPU 保活不碰**：由 worker 与看板管理，严禁自行 `ka.sh start / stop` 或 kill 保活进程。
 - **租期、续租、借卡、权重与优先由用户定**：续租由用户在看板操作并输入验证码；实验会话不碰平台、不自行借卡、不改 `[sched]`。
 - **服务器重启即容器重启**：标了 `worker = "auto"` 的主机看板自动拉起 worker，中断任务重跑；未标的主机请用户 `labmon worker start <主机>`（需管理员令牌）。
