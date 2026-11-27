@@ -187,6 +187,7 @@ function drawer(r) {
     if (k.startsWith("guard:")) GDERR = null;
     if (k.startsWith("renew:")) renewLeave();
     if (k.startsWith("assign:")) APICK = null;
+    if (k.startsWith("ext:")) extLeave();
     pane.querySelector(".secret")?.remove();
     DKEY = null; DLAST = ""; DBACK = null;
     el.classList.remove("on"); el.setAttribute("aria-hidden", "true"); document.documentElement.classList.remove("drw-on");
@@ -199,8 +200,9 @@ function drawer(r) {
   if (DKEY && DKEY !== key && DKEY.startsWith("person:")) { FDK = {}; if (FPED && !FPED.isNew) FPED = null; }
   if (DKEY?.startsWith("renew:") && d.k !== "renew") renewLeave();     // 切到别的抽屉也算离开续租
   if (DKEY?.startsWith("assign:") && d.k !== "assign") APICK = null;
+  if (DKEY?.startsWith("ext:") && (d.k !== "ext" || DKEY !== key)) extLeave();
   const html = d.k === "srv" ? srvDrawer(d.id) : d.k === "new" ? newDrawer(d.id) : d.k === "guard" ? guardDrawer() : d.k === "renew" ? renewDrawer(d.id) : d.k === "proj" ? projDrawer(d.id)
-    : d.k === "assign" ? assignDrawer(d.id) : d.k === "arch" ? archDrawer() : directoryDrawer(d);
+    : d.k === "assign" ? assignDrawer(d.id) : d.k === "arch" ? archDrawer() : d.k === "ext" ? extHostDrawer(d.id) : directoryDrawer(d);
   const section = d.section || "";
   const previous = pane.dataset.section;
   if (html !== DLAST || key !== DKEY) {
@@ -240,6 +242,7 @@ document.addEventListener("change", e => {               // 批量续租的勾�
   if ("regto" in d && POP) { POP.to = d.regto; POP.err = null; return render(false); }   // 换到哪台
   if ("assignto" in d && APICK && !APICK.busy) { APICK.to = d.assignto; APICK.err = null; return render(false); }   // 给项目用：抽屉内选项目
   if ("adopt" in d && ADOPT) { ADOPT.sel[d.adopt] = t.checked; return render(false); }    // 接上卡的勾选
+  if ("extf" in d) return extInput(t, "change");
   const sel = d.rsel, ack = d.rack;
   if (!RPICK || (!sel && !ack) || FCAP?.pop === "renew" || RPICK.busy) return;      // 输验证码、提交中不改（同 renewDrawer 的 lock）
   const set = sel ? RPICK.sel : RPICK.ack, id = sel || ack;
@@ -258,6 +261,7 @@ document.addEventListener("input", e => {               // 输入框的值先记
   if (f?.[0] === "G") gdSyncSave();
   if (e.target.classList?.contains("when-in")) whenInput(e.target);
   if (e.target.dataset?.cf && e.target.type !== "checkbox") cfgInput(e.target, "input");
+  if (e.target.dataset?.extf && e.target.type !== "checkbox") extInput(e.target, "input");
   if (e.target.dataset?.popField && POP?.draft) POP.draft[e.target.dataset.popField] = e.target.value;
 });
 
@@ -381,6 +385,8 @@ document.addEventListener("click", e => {
   if (rgb) { if (!rgb.disabled) regAct(rgb.dataset.reg, rgb.dataset); return; }
   const asg = e.target.closest?.("[data-assign]");
   if (asg) { if (!asg.disabled) assignAct(asg.dataset.assign, asg.dataset); return; }
+  const exb = e.target.closest?.("[data-ext]");
+  if (exb) { if (!exb.disabled) extAct(exb.dataset.ext, exb.dataset); return; }
   const fo = e.target.closest?.("[data-fop]");
   if (fo && LANOFF() && NONET.has(fo.dataset.fop)) return noNet(e, fo);
   if (fo) {

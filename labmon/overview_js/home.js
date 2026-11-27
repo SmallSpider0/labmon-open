@@ -117,17 +117,20 @@ function home() {
     <div class="kpi"><div class="k">告警</div><div class="v" style="color:${na ? "var(--bad)" : "var(--ok)"}">${na}<small> 条</small></div><div class="s">${na ? (fal.length || pal.length ? "含" + [fal.length ? `${fLbl} ${fal.length} 条` : "", pal.length ? `项目 ${pal.length} 条` : ""].filter(Boolean).join("、") + "，" : "") + "见下方" : `${D.hosts.filter(h => h.worker_up).length} / ${D.hosts.length} 台 worker 在跑`}</div></div></div>`;
   if (na) s += `<div class="alerts">${al.map(a => `<div>⚠ ${esc(a)}</div>`).join("")}${fal.map(a => `<div>⚠ <a href="${fHref}">${fLbl}</a>：${esc(a)}</div>`).join("")}`
     + `${pal.map(({ps, m}) => `<div>⚠ ${ps.map(p => `<a href="#/p/${encodeURIComponent(p.id)}">${esc(p.title || p.id)}</a>`).join("、")}：${esc(m)}</div>`).join("")}</div>`;
-  s += `<div class="card"><div class="chd"><b>主机</b><span class="sm mut">点一行看详情</span></div><div class="scroll"><table>
-    <tr><th>主机</th><th>worker</th><th style="min-width:180px" ${tip("每张卡一行：条是显存，数字是显存占比 · GPU 近 1 小时平均利用率（保活按 0 算）")}>显存 · 利用率</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("组里各服务器挂的同一块盘：我们各项目、公共目录、我们的其他目录、其他人；红线是告警线。按人看在组内服务器的「共享盘」")}>共享盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
+  const addExtBtn = LIVE && ME && (ME.admin ? canOps() : ME.write) ? `<span class="sp"></span><button class="btn mini-btn" data-drw="#/ext/new">+ 添加外部主机</button>` : "";
+  s += `<div class="card"><div class="chd wrap"><b>主机</b><span class="sm mut">点一行看详情</span>${addExtBtn}</div><div class="scroll"><table>
+    <tr><th>主机</th><th>worker</th><th style="min-width:180px" ${tip("每张卡一行：条是显存，数字是显存占比 · GPU 近 1 小时平均利用率（保活按 0 算）")}>显存 · 利用率</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("集群主机显示共享盘；独立主机显示本地工作盘（含低水位/配额闸门）；红线是告警/停止线")}>磁盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
     (D.hosts.map(h => {
       const info = h.status?.info, gs = info?.gpus || [], m = info?.mem;
       const gb = gs.map(g => { const U = utilText(gpuBusy(h, g.i), g.util); return `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB\n${U.tip}`)}><div class="bar thin" style="flex:1"><i style="width:${100 * g.used / g.total}%;background:var(--accent)"></i></div><span class="sm num nw">${pct(g.used, g.total)}%<span class="mut"> · ${U.big}</span></span></div>`; }).join("");
-      const sx = (h.ephemeral || h.standalone) ? null : sharedParts();
+      const sx = (h.ephemeral || h.standalone) ? null : sharedParts(), wd = h.standalone ? h.work_disk : null;
       const ephSto = h.ephemeral ? (h.storage || []).map(x => {
         const low = x.kind === "cloud" && x.avail_gb < 1;
         return `<span class="sm nw" style="${low ? "color:var(--bad);font-weight:600" : ""}" ${tip(`${x.kind === "cloud" ? "云盘（不计入实验室共享盘）" : "实例本地盘（回收清空）"}\n${x.path}：剩 ${g1(x.avail_gb)} / ${g1(x.total_gb)} GiB`)}>${esc(x.label)} 剩 ${g1(x.avail_gb)} GiB</span>`;
       }).join(" · ") || `<span class="sm mut">无共享盘</span>` : null;
-      const sb = h.ephemeral ? ephSto : h.standalone ? `<span class="sm mut" ${tip("独立主机不挂集群共享盘")}>—</span>` : sx ? `<div class="row" style="flex-wrap:nowrap">${sharedBar(sx, true)}<span class="sm num nw" style="${sx.dk.free < sx.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(sx.dk.free)}${sx.dk.eta_days != null && sx.dk.eta_days < 7 ? ` · ${sx.dk.eta_days} 天满` : ""}</span></div>` : "—";
+      const sb = h.ephemeral ? ephSto
+        : h.standalone ? (wd ? `<div class="row" style="flex-wrap:nowrap">${workDiskBar(wd, true)}<span class="sm num nw" style="${wd.disk_gate?.on || h.status?.disk_gate?.on || wd.low ? "color:var(--bad)" : ""}">${wd.disk_gate?.on || h.status?.disk_gate?.on ? "闸门 · " : ""}剩 ${Math.round((wd.free || 0) / GIB)}</span></div>` : `<span class="sm mut" ${tip("独立主机不挂集群共享盘，本地工作盘等待首次扫描")}>—</span>`)
+        : sx ? `<div class="row" style="flex-wrap:nowrap">${sharedBar(sx, true)}<span class="sm num nw" style="${sx.dk.free < sx.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(sx.dk.free)}${sx.dk.eta_days != null && sx.dk.eta_days < 7 ? ` · ${sx.dk.eta_days} 天满` : ""}</span></div>` : "—";
       const mb = m ? `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1"><i style="width:${100 * m.used / m.limit}%;background:${m.used / m.limit >= 0.9 ? "var(--bad)" : "var(--accent)"}"></i><b style="left:90%"></b></div><span class="sm num nw">${g1(m.used)} / ${g1(m.limit)}</span></div>` : "—";
       return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b>${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : standaloneBadge(h)}</td><td>${workerBadge(h)}</td>
         <td>${gb || "—"}</td><td>${mb}</td><td>${sb}</td><td class="r nw">${info?.cpu_used != null ? g1(info.cpu_used) : "—"} <span class="mut">/ ${info?.cpu_quota ? g1(info.cpu_quota) : info?.nproc ?? "—"}</span>${thrTag(h) ? `<div>${thrTag(h)}</div>` : ""}</td>
@@ -491,7 +494,7 @@ function resCard(h) {
       sp(r => r.cpu != null ? 100 * r.cpu / q : null),
       `容器里 nproc 显示 ${info.nproc ?? "—"} 个逻辑核，那是宿主机的；配额${info.cpu_quota ? " " + g1(info.cpu_quota) + " 核" : "读不到，不记 CPU 账"}\n放行按 CPU 记账：任务要的核数取清单的 cpus=，否则同类近 5 次峰值 ×1.1，都没有按 1 核；放不下的等着，原因写「CPU 不够」\n任务里的 $LABMON_CPUS 是开跑时给它记的核数（估计封顶到上限），不随之后的回收变；没设的 OMP/MKL/OPENBLAS 线程数缺省同它${psiT("cpu")}`);
   }
-  const x = h.ephemeral ? null : sharedParts();
+  const x = (h.ephemeral || h.standalone) ? null : sharedParts();
   if (h.ephemeral) {
     for (const d of h.storage || []) {
       const used = Math.max(0, (d.total_gb || 0) - (d.avail_gb || 0));
@@ -504,8 +507,14 @@ function resCard(h) {
         `<span class="sm mut">${d.kind === "cloud" ? "不计入实验室共享盘" : "实例回收清空"}</span>`,
         `${d.path}\n${d.kind === "cloud" ? "云盘存储（不计入实验室共享盘；剩余低于 1 GiB 标红告警）" : "实例本地高速盘（回收后清空）"}`);
     }
-  }
-  if (x) {
+  } else if (h.standalone && h.work_disk) {
+    const wd = h.work_disk, recN = (wd.reclaimable || []).length, gOn = !!(wd.disk_gate?.on || h.status?.disk_gate?.on);
+    const right = gOn ? `<span class="badge b-bad">已暂停放新任务</span>` : recN ? `<span class="badge b-warn">${recN} 处可回收</span>` : "持久保存";
+    s += row("本地工作盘", workDiskBar(wd, false),
+      `<span style="${wd.low || gOn ? "color:var(--bad)" : ""}">剩 ${Math.round((wd.free || 0) / GIB)} / ${Math.round((wd.total || 0) / GIB)} GiB</span><span class="mut">工作区 ${wd.work_b != null ? GB(wd.work_b) + " GiB" : "待扫描"}${wd.quota_gb ? ` / 配额 ${wd.quota_gb}` : ""}</span>`,
+      right,
+      `${wd.root}：独立主机本地工作盘（持久保存，不会随续租清空）；低于 ${wd.warn_gb} GiB 预警，低于 ${wd.stop_gb} GiB 暂停放新任务\n目录明细与可回收列表见下方「记录 · 本地工作盘」`);
+  } else if (x) {
     const pts = (D.disk.hist || []).filter(r => r[0] >= now - 7 * 86400).map(r => [r[0], x.dk.total - r[1] / GIB]), dg = "d:" + h.id;
     SPKG[dg] = {t0: now - 7 * 86400, t1: now, at: t => { const r = nearest(pts, t, r => r[0]); return r ? `${ts(r[0])}：剩 ${g1(r[1])} GiB` : ""; }};
     const lo = Math.min(x.dk.warn_gb || 0, ...pts.map(r => r[1])) * 0.9, hi = Math.max(1, ...pts.map(r => r[1])) * 1.05;
@@ -514,7 +523,7 @@ function resCard(h) {
       pts.length > 1 ? spark(dg, now - 7 * 86400, now, pts, {lo, hi, ref: x.dk.warn_gb, gap: 3 * 3600}) + "7 天" : "7 天曲线攒数据中",
       `${x.dk.path}：组里各服务器挂的同一块盘，总量与剩余由 df 直接读出\n${diskProg(D.disk)}\n红线：剩余低于 ${x.dk.warn_gb} GiB 告警\n点「共享盘」看${LIVE && ME && !ME.admin ? "本人用量" : "各人用了多少"}`);
   }
-  const nf = pr.nfs;
+  const nf = h.standalone ? null : pr.nfs;
   if (nf) {                                       // 共享盘读写延迟：条的一半是近 14 天基线（竖线），超过基线变红
     const hi = 2 * nf.base, w = nf.ms == null ? 0 : Math.min(100, 100 * nf.ms / hi);
     s += row("共享盘读写", `<div class="bar big" style="overflow:hidden"><i style="width:${w}%;background:var(${nf.slow ? "--bad" : "--accent"});opacity:.6"></i><b style="left:50%" ${tip(`近 14 天基线 ${g1(nf.base)} ms`)}></b></div>`,

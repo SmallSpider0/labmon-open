@@ -75,8 +75,21 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 - **综合状态**：`labmon status`（查主机显存、GPU 保活状态、容器 CPU 记账、车道进度与预计结束时间、挪法建议、告警）。
 - **推演结束时间**：以 `labmon status` 和 `labmon worker status` 的系统推演为准，不自行拿 `est_min` 外推。
 - **主机与卡**：`labmon host list` 查看在用、借用及共用目录主机；`labmon worker status <主机>` 查看具体队列与任务。
-- **磁盘用量**：`labmon disk` 查看本项目共享盘与各台本地盘用量、增量及 Top 目录（查本人共享盘总占用用 `labmon disk --me`），不跑 du。
+- **磁盘用量**：`labmon disk` 查看本项目共享盘、独立主机本地工作盘及可回收目录，以及各台临时缓存占用（查本人共享盘总占用用 `labmon disk --me`），不跑 du。清理自管缓存用 `labmon worker clean <主机> [--project <id>]`（默认 `--dry-run` 预览，加 `--yes` 才删，绝不触碰 `projects/` 产物）。
 - **历史与事件**：`labmon records [--host <主机>]` 查看拉起、续租、失败及临时指令记录。
+
+## 独立主机（外租 Linux / WSL2 / 本机 Mac）
+
+独立主机（`standalone = true`，`labmon host list` 标「外部机」）不挂集群共享盘，各机独立使用本地工作根目录 `data_root`（缺省 `~/.local/share/labmon/work`）：
+
+- **接入与密钥红线**：可用 `labmon host add <id> --ssh user@host` / `edit` / `test` / `key` / `rm` 协助用户管理外部主机；**只走零私钥上传路线**（看板生成专用 Ed25519 公钥与一行 `authorized_keys` 授权命令，由用户确认粘贴到目标机）。**严禁读取或上传用户本机 `~/.ssh/id_*` 个人私钥**。
+- **防开发仓污染（硬规）**：先跑 `labmon project init <主机> <项目>` 在 `<data_root>/projects/<项目>/` 下建目录，**严禁直接对正在编辑的源码仓执行 `worker add`**（默认拦截 `<data_root>` 之外的清单目录）：
+  - **本机 Mac（APFS）**：在 `<data_root>/projects/<项目>/code` 用 `git worktree add --detach` 或 APFS 零拷贝 `cp -cR` 隔离运行副本；
+  - **大数据集与权重**：统一放 `<data_root>/{datasets,weights}`，项目目录内**只读软链接**引用，不重复拷贝；
+  - **WSL2**：`data_root` 必须落在 Linux ext4（如 `~/.local/share/labmon/work`），禁止放 `/mnt/c`（IO 极慢且锁语义不完整）；
+  - **产物与日志**：实验输出统一落 `<data_root>/projects/<项目>/runs/` 与 `logs/`，不写回源码仓。
+- **空间防爆与清理**：独立主机默认剩 `20 GiB` 预警、剩 `10 GiB` 触发 `disk_gate` 磁盘闸门（停止放新任务，不杀在跑任务，含 `+2 GiB` 滞回恢复）。查看占用与 14 天闲置可回收目录用 `labmon disk`；清自管缓存与已结束单格临时用 `labmon worker clean <主机> [--project <id>]`（默认预览，显式 `--yes` 才删）；`projects/` 下的旧产物由用户确认后手动删除。
+- **跨机语义限制**：独立主机不支持跨主机 `after=` 依赖、`gang=` 多机成组、借用、算力池与跨盘「搬登记」；但看板会自动把同名项目的历史用量裁剪下发（`hist_shared.json`），新机首次即可复用估时与显存/内存估计。
 
 ### 暂停与让路
 

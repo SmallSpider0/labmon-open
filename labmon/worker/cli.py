@@ -3,10 +3,12 @@ import argparse
 import contextlib
 import json
 import os
+import shutil
 import signal
 import sys
 
 from . import common as _C
+from . import disk as _D
 from . import pure as _P
 from . import queue as _Q
 from . import measure as _M
@@ -93,17 +95,185 @@ def slot_main(argv):
         _C.time.sleep(1)
 
 
+def _fmt_bytes(b):
+    if b >= _C.GIB:
+        return "%.2f GiB" % (b / _C.GIB)
+    if b >= _C.MIB:
+        return "%.1f MiB" % (b / _C.MIB)
+    return "%d B" % b
+
+
+def _job_alive(pid):
+    """检查任务自身进程或进程组是否仍在运行（与 worker 是否退出无关，#114）：
+    Worker.run() 退出时故意保留运行中任务，因此仅凭 worker PID 不在绝不能认定任务已结束。"""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    for fn in (os.kill, os.killpg):
+        try:
+            fn(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            continue
+    return False
+
+
+def _running_scratches(p):
+    """实时读取运行中的单格临时集合 {(proj_seg, job_seg)}（合并 status.json 与 active_scratch.json）：
+    - status.json 损毁时返回 None（调用方跳过 jobs/ 清理，绝不误删）；
+    - worker 活着时信任 status.running + external；worker 退出时按各任务自身进程/进程组是否存活判定；
+    - 同步合并 active_scratch.json 中仍存活的进程，覆盖 Worker.start() 刚起进程尚未 write_status 的窗口。"""
+    running = set()
+    raw_st = _C.read(p.status, "")
+    if raw_st:
+        try:
+            st = json.loads(raw_st)
+        except ValueError:
+            return None
+        w_alive = _C.alive(_C.read_pid(p.pid), ("labmon_worker",))
+        for j in (st.get("running") or []) + (st.get("external") or []):
+            if not (isinstance(j, dict) and j.get("project") and j.get("name")):
+                continue
+            jpid = j.get("pid")
+            if w_alive or jpid is None or _job_alive(jpid):
+                running.add((_C.NAME_RE.sub("_", j["project"]), _C.NAME_RE.sub("_", j["name"])))
+    raw_act = _C.read(p.active_scratch, "")
+    if raw_act:
+        try:
+            act = json.loads(raw_act)
+        except ValueError:
+            return None
+        if isinstance(act, dict):
+            for k, jpid in act.items():
+                if "/" in str(k) and _job_alive(jpid):
+                    a, b = str(k).split("/", 1)
+                    running.add((a, b))
+    return running
+
+
+def clean_local(p, project=None, cache=False, scratch=False, yes=False):
+    """清理本机自管临时目录（<LABMON_LOCAL>/{cache,jobs}）：
+    - 绝不触碰 projects/、datasets/、weights/、envs/ 或任何 <LABMON_LOCAL> 之外的路径（经 realpath 严格校验且不跟随符号链接）；
+    - 默认仅预览（dry-run），显式传 yes=True 才执行删除；
+    - 清理 jobs/ 单格临时目录时与 Worker.start/grant 共用 scratch_lock：扫描在锁外执行，删除每个单格目录前在锁内重新核实任务存活并原子移出后锁外删除，彻底避免扫描期间新起任务被误删。"""
+    do_cache = cache or (not cache and not scratch)
+    do_scratch = scratch or (not cache and not scratch)
+    base = os.path.realpath(_C.LOCAL)
+    running = set()
+    if do_scratch:
+        got = _running_scratches(p)
+        if got is None:
+            print("状态文件 %s 无法解析，为避免误删运行中任务的临时目录已跳过 jobs/ 清理" % p.status)
+            do_scratch = False
+        else:
+            running = got
+    targets = []
+    skipped = []
+
+    def _safe_child(path):
+        if os.path.islink(path):
+            return None
+        rp = os.path.realpath(path)
+        try:
+            if rp == base or os.path.commonpath((base, rp)) != base:
+                return None
+        except ValueError:
+            return None
+        return rp
+
+    proj_seg = _C.NAME_RE.sub("_", project) if project else None
+    if do_cache:
+        cdir = os.path.join(base, "cache")
+        if os.path.isdir(cdir) and not os.path.islink(cdir):
+            names = [proj_seg] if proj_seg else sorted(os.listdir(cdir))
+            for nm in names:
+                tpath = os.path.join(cdir, nm)
+                rp = _safe_child(tpath)
+                if rp and os.path.exists(rp):
+                    sz = _D.scan_unit(rp, _C.time.time(), _D.Pace(_D.LOCAL_IOPS))["b"] if os.path.isdir(rp) else os.lstat(rp).st_size
+                    targets.append(("cache", nm, rp, sz, None))
+    if do_scratch:
+        jdir = os.path.join(base, "jobs")
+        if os.path.isdir(jdir) and not os.path.islink(jdir):
+            pnames = [proj_seg] if proj_seg else sorted(os.listdir(jdir))
+            for pnm in pnames:
+                pdir = os.path.join(jdir, pnm)
+                prp = _safe_child(pdir)
+                if not (prp and os.path.isdir(prp)):
+                    continue
+                for jnm in sorted(os.listdir(prp)):
+                    if jnm.startswith(".labmon_del_"):
+                        continue
+                    if (pnm, jnm) in running:
+                        skipped.append(os.path.join(prp, jnm))
+                        continue
+                    jpath = os.path.join(prp, jnm)
+                    jrp = _safe_child(jpath)
+                    if jrp and os.path.exists(jrp):
+                        sz = _D.scan_unit(jrp, _C.time.time(), _D.Pace(_D.LOCAL_IOPS))["b"] if os.path.isdir(jrp) else os.lstat(jrp).st_size
+                        targets.append(("scratch", "%s/%s" % (pnm, jnm), jrp, sz, (pnm, jnm)))
+    if not targets:
+        print("没有可清理的自管缓存或已结束单格临时目录（目录：%s）" % base)
+        if skipped:
+            print("  已跳过 %d 个在跑任务的单格临时目录" % len(skipped))
+        return 0
+    tot = sum(x[3] for x in targets)
+    kind_zh = {"cache": "缓存", "scratch": "单格临时"}
+    if not yes:
+        print("可清理 %d 项，共 %s（目录：%s；预览模式未删除，加 --yes 确认清理；绝不触碰 projects/ 产物）：" % (len(targets), _fmt_bytes(tot), base))
+        for kind, label, rp, sz, _ in targets:
+            print("  [%s] %s  %s  (%s)" % (kind_zh[kind], label, _fmt_bytes(sz), rp))
+        if skipped:
+            print("  已跳过 %d 个在跑任务的单格临时目录" % len(skipped))
+        return 0
+    freed, n = 0, 0
+    for idx, (kind, label, rp, sz, skey) in enumerate(targets):
+        try:
+            del_path = rp
+            if kind == "scratch" and skey is not None:
+                # 在 scratch_lock 锁内重新核实任务状态，防扫描到删除期间 Worker.start/grant 新启任务被误删
+                with _C.flock(p.scratch_lock):
+                    cur_run = _running_scratches(p)
+                    if cur_run is None or skey in cur_run:
+                        skipped.append(rp)
+                        continue
+                    if not os.path.exists(rp):
+                        continue
+                    staged = os.path.join(os.path.dirname(rp), ".labmon_del_%d_%d" % (os.getpid(), idx))
+                    os.rename(rp, staged)
+                    del_path = staged
+            if os.path.isdir(del_path) and not os.path.islink(del_path):
+                shutil.rmtree(del_path)
+            else:
+                os.unlink(del_path)
+            freed += sz
+            n += 1
+            print("  已清理 [%s] %s（%s）" % (kind_zh[kind], label, _fmt_bytes(sz)))
+        except OSError as e:
+            print("  清理失败 %s：%s" % (rp, e), file=sys.stderr)
+    os.makedirs(p.dir, exist_ok=True)
+    with _C.flock(p.events):
+        _C.append_jsonl(p.events, {"t": round(_C.time.time()), "kind": "worker",
+                                   "msg": "清理自管缓存/临时目录：%d 项，释放 %s%s" % (n, _fmt_bytes(freed), "（项目 %s）" % project if project else ""),
+                                   **({"project": project} if project else {})})
+    print("已清理 %d 项，共释放 %s（未触碰 projects/ 产物）" % (n, _fmt_bytes(freed)))
+    if skipped:
+        print("  已跳过 %d 个在跑任务的单格临时目录" % len(skipped))
+    return 0
+
+
 def main(argv=None):
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["slot"]:
         return slot_main(argv[1:])
     ap = argparse.ArgumentParser(prog="labmon_worker.py")
-    ap.add_argument("cmd", choices=["run", "add", "rm", "ls", "stop", "limit", "override", "fit", "thaw"])
+    ap.add_argument("cmd", choices=["run", "add", "rm", "ls", "stop", "limit", "override", "fit", "thaw", "clean"])
     ap.add_argument("args", nargs="*", help="add / rm：ROOT JOBS；limit：tag=N…；override：add|rm KIND [目标] 或 ls；fit：任务名…（--list 时 ROOT JOBS）")
     ap.add_argument("--host", required=True)
     ap.add_argument("--idle", action="store_true", help="add：仅在清单空闲时更换资源")
     ap.add_argument("--gpus", help="add：只用这些卡（nvidia-smi 序号，逗号分隔）")
-    ap.add_argument("--project", help="add：看板的项目 id（必写）；fit：按这个项目的历史估（缺省取同名任务最近一次的项目）")
+    ap.add_argument("--project", help="add：看板的项目 id（必写）；fit：按这个项目的历史估（缺省取同名任务最近一次的项目）；clean：仅清理该项目")
     ap.add_argument("--expect-project", help="add / rm：在登记锁内核对这条清单所属的项目")
     ap.add_argument("--pool", action="store_true", help="add：算力池放过来的（登记里记 pool，用于区分池放的清单）")
     ap.add_argument("--expect-from", help="add：在登记锁内核对这条清单此刻还登记在这台（算力池搬清单用，#25：会话已撤回、已搬走的不再重新登记）")
@@ -121,10 +291,17 @@ def main(argv=None):
     ap.add_argument("--json", action="store_true", help="fit --list：只看队首，打一行 JSON（算力池往哪台放用，#25）")
     ap.add_argument("--replace", action="store_true", help="run：已有 worker 时让它退出后接管（升级用）")
     ap.add_argument("--shared", help="run：组里共用的那块盘的挂载点（如 /root/data1），给了就参与统计它的用量")
+    ap.add_argument("--standalone", action="store_true", help="run：以独立主机模式运行（不共享 worker_home，扫 <data_root> 工作盘）")
+    ap.add_argument("--cache", action="store_true", help="clean：清理 <LOCAL>/cache")
+    ap.add_argument("--scratch", action="store_true", help="clean：清理 <LOCAL>/jobs（已结束任务）")
+    ap.add_argument("--dry-run", action="store_true", help="clean：仅预览可清理目录与大小（缺省行为）")
+    ap.add_argument("--yes", action="store_true", help="clean：确认执行清理（否则仅预览）")
     a = ap.parse_args(argv)
     p = _C.Paths(a.host)
     if a.cmd == "run":
-        return _W.Worker(a.host, a.shared).run(a.replace)
+        return _W.Worker(a.host, a.shared, standalone=True if a.standalone else None).run(a.replace)
+    if a.cmd == "clean":
+        return clean_local(p, project=a.project, cache=a.cache, scratch=a.scratch, yes=a.yes and not a.dry_run)
     if a.cmd == "fit":
         if a.list:
             if len(a.args) != 2:
@@ -319,6 +496,8 @@ def main(argv=None):
     print("worker：" + ("运行中 PID %d" % pid if up else "未运行") + ("（状态 %s）" % _C.now_str(st["t"]) if st.get("t") else ""))
     if (st.get("gate") or {}).get("on"):
         print("  内存闸门关闭中：停止放行")
+    if (st.get("disk_gate") or {}).get("on"):
+        print("  " + (st["disk_gate"].get("why") or "磁盘闸门关闭中：暂停放新任务"))
     for o in st.get("overrides", []):
         print("  临时指令 " + _C.ovr_text(o))
     wd = _K.load_frozen(p)                           # 直接读 frozen.json：刚拉起、状态还没写时也看得到

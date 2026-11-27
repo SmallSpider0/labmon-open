@@ -217,6 +217,52 @@ function diskOwner(n, manage = true) {
 async function diskSet(body) {
   try { await fleetPost("disk", body); FDK = {}; await collectNow(true); } catch (e) { FERR = e.message || String(e); render(false); }
 }
+// 独立主机的本地工作盘（#114）：h.work_disk（disk.host_work_disk 生成，唯一实现）。
+// 持久保存、不会随续租清空，且 labmon 绝不自动删除 projects/ 下的产物与日志；仅标出 14 天闲置可回收目录。
+function workDiskBar(wd, thin = false) {
+  if (!wd?.total) return "";
+  const T = wd.total / GIB, P = gb => Math.max(0, Math.min(100, 100 * gb / T));
+  const projs = Object.entries(wd.projects || {}).sort((a, b) => (b[1].b || 0) - (a[1].b || 0));
+  const common = (wd.dirs || []).filter(d => !d.p && COMMON.has(d.name));
+  const rest = (wd.dirs || []).filter(d => !d.p && !COMMON.has(d.name));
+  const sumB = xs => xs.reduce((a, d) => a + (d.b || 0), 0);
+  let s = projs.map(([p, v]) => seg(P((v.b || 0) / GIB), color(p), `${p}：${GB(v.b)} GiB${v.d24 ? `（24 小时 ${dGB(v.d24)}）` : ""}`, thin ? "" : p)).join("");
+  const cb = sumB(common);
+  if (cb > 0) s += seg(P(cb / GIB), "var(--faint)", `公共目录 ${GB(cb)} GiB（${common.map(d => d.name).join("、")}）`, thin ? "" : "公共");
+  const rb = sumB(rest);
+  if (rb > 0) s += seg(P(rb / GIB), "var(--muted)", `工作盘其他目录 ${GB(rb)} GiB`, thin ? "" : "其他");
+  const diskUsed = Math.max(0, (wd.total - (wd.free || 0)) / GIB), workUsed = (wd.work_b || 0) / GIB;
+  const outside = Math.max(0, diskUsed - workUsed);
+  if (outside > 0.1) s += seg(P(outside), "color-mix(in srgb, var(--muted) 45%, var(--soft))", `盘上其他文件 ${g1(outside)} GiB（工作根目录之外，不扫描）`, thin ? "" : "盘上其他", "hatch");
+  let marks = "";
+  if (wd.stop_gb > 0 && wd.stop_gb < T) marks += `<b style="left:${100 - P(wd.stop_gb)}%" ${tip(`剩余低于 ${wd.stop_gb} GiB 触发磁盘闸门暂停放新任务`)}></b>`;
+  else if (wd.warn_gb > 0 && wd.warn_gb < T) marks += `<b style="left:${100 - P(wd.warn_gb)}%" ${tip(`剩余低于 ${wd.warn_gb} GiB 告警`)}></b>`;
+  return `<div class="bar ${thin ? "thin" : "big"}" style="flex:1;overflow:hidden">${s}${marks}</div>`;
+}
+function workDiskBlock(wd, h) {
+  if (!wd) return `<div class="empty">还没读到这台独立主机的本地工作盘（等待 worker 下一轮上报）。</div>`;
+  const gateOn = !!(wd.disk_gate?.on || h?.status?.disk_gate?.on);
+  const gate = gateOn ? `<span class="badge b-bad">磁盘闸门已触发：暂停放新任务</span>` : "";
+  const quota = wd.quota_gb ? ` · 软配额 ${wd.quota_gb} GiB` : "";
+  const wbText = wd.work_b != null ? `${GB(wd.work_b)} GiB` : "待扫描";
+  const head = `<div class="sm" style="margin-bottom:6px">本地工作盘 <code>${esc(wd.root)}</code>：工作区 <b>${wbText}</b>，整盘剩 <b style="${wd.low || gateOn ? "color:var(--bad)" : ""}">${GB(wd.free)}</b> / ${GB(wd.total)} GiB${quota}（预警 ${wd.warn_gb} GiB / 停止线 ${wd.stop_gb} GiB）${gate ? " " + gate : ""}</div>
+    <div class="sm mut" style="margin-bottom:6px">本地工作盘数据持久保存，不会随续租清空；labmon 绝不自动删除 <code>projects/</code> 下的产物与日志。14 天未修改且无活跃队列的大目录会标注「可回收」。</div>`;
+  const reclaimSet = new Set((wd.reclaimable || []).map(x => x.u));
+  const dirs = [...(wd.dirs || [])].sort((a, b) => (b.b || 0) - (a.b || 0));
+  const rows = dirs.map(d => {
+    const rec = reclaimSet.has(d.u);
+    const lbl = d.p ? `<span class="dot" style="background:${color(d.p)}"></span> <code>${esc(d.u)}</code>` : `<code>${esc(d.u)}</code>`;
+    return `<tr><td class="sm">${lbl}${rec ? ` <span class="badge b-warn" ${tip("超过 14 天未修改、占用 ≥ 1 GiB 且无活跃队列，请确认后手动清理")}>可回收</span>` : ""}</td>
+      <td class="r">${G(d.b)}</td><td class="r">${d.d24 != null ? dGB(d.d24) : "—"}</td><td class="r sm">${d.m ? ago(d.m) : "—"}</td></tr>`;
+  }).join("");
+  const localCache = h.status?.storage?.local || {};
+  const cacheBytes = Object.values(localCache).reduce((a, v) => a + (v.cache || 0) + (v.scratch || 0), 0);
+  const foot = `<div class="sm mut" style="margin-top:6px">自管缓存与单格临时（<code>.tmp/</code>）：${G(cacheBytes)} · 预览清理：<code>labmon worker clean ${esc(h.id)}</code>（仅清自管缓存，需显式 <code>--yes</code> 才删）${wd.pending ? ` · 还有 ${wd.pending} 个目录待扫` : ""}</div>`;
+  return head + workDiskBar(wd, false)
+    + (rows ? `<div class="scroll" style="margin-top:8px"><table class="dku"><tr><th>工作目录</th><th class="r">大小</th><th class="r">24 小时</th><th class="r">最近修改</th></tr>${rows}</table></div>` : `<div class="empty" style="margin-top:6px">工作目录下还没有已统计的子目录。</div>`)
+    + foot;
+}
+const canEditExt = h => !!(h?.standalone && LIVE && ME && (ME.admin ? canOps() : ME.write && h.owner && h.owner.toLowerCase() === ME.name.toLowerCase()));
 // 概况条：租期、容器、本地依赖（续租会清空本地盘），空闲时续租按钮也在这里
 function hostStrip(h) {
   const info = h.status?.info || {}, now = D.generated;
@@ -229,8 +275,9 @@ function hostStrip(h) {
   }
   const deps = h.status?.local?.jobs || [], bad = deps.filter(r => !r.heal), miss = missW(h);
   let s = "";
-  if (h.standalone) s += it("server", `${h.platform_kind === "other" ? "外平台独立主机" : "独立主机"} <span class="mut">不共享集群盘</span>`,
+  if (h.standalone) s += it("server", `${h.platform_kind === "other" ? "外平台独立主机" : "独立主机"} <span class="mut">不共享集群盘${h.owner ? ` · 归属 ${esc(h.owner)}` : ""}</span>`,
     "不共享集群 worker_home：仅自用，不支持借用、算力池与跨主机搬登记");
+  if (h.status?.disk_gate?.on) s += it("db", `<b style="color:var(--bad)">磁盘闸门已触发</b> <span class="mut">${esc(h.status.disk_gate.why || "已暂停放新任务")}</span>`);
   if (h.borrow) s += it("users", `${esc(borrowText(h.borrow, D.generated))}${!h.borrow.swap && LIVE && srvById(h.id) ? ` <a href="${DH.srv(h.id)}">借用详情</a>` : ""}`
       + (BMSG?.id === h.id ? `<span class="mut">（${esc(BMSG.msg)}）</span>` : ""),
     h.borrow.swap ? "改约定：labmon borrow " + h.id + " --until …（none 去掉）" : "");
@@ -243,9 +290,10 @@ function hostStrip(h) {
     deps.map(r => `${r.project} ${r.job}：${r.files.length} 个文件 ${G(r.bytes)}，${healText([r])}`).join("\n") + "\n（明细在下方「记录 · 本地依赖」）");
   const lent = h.borrow && !h.borrow.swap && LIVE && srvById(h.id);     // 借来的组内服务器：改约定、还（续租是对方的事）
   const scm = h.platform && (!h.platform_kind || h.platform_kind === "scm");
-  const b = scm ? renewBtns(h) : lent ? borrowBtns(lent) : "", btn = b ? `<div class="rn">${b}</div>` : "";
+  const extBtn = canEditExt(h) ? `<button class="btn mini-btn" data-drw="${esc(DH.ext(h.id))}">${icon("gear")}管理外部机</button>` : "";
+  const b = scm ? renewBtns(h) : lent ? borrowBtns(lent) : extBtn, btn = b ? `<div class="rn">${b}</div>` : "";
   if (!s && !btn) return "";
-  return `<div class="card strip"><div class="info"><div class="line">${s}</div></div>${btn}${RERR[h.id] ? `<div class="rn-err">${esc(RERR[h.id])}</div>` : b ? fErr() : ""}</div>`;
+  return `<div class="card strip"><div class="info"><div class="line">${s}</div></div>${btn}${RERR[h.id] ? `<div class="rn-err">${esc(RERR[h.id])}</div>` : b && !extBtn ? fErr() : ""}</div>`;
 }
 function depsTable(h) {
   const deps = h.status?.local?.jobs || [], miss = missW(h);
@@ -279,8 +327,11 @@ function hostPage(id) {
     {id: "queues", name: "队列", note: nOf(qs.length), body: () => (qs.length ? `<table>${qs.map(q => queueRow(h, q)).join("")}</table>` : `<div class="empty">没有登记队列。</div>`)
       + (qs.length && LIVE ? `<div class="sm mut" style="margin-top:6px">按项目换到别的主机、不用这台，在项目页的「管理」里。</div>` : "")},
     {id: "deps", name: "本地依赖", note: deps.length ? `${deps.length} 格` : "无", body: () => depsTable(h)},
-    {id: "lw", name: "本地盘", note: h.lw?.ok ? `labmon 之外 ${g1(h.lw.user)} GiB` : h.lw ? "测不准" : "无",
-      body: () => lwBlock(hostLw(h), {started: st.info?.started, loc: st.storage?.local, why: "worker 还没扫到：限速轮流扫，开机或借来后头一轮要一会儿"})},
+    {id: "lw", name: h.standalone ? "本地工作盘" : "本地盘",
+      note: h.standalone ? (h.work_disk ? (h.work_disk.disk_gate?.on || h.status?.disk_gate?.on ? "已暂停放行" : `剩 ${GB(h.work_disk.free)} GiB${(h.work_disk.reclaimable || []).length ? ` · ${h.work_disk.reclaimable.length} 处可回收` : ""}`) : "无")
+        : (h.lw?.ok ? `labmon 之外 ${g1(h.lw.user)} GiB` : h.lw ? "测不准" : "无"),
+      body: () => h.standalone ? workDiskBlock(h.work_disk, h)
+        : lwBlock(hostLw(h), {started: st.info?.started, loc: st.storage?.local, why: "worker 还没扫到：限速轮流扫，开机或借来后头一轮要一会儿"})},
     {id: "log", name: "worker 日志", note: h.log.length ? `${Math.min(40, h.log.length)} 行` : "无", body: () => h.log.length ? `<pre>${esc(h.log.slice(-40).join("\n"))}</pre>` : `<div class="empty">没有日志。</div>`});
   s += recCard("host", tabs);
   return s;

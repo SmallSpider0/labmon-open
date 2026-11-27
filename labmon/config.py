@@ -881,6 +881,69 @@ def remove_fleet_server(sid: str) -> Path:
     raise ConfigError(f"{p} 的 [[fleet.servers]] 里没有 {sid}")
 
 
+def _check_hosts_toml(text: str) -> dict:
+    """整份主机清单校验（add_host / edit_host / remove_host 共用）：TOML 合法、无重复主机 id、每块 [[hosts]] 过 host_defaults。"""
+    d = tomllib.loads(text)
+    seen = set()
+    for h in d.get("hosts") or []:
+        if not isinstance(h, dict) or not h.get("id"):
+            raise ConfigError("[[hosts]] 块缺少 id")
+        hid = str(h["id"])
+        if hid in seen:
+            raise ConfigError(f"主机清单里有重复的 id：{hid}")
+        seen.add(hid)
+        host_defaults(h)
+    return d
+
+
+@_hosts_edit
+def add_host(entry: dict, why: str) -> Path:
+    """在用户级主机清单追加一块 [[hosts]]（外部主机唯一落盘入口），跳过值为 None 的键，全文件过 _check_hosts_toml 后原子写入。"""
+    p = hosts_file()
+    hid = str(entry.get("id") or "").strip()
+    if not hid:
+        raise ConfigError("主机 id 不能为空")
+    lines = p.read_text().splitlines(keepends=True) if p.exists() else []
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    raw = _read_toml(p) if p.exists() else {}
+    if any(str(x.get("id")) == hid for x in raw.get("hosts") or []):
+        raise ConfigError(f"主机清单里已有主机 {hid}")
+    if any(str(x.get("id")) == hid for x in (raw.get("fleet") or {}).get("servers") or []):
+        raise ConfigError(f"主机 id {hid} 与组内服务器重名")
+    row = {k: v for k, v in entry.items() if v is not None}
+    updated = _append_blocks(lines, "[[hosts]]", [row])
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return _write_checked(p, "".join(updated), why, {"host": hid, "hosts": None}, check=_check_hosts_toml)
+
+
+@_hosts_edit
+def edit_host(hid: str, updates: dict, why: str) -> Path:
+    """修改用户级主机清单里指定 [[hosts]] 块的顶层键（值为 None 删掉该行），保留注释与其他块，过 _check_hosts_toml 后原子写入。"""
+    p = hosts_file()
+    lines = p.read_text().splitlines(keepends=True) if p.exists() else []
+    for s, end, bid in _blocks(lines, "[[hosts]]"):
+        if bid != hid:
+            continue
+        block = _set_keys(lines[s + 1:end], updates, p)
+        return _write_checked(p, "".join(lines[:s + 1] + block + lines[end:]), why, {"host": hid, "hosts": None}, check=_check_hosts_toml)
+    raise ConfigError(f"主机清单里没有主机 {hid}")
+
+
+@_hosts_edit
+def remove_host(hid: str, why: str) -> Path:
+    """从用户级主机清单删掉指定 [[hosts]] 块（连同其上方紧邻空行），过 _check_hosts_toml 后原子写入。"""
+    p = hosts_file()
+    lines = p.read_text().splitlines(keepends=True) if p.exists() else []
+    for s, end, bid in _blocks(lines, "[[hosts]]"):
+        if bid != hid:
+            continue
+        while s > 0 and not lines[s - 1].strip():
+            s -= 1
+        return _write_checked(p, "".join(lines[:s] + lines[end:]), why, {"host": hid, "hosts": None}, check=_check_hosts_toml)
+    raise ConfigError(f"主机清单里没有主机 {hid}")
+
+
 TOML_DT = r"\d{4}-\d{2}-\d{2}[Tt ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:[Zz]|[+-]\d{2}:\d{2})?"   # 原生日期时间（日期与时刻之间可以是空格）
 
 

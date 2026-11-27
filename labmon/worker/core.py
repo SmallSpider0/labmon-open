@@ -22,11 +22,15 @@ from . import forecast as _FC
 from . import offers as _OF
 
 class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin, _OF.OffersMixin, _M.MeasureMixin):
-    def __init__(self, host, shared=None):
+    def __init__(self, host, shared=None, standalone=None):
         self.host = host
+        self.standalone = (os.environ.get("LABMON_STANDALONE") == "1") if standalone is None else bool(standalone)
+        self._sched_standalone = False
         self.p = _C.Paths(host)
-        self.disk = _D.Disk(shared, host) if shared else None   # 共享盘用量（只有拿着租约的那台在扫）
+        self.disk = _D.Disk(shared, host) if (shared and not self.standalone) else None   # 共享盘用量（只有拿着租约的那台在扫）
         self.ldisk = _D.LocalDisk(host)          # 容器根盘开机以来的新写入与 labmon 目录的用量（每台扫自己的，#149）
+        self.wdisk = _D.WorkDisk(host) if self.standalone else None   # 独立主机隔离工作盘（仅扫 <data_root>，不扫根盘 /，#114）
+        self.disk_gate = {"on": False, "why": None, "free_gb": None, "stop_gb": None, "quota_gb": None, "work_gb": None}
         self.running = {}     # 请求 key（run_key：串行清单是队列 key、并行清单是 队列 key|任务名；单元是 slot:<id>）→ 运行中的任务或单元
         self.par_t = {}       # 队列 key → 这条清单上次往上加行的时刻（并行清单两次加行至少隔 PAR_STEP_S，par_gate；补位不算，#176）
         self.par_hi = {}      # 队列 key → (近来同时跑到过的行数, 最后一次跑着这么多行的时刻)：补到它以内是补位（par_level、par_note，#176）
@@ -128,6 +132,10 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         if keepalive_demo:
             self.ka_reg = os.path.join(keepalive_demo, "queues", "labmon-" + host)
         self.ka_ev = os.path.join(keepalive_demo, "keepalive", "events.log") if keepalive_demo else None   # ka.sh 记的停启与调用者
+
+    def is_standalone(self):
+        """当前 worker 是否运行在独立主机模式（环境变量 LABMON_STANDALONE=1、构造参数或 sched.json 下发）。"""
+        return bool(getattr(self, "standalone", False) or getattr(self, "_sched_standalone", False))
 
     # ---- 日志与事件 ----
     def wlog(self, msg):
@@ -296,8 +304,6 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if os.path.exists(rcf):
                 os.remove(rcf)
             sd, cd = _Q.scratch_dir(q["project"], job["name"]), _Q.cache_dir(q["project"])
-            for d in (sd, cd):
-                os.makedirs(d, exist_ok=True)
             env = dict(os.environ, PYTHONUNBUFFERED="1", QUEUE_ROOT=q["root"], LABMON_SCRATCH=sd, LABMON_CACHE=cd)
             env.pop("PYTHONPATH", None)
             env["CUDA_VISIBLE_DEVICES"] = ",".join(c["uuid"] for c in gpus) if job["ngpu"] > 0 else ""
@@ -311,12 +317,17 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             script = ("echo %d > /proc/self/oom_score_adj 2>/dev/null; " % _C.GUEST_ADJ if self.guest() else "") \
                 + body + '; echo $? > "$3"'
             args = ["bash", "-c", script, "labmon-job:" + job["name"], q["env"] or "", job["cmd"], rcf]
-            with open(os.path.join(lg, job["name"] + ".log"), "a") as out:
-                out.write("===== %s labmon 开始（GPU %s）=====\n" % (_C.now_str(), ",".join(str(c["i"]) for c in gpus) or "无"))   # 分隔行，见 START_RE
-                out.flush()
-                pr = subprocess.Popen(args,
-                                      cwd=q["root"], env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                      start_new_session=True)
+            # 与 clean_local 共用 scratch_lock：建单格临时目录、起进程并写 active_scratch 原子互斥，防止 clean 扫描到删除窗口误删新起任务
+            with _C.flock(self.p.scratch_lock):
+                for d in (sd, cd):
+                    os.makedirs(d, exist_ok=True)
+                with open(os.path.join(lg, job["name"] + ".log"), "a") as out:
+                    out.write("===== %s labmon 开始（GPU %s）=====\n" % (_C.now_str(), ",".join(str(c["i"]) for c in gpus) or "无"))   # 分隔行，见 START_RE
+                    out.flush()
+                    pr = subprocess.Popen(args,
+                                          cwd=q["root"], env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                          start_new_session=True)
+                self._note_scratch(q["project"], job["name"], pr.pid)
             if nice_inc and not use_nice_cmd:
                 try:
                     cur_nice = os.getpriority(os.PRIO_PROCESS, pr.pid)
@@ -340,13 +351,41 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                    name=job["name"], project=q["project"], queue=q["jobs"])
         return None
 
+    def _note_scratch(self, project, name, pid):
+        """在 scratch_lock 锁内记下刚放行任务的 (project, name) -> pid，供 clean_local 删除前复核防竞态。"""
+        if not (project and name and isinstance(pid, int) and pid > 0):
+            return
+        try:
+            cur = json.loads(_C.read(self.p.active_scratch, "{}") or "{}")
+            if not isinstance(cur, dict):
+                cur = {}
+        except ValueError:
+            cur = {}
+        # 剔除已退出或不在 running 里的旧记录，防止 active_scratch.json 无限增长
+        live = {k: v for k, v in cur.items() if isinstance(v, int) and v > 0 and self._pid_alive_fast(v)}
+        key = "%s/%s" % (_C.NAME_RE.sub("_", project), _C.NAME_RE.sub("_", name))
+        live[key] = pid
+        _C.write(self.p.active_scratch, json.dumps(live, ensure_ascii=False))
+
+    @staticmethod
+    def _pid_alive_fast(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
     def grant(self, r, gpus):
         """放行一次单元申请：写 .ok（含选中的卡），申请方据此设 CUDA_VISIBLE_DEVICES 后 exec 原命令。"""
         base = os.path.join(_C.SLOTS, r["id"])
         nice_inc = _S.cpu_only_nice(r["ngpu"], self.info.get("gpus") or (), _C.is_hold(r["name"]))
-        _C.write(base + ".ok", json.dumps({"gpus": [c["uuid"] for c in gpus], "t": _C.time.time(), "cpus": self.cpus_for(r),
-                                        **({"adj": _C.GUEST_ADJ} if self.guest() else {}),
-                                        **({"nice": nice_inc} if nice_inc else {})}))
+        with _C.flock(self.p.scratch_lock):
+            self._note_scratch(r.get("project"), r.get("name"), r.get("pid"))
+            _C.write(base + ".ok", json.dumps({"gpus": [c["uuid"] for c in gpus], "t": _C.time.time(), "cpus": self.cpus_for(r),
+                                            **({"adj": _C.GUEST_ADJ} if self.guest() else {}),
+                                            **({"nice": nice_inc} if nice_inc else {})}))
         if os.path.exists(base + ".why"):
             os.remove(base + ".why")
         self.running[r["key"]] = dict(r, t0=_C.time.time(), gpus=[c["uuid"] for c in gpus], use={}, pstart=_C.pstart(r["pid"]))
@@ -452,7 +491,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 open(os.path.join(q["state"], name + ".done"), "w").close()
                 self.publish(j)
                 shutil.rmtree(_Q.scratch_dir(j["project"], name), ignore_errors=True)   # 失败的留着查
-                self.ldisk.hint(os.path.dirname(_Q.scratch_dir(j["project"], name)))      # 本地盘上这个项目的单格临时少了一份
+                (self.wdisk if self.is_standalone() and self.wdisk else self.ldisk).hint(os.path.dirname(_Q.scratch_dir(j["project"], name)))      # 本地盘上这个项目的单格临时少了一份
                 self.qlog(q, "完成 %s（%d 分钟）" % (name, int(mins)))
                 self.event("done", "完成 %s（%d 分钟）" % (name, int(mins)), name=name, project=j["project"])
             else:
@@ -528,6 +567,10 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             km = (old.get("keepalive") or {}).get("mine")   # 自己开的保活：停多久都沿用，按出生时钟认（ka_groups 对不上就清掉，换了容器不会认错）
             self.ka_mine = km if isinstance(km, dict) and {"g", "born"} <= set(km) else None
             self.thr_since = (old.get("throttle") or {}).get("since") if fresh else None   # 限流的起算时刻：升级、重启不从头计时
+            dg = old.get("disk_gate")
+            if fresh and isinstance(dg, dict):
+                self.disk_gate = {k: dg.get(k) for k in ("on", "why", "free_gb", "stop_gb", "quota_gb", "work_gb")}
+                self.disk_gate["on"] = bool(self.disk_gate.get("on"))
             # 跑空登记的空置起点与休眠态（#164）：重启照常沿用，不重置 2 天倒计时；记着休眠时的清单与登记 file_sig，停机期间变动也会醒来
             ri = old.get("reg_idle") if isinstance(old.get("reg_idle"), dict) else {}
             self.reg_idle = {str(k): {"since": float(v["since"]),
@@ -689,6 +732,9 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if mine[id(j)]:
                 cards_on[id(j)] = self.measure(j, mine[id(j)], procs, gp, util, ovram, jobs, t)
         self.info = h
+        for d in h.get("disk") or []:
+            if isinstance(d, dict):
+                d["kind"] = "local" if self.is_standalone() else "shared"
         extra = self.other_cpu(jobs, h, t)
         # 保活整棵进程树（DataLoader 等子进程也持着内存、占着核，只算 GPU 进程本身会把它们算到对方头上，#29）：
         # 内存扣各进程 PSS 之和（组内探针 fleet.analyze 同一口径），CPU 扣这一段里的核数。根是这一轮认作保活的 GPU 进程：ka.sh 管的（owner keepalive），
@@ -910,6 +956,9 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         def pre():
             if gate:
                 return gate
+            # 磁盘闸门必须在启动 needs 本地依赖拷贝之前拦截，避免空间不足时 stage_bg 继续拷贝写满磁盘
+            if (self.disk_gate or {}).get("on"):
+                return self.disk_gate.get("why") or "磁盘闸门：本地盘空间不足，暂停放新任务；请运行 labmon disk 查看并清理缓存或旧运行目录"
             if r["kind"] == "queue" and r.get("needs"):
                 cp = [m for c in _Q.check_needs(r, self.qenv(r["q"])) for m in c["copy"]]
                 why = (cp or (r["key"], r["name"]) in self.stagers) and self.stage_bg(r, cp)   # 拷完的那一轮 cp 已空，也要收结果
@@ -932,6 +981,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         waiting, reqs = self.requests(queues, first)
         try:
             self.sample(queues)                   # 先读主机现状：准入要用当前的内存与各任务实测
+            self.apply_cpu_quota(self.info, pol)  # 将外部主机配置的 cpu_quota 接入准入、推演与 fit 容量
+            self.disk_events(self.info, pol)      # 独立主机低水位/软配额磁盘闸门（不杀在跑任务，仅 pre() 拦截新任务）
             self.watch(_C.time.time())               # 借来的主机：找看门狗（在停保活之前，看得到是谁拉起的）
         except Exception as e:  # noqa: BLE001 — 统计出错不能拖垮调度
             if self.noted.get("_sample") != str(e):
@@ -991,7 +1042,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             return now
         t_add = q.get("added_t") or 0
         rn = os.path.normpath(q["root"])
-        t_hist = max((h.get("t1") or 0 for h in self.hist if h.get("queue") == q["jobs"] and os.path.normpath(h.get("root") or "") == rn), default=0)
+        t_hist = max((h.get("t1") or 0 for h in self.hist if not h.get("shared_hist") and h.get("queue") == q["jobs"] and os.path.normpath(h.get("root") or "") == rn), default=0)
         since = max(t_add, t_hist)
         return min(now, since) if since else now
 
@@ -1166,6 +1217,18 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 self.local = {"t": now, "jobs": sorted(_Q.local_deps([q for q in queues if not q.get("sleeping")], _C.DATA_ROOT, self.qenv), key=lambda r: r["heal"])[:40]}
             except Exception as e:  # noqa: BLE001 — 统计出错不能拖垮调度
                 self.wlog("统计本地依赖出错：%r" % e)
+        if self.is_standalone():
+            def work():
+                if self.wdisk is None:
+                    self.wdisk = _D.WorkDisk(self.host)
+                self.wdisk.want({p for q in queues for p in [_C.project_dir(q["root"])] if p})
+                self.wdisk.step(now, self.io_yield)
+                self.disk_ends(now)
+                pmap = {p: q["project"] for q in queues for p in [_C.project_dir(q["root"])] if p}
+                wk, loc = self.wdisk.summary(pmap)
+                self.storage = {"t": wk.get("t"), "local": loc, "own": wk.get("b"), "wrote": None, "work": wk, "projects": pmap}
+            self.disk_do("工作盘", work)
+            return
         def local():
             d = self.ldisk
             st, g = self.info.get("started"), self.guest()
@@ -1185,11 +1248,11 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             self.disk_do("共享盘", shared)
 
     def disk_ends(self, now):
-        """有清单任务跑完（各主机的 usage.jsonl，load_hist 读的；成败都算）：它的项目目录下的单位尽快重扫（Disk.hint）。
+        """有清单任务跑完（各主机的 usage.jsonl，load_hist 读的；成败都算；跳过看板转送的 shared_hist）：它的项目目录下的单位尽快重扫（Disk.hint）。
         看板拿跑完那次重扫与开跑前的扫描之差算任务写入量（disk.project_storage 的 jobs，#53）。只有拿着租约的那台有索引，hint 才起作用；
         只认近一小时结束的（worker 重启后不把一天的旧记录都重扫一遍），已提前过的不再提前。没拿着租约时不记“提前过”，接手（读进新索引）后重新看近一小时的。"""
-        d = self.disk
-        if not (d.mine and d.ix is not None):
+        d = self.wdisk if self.is_standalone() else self.disk
+        if not (d and d.mine and d.ix is not None):
             return
         if self.hint_ix is not d.ix:
             self.hint_ix, self.hinted, self.hint_v = d.ix, set(), -1
@@ -1197,18 +1260,19 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             return
         self.hint_v = self.hist_v
         cur = {(h.get("host"), h.get("root"), h.get("name"), h.get("t0")): h for h in self.hist
-               if h.get("root") and (h.get("t1") or 0) >= now - 3600}
+               if not h.get("shared_hist") and h.get("root") and (h.get("t1") or 0) >= now - 3600}
         for k, h in cur.items():
             if k not in self.hinted and _C.project_dir(h["root"]):
-                self.disk.hint(_C.project_dir(h["root"]))
+                d.hint(_C.project_dir(h["root"]))
         self.hinted = set(cur)
 
     def scan_chain(self, now):
         """主循环拍与拍之间（每 0.5 秒）调：哪个扫描者的线程做完了一件，就马上收结果、开下一件，不等下一拍（#153）。
         开下一件照样经 step 的 defer（共享盘慢时让路）；限速按扫描者合起来算（Pace 的 rate）。"""
-        for name, d in (("本地盘", self.ldisk), ("共享盘", self.disk)):
+        pairs = (("工作盘", self.wdisk),) if self.is_standalone() else (("本地盘", self.ldisk), ("共享盘", self.disk))
+        for name, d in pairs:
             if d and d.job and not d.job[0].is_alive():
-                self.disk_do(name, lambda: d.step(now, self.io_yield))
+                self.disk_do(name, lambda d=d: d.step(now, self.io_yield))
 
     def disk_do(self, name, fn):
         """跑一步共享盘或本地盘的统计：出错不能拖垮调度，同一个错只记一次 worker.log。"""
@@ -1226,8 +1290,10 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.cpu_hints(S, u10)
         hits = [round(t) for t in self.ka_hits if t > now - _K.FIGHT_S]   # 近 FIGHT_S 秒保活被拉起的时刻（kafight，重启后 load_prev 找回）
         _C.write(self.p.status, json.dumps({
-            "t": _C.time.time(), "pid": os.getpid(), "host": self.host, "info": self.info, "gpu_procs": self.gprocs,
-            "gate": {"on": self.gate, "at": _C.GATE}, "limits": limits, "overrides": self.ovr, "local": self.local, "storage": self.storage,
+            "t": _C.time.time(), "pid": os.getpid(), "host": self.host, "standalone": self.is_standalone(), "info": self.info, "gpu_procs": self.gprocs,
+            "gate": {"on": self.gate, "at": _C.GATE},
+            "disk_gate": self.disk_gate if (self.is_standalone() or (self.disk_gate or {}).get("on") or (self.disk_gate or {}).get("stop_gb") or (self.disk_gate or {}).get("quota_gb")) else None,
+            "limits": limits, "overrides": self.ovr, "local": self.local, "storage": self.storage,
             "voided": self.voided,
             "kafight": dict(self.fight, n=len(hits), hits=hits) if hits else None,
             "throttle": self.throttle(now),       # 这一段 CPU 限流与超核的任务（Worker.throttle）；没在限流为 None

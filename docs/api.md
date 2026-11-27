@@ -109,7 +109,8 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/ephemeral/push`（推模式临时主机心跳上报，#213） | `project`；校验 `project` 归属（`users.need_project`），单请求 ≤ 128 KiB，仅主服务可写 |
 | `GET /api/project/<id>/(status\|disk\|records)`（实验会话的只读命令，#52） | `read`；普通用户只看自己的项目（`users.need_project`） |
 | `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
-| `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit)`、`/api/override/(pause\|resume)`（[命令行](#命令行162)） | `project`；普通用户只改自己下的暂停，项目级的与带 `--host` 的同一条（`users.need_pause`，#16、#27） |
+| `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit\|clean)`、`/api/override/(pause\|resume)`（[命令行](#命令行162)） | `project`；普通用户只改自己下的暂停，项目级的与带 `--host` 的同一条（`users.need_pause`，#16、#27）；`worker/clean` 普通用户必须指定本人名下 `--project` |
+| `POST /api/hosts/external`、`PUT /api/hosts/external/<id>`、`DELETE /api/hosts/external/<id>`、`POST /api/hosts/external/<id>/(test\|key)`（外部主机双入口，#114） | `project`；管理员按 `users.can_ops`（内网或已开公网平台操作，命令行需 `admin` 令牌）；普通用户仅可自助增删改测本人名下私有外部机（上限 `USER_EXT_HOSTS = 3` 台，强制 `standalone=true`、`share="private"`、`ssh_key="managed"`，禁 `ssh=""`、回环/链路本地与组内机冲突，`users.need_external_host`） |
 | `POST /api/worker/(stop\|limit)`、`/api/override/(drain\|undrain)` | `admin`，只给管理员 |
 | `POST /api/borrow`、`/api/host/(return\|restore)` | `admin`，只给管理员；公网须开启账号许可 |
 | `POST /api/password`、`/api/tokens/add`、`POST /api/revoke`、`/api/push`、`/api/push/test` | 浏览器会话（`account`） |
@@ -276,11 +277,15 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 | `POST /api/wait {"project", "jobs", "watch", "hold", "extra", "rid", "session", "wid", "take"}` | `{"new": {键: 文字}, "jobs": [{"name", "st", "text", "final"}], "watch", "done"}`（`waits.wait`） |
 | `POST /api/project/<id>/check {"text", "probe"?}` | `{"rc", "out"（默认紧凑校验摘要：几台主机、几条清单通过校验；`probe=true` / `--probe` 打印各主机完整探针规格 JSON）, "err", "after"（同步状态那行之后的几行）}`；配置不对 400。普通用户看到的 `out` 里，没开给他的主机只有一行“没开给你用”，不列连接信息与探针规格（#16、#200） |
 | `POST /api/project/init {"host", "name"}` | `{"rc", "out", "err"}`（`api.project_init`） |
-| `POST /api/worker/<动作> {"host", "args", "gpus", "project", "stop"}` | `{"rc", "out", "err"}`；`usage` 是参数错（如 `--project` 不是看板上的项目） |
+| `POST /api/worker/<动作> {"host", "args", "gpus", "project", "stop", "cache"?, "scratch"?, "dry_run"?, "yes"?}` | `{"rc", "out", "err"}`；`usage` 是参数错（如 `--project` 不是看板上的项目）；`clean` 仅作用于 `<LOCAL>/{cache,jobs}` 自管缓存，默认 `--dry-run`，加 `yes=true` 才删 |
 | `POST /api/override/<动作> {"target", "hosts", "until", "now"}` | `{"rc", "out", "err"}`；`until` 是 epoch 秒（相对写法在命令行那台机器上解析） |
 | `POST /api/borrow {"id", "until", "for", "from", "away"}` | `{"rc", "out", "err"}`（`api.borrow`） |
 | `POST /api/host/(return\|restore) {"id", "at", "now"}` | `{"rc", "out", "err"}`（`api.host`；`at` 是 epoch 秒，清单里写带年份的） |
-| `GET /api/hosts` | `{"missing", "hosts": [{"id", "returned", "ssh", "port", "label", "borrow", "worker_home", "home_with"}]}`：`labmon host list`、`labmon borrow` 列表用；`worker_home` 补了缺省值，`home_with` 是与它共用 worker 目录（同一块共享盘）的别的在用主机（`config.home_peers`，已归还的为空；普通用户只列他能用的） |
+| `POST /api/hosts/external` / `PUT /api/hosts/external/<id>` | 新增或修改外部主机（`exthost.py`，零私钥上传）；托管密钥自动生成专用 Ed25519 密钥对，返回 `{"host", "pubkey", "fingerprint", "auth_cmd", "msg"}`（绝不接受或回显私钥） |
+| `DELETE /api/hosts/external/<id> {"force"?}` | 移除外部主机（有在跑/排队任务时非 `force` 回 409），同步断开 ControlMaster、清理独立 `known_hosts` 并销毁专用私钥 |
+| `POST /api/hosts/external/<id>/test` | 单次测试外部主机 SSH 连通性、OS/WSL/GPU、Python 版本与 `data_root` 可用空间（不重试） |
+| `POST /api/hosts/external/<id>/key {"rotate"?}` | 查看或轮换外部主机专用 Ed25519 公钥（`rotate=true` 时断开旧连接），仅返回公钥、指纹与授权命令 |
+| `GET /api/hosts` | `{"missing", "hosts": [{"id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until", "worker_home", "data_root", "local_dir", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "platform_kind", "share", "standalone", "ssh_key_mode", "ssh_key_fp", "home_with"}]}`：`labmon host list`、`labmon borrow` 与外部机抽屉共用（普通用户只列他能用及名下的主机，他人私有外部机完全不可见） |
 
 | `GET /api/disk` | `{"rc", "out", "err", "data"}`：`out` 是排好的总盘概况与本人共享盘用量，`data` 是 `disk.person_storage` 的脱敏结果（`api.my_disk`，#211） |
 | `GET /api/project/<id>/status` | `{"rc", "out", "err", "data"}`：`out` 是排好的项目现状，`data` 是项目快照原样（[schema.md](schema.md)；还没采集过为 null）（`api.status`） |

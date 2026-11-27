@@ -24,6 +24,7 @@ EVENT_KINDS = {
     "renew": ("续租", "warn", "op"), "fleet_renew": ("续租", "ok", "op"), "fleet_off": ("关机", "warn", "op"), "fleet_boot": ("开机", "ok", "op"),
     "boot": ("开机参数", "mute", "op"),
     "config": ("改配置", "warn", "config"), "project": ("项目", "warn", "config"), "lease": ("租期", "warn", "lease"), "disk": ("共享盘", "bad", "disk"),
+    "disk_gate": ("磁盘闸门", "bad", "disk"),                            # 独立主机本地盘低水位/软配额闸门开关（#114）
     "account": ("账号", "warn", "config"),                               # 看板账号的改动与锁定（users.py，#160）
     "io_suspect": ("读写拥塞嫌疑", "warn", "disk"),                       # worker 记的：任务比同类慢很多、共享盘又慢（只记录、不告警）
     "borrow": ("借用", "warn", "borrow"), "borrow_due": ("约定时间", "warn", "borrow"), "borrow_back": ("对方在用", "warn", "borrow"),

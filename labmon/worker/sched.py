@@ -1070,7 +1070,7 @@ class SchedMixin:
         return (d, why) if src else d
 
     def reload_hist(self):
-        h = _C.load_hist(self.hist_cache)
+        h = _C.load_hist(self.hist_cache, host=self.host, standalone=self.is_standalone())
         if h is not None:
             self.hist, self.hist_v = h, self.hist_v + 1
 
@@ -1187,17 +1187,48 @@ class SchedMixin:
 
     # ---- 调度设置与公平份额 ----
     def policy(self):
-        """调度设置：看板写来的 sched.json（用户级主机清单的 [sched]），没写的用缺省（POLICY）。返回 {cap 秒, hl 秒, w {项目: 权重}, own {项目: 人员键}}。
+        """调度设置：看板写来的 sched.json（用户级主机清单的 [sched]），没写的用缺省（POLICY）。返回 {cap 秒, hl 秒, w {项目: 权重}, own {项目: 人员键},
+        standalone, disk_warn_gb, disk_stop_gb, disk_quota_gb}。
         own 是看板按项目主人写的（owner，#23；人员名的短哈希，不是名字）：同一个键的几个项目在 fair_key 里合起来算一份。"""
         try:
             d = json.loads(_C.read(self.p.sched, "{}") or "{}")
         except ValueError:
             d = {}
+        if "standalone" in d:
+            self._sched_standalone = bool(d.get("standalone"))
+        st = self.is_standalone()
         own = d.get("owner") if isinstance(d.get("owner"), dict) else {}
-        return {"cap": float(d["wait_cap_min"]) * 60 if d.get("wait_cap_min") else _C.POLICY["cap"],
-                "hl": float(d["half_life_h"]) * 3600 if d.get("half_life_h") else _C.POLICY["hl"],
-                "w": {str(k): float(v) for k, v in (d.get("weight") or {}).items()},
-                "own": {str(k): str(v) for k, v in own.items() if v}}
+        def _opt_num(k, default=None):
+            v = d.get(k)
+            if v is None:
+                return default
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return default
+        out = {"cap": float(d["wait_cap_min"]) * 60 if d.get("wait_cap_min") else _C.POLICY["cap"],
+               "hl": float(d["half_life_h"]) * 3600 if d.get("half_life_h") else _C.POLICY["hl"],
+               "w": {str(k): float(v) for k, v in (d.get("weight") or {}).items()},
+               "own": {str(k): str(v) for k, v in own.items() if v}}
+        env_cq = os.environ.get("LABMON_CPU_QUOTA")
+        if st or any(k in d for k in ("standalone", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "cpu_quota")) or env_cq:
+            out["standalone"] = st
+            out["disk_warn_gb"] = _opt_num("disk_warn_gb", _C.DISK_WARN_GB if st else None)
+            out["disk_stop_gb"] = _opt_num("disk_stop_gb", _C.DISK_STOP_GB if st else None)
+            out["disk_quota_gb"] = _opt_num("disk_quota_gb", None)
+            # 区分看板显式清除（"cpu_quota" in d 且为 null）与尚未收到下发（回退启动时的 LABMON_CPU_QUOTA）
+            if "cpu_quota" in d:
+                cq = _opt_num("cpu_quota", None)
+            elif env_cq:
+                try:
+                    cq = float(env_cq)
+                except ValueError:
+                    cq = None
+            else:
+                cq = None
+            if cq is not None and cq > 0:
+                out["cpu_quota"] = cq
+        return out
 
     def cards(self, ngpu, vram_gib, excl):
         """这台主机上一个任务占几张卡（card_share；卡的总显存取这台最小的那张）。"""
@@ -1213,6 +1244,8 @@ class SchedMixin:
         if self.hrows_v != self.hist_v:
             self.hrows_v, self.hrows = self.hist_v, []
             for h in self.hist:
+                if h.get("shared_hist"):
+                    continue
                 # 只认记了 project 的行（看板的项目 id）：没记的旧行按目录名猜出来的（如 project-a）与项目 id 对不上，
                 # 份额里会冒出幽灵项目，所以不计（只留给估时用，hist_key）；半衰期 12 小时，它们很快就不起作用
                 n, p = h.get("cards"), h.get("project")
@@ -1237,10 +1270,13 @@ class SchedMixin:
         有没有更新看状态里那台 worker 自己写的时刻 t，不看文件修改时间：修改时间是共享盘服务器的时钟，比各容器慢 3 分多钟，看上去总超过 STATUS_STALE_S。"""
         if now - self.peer_t >= _C.PEER_EVERY:
             self.peer_t, self.peer, self.peer_ends, self.peer_todo, self.peer_box, self.peer_st = now, [], {}, [], [], {}
+            self.peer_regs, self.pool_heads = {}, []
             try:
                 self.gone = set(json.loads(_C.read(self.p.returned, "{}") or "{}").get("hosts") or [])
             except (ValueError, AttributeError, TypeError):
                 self.gone = set()
+            if self.is_standalone():
+                return self.peer
             addr = ((self.info.get("press") or {}).get("nfs") or {}).get("addr")
             for f in sorted(glob.glob(os.path.join(_C.HOME, "hosts", "*", "status.json"))):
                 try:

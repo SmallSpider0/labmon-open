@@ -210,6 +210,202 @@ function meCan(M, info) {
   const ss = Object.keys(info).length ? Object.keys(info).filter(s => M.scopes.includes(s)) : M.scopes;
   return `这个令牌能做：${ss.map(s => info[s]?.[1] || info[s]?.[0] || s).join("；")}。`;
 }
+// 「我的账号 → 概览」的「我的外部主机」：本人名下（管理员见全部）的独立外部主机，直接打开右侧抽屉增删改测
+function myExtHostsSec(M) {
+  const exts = (D.hosts || []).filter(h => h.standalone && (M.admin || (h.owner && h.owner.toLowerCase() === M.name.toLowerCase())));
+  const canAdd = LIVE && (M.admin ? canOps() : M.write);
+  const lim = M.admin ? "" : ` <span class="sm mut">（${exts.length} / 3 台）</span>`;
+  const btn = canAdd ? `<span class="sp"></span><button class="btn mini-btn" data-drw="#/ext/new">+ 添加外部主机</button>` : "";
+  const body = exts.length ? `<div class="ulist">${exts.map(h => `<div class="urow sm-row"><div class="u">${icon("server")}<div class="t">
+      <a href="#/host/${encodeURIComponent(h.id)}"><b>${esc(h.label || h.id)}</b></a> <span class="sm mut">${esc(h.id)}${h.owner ? ` · ${esc(h.owner)}` : ""}</span>
+      <div class="sm mut">${h.work_disk ? `本地工作盘剩 ${GB(h.work_disk.free)} / ${GB(h.work_disk.total)} GiB` : "独立主机"}</div></div></div>
+      <div class="acts">${canEditExt(h) ? `<button class="btn mini-btn" data-drw="${esc(DH.ext(h.id))}">管理</button>` : ""}</div></div>`).join("")}</div>`
+    : `<div class="empty">还没有添加外部主机（支持外租 GPU 服务器、WSL2 与自有 Linux 机；零私钥上传，自动生成专用公钥）。</div>`;
+  return dSec("我的外部主机", body, lim + btn);
+}
+
+/* ---------- 外部主机右侧抽屉（#/ext/new、#/ext/<id>）：零私钥上传，API/CLI + GUI 共用 /api/hosts/external* ---------- */
+let EXT = null;   // {id, isNew, visit, loading, busy, testing, deleting, form, key, test, msg, err, confirmDel, forceDel}
+function extLeave() { EXT = null; }
+function extDefaultForm(h = null) {
+  return {
+    id: h?.id || "", label: h?.label || "", ssh: h?.ssh || "", port: h?.port != null ? String(h.port) : "22",
+    platform_kind: h?.platform_kind || "other", ssh_key: h?.ssh_key_mode || (ME?.admin && h && !h.ssh ? "system" : "managed"),
+    owner: h?.owner || "", lease_until: h?.lease_until || "", data_root: h?.data_root || "~/.local/share/labmon/work",
+    python: h?.python || "python3",
+    disk_warn_gb: h?.disk_warn_gb != null ? String(h.disk_warn_gb) : "20",
+    disk_stop_gb: h?.disk_stop_gb != null ? String(h.disk_stop_gb) : "10",
+    disk_quota_gb: h?.disk_quota_gb != null ? String(h.disk_quota_gb) : "",
+    cpu_quota: h?.cpu_quota != null ? String(h.cpu_quota) : "",
+    mps_vram_gb: h?.mps_vram_gb != null ? String(h.mps_vram_gb) : "",
+  };
+}
+async function extLoad(id) {
+  const st = EXT, visit = st.visit;
+  st.loading = true; st.err = null;
+  try {
+    const r = await api("api/hosts", {cache: "no-store"}, {retry: true}), j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+    if (EXT !== st || st.visit !== visit) return;
+    const h = (j.hosts || []).find(x => x.id === id);
+    if (!h) { st.err = `找不到外部主机 ${id}（或无权访问）`; st.loading = false; return render(false); }
+    st.form = extDefaultForm(h);
+    st.fp = h.ssh_key_fp || null;
+    if (h.ssh && h.ssh_key_mode === "managed") {
+      const kr = await postJSON(`api/hosts/external/${encodeURIComponent(id)}/key`, {rotate: false});
+      const kj = await kr.json().catch(() => ({}));
+      if (EXT === st && st.visit === visit && kr.ok) st.key = {pubkey: kj.pubkey, fingerprint: kj.fingerprint, auth_cmd: kj.auth_cmd};
+    }
+  } catch (e) { if (EXT === st && st.visit === visit) st.err = e.message || String(e); }
+  if (EXT === st && st.visit === visit) { st.loading = false; render(false); }
+}
+function extInput(el, ev) {
+  if (!EXT) return;
+  const k = el.dataset.extf;
+  if (k === "forceDel") { EXT.forceDel = !!el.checked; return render(false); }
+  EXT.form[k] = el.type === "checkbox" ? !!el.checked : el.value;
+  if (ev === "change" && (k === "ssh_key" || k === "platform_kind")) render(false);
+}
+async function extAct(act, d = {}) {
+  if (!EXT || EXT.busy) return;
+  const st = EXT, visit = st.visit, f = st.form;
+  if (act === "delask") { st.confirmDel = !st.confirmDel; st.err = null; return render(false); }
+  if (act === "save") {
+    const body = {
+      ...(st.isNew ? {id: (f.id || "").trim()} : {}),
+      label: (f.label || "").trim() || (f.id || "").trim(),
+      ssh: (f.ssh || "").trim(),
+      port: f.port ? Number(f.port) : 22,
+      platform_kind: f.platform_kind || "other",
+      ssh_key: ME?.admin ? (f.ssh_key || "managed") : "managed",
+      ...(ME?.admin ? {owner: (f.owner || "").trim()} : {}),
+      lease_until: (f.lease_until || "").trim() || null,
+      data_root: (f.data_root || "").trim() || "~/.local/share/labmon/work",
+      python: (f.python || "").trim() || "python3",
+      disk_warn_gb: f.disk_warn_gb === "" ? null : Number(f.disk_warn_gb),
+      disk_stop_gb: f.disk_stop_gb === "" ? null : Number(f.disk_stop_gb),
+      disk_quota_gb: f.disk_quota_gb === "" ? null : Number(f.disk_quota_gb),
+      cpu_quota: f.cpu_quota === "" ? null : Number(f.cpu_quota),
+      mps_vram_gb: f.mps_vram_gb === "" ? null : Number(f.mps_vram_gb),
+    };
+    if (st.isNew && !body.id) { st.err = "请填写主机 id（小写字母、数字、- 或 _）"; return render(false); }
+    if (!ME?.admin && !body.ssh) { st.err = "请填写 SSH 地址（如 user@203.0.113.10）"; return render(false); }
+    st.busy = true; st.err = st.msg = null; render(false);
+    try {
+      const url = st.isNew ? "api/hosts/external" : `api/hosts/external/${encodeURIComponent(st.id)}`;
+      const r = await sendJSON(st.isNew ? "POST" : "PUT", url, body);
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      if (EXT !== st || st.visit !== visit) return;
+      st.isNew = false; st.id = j.host?.id || st.id;
+      if (j.host) st.form = extDefaultForm({...j.host, ssh_key_mode: j.host.ssh_key});
+      if (j.pubkey) st.key = {pubkey: j.pubkey, fingerprint: j.fingerprint, auth_cmd: j.auth_cmd};
+      st.msg = j.msg || "已保存";
+      if (ME?.admin) collectNow(true); else poll();
+    } catch (e) { if (EXT === st && st.visit === visit) st.err = e.message || String(e); }
+    if (EXT === st && st.visit === visit) { st.busy = false; render(false); }
+    return;
+  }
+  if (act === "test" && !st.isNew) {
+    st.testing = true; st.err = null; st.test = null; render(false);
+    try {
+      const r = await postJSON(`api/hosts/external/${encodeURIComponent(st.id)}/test`, {});
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      if (EXT === st && st.visit === visit) st.test = j;
+    } catch (e) { if (EXT === st && st.visit === visit) st.test = {ok: false, error: e.message || String(e)}; }
+    if (EXT === st && st.visit === visit) { st.testing = false; render(false); }
+    return;
+  }
+  if (act === "rotate" && !st.isNew) {
+    st.busy = true; st.err = st.msg = null; render(false);
+    try {
+      const r = await postJSON(`api/hosts/external/${encodeURIComponent(st.id)}/key`, {rotate: true});
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      if (EXT === st && st.visit === visit) {
+        st.key = {pubkey: j.pubkey, fingerprint: j.fingerprint, auth_cmd: j.auth_cmd};
+        st.msg = j.msg || "已轮换专用密钥";
+      }
+    } catch (e) { if (EXT === st && st.visit === visit) st.err = e.message || String(e); }
+    if (EXT === st && st.visit === visit) { st.busy = false; render(false); }
+    return;
+  }
+  if (act === "delgo" && !st.isNew) {
+    st.busy = true; st.err = null; render(false);
+    try {
+      const r = await sendJSON("DELETE", `api/hosts/external/${encodeURIComponent(st.id)}`, {force: !!st.forceDel});
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      if (EXT === st && st.visit === visit) {
+        extLeave();
+        if (ME?.admin) collectNow(true); else poll();
+        return closeDrw();
+      }
+    } catch (e) { if (EXT === st && st.visit === visit) { st.err = e.message || String(e); st.busy = false; render(false); } }
+  }
+}
+function extHostDrawer(id) {
+  const isNew = !id;
+  if (!EXT || (isNew ? !EXT.isNew && EXT.origNew !== true : EXT.id !== id)) {
+    const snapH = !isNew ? (D.hosts || []).find(x => x.id === id) : null;
+    EXT = {id, isNew, origNew: isNew, visit: Date.now(), loading: false, busy: false, testing: false,
+      form: extDefaultForm(snapH), key: null, test: null, msg: null, err: null, confirmDel: false, forceDel: false};
+    if (!isNew && LIVE) extLoad(id);
+  }
+  const st = EXT, f = st.form, dis = st.busy || st.loading ? "disabled" : "";
+  const can = LIVE && ME && (ME.admin ? canOps() : ME.write);
+  const inp = (k, label, ph = "", extra = "") => `<label>${label}<input class="ain" data-extf="${k}" value="${esc(f[k] ?? "")}" placeholder="${esc(ph)}" autocomplete="off" ${extra} ${dis}></label>`;
+  const keyCard = st.key ? `<div class="secret" role="status">
+      <div class="row wrap"><b>看板专用公钥（零私钥上传）</b><span class="sm mut">${esc(st.key.fingerprint || "")}</span><span class="sp"></span>
+        <button class="btn mini-btn" type="button" data-copy="${esc(st.key.pubkey)}">复制公钥</button>
+        <button class="btn mini-btn" type="button" data-copy="${esc(st.key.auth_cmd)}">复制授权命令</button>
+        ${can ? `<button class="btn mini-btn" type="button" data-ext="rotate" ${dis}>轮换密钥</button>` : ""}</div>
+      <div class="sm mut" style="margin:4px 0">将下面命令粘贴到目标机执行一次，授权看板公钥登录（私钥仅留看板本机隔离目录，绝不索要个人私钥）：</div>
+      <code class="v" style="word-break:break-all">${esc(st.key.auth_cmd)}</code></div>`
+    : `<div class="sm mut">${f.ssh_key === "system" ? "使用看板宿主机的默认 SSH 密钥（仅管理员可用）。" : "保存后将自动为这台主机生成专属 Ed25519 公钥与一行 authorized_keys 授权命令（零私钥上传）。"}</div>`;
+  const testRes = st.test ? (st.test.ok
+    ? `<div class="rn-state">${esc(st.test.msg || "连通正常")}</div>`
+    : `<div class="rn-err">${esc(st.test.error || "连通失败")}${st.test.hint ? `<div class="sm mut" style="margin-top:4px">建议：${esc(st.test.hint)}</div>` : ""}</div>`) : "";
+  const delBox = !st.isNew && can ? (st.confirmDel
+    ? `<div class="pop-w" style="margin-top:8px"><b>确认删除外部主机 ${esc(st.id)}？</b><div class="sm">将从主机清单移除并同步销毁看板专用私钥、断开 SSH 长连接。</div>
+        <label class="sm pop-ck"><input type="checkbox" data-extf="forceDel" ${st.forceDel ? "checked" : ""}> 强制删除（即使仍有排队或在跑任务）</label>
+        <div class="row" style="gap:6px;margin-top:6px"><button class="btn pri dz" type="button" data-ext="delgo" ${dis}>确认删除</button><button class="btn" type="button" data-ext="delask" ${dis}>取消</button></div></div>`
+    : `<button class="btn danger" type="button" data-ext="delask" ${dis}>删除外部主机</button>`) : "";
+  const basic = `<div class="aform">
+      ${inp("id", "主机 ID（小写字母/数字/-/_）", "ext-4090", st.isNew ? "" : "readonly")}
+      ${inp("label", "显示名称", "外租 4090 / WSL2-本机")}
+      <label>平台类型<select class="ain" data-extf="platform_kind" ${dis}>
+        <option value="other"${f.platform_kind === "other" ? " selected" : ""}>外租平台（只做租期提醒，不做平台操作）</option>
+        <option value="none"${f.platform_kind === "none" ? " selected" : ""}>自有机器（WSL2 / 个人主机 / 本机 Mac）</option></select></label>
+      ${f.platform_kind === "other" ? inp("lease_until", "租期到期（可选，YYYY-MM-DD HH:MM）", "2026-12-01 18:00") : ""}
+      ${ME?.admin ? inp("owner", "归属账号（可选，留空归管理员）", "如 alice") : `<div class="sm mut">归属：<b>${esc(ME?.name || "本人")}</b>（私有，仅本人可见，最多 3 台）</div>`}
+    </div>`;
+  const conn = `<div class="aform">
+      ${inp("ssh", ME?.admin ? "SSH 地址（留空表示看板本机）" : "SSH 地址（user@host，禁回环/内网保留段）", "ubuntu@203.0.113.10")}
+      ${inp("port", "SSH 端口", "22", 'type="number" min="1" max="65535"')}
+      ${inp("python", "远端 Python 路径", "python3")}
+      ${ME?.admin ? `<label>SSH 密钥模式<select class="ain" data-extf="ssh_key" ${dis}>
+        <option value="managed"${f.ssh_key !== "system" ? " selected" : ""}>看板专用密钥（managed，推荐）</option>
+        <option value="system"${f.ssh_key === "system" ? " selected" : ""}>宿主机默认密钥（system，仅管理员）</option></select></label>` : ""}
+    </div>${keyCard}`;
+  const disk = `<div class="aform">
+      ${inp("data_root", "独立工作根目录（data_root）", "~/.local/share/labmon/work")}
+      ${inp("disk_warn_gb", "磁盘预警线（GiB，默认 20）", "20", 'type="number" min="0"')}
+      ${inp("disk_stop_gb", "磁盘停止线（GiB，默认 10，触发闸门停放新任务）", "10", 'type="number" min="0"')}
+      ${inp("disk_quota_gb", "工作目录软配额（GiB，可选）", "留空不限", 'type="number" min="1"')}
+      ${inp("cpu_quota", "CPU 核数配额（可选）", "留空自动检测", 'type="number" min="1"')}
+      ${inp("mps_vram_gb", "Apple Silicon 统一内存显存上限（GiB，可选）", "仅 Mac 用", 'type="number" min="1"')}
+    </div>`;
+  const acts = can ? `<div class="row wrap" style="gap:8px;margin-top:8px">
+      <button class="btn pri" type="button" data-ext="save" ${dis}>${st.busy ? "保存中…" : st.isNew ? "保存并生成公钥" : "保存修改"}</button>
+      ${!st.isNew ? `<button class="btn" type="button" data-ext="test" ${st.testing || st.busy ? "disabled" : ""}>${st.testing ? "测试中…" : "测试连通"}</button>` : ""}
+      <button class="btn" type="button" data-dclose ${dis}>关闭</button><span class="sp"></span>${delBox}</div>` : opsNote();
+  return dHead(`<span class="fav">${icon("server")}</span>`, st.isNew ? "添加外部主机" : `外部主机 · ${esc(st.id)}`,
+      "独立工作盘 · 零私钥上传 · 绝不碰平台操作")
+    + `<div class="db">${st.loading ? `<div class="empty">正在读取配置…</div>` : ""}${st.msg ? `<div class="rn-state">${esc(st.msg)}</div>` : ""}${st.err ? `<div class="rn-err">${esc(st.err)}</div>` : ""}${testRes}
+      ${dSec("基本信息", basic)}${dSec("SSH 连接与专用公钥", conn)}${dSec("本地工作盘与资源水位", disk)}${dSec("操作", acts)}</div>`;
+}
 function mePage(tab) {
   if (!LIVE || !ME) return `<div class="card"><div class="empty">账号要经看板服务（labmon serve）打开才看得到。</div></div>`;
   if (!ACC.at.me) accLoad("me");
@@ -246,7 +442,7 @@ function mePage(tab) {
     ["我的项目", accountList(M.own)],
     ["能用的主机", (M.hosts?.length ? accountList(M.hosts) : "没有单独分配") + (seen.length ? `<span class="sm mut">；你的项目还在 ${accountList(seen)} 上有任务</span>` : "")]
   ]));
-  return head + clientSec(M) + own;
+  return head + myExtHostsSec(M) + clientSec(M) + own;
 }
 function accStatus(u, brief = false) {
   if (u.lock) return `<span class="badge b-bad">${brief ? "已锁定" : `锁到 ${tsNear(u.lock)}`}</span>`;

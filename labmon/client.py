@@ -216,7 +216,7 @@ def _once(srv: dict, method: str, path: str, body, headers: dict, timeout: float
     """发一次：返回 (状态码, JSON 或 None)；请求没送到抛 _Down(sent=False)，发出去之后回话断了、超时了抛 _Down(sent=True)。"""
     hd = {"Accept": "application/json", HEADER: dist.version(), **headers}
     data = None
-    if method in ("POST", "PUT"):
+    if method in ("POST", "PUT", "DELETE"):
         hd["Content-Type"] = "application/json"
         data = json.dumps(body if body is not None else {}, ensure_ascii=False).encode()
     req = urllib.request.Request(srv["url"] + path, data=data, method=method, headers=hd)
