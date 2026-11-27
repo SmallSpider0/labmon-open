@@ -238,7 +238,7 @@ document.addEventListener("change", e => {               // 批量续租的勾�
   if ("bfor" in d && POP?.sel) { t.checked ? POP.sel.add(d.bfor) : POP.sel.delete(d.bfor); return; }
   if ("owner" in d && POP?.k === "owner") { POP.owner = t.value; return; }
   if ("achost" in d && POP?.k === "acc-hosts") { t.checked ? POP.sel.add(d.achost) : POP.sel.delete(d.achost); return; }
-  if ("popField" in d && POP?.draft) { POP.draft[d.popField] = t.value; return render(false); }
+  if ("popField" in d && POP?.draft && t.type === "radio") { POP.draft[d.popField] = t.value; return; }
   if ("regto" in d && POP) { POP.to = d.regto; POP.err = null; return render(false); }   // 换到哪台
   if ("assignto" in d && APICK && !APICK.busy) { APICK.to = d.assignto; APICK.err = null; return render(false); }   // 给项目用：抽屉内选项目
   if ("adopt" in d && ADOPT) { ADOPT.sel[d.adopt] = t.checked; return render(false); }    // 接上卡的勾选

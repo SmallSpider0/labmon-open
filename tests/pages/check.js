@@ -3607,6 +3607,16 @@ t("overview", "前端 UI 打磨（#237）：分段按钮组、外部机抽屉重
   run(OT, `D.occ["srv-a"].push({p: "proj-a", n: "cpu_job", lane: "CPU", t0: ${NOW - 1800}, t1: ${NOW + 1800}, g: [], st: "run"}); drawTimeline()`);
   const tlH = Number((el(OT, "tlbox").innerHTML.match(/<svg[^>]*height="([^"]+)"/) || [])[1]);
   ok(run(OT, "OCC_CARD_LAY.base") === 15 && tlH > 0 && tlH < 120, `总览时间线应紧凑：base=${run(OT, "OCC_CARD_LAY.base")}, svgH=${tlH}`);
+  // 账号表单 data-pop-field 的 change 事件：文本框失焦不触发重绘，radio 仅更新草稿不重绘
+  const AT = accCtx(OV, ADMIN_ME, "#/me/tokens"); run(AT, "ACC.at.me = 1");
+  page(AT, "#/me/tokens"); run(AT, 'accAct("open-tok")');
+  run(AT, "RN = 0; ORIG_R = render; render = (...a) => { RN++; return ORIG_R(...a); }");
+  fire(AT, "change", {type: "text", value: "新名称", dataset: {popField: "tokn"}, classList: {contains: () => false}});
+  const rText = run(AT, "RN");
+  fire(AT, "change", {type: "radio", value: "admin", dataset: {popField: "toks"}, classList: {contains: () => false}});
+  const rRadio = run(AT, "RN"), toks = run(AT, "POP.draft.toks");
+  run(AT, "render = ORIG_R");
+  ok(rText === 0 && rRadio === 0 && toks === "admin", `data-pop-field change 不应重建表单且应更新 radio 草稿：rText=${rText}, rRadio=${rRadio}, toks=${toks}`);
 });
 
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));
