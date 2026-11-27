@@ -230,6 +230,69 @@ class CommittedTest(unittest.TestCase):
             self.assertEqual((wh / "worker" / "sched.py").read_text(), "# main sched\n")
             self.assertEqual(list(wh.glob(".deploy.*")), [])
 
+    def test_start_if_missing_compat_legacy_and_daemon_worker(self):
+        """#114 P4 + #224：deploy='if_missing' 保留远端已有旧 worker 时不传 --daemon（走 setsid/nohup 回退），
+        新版 worker（run --help 含 --daemon）走 --daemon 后台启动。"""
+        no_git_env(self)
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td).resolve()
+            # 1) 旧 worker：不认识 --daemon（传了直接 exit 2）
+            wh_old = d / "old" / "labmon"
+            wh_old.mkdir(parents=True)
+            (wh_old / "labmon_worker.py").write_text("# legacy worker\n")
+            rec_old = d / "old.rec"
+            up_old = d / "old.up"
+            py_old = d / "py_old"
+            py_old.write_text(
+                "#!/bin/sh\n"
+                "shift\n"
+                "case \"$1\" in\n"
+                f"  ls) [ -f {up_old} ] && echo 'worker：运行中 PID 1' || echo 'worker：未运行'; exit 0;;\n"
+                "  run)\n"
+                "    for a in \"$@\"; do [ \"$a\" = --help ] && echo 'usage: run [--host H]' && exit 0; done\n"
+                "    for a in \"$@\"; do [ \"$a\" = --daemon ] && echo 'unrecognized arguments: --daemon' >&2 && exit 2; done\n"
+                f"    echo \"$*\" > {rec_old}; touch {up_old}; exit 0;;\n"
+                "esac\n"
+            )
+            py_old.chmod(0o755)
+            h_old = {"id": "here", "worker_home": str(wh_old), "python": str(py_old), "shared": []}
+            with mock.patch.object(workerctl, "host_conf", return_value=h_old), \
+                    mock.patch.object(workerctl.LS, "need"), \
+                    mock.patch.object(workerctl, "START_CHECK_S", 0.05), \
+                    mock.patch.object(workerctl, "worker_bundle", return_value=("", [])):
+                rc, out = workerctl.run_out("start", "here", [], deploy="if_missing")
+            self.assertEqual(rc, 0, out)
+            self.assertEqual((wh_old / "labmon_worker.py").read_text(), "# legacy worker\n")
+            self.assertNotIn("--daemon", rec_old.read_text())
+
+            # 2) 新 worker：run --help 含 --daemon，走 --daemon 启动且不覆盖已有文件
+            wh_new = d / "new" / "labmon"
+            wh_new.mkdir(parents=True)
+            (wh_new / "labmon_worker.py").write_text("# existing new worker\n")
+            rec_new = d / "new.rec"
+            up_new = d / "new.up"
+            py_new = d / "py_new"
+            py_new.write_text(
+                "#!/bin/sh\n"
+                "shift\n"
+                "case \"$1\" in\n"
+                f"  ls) [ -f {up_new} ] && echo 'worker：运行中 PID 2' || echo 'worker：未运行'; exit 0;;\n"
+                "  run)\n"
+                "    for a in \"$@\"; do [ \"$a\" = --help ] && echo 'usage: run [--daemon] [--host H]' && exit 0; done\n"
+                f"    echo \"$*\" > {rec_new}; touch {up_new}; exit 0;;\n"
+                "esac\n"
+            )
+            py_new.chmod(0o755)
+            h_new = {"id": "here", "worker_home": str(wh_new), "python": str(py_new), "shared": []}
+            with mock.patch.object(workerctl, "host_conf", return_value=h_new), \
+                    mock.patch.object(workerctl.LS, "need"), \
+                    mock.patch.object(workerctl, "START_CHECK_S", 0.05), \
+                    mock.patch.object(workerctl, "worker_bundle", return_value=("", [])):
+                rc2, out2 = workerctl.run_out("start", "here", [], deploy="if_missing")
+            self.assertEqual(rc2, 0, out2)
+            self.assertEqual((wh_new / "labmon_worker.py").read_text(), "# existing new worker\n")
+            self.assertIn("--daemon", rec_new.read_text())
+
 
 if __name__ == "__main__":
     unittest.main()
