@@ -155,7 +155,34 @@ svg.spark { flex: 1; min-width: 0; width: 100%; height: 22px; cursor: crosshair;
 #tlbar { display: inline-flex; align-items: center; gap: 6px; margin-left: auto; }
 #tlbar .btn { min-height: 24px; padding: 1px 9px; }
 #tlbar .seg { margin-left: 0; }
+.tl-ctl { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; margin: 0 0 6px; }
+.tl-ctl:empty { display: none; }
+.tl-ctl .seg { margin-left: 0; }
 #tllegend { margin: -2px 0 2px; }
+/* 主机表按算力池分组头与 ≥ 4 卡紧凑 2 列微条 */
+tr.pool-gh { cursor: pointer; }
+tr.pool-gh td { background: var(--soft); padding: 4px 8px; }
+tr.pool-gh:hover td { background: color-mix(in srgb, var(--accent) 8%, var(--soft)); }
+.pgh-in { display: inline-flex; align-items: center; gap: 6px; }
+.pgh-in .ico { width: 14px; height: 14px; color: var(--muted); transition: transform .15s; }
+tr.pool-gh.fold .pgh-in .ico { transform: rotate(-90deg); }
+.gpu-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 3px 8px; min-width: 180px; }
+.gpu-mini { display: flex; align-items: center; gap: 4px; font-size: 11px; line-height: 1.3; min-width: 0; }
+.gpu-mini .bar { flex: 1; min-width: 22px; }
+/* 侧边栏主机区按池二级折叠（主机 > 6 台） */
+.npool { display: flex; align-items: center; gap: 6px; height: 30px; margin: 1px 6px; padding: 0 10px 0 14px; border-radius: 6px;
+         font-size: 12px; color: var(--side-fg); cursor: pointer; user-select: none; }
+.npool:hover { background: var(--side-on); }
+.npool .ico { width: 14px; height: 14px; color: var(--side-mut); transition: transform .15s; }
+.npool.fold .ico { transform: rotate(-90deg); }
+.npool .lbl { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.npool .ct { margin-left: auto; font-size: 11px; color: var(--side-mut); }
+.npool .ct.bad { color: #fff; background: var(--bad); border-radius: 9px; padding: 0 6px; font-weight: 600; }
+.npool.fold + .npool-grp { display: none; }
+.npool-grp .nav { padding-left: 22px; height: 32px; }
+body.mini .npool { display: none; }
+body.mini .npool.fold + .npool-grp { display: block; }
+body.mini .npool-grp .nav { padding-left: 0; height: auto; }
 #tlbox { touch-action: pan-y; cursor: grab; user-select: none; -webkit-user-select: none; margin-bottom: 4px; }
 #tlbox.drag, #tlbox.drag * { cursor: grabbing; }
 .tlkey { margin-bottom: 10px; }

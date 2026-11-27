@@ -142,35 +142,60 @@ function home() {
     s += `<div class="alerts">${head}${extra}</div>`;
   }
   const addExtBtn = LIVE && ME && (ME.admin ? canOps() : ME.write) ? `<span class="sp"></span><button class="btn mini-btn" data-drw="#/ext/new">+ 添加外部主机</button>` : "";
+  // 主机表「显存 · 利用率」列：1–3 卡逐卡一行；≥ 4 卡自动收成 2 列微条网格，悬停仍保留逐卡完整明细
+  const gpuCell = (h, gs) => {
+    if (!gs.length) return "—";
+    const compact = gs.length >= 4;
+    const rows = gs.map(g => {
+      const isMps = g.backend === "mps", U = utilText(gpuBusy(h, g.i), g.util), up = unacctPaused(h, g), umb = g.unacct_mb || 0;
+      const utip = isMps ? `\n${g.name || "Apple Silicon (MPS)"}（统一内存保守估算，默认单卡互斥，不采集利用率）`
+        : up ? `\n外部（如宿主机）占卡暂停放行${umb ? `（约 ${mb2g(umb)} GiB）` : ""}${g.unacct_why ? `：${g.unacct_why}` : ""}`
+        : umb >= 512 ? `\n外部（如宿主机）未归因显存约 ${mb2g(umb)} GiB（已扣减可放显存）` : "";
+      const utag = isMps ? ` <span class="badge b-mute">MPS</span>`
+        : up ? ` <span class="badge b-warn">外部占卡</span>` : umb >= 512 ? `<span class="mut"> · 外部 ${mb2g(umb)}G</span>` : "";
+      const t = tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB\n${isMps ? "Apple Silicon MPS 逻辑卡" : U.tip}${utip}`);
+      const w = g.total ? 100 * g.used / g.total : 0, bg = up ? "var(--warn)" : "var(--accent)";
+      if (compact) {
+        return `<div class="gpu-mini" ${t}><span class="mut num">G${g.i}</span><div class="bar thin"><i style="width:${w}%;background:${bg}"></i></div><span class="num nw">${pct(g.used, g.total)}%${isMps ? "" : `<span class="mut">·${U.big}</span>`}</span></div>`;
+      }
+      return `<div class="row" style="flex-wrap:nowrap" ${t}><div class="bar thin" style="flex:1"><i style="width:${w}%;background:${bg}"></i></div><span class="sm num nw">${pct(g.used, g.total)}%${isMps ? "" : `<span class="mut"> · ${U.big}</span>`}${utag}</span></div>`;
+    }).join("");
+    return compact ? `<div class="gpu-grid">${rows}</div>` : rows;
+  };
+  const renderHostRow = h => {
+    const info = h.status?.info, gs = info?.gpus || [], m = info?.mem;
+    const gb = gpuCell(h, gs);
+    const sx = (h.ephemeral || h.standalone) ? null : sharedParts(), wd = h.standalone ? h.work_disk : null;
+    const ephSto = h.ephemeral ? (h.storage || []).map(x => {
+      const low = x.kind === "cloud" && x.avail_gb < 1;
+      return `<span class="sm nw" style="${low ? "color:var(--bad);font-weight:600" : ""}" ${tip(`${x.kind === "cloud" ? "云盘（不计入实验室共享盘）" : "实例本地盘（回收清空）"}\n${x.path}：剩 ${g1(x.avail_gb)} / ${g1(x.total_gb)} GiB`)}>${esc(x.label)} 剩 ${g1(x.avail_gb)} GiB</span>`;
+    }).join(" · ") || `<span class="sm mut">无共享盘</span>` : null;
+    const sb = h.ephemeral ? ephSto
+      : h.standalone ? (wd ? `<div class="row" style="flex-wrap:nowrap">${workDiskBar(wd, true)}<span class="sm num nw" style="${wd.disk_gate?.on || h.status?.disk_gate?.on || wd.low ? "color:var(--bad)" : ""}">${wd.disk_gate?.on || h.status?.disk_gate?.on ? "闸门 · " : ""}剩 ${Math.round((wd.free || 0) / GIB)}</span></div>` : `<span class="sm mut" ${tip("独立主机不挂集群共享盘，本地工作盘等待首次扫描")}>—</span>`)
+      : sx ? `<div class="row" style="flex-wrap:nowrap">${sharedBar(sx, true)}<span class="sm num nw" style="${sx.dk.free < sx.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(sx.dk.free)}${sx.dk.eta_days != null && sx.dk.eta_days < 7 ? ` · ${sx.dk.eta_days} 天满` : ""}</span></div>` : "—";
+    const mb = m ? `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1"><i style="width:${100 * m.used / m.limit}%;background:${m.used / m.limit >= 0.9 ? "var(--bad)" : "var(--accent)"}"></i><b style="left:90%"></b></div><span class="sm num nw">${g1(m.used)} / ${g1(m.limit)}</span></div>` : "—";
+    const poolTag = h.pool_label ? " " + poolBadge(h) : "";
+    const autoTag = h.member_auto ? ` <span class="badge b-ok" ${tip("本人名下自动接入调度的组内服务器（不动已有实验与用户自开保活）")}>我的服务器</span>` : "";
+    return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b>${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : standaloneBadge(h)}${autoTag}${poolTag}</td><td>${workerBadge(h)}</td>
+      <td>${gb}</td><td>${mb}</td><td>${sb}</td><td class="r nw">${info?.cpu_used != null ? g1(info.cpu_used) : "—"} <span class="mut">/ ${info?.cpu_quota ? g1(info.cpu_quota) : info?.nproc ?? "—"}</span>${thrTag(h) ? `<div>${thrTag(h)}</div>` : ""}</td>
+      <td class="r">${jobsOf(h).length}</td><td class="r">${(h.status?.waiting || []).length}</td>
+      <td class="sm nw" ${!h.ephemeral && info?.started ? tip(`${info.os === "darwin" ? "主机" : "容器"} ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : ""}>${h.ephemeral ? `<span class="mut">临时实例</span>` : h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${h.ephemeral ? "" : renewChip(h)}</td></tr>`;
+  };
+  const hGroups = groupHostsByPool(D.hosts), hasPoolGrp = hGroups.some(g => g.pool), tblFold = ST.get("tblPoolFold", {});
+  const hostRowsHtml = !D.hosts.length ? "" : !hasPoolGrp ? D.hosts.map(renderHostRow).join("") : hGroups.map(pg => {
+    const fk = pg.pool ? pg.id : "__other__", folded = !!tblFold[fk];
+    const up = pg.hosts.filter(h => h.worker_up).length;
+    const gpus = pg.hosts.reduce((a, h) => a + (h.status?.info?.gpus?.length || 0), 0);
+    const runs = pg.hosts.reduce((a, h) => a + jobsOf(h).length, 0);
+    return `<tr class="pool-gh${folded ? " fold" : ""}" data-pfold="tbl:${esc(fk)}" role="button" tabindex="0" aria-expanded="${!folded}"><td colspan="9">`
+      + `<span class="pgh-in">${icon("chev")}<b>${esc(pg.label)}</b>`
+      + `<span class="sm mut">在线 ${up}/${pg.hosts.length} 台 · ${gpus} 卡${runs ? ` · 运行 ${runs}` : ""}</span>`
+      + `${folded ? `<span class="sm mut">（已折叠）</span>` : ""}</span></td></tr>`
+      + (folded ? "" : pg.hosts.map(renderHostRow).join(""));
+  }).join("");
   s += `<div class="card"><div class="chd wrap"><b>主机</b><span class="sm mut">点一行看详情</span>${addExtBtn}</div><div class="scroll"><table>
-    <tr><th>主机</th><th>worker</th><th style="min-width:180px" ${tip("每张卡一行：条是显存，数字是显存占比 · GPU 近 1 小时平均利用率（保活按 0 算）")}>显存 · 利用率</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("集群主机显示共享盘；独立主机显示本地工作盘（含低水位/配额闸门）；红线是告警/停止线")}>磁盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
-    (D.hosts.map(h => {
-      const info = h.status?.info, gs = info?.gpus || [], m = info?.mem;
-      const gb = gs.map(g => {
-        const isMps = g.backend === "mps", U = utilText(gpuBusy(h, g.i), g.util), up = unacctPaused(h, g), umb = g.unacct_mb || 0;
-        const utip = isMps ? `\n${g.name || "Apple Silicon (MPS)"}（统一内存保守估算，默认单卡互斥，不采集利用率）`
-          : up ? `\n外部（如宿主机）占卡暂停放行${umb ? `（约 ${mb2g(umb)} GiB）` : ""}${g.unacct_why ? `：${g.unacct_why}` : ""}`
-          : umb >= 512 ? `\n外部（如宿主机）未归因显存约 ${mb2g(umb)} GiB（已扣减可放显存）` : "";
-        const utag = isMps ? ` <span class="badge b-mute">MPS</span>`
-          : up ? ` <span class="badge b-warn">外部占卡</span>` : umb >= 512 ? `<span class="mut"> · 外部 ${mb2g(umb)}G</span>` : "";
-        return `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB\n${isMps ? "Apple Silicon MPS 逻辑卡" : U.tip}${utip}`)}><div class="bar thin" style="flex:1"><i style="width:${g.total ? 100 * g.used / g.total : 0}%;background:${up ? "var(--warn)" : "var(--accent)"}"></i></div><span class="sm num nw">${pct(g.used, g.total)}%${isMps ? "" : `<span class="mut"> · ${U.big}</span>`}${utag}</span></div>`;
-      }).join("");
-      const sx = (h.ephemeral || h.standalone) ? null : sharedParts(), wd = h.standalone ? h.work_disk : null;
-      const ephSto = h.ephemeral ? (h.storage || []).map(x => {
-        const low = x.kind === "cloud" && x.avail_gb < 1;
-        return `<span class="sm nw" style="${low ? "color:var(--bad);font-weight:600" : ""}" ${tip(`${x.kind === "cloud" ? "云盘（不计入实验室共享盘）" : "实例本地盘（回收清空）"}\n${x.path}：剩 ${g1(x.avail_gb)} / ${g1(x.total_gb)} GiB`)}>${esc(x.label)} 剩 ${g1(x.avail_gb)} GiB</span>`;
-      }).join(" · ") || `<span class="sm mut">无共享盘</span>` : null;
-      const sb = h.ephemeral ? ephSto
-        : h.standalone ? (wd ? `<div class="row" style="flex-wrap:nowrap">${workDiskBar(wd, true)}<span class="sm num nw" style="${wd.disk_gate?.on || h.status?.disk_gate?.on || wd.low ? "color:var(--bad)" : ""}">${wd.disk_gate?.on || h.status?.disk_gate?.on ? "闸门 · " : ""}剩 ${Math.round((wd.free || 0) / GIB)}</span></div>` : `<span class="sm mut" ${tip("独立主机不挂集群共享盘，本地工作盘等待首次扫描")}>—</span>`)
-        : sx ? `<div class="row" style="flex-wrap:nowrap">${sharedBar(sx, true)}<span class="sm num nw" style="${sx.dk.free < sx.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(sx.dk.free)}${sx.dk.eta_days != null && sx.dk.eta_days < 7 ? ` · ${sx.dk.eta_days} 天满` : ""}</span></div>` : "—";
-      const mb = m ? `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1"><i style="width:${100 * m.used / m.limit}%;background:${m.used / m.limit >= 0.9 ? "var(--bad)" : "var(--accent)"}"></i><b style="left:90%"></b></div><span class="sm num nw">${g1(m.used)} / ${g1(m.limit)}</span></div>` : "—";
-      const poolTag = h.pool_label ? " " + poolBadge(h) : "";
-      const autoTag = h.member_auto ? ` <span class="badge b-ok" ${tip("本人名下自动接入调度的组内服务器（不动已有实验与用户自开保活）")}>我的服务器</span>` : "";
-      return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b>${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : standaloneBadge(h)}${autoTag}${poolTag}</td><td>${workerBadge(h)}</td>
-        <td>${gb || "—"}</td><td>${mb}</td><td>${sb}</td><td class="r nw">${info?.cpu_used != null ? g1(info.cpu_used) : "—"} <span class="mut">/ ${info?.cpu_quota ? g1(info.cpu_quota) : info?.nproc ?? "—"}</span>${thrTag(h) ? `<div>${thrTag(h)}</div>` : ""}</td>
-        <td class="r">${jobsOf(h).length}</td><td class="r">${(h.status?.waiting || []).length}</td>
-        <td class="sm nw" ${!h.ephemeral && info?.started ? tip(`${info.os === "darwin" ? "主机" : "容器"} ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : ""}>${h.ephemeral ? `<span class="mut">临时实例</span>` : h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${h.ephemeral ? "" : renewChip(h)}</td></tr>`;
-    }).join("") || `<tr><td colspan="9" class="empty">${selfView
+    <tr><th>主机</th><th>worker</th><th style="min-width:180px" ${tip("每张卡一行（≥ 4 卡自动收成 2 列微条）：条是显存，数字是显存占比 · GPU 近 1 小时平均利用率（保活按 0 算）")}>显存 · 利用率</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("集群主机显示共享盘；独立主机显示本地工作盘（含低水位/配额闸门）；红线是告警/停止线")}>磁盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
+    (hostRowsHtml || `<tr><td colspan="9" class="empty">${selfView
       ? (() => { const ls = [fleetN ? `<a href="#/fleet">前往我的服务器</a>接入名下组员机` : "", ME.write ? `<button type="button" class="btn mini-btn" data-drw="#/ext/new">+ 添加外部主机</button>` : ""].filter(Boolean);
         return `当前没有可用主机${ls.length ? "：" + ls.join("，或 ") : "。"}`; })()
       : "主机清单里没有在用的主机。"}</td></tr>`) + `</table></div></div>`;
@@ -258,14 +283,14 @@ function tasksCard(hs, jobs, allw, showHost) {
   return `<div class="card"><div class="chd wrap"><b>任务</b><span class="sm mut">${head}</span>
       <span class="ii" ${tip("点一行展开命令与日志。显存、内存为“当前 / 峰值”；内存按会话内全部进程的 PSS 计，fork 出来的子进程不会重复计。\n时间线：每张卡一行，有纯 CPU 任务的主机在卡行下方加一行 CPU，按项目配色；往后的是 worker 按同一套放行规则推演的，同机各项目一起排。")}>ⓘ</span>
       ${TLH ? `<span id="tlbar"></span>` : ""}</div>
-    ${TLH ? `<div class="sm" id="tllegend"></div><div id="tlbox"></div><div id="tlkey" class="tlkey${TL.key ? " open" : ""}"></div>` : ""}${jobsTable(jobs, showHost)}
+    ${TLH ? `<div class="tl-ctl" id="tlctl"></div><div class="sm" id="tllegend"></div><div id="tlbox"></div><div id="tlkey" class="tlkey${TL.key ? " open" : ""}"></div>` : ""}${jobsTable(jobs, showHost)}
     ${allw.length ? `<div class="sub">等待</div>${waitingTable(allw, showHost)}` : ""}</div>`;
 }
 
 // 任务卡里的占用时间线（common.js 的时间线引擎）：每台主机每张卡一行，有纯 CPU 任务的主机在卡行下方加一行 CPU，按项目配色。已跑的是工作台存的用量记录，往后是 worker 推演（overview.occupancy）。
-// TLH 是 tasksCard 定的这次画哪些主机；render 之后调
+// TLH 是 tasksCard 定的这次画哪些主机；render 之后调；TL_POOL 记总览时间线按算力池筛选的当前组（"" 全部、"__other__" 未入池、或 pool_id）
 const isCpuOcc = x => !x.g || !x.g.length;
-let TLH = null;
+let TLH = null, TL_POOL = "";
 tlInit({get: (k, d) => ST.get("ov" + k, d), set: (k, v) => ST.set("ov" + k, v), now: () => D.generated, draw: () => drawTimeline(),
   all: () => { const hs = TLH?.hs || [], xs = hs.flatMap(h => D.occ?.[h.id] || []);     // 「全部」也包住租期到期，看排队跑不跑得完
     return tlSpan(xs.map(x => x.t0), [...xs.map(x => x.t1), ...hs.map(h => h.lease_end).filter(Boolean)]); },
@@ -273,28 +298,56 @@ tlInit({get: (k, d) => ST.get("ov" + k, d), set: (k, v) => ST.set("ov" + k, v), 
 function drawTimeline() {
   const box = document.getElementById("tlbox"); if (!box?.clientWidth || !TLH) return;
   tlBind(box); tlFrame();
+  const pGroups = TLH.showHost ? groupHostsByPool(TLH.hs) : [];
+  const showPoolFilter = TLH.showHost && pGroups.some(g => g.pool) && pGroups.length > 1;
+  const grpKey = g => g.pool ? g.id : "__other__";
+  if (!showPoolFilter || (TL_POOL && !pGroups.some(g => grpKey(g) === TL_POOL))) TL_POOL = "";
+  const visHs = !showPoolFilter || !TL_POOL ? TLH.hs : (pGroups.find(g => grpKey(g) === TL_POOL)?.hosts || TLH.hs);
   const {t0, t1} = tlRange(), rows = [], used = new Set();
-  const hostRows = TLH.hs.map(h => {
+  const hostRows = visHs.map(h => {
     const oc = D.occ?.[h.id] || [], gs = h.status?.info?.gpus || [];
     const cpu = oc.filter(isCpuOcc).map(x => ({...x}));     // 纯 CPU 任务（#207）：有才动态追加 CPU 行，无则不画
     return {h, oc, gs, cpu, n: gs.length + (cpu.length ? 1 : 0)};
   });
-  const sep = TLH.hs.length > 1 && hostRows.some(r => r.n > 1);     // 有主机不止一行（多卡或含 CPU 行）时，每台的第一行上面画分隔线
+  const totalRows = hostRows.reduce((a, r) => a + r.n, 0);
+  const canHideIdle = totalRows > 12, hideIdle = canHideIdle && ST.get("tlIdle", true);
+  let idleCount = 0, hiddenIdle = 0;
+  const sep = visHs.length > 1 && hostRows.some(r => r.n > 1);     // 有主机不止一行（多卡或含 CPU 行）时，每台的第一行上面画分隔线
   for (const {h, oc, gs, cpu} of hostRows) {
-    for (const [k, g] of gs.entries()) {
+    let first = true;
+    for (const g of gs) {
       const xs = oc.filter(x => x.g?.includes(g.i)).map(x => ({...x}));     // 多卡任务每张卡各画一条，各自分道
+      const active = xs.some(x => x.t1 > t0 && x.t0 < t1);
+      const key = `card:${h.id}:${g.i}`;
+      if (canHideIdle && !active && !TL.lk?.rows.has(key)) {
+        idleCount++;
+        if (hideIdle) { hiddenIdle++; continue; }
+      }
       xs.forEach(x => { if (x.t1 > t0 && x.t0 < t1) used.add(x.p); });
       const lay = tlRowLayout(tlPack(xs), OCC_CARD_LAY);
-      rows.push({key: `card:${h.id}:${g.i}`, h: lay.h, gap: 0, sep: sep && !k, draw: (y, hh, c) => cardRow(h, g, xs, lay, y, hh, c)});
+      rows.push({key, h: lay.h, gap: 0, sep: sep && first, draw: (y, hh, c) => cardRow(h, g, xs, lay, y, hh, c)});
+      first = false;
     }
     if (cpu.length) {
       cpu.forEach(x => { if (x.t1 > t0 && x.t0 < t1) used.add(x.p); });
       const lay = tlRowLayout(tlPack(cpu), OCC_CARD_LAY);
-      rows.push({key: `cpu:${h.id}`, h: lay.h, gap: 0, sep: sep && !gs.length, draw: (y, hh, c) => cardRow(h, null, cpu, lay, y, hh, c)});
+      rows.push({key: `cpu:${h.id}`, h: lay.h, gap: 0, sep: sep && first, draw: (y, hh, c) => cardRow(h, null, cpu, lay, y, hh, c)});
     }
   }
+  const ctl = document.getElementById("tlctl");
+  if (ctl) {
+    const pflt = showPoolFilter
+      ? `<div class="seg" role="group" aria-label="按算力池筛选时间线"><button type="button" data-tlpool="" class="${!TL_POOL ? "on" : ""}">全部</button>`
+        + pGroups.map(g => `<button type="button" data-tlpool="${esc(grpKey(g))}" class="${TL_POOL === grpKey(g) ? "on" : ""}">${esc(g.label)}</button>`).join("") + `</div>` : "";
+    const idleBtn = canHideIdle && idleCount > 0
+      ? (hideIdle ? `<button type="button" class="lnk sm" data-tlidle aria-pressed="true">已隐藏 ${hiddenIdle} 张空闲卡，点此展开</button>`
+        : `<button type="button" class="lnk sm" data-tlidle aria-pressed="false">隐藏空闲卡（${idleCount} 张）</button>`) : "";
+    ctl.innerHTML = pflt + idleBtn;
+  }
   const marks = [...new Map(D.projects.flatMap(p => p.markers || []).map(m => [m.label + m.ts, m])).values()];
-  tlShow(box, rows, {markers: marks, sepGap: 5, items: () => [...occItems(color([...used][0])),
+  const more = !rows.length && hiddenIdle
+    ? `<div class="empty">当前时间段共 ${hiddenIdle} 张空闲卡已隐藏，<button type="button" class="lnk" data-tlidle>点此展开</button></div>` : "";
+  tlShow(box, rows, {markers: marks, sepGap: 5, more, items: () => [...occItems(color([...used][0])),
     ["lease", "租期到期", tlSw(`<line x1="6" x2="6" y1="0" y2="12" stroke="var(--bad)" stroke-dasharray="3 2" stroke-width="1.5"/>`, 12)]]});
   const lg = document.getElementById("tllegend");
   if (lg) lg.innerHTML = [...used].map(p => projName(p, {always: true})).join(" &nbsp;");     // 只列这段时间图上有的
