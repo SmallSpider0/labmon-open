@@ -9,30 +9,40 @@ const fBadge = x => x.off ? `<span class="badge b-mute" ${tip(`${ts(x.off.t)} �
 const fShare = x => x.sample?.share && x.state !== "down" ? `<span class="badge b-ok" ${tip("除保活外的实际占用都低于阈值：还能给别人并行用")}>可共享</span>` : "";
 const fState = x => fBadge(x) + (fShare(x) ? " " + fShare(x) : "");
 const fDot = x => x.off ? "var(--muted)" : x.down ? "var(--bad)" : x.state === "unknown" || leaseSoon(x.lease_end) ? "var(--warn)" : x.state ? "var(--ok)" : "var(--muted)";
-// 组员名下服务器自动接入调度 / 仅监控状态与切换（#224，唯一实现）
+// 组员名下服务器自动接入调度 / 仅监控状态与切换（#224/#236，唯一实现）
 let MAN = {busy: false, id: null, where: null, msg: null, err: null};
 const manageBadge = x => !x || x.mine || !x.manage ? ""
-  : x.manage.on ? `<span class="badge b-ok" ${tip(x.manage.why || "已自动接入本人调度")}>已接入调度</span>`
+  : x.manage.on ? (x.manage.state === "relaunch_failed"
+    ? `<span class="badge b-bad" ${tip(x.manage.why || "自动拉起 worker 失败")}>拉起失败</span>`
+    : x.manage.blocked
+    ? `<span class="badge b-warn" ${tip(x.manage.why || "接入调度受阻")}>接入受阻</span>`
+    : `<span class="badge b-ok" ${tip(x.manage.why || "已自动接入本人调度")}>已接入调度</span>`)
   : x.manage.opt_out ? `<span class="badge b-mute" ${tip(x.manage.why || "已切为仅监控")}>仅监控</span>` : "";
 const canToggleManage = x => !!(LIVE && ME && x && !x.mine && x.manage?.can_toggle
   && (ME.admin ? canOps() : ME.write && ME.fleet_person === x.holder));
 function managePop(x, where = "drw") {
   if (!canToggleManage(x)) return "";
-  const on = !!x.manage.on, k = `fman-${where}`, open = popIs(k, x.id), nextOn = !on;
+  const on = !!x.manage.on, needResume = on && x.manage.state === "manual_stopped";
+  const mk = (k, nextOn, label, cls, bodyHtml) => {
+    const open = popIs(k, x.id);
+    const btn = `<button type="button" class="btn mini-btn${cls}" data-fman="pick" data-id="${esc(x.id)}" data-where="${where}" data-k="${k}" ${MAN.busy ? "disabled" : ""}>${label}</button>`;
+    const err = open && MAN.err && MAN.id === x.id ? `<div class="rn-err">${esc(MAN.err)}</div>` : "";
+    const go = `<button type="button" class="btn pri${nextOn ? "" : " dz"}" data-fman="go" data-id="${esc(x.id)}" data-on="${nextOn ? "1" : "0"}" data-where="${where}" ${MAN.busy ? "disabled" : ""}>${MAN.busy ? "处理中…" : `确认${label}`}</button>`;
+    return popConfirm(btn, open, bodyHtml + err, go);
+  };
+  const resume = needResume ? mk(`fman-${where}-res`, true, "恢复拉起", " pri",
+    `<b>清除 ${esc(x.holder)}（${esc(x.id)}）的手动停用标记并恢复拉起？</b><div class="rn-note">将清除远端/共享盘的 <code>stopped</code> 停用标记与拉起冷却，由主服务下一轮采集自动拉起 worker（不推送代码，不动已有实验与用户自开保活）。</div>`) : "";
   const label = on ? "切为仅监控" : "接入调度";
-  const btn = `<button type="button" class="btn mini-btn${on ? "" : " pri"}" data-fman="pick" data-id="${esc(x.id)}" data-where="${where}" ${MAN.busy ? "disabled" : ""}>${label}</button>`;
   const body = on
     ? `<b>将 ${esc(x.holder)}（${esc(x.id)}）切为仅监控？</b><div class="rn-note">将停止该台 worker 并撤出受管主机列表，不再放行新任务；容器内正在跑的任务不受影响，看板保留只读监控。可随时重新接入。</div>`
-    : `<b>将 ${esc(x.holder)}（${esc(x.id)}）接入本人调度？</b><div class="rn-note">将自动部署并拉起 worker，仅开放给持有人本人；绝不动容器内已有实验进程与用户自开保活。</div>`;
-  const err = open && MAN.err && MAN.id === x.id ? `<div class="rn-err">${esc(MAN.err)}</div>` : "";
-  const go = `<button type="button" class="btn pri${on ? " dz" : ""}" data-fman="go" data-id="${esc(x.id)}" data-on="${nextOn ? "1" : "0"}" data-where="${where}" ${MAN.busy ? "disabled" : ""}>${MAN.busy ? "处理中…" : `确认${label}`}</button>`;
-  return popConfirm(btn, open, body + err, go);
+    : `<b>将 ${esc(x.holder)}（${esc(x.id)}）接入本人调度？</b><div class="rn-note">将自动部署并拉起 worker（同时清除旧停用标记），仅开放给持有人本人；绝不动容器内已有实验进程与用户自开保活。</div>`;
+  return resume + mk(`fman-${where}`, !on, label, on ? "" : " pri", body);
 }
 async function manageAct(act, d = {}) {
   const id = d.id || "", where = d.where || "drw";
   if (act === "pick") {
     MAN.err = null;
-    popToggle(`fman-${where}`, id);
+    popToggle(d.k || `fman-${where}`, id);
     return render(false);
   }
   if (act !== "go" || MAN.busy) return;

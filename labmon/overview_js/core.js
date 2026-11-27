@@ -118,7 +118,9 @@ function alertsOf(h) {
   if (ks) add("user", `${h.label}：GPU 保活停不下来（${ks.why}，${tsNear(ks.t0)} 起 ${ks.n} 次），任务和它同卡分算力、少了它占的显存；${h.borrow ? `请 ${h.borrow.holder || "对方"} 停掉它或查 ka.sh` : "请查 ka.sh"}`);
   if (h.renew?.state === "ready") add("user", `${h.label}：可以续租了（${h.renew.why}），${srvById(h.id) ? "到主机页点「续租」" : "去平台续租（主机清单没有 [fleet] 段，看板不能替你续）"}`);
   else if (leaseSoon(h.lease_end)) add("user", `${h.label}：${leaseText(h)}（${ts(h.lease_end)} 到期）${h.renew ? "，已预备续租：" + h.renew.why : h.platform_kind === "other" ? "，请在外平台手动续租或提前迁移任务" : h.platform ? "，到主机页点「预备续租」" : "，找个任务间隙在平台续租"}`);
-  if (h.auto && !h.error && h.status && !h.worker_up && !h.stopped) add("user", `${h.label}：worker 不在，看板会自动拉起（10 分钟内一次）`);
+  const sBlock = h.stopped_blocks != null ? !!h.stopped_blocks : !!h.stopped;
+  if (h.auto && !h.error && !h.status_error && !h.lan_off && h.status && !h.worker_up && !sBlock) add("user", `${h.label}：worker 不在，看板会自动拉起（10 分钟内一次）`);
+  else if (h.auto && !h.error && !h.lan_off && !h.worker_up && sBlock) add("user", `${h.label}：worker 已手动停用（${String(h.stopped || "").replace(/^manual:/, "")}），不会自动拉起`);
   return out;
 }
 const allAlerts = () => D.hosts.flatMap(h => forUser(alertsOf(h)));

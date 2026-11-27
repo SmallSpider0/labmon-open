@@ -19,7 +19,7 @@ from . import pool as P
 from . import projects as PJ
 from . import users as U
 from . import workerctl as W
-from .config import GIB, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, host_platform, host_pool, host_share, host_ssh_key, hosts_file, is_pool_id, is_standalone, pools, resolve_pool, set_returned, set_sched_ovr, user_hosts
+from .config import GIB, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, host_platform, host_pool, host_share, host_ssh_key, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pools, resolve_pool, set_returned, set_sched_ovr, user_hosts
 from .worker import cpu_line, ka_lines, unacct_lines
 from .worker.pure import is_wsl_mnt, other_load, other_load_text, wsl_mnt_warn
 from .records import EVENT_KINDS, project_rows
@@ -70,21 +70,26 @@ def unknown_project(pid: str, *, require: bool = False) -> str | None:
     return None
 
 
-def hosts() -> dict:
+def hosts(who: U.Ident | None = None) -> dict:
     """GET /api/hosts：用户级主机清单里的主机（labmon host list、labmon borrow 不给参数时列）。没有清单时 missing 是它的路径。
+    管理员（或 who=None）默认排除他人私有的 member_auto 主机及其 home_with 引用（#236）；普通用户交由 serve.py 按 access 筛选本人可用主机（含本人 member_auto）。
     worker_home 已补缺省值；home_with 是与它共用 worker_home 的别的在用主机（config.home_peers，#35 A；已归还或独立机为 []）。
     同时返回分类字段与托管公钥指纹（绝不返回私钥路径或原文）。"""
     hf = hosts_file()
     if not hf.exists():
         return {"missing": str(hf), "hosts": [], "pools": []}
     keys = ("id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until", "python", "cpu_quota", "mps_vram_gb", "allow_shared_gpu")
-    act, full = active_hosts(), {str(h["id"]): h for h in all_hosts()}
+    filter_other = who is None or who.role == "admin"
+    act = own_hosts(who) if filter_other else active_hosts()
+    full = {str(h["id"]): h for h in all_hosts()}
     try:
         pm = pools()
     except ConfigError:
         pm = {}
     out = []
     for raw in user_hosts():
+        if filter_other and is_other_member_auto(raw, who):
+            continue
         hid = str(raw.get("id"))
         h = full.get(hid) or raw
         sk = host_ssh_key(h)
@@ -164,7 +169,7 @@ def borrow(sid: str, until: float | None, projects: str | None, holder: str | No
 
 
 def override(verb: str, target: str, host_ids: list[str] | None, until: float | None, now: bool, immediate_hosts: list[str] | None = None,
-             by: str | None = None, check=None, own: bool = False) -> dict:
+             by: str | None = None, check=None, own: bool = False, who: U.Ident | None = None) -> dict:
     """labmon pause|resume|focus|unfocus|drain|undrain：项目的不带 --host 记在主机清单（所有主机，含之后加入的，#96），带 --host 的、drain 与 --now
     经 workerctl.override_each 下给那几台。每台一行：worker 打印的“生效中：…”，或 ssh 连不上的原因。
     by：谁下的（项目级暂停记进主机清单 [sched.pause_by]，#16；带 --host 的暂停、优先记进那几台指令的 by，#27）。
@@ -179,7 +184,7 @@ def override(verb: str, target: str, host_ids: list[str] | None, until: float | 
                     return usage("drain / undrain 的主机写在位置参数上（labmon drain 29），不用 --host")
                 hs, tgt = [target], None
             else:
-                hs, tgt = host_ids or [h["id"] for h in active_hosts()], target
+                hs, tgt = host_ids or [h["id"] for h in own_hosts(who)], target
                 if action == "add" and (bad := unknown_project(tgt, require=True)):
                     o.err(f"[labmon] {bad}")
                     return o.done(3)
@@ -261,28 +266,42 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
                         "err": f"[labmon] 主机 {hid} 属于独占共有算力池「{ep['label']}」（{ep['host_id']}），禁止直接登记到单台；"
                                f"请改用：labmon worker add {ep['host_id']} ROOT JOBS --project <项目>"
                                "（如需允许直投，在 hosts.toml 对应池下设 exclusive = false）\n"}
+            hc = next((h for h in active_hosts() if str(h["id"]) == str(hid)), None)
+            if hc and hc.get("member_auto"):
+                if is_other_member_auto(hc, who):
+                    holder = hc.get("member_holder") or member_owner(hc) or "他人"
+                    return {"rc": 2, "out": "",
+                            "err": f"[labmon] 主机 {hid} 是 {holder} 自动接入的个人服务器，不能给他人项目使用\n"}
+                if project:
+                    from . import overview as O
+                    allowed = O._host_allowed_projects(hc)
+                    if allowed is not None and project not in allowed:
+                        return {"rc": 2, "out": "",
+                                "err": f"[labmon] 主机 {hid} 仅限持有人本人名下的项目使用，不能登记项目 {project}\n"}
         with PJ._reg_locked() if sub == "add" else nullcontext():
             if project and sub not in ("rm", "clean") and (reason := unknown_project(project, require=sub == "add")):
                 return usage(reason)
-            fl = {"list": True, "hosts": ",".join(h for h in home_peers(hid) if h == hid or may is None or may(h))} if lst and sub == "fit" else {}
+            peer_pool = [h for h in active_hosts() if str(h["id"]) == str(hid) or not is_other_member_auto(h, who)] if (who is None or who.role == "admin") else None
+            fl = {"list": True, "hosts": ",".join(h for h in home_peers(hid, peer_pool) if h == hid or may is None or may(h))} if lst and sub == "fit" else {}
             cl = {"cache": cache, "scratch": scratch, "dry_run": dry_run, "yes": yes} if sub == "clean" else {}
             rc, out = W.run_out(sub, hid, rest, gpus, project=project if sub != "rm" else None, stop=stop,
                                 **({"expect_project": project} if own and sub in ("add", "rm") else {}), **fl, **cl)
     except ConfigError as e:
         return {"rc": 3, "out": "", "err": f"[labmon] {e}\n"}
-    extra = home_text(hid, may) if sub == "status" and rc == 0 else ""
+    extra = home_text(hid, may, who=who) if sub == "status" and rc == 0 else ""
     if extra:
         out = out.rstrip("\n") + "\n" + extra
     return {"rc": rc, "out": out, "err": ""}
 
 
-def home_text(hid: str, may=None) -> str:
-    """worker status 末尾那一行：独立主机注明独立；共享盘主机列出与它共用 worker 目录的在用主机；只有它自己时为空。may 同 worker。"""
+def home_text(hid: str, may=None, *, who: U.Ident | None = None) -> str:
+    """worker status 末尾那一行：独立主机注明独立；共享盘主机列出与它共用 worker 目录的在用主机（管理员默认排除他人 member_auto）；只有它自己时为空。may 同 worker。"""
     act = active_hosts()
     me = next((h for h in act if str(h["id"]) == hid), None)
     if me and is_standalone(me):
         return f"  独立主机（不共享集群盘；工作根目录 {me['data_root']}）\n"
-    ids = [x for x in home_peers(hid, act) if x != hid and (may is None or may(x))]
+    peer_pool = [h for h in act if str(h["id"]) == str(hid) or not is_other_member_auto(h, who)] if (who is None or who.role == "admin") else act
+    ids = [x for x in home_peers(hid, peer_pool) if x != hid and (may is None or may(x))]
     if not ids:
         return ""
     home = next(h["worker_home"] for h in act if str(h["id"]) == hid)

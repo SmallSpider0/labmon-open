@@ -343,10 +343,96 @@ def _member_account(holder: str | None, links: dict[str, tuple[str | None, str |
     return None
 
 
+def member_owner(h: dict | None) -> str | None:
+    """自动接入组员服务器（member_auto，#224/#236）的归属账号名（小写）；非 member_auto 返回 None。"""
+    if not h or not h.get("member_auto"):
+        return None
+    acc = h.get("member_account")
+    if isinstance(acc, str) and acc.strip():
+        return acc.strip().lower()
+    us = h.get("users")
+    if isinstance(us, list) and us and str(us[0]).strip():
+        return str(us[0]).strip().lower()
+    return None
+
+
+def is_other_member_auto(h: dict | None, who=None) -> bool:
+    """判断主机 h 是否属于他人（非 who 本人）的自动接入组员服务器（唯一实现，#236）：
+    - 非 member_auto 主机一律返回 False；
+    - who 为 None 时（不针对特定本人，即全局管理员自用视角），所有 member_auto 均视为他人私有返回 True；
+    - who 为账号名或带 .name 的 Ident 时，归属账号与 who 一致（如普通组员本人，或管理员本人恰好持有该服务器）返回 False，其余返回 True。"""
+    if not h or not h.get("member_auto"):
+        return False
+    if who is None:
+        return True
+    name = (who.name if hasattr(who, "name") else str(who)).strip().lower()
+    owner = member_owner(h)
+    return not owner or owner != name
+
+
+def own_hosts(who=None, *, hosts: list[dict] | None = None) -> list[dict]:
+    """在用主机中排除他人私有的 member_auto 主机（唯一实现，#236）：管理员总览/CLI 默认主机列表共用。"""
+    src = active_hosts() if hosts is None else hosts
+    return [h for h in src if not is_other_member_auto(h, who)]
+
+
+def stopped_blocks_relaunch(stopped: str | None, *, member_auto: bool = False) -> bool:
+    """hosts/<id>/stopped 标记是否应阻止看板自动拉起 worker（唯一实现，#236）：
+    - 空值或 auto:*（切仅监控 / 删账号 / 借用归还等生命周期停机）：不阻断自动拉起；
+    - manual:*（手动 labmon worker stop 写入）：一律阻断自动拉起；
+    - 旧版纯时间戳（无 manual:/auto: 前缀）：对普通自用主机保持兼容仍阻断，对 member_auto 不阻断，
+      避免历史借用归还/旧版停机留下的纯时间戳永久锁死新接入的组员服务器。"""
+    s = str(stopped or "").strip()
+    if not s or s.startswith("auto:"):
+        return False
+    if s.startswith("manual:"):
+        return True
+    return not member_auto
+
+
+def relaunch_state(h: dict | None, *, member_auto: bool | None = None, relaunch_rec=None) -> dict:
+    """单台主机此刻自动拉起 worker 的唯一状态判定（overview.relaunch 与 config.member_manage_state 共用，#236）。
+    返回 {can_relaunch, blocked, code, why}：
+    - running：worker 正常运行中；
+    - pending：可自动拉起，等待下一次拉起；
+    - relaunch_failed：可自动拉起，但最近一次拉起退出码非 0（等待冷却后重试）；
+    - manual_stopped / ssh_error / status_error / lan_off / not_auto / ephemeral：当前阻断或不自动拉起。"""
+    if h is None:
+        return {"can_relaunch": True, "blocked": False, "code": "pending", "why": "等待自动拉起 worker"}
+    if h.get("ephemeral"):
+        return {"can_relaunch": False, "blocked": False, "code": "ephemeral", "why": "临时主机不自动拉起"}
+    if h.get("worker_up") and (h.get("status") or member_auto):
+        return {"can_relaunch": False, "blocked": False, "code": "running", "why": "worker 运行中"}
+    is_ma = bool(h.get("member_auto")) if member_auto is None else bool(member_auto)
+    auto = bool(h.get("auto")) if "auto" in h else is_ma
+    if not auto:
+        return {"can_relaunch": False, "blocked": True, "code": "not_auto", "why": "未开启自动拉起"}
+    if h.get("lan_off"):
+        return {"can_relaunch": False, "blocked": True, "code": "lan_off", "why": "看板当前不在内网，暂无法自动拉起 worker"}
+    if h.get("error"):
+        return {"can_relaunch": False, "blocked": True, "code": "ssh_error", "why": f"主机连不上（{h['error']}），暂无法自动拉起 worker"}
+    if h.get("status_error"):
+        return {"can_relaunch": False, "blocked": True, "code": "status_error", "why": f"worker 状态文件异常（{h['status_error']}），暂不自动拉起"}
+    stopped = h.get("stopped")
+    if stopped_blocks_relaunch(stopped, member_auto=is_ma):
+        ts_txt = str(stopped).strip()
+        if ts_txt.startswith("manual:"):
+            ts_txt = ts_txt[len("manual:"):].strip()
+        hid = str(h.get("id") or "")
+        hint = f"可点击「恢复拉起」或运行 labmon worker start {hid}" if is_ma else f"需运行 labmon worker start {hid} 恢复"
+        return {"can_relaunch": False, "blocked": True, "code": "manual_stopped",
+                "why": f"已手动停用 worker（{ts_txt}），不自动拉起（{hint}）"}
+    if isinstance(relaunch_rec, dict) and relaunch_rec.get("rc"):
+        err = str(relaunch_rec.get("err") or "").strip()
+        why = f"上次自动拉起失败（退出码 {relaunch_rec['rc']}）" + (f"：{err}" if err else "") + "，10 分钟后重试"
+        return {"can_relaunch": True, "blocked": False, "code": "relaunch_failed", "why": why}
+    return {"can_relaunch": True, "blocked": False, "code": "pending", "why": "等待自动拉起 worker"}
+
+
 def member_manage_state(s: dict, hosts: list[dict], *, links: dict | None = None, off: dict | None = None,
-                        snap_e: dict | None = None) -> dict:
-    """单台 [[fleet.servers]] 自动接入本人调度的状态唯一判定（#224）：
-    user_hosts()、fleetview.view()、fleet.set_member_manage() 共用。"""
+                        snap_e: dict | None = None, relaunch_rec=None) -> dict:
+    """单台 [[fleet.servers]] 自动接入本人调度的状态唯一判定（#224/#236）：
+    user_hosts()、fleetview.view()、fleet.set_member_manage() 共用；开启后的拉起状态统一复用 relaunch_state()。"""
     if links is None:
         from .users import people_of
         links = people_of()
@@ -365,28 +451,39 @@ def member_manage_state(s: dict, hosts: list[dict], *, links: dict | None = None
     worker_up = bool((snap_e or {}).get("worker_up"))
     if hosted:
         return {"on": False, "auto": False, "opt_out": False, "hosted": True, "account": acct,
-                "can_toggle": False, "worker_up": worker_up, "why": "已在主机清单 [[hosts]] 单独配置"}
+                "can_toggle": False, "worker_up": worker_up, "state": "hosted", "blocked": False,
+                "why": "已在主机清单 [[hosts]] 单独配置"}
     if is_borrowed:
         return {"on": False, "auto": False, "opt_out": opt_out, "hosted": False, "account": acct,
-                "can_toggle": False, "worker_up": worker_up, "why": "当前处于借用中，归还后按本人设置恢复"}
+                "can_toggle": False, "worker_up": worker_up, "state": "borrowed", "blocked": False,
+                "why": "当前处于借用中，归还后按本人设置恢复"}
     if is_off:
         return {"on": False, "auto": False, "opt_out": opt_out, "hosted": False, "account": acct,
-                "can_toggle": False, "worker_up": False, "why": "已关机"}
+                "can_toggle": False, "worker_up": False, "state": "off", "blocked": False, "why": "已关机"}
     if not acct:
         return {"on": False, "auto": False, "opt_out": opt_out, "hosted": False, "account": None,
-                "can_toggle": False, "worker_up": False, "why": "未开通看板账号，保持只读"}
+                "can_toggle": False, "worker_up": False, "state": "no_account", "blocked": False,
+                "why": "未开通看板账号，保持只读"}
     if opt_out:
         return {"on": False, "auto": False, "opt_out": True, "hosted": False, "account": acct,
-                "can_toggle": True, "worker_up": False, "why": "已切为仅监控（不自动拉起 worker）"}
+                "can_toggle": True, "worker_up": False, "state": "opt_out", "blocked": False,
+                "why": "已切为仅监控（不自动拉起 worker）"}
+    rs = relaunch_state(snap_e, member_auto=True, relaunch_rec=relaunch_rec)
+    if rs["code"] == "running":
+        why = "已接入本人调度（worker 运行中）"
+    elif rs["code"] == "pending":
+        why = "已接入本人调度（等待自动拉起 worker）"
+    else:
+        why = f"已接入本人调度，但{rs['why']}"
     return {"on": True, "auto": True, "opt_out": False, "hosted": False, "account": acct,
-            "can_toggle": True, "worker_up": worker_up,
-            "why": "已接入本人调度（worker 运行中）" if worker_up else "已接入本人调度（等待自动拉起 worker）"}
+            "can_toggle": True, "worker_up": worker_up, "state": rs["code"], "blocked": bool(rs["blocked"]),
+            "why": why}
 
 
 def member_host(s: dict, hosts: list[dict], acct: str, fleet_cfg: dict | None = None) -> dict:
-    """已开账号的组员名下 [[fleet.servers]] 自动接入本人调度时的受管主机条目（#224）：
+    """已开账号的组员名下 [[fleet.servers]] 自动接入本人调度时的受管主机条目（#224/#236）：
     复用模板或 [fleet] 的 SSH/python/data_root/worker_home/shared/mounts/checks，不继承 ka_bin（不碰用户自开保活），
-    仅开放给持有人本人（users=[acct]），普通账号另标 member_restrict（worker 启动时启用项目白名单硬隔离，防遗留队列越权放行），
+    仅开放给持有人本人（users=[acct]，member_account=acct），普通账号另标 member_restrict（worker 启动时启用项目白名单硬隔离，防遗留队列越权放行），
     不写 platform_job/platform_pool 以免被误当成 [[hosts]] 自用机。"""
     from .fleet import state_file                 # fleet 在上层 import 本模块，这里只能延迟 import
     from .users import account as _account
@@ -407,7 +504,7 @@ def member_host(s: dict, hosts: list[dict], acct: str, fleet_cfg: dict | None = 
            "id": str(s["id"]), "label": label, "ssh": s.get("ssh"), "port": s.get("port", PORT),
            "known_hosts": str(state_file("known_hosts")), "worker": "auto",
            "users": [acct], "share": "private", "member_auto": True, "member_holder": holder,
-           "member_restrict": (acc or {}).get("role") != "admin"}
+           "member_account": acct, "member_restrict": (acc or {}).get("role") != "admin"}
     if fcfg.get("lease_days") is not None:
         out["lease_days"] = fcfg["lease_days"]
     return out
@@ -471,10 +568,12 @@ def all_hosts() -> list[dict]:
 
 
 def home_host(home: str | tuple, hosts: list[dict] | None = None) -> dict | None:
-    """一个 worker_home 共享域由哪台在用主机代读、代办：照主机清单顺序第一台匹配域键的在用主机（hosts 缺省 active_hosts）。
+    """一个 worker_home 共享域由哪台在用主机代读、代办：照主机清单顺序优先挑非 member_auto 的匹配在用主机（hosts 缺省 active_hosts），
+    全为 member_auto 时再兜底挑第一台匹配机。
     home 可以是 home_key(h) 返回的元组，或共享盘 worker_home 路径字符串（仅匹配非独立主机，防独立主机默认路径撞名）。
     工作台读已归还主机留下的登记、移除已归还主机上的登记（workerctl.run_out 的 rm）都经它：没有就是 None。"""
-    return next((h for h in (active_hosts() if hosts is None else hosts) if _same_home(h, home)), None)
+    cand = [h for h in (active_hosts() if hosts is None else hosts) if _same_home(h, home)]
+    return next((h for h in cand if not h.get("member_auto")), cand[0] if cand else None)
 
 
 def _same_home(h: dict, home: str | tuple) -> bool:

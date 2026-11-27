@@ -121,7 +121,10 @@ class OffersMixin:
         cx = {"qs": qs, "base": base, "now": now, "pol": pol, "focus": focus, "use": use, "info": info, "mine": mine, "held": held}
         idle = self.idle(now)
         out = []
+        allowed = self.allowed_projects()
         for p in sorted({ln["project"] for ln in others if ln["pend"]}):
+            if allowed is not None and p not in allowed:
+                continue
             lns = [ln for ln in others if ln["project"] == p]
             mine_p = [ln for ln in own if ln["project"] == p]
             free = None if None in [ln["end"] for ln in mine_p] else max([now] + [ln["end"] for ln in mine_p])

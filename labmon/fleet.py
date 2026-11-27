@@ -1147,13 +1147,14 @@ def set_guard(sid: str | None = None, on: bool | None = None, idle_min=None, wat
         set_fleet_keys(keys, "改保活守护的时间")
 
 
-def set_member_manage(sid: str, on: bool, by: str, *, stop_fn=None, clear_relaunch_fn=None) -> dict:
-    """单台组员服务器一键切换「接入调度 / 仅监控（停 worker）」（#224，POST /api/fleet/manage 调用）：
+def set_member_manage(sid: str, on: bool, by: str, *, stop_fn=None, clear_relaunch_fn=None, clear_stopped_fn=None) -> dict:
+    """单台组员服务器一键切换「接入调度 / 仅监控（停 worker）」（#224/#236，POST /api/fleet/manage 调用）：
     - 过 lease.need 主备守门；
     - 仅适用于已开通看板账号、未在 [[hosts]] 显式配置、未关机且未借出的 [[fleet.servers]]；
     - 严格与 worker 代码部署分离：本路由绝不上传或替换 worker 代码（代码推送与升级仍仅限管理员在内网经 /api/worker/start 执行）；
     - 切为仅监控（on=False）：先尝试经 stop_managed_worker 停掉该台 worker（仅停进程并记 auto:monitor 标记，在跑任务继续跑完；连不上不阻塞退出），再落盘 manage = false；
-    - 切回接入调度（on=True）：清除 manage 键恢复默认自动接入，清 relaunch 冷却与已下发缓存，交由主服务后台 overview.relaunch 按已部署代码自动拉起。"""
+    - 切回接入调度或恢复拉起（on=True）：清除 manage 键恢复默认自动接入，清 relaunch 冷却与已下发缓存，并尽力清除远端/共享盘 hosts/<id>/stopped 停用标记，
+      交由主服务后台 overview.relaunch 按已部署代码自动拉起。"""
     LS.need("切换服务器接入调度")
     if not isinstance(on, bool):
         raise ConfigError("on 参数须为 true（接入调度）或 false（仅监控）")
@@ -1178,6 +1179,7 @@ def set_member_manage(sid: str, on: bool, by: str, *, stop_fn=None, clear_relaun
 
     from . import overview as O
     from . import workerctl as W
+    from .state import snapshot
 
     clear_rl = clear_relaunch_fn or O.clear_relaunch
     name = f"{s['holder']}（{sid}）"
@@ -1207,9 +1209,28 @@ def set_member_manage(sid: str, on: bool, by: str, *, stop_fn=None, clear_relaun
     set_fleet_keys({"manage": None}, f"{by} 将 {name} 重新接入本人调度", sid=sid)
     clear_rl(sid)
     O.clear_sent(sid)
+    clear_note, cleared_ok = "", False
+    if clear_stopped_fn is not None:
+        try:
+            cleared_ok, why = clear_stopped_fn(sid)
+            if not cleared_ok and why:
+                clear_note = f"（清理旧停用标记未成功：{why}）"
+        except (ConfigError, OSError) as x:
+            clear_note = f"（清理旧停用标记未成功：{x}）"
+    elif L.check()["ok"]:
+        try:
+            cleared_ok, why = W.clear_stopped(sid)
+            if not cleared_ok and why:
+                clear_note = f"（清理旧停用标记未成功：{why}）"
+        except (ConfigError, OSError) as x:
+            clear_note = f"（清理旧停用标记未成功：{x}）"
     s_on = {k: v for k, v in s.items() if k != "manage"}
-    msg = f"{name} 已重新接入本人调度，主服务将在下一轮采集自动拉起 worker（不动已有实验与自开保活）"
-    return {"id": sid, "on": True, "msg": msg, "manage": member_manage_state(s_on, hosts_raw)}
+    snap_e = next((dict(e) for e in (snapshot() or {}).get("hosts") or [] if e.get("id") == sid), None)
+    if snap_e is not None and cleared_ok:
+        snap_e["stopped"] = None
+        snap_e["stopped_blocks"] = False
+    msg = f"{name} 已重新接入本人调度，主服务将在下一轮采集自动拉起 worker（不动已有实验与自开保活）{clear_note}"
+    return {"id": sid, "on": True, "msg": msg, "manage": member_manage_state(s_on, hosts_raw, snap_e=snap_e)}
 
 
 def lease_end(st: dict, cfg: dict) -> float | None:
