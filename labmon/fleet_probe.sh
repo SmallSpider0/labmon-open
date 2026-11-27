@@ -85,8 +85,29 @@ for h in $HP; do
     [ -d "/proc/$h" ] && echo "$h $h $(readlink "/proc/$h/cwd" 2>/dev/null)"
     ka_pid "/proc/$h" "$@"; MAPPED="$MAPPED$h " ;; esac
 done
+# 按 UTF-8 字节边界安全截断每行到最多 $1 字节：不依赖容器 UTF-8 locale 或 python，兼容 GNU/mawk/BSD/BusyBox awk；
+# 截到 max 字节后若末尾是未完整的 2/3/4 字节 UTF-8 字符则回退丢弃，对原本即非法的字节不做掩盖。
+trunc_utf8() {
+  LC_ALL=C awk -v max="${1:-400}" '
+    BEGIN { for (i = 128; i < 256; i++) ord[sprintf("%c", i)] = i }
+    {
+      if (length($0) <= max) { print; next }
+      s = substr($0, 1, max); p = max; b = 0
+      while (p > 0) {
+        c = substr(s, p, 1)
+        b = (c in ord) ? ord[c] : 0
+        if (b < 128 || b >= 192) break
+        p--
+      }
+      if (p > 0) {
+        n = (b >= 240 && b <= 244 ? 4 : b >= 224 && b < 240 ? 3 : b >= 194 && b < 224 ? 2 : 0)
+        if (n > 0 && max - p + 1 < n) s = substr(s, 1, p - 1)
+      }
+      print s
+    }'
+}
 echo "@@ ps"
-PS=$(ps -eo pid=,ppid=,etimes=,time=,pcpu=,rss=,args= 2>/dev/null | cut -c1-400)
+PS=$(ps -eo pid=,ppid=,etimes=,time=,pcpu=,rss=,args= 2>/dev/null | trunc_utf8 400)
 echo "$PS"
 # 保活 GPU 进程与它们的子孙各自的 PSS（kB，共享页按份摊）：本机按它扣保活整棵进程树的内存，同 worker 的 mem_of（smaps_rollup，旧内核没有就逐段加 smaps）。
 # 别人的实验进程不读：3.10 内核没有 smaps_rollup，读整份 smaps 要遍历页表、占着对方进程的 mmap_sem

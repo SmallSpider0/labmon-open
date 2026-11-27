@@ -95,7 +95,16 @@ running_groups() {   # ka.sh running 的读法（与 worker 的 Worker.ka_groups
   ids=$(bash -c "$1 running" 9>&-); rc=$?
   [ "$rc" = 0 ] || { [ "$rc" = 1 ] && return 1; return "$rc"; }
   if [ "${2:-}" = strict ]; then
-    printf '%s\n' "$ids" | awk 'NF && $0 !~ /^[1-9][0-9]*$/ {if (!bad) print "认不出的一行：" substr($0, 1, 200) > "/dev/stderr"; bad=1}
+    printf '%s\n' "$ids" | LC_ALL=C awk '
+      BEGIN { for (i = 128; i < 256; i++) ord[sprintf("%c", i)] = i }
+      function trunc(s, m,    p, c, b, n) {
+        if (length(s) <= m) return s
+        s = substr(s, 1, m); p = m; b = 0
+        while (p > 0) { c = substr(s, p, 1); b = (c in ord) ? ord[c] : 0; if (b < 128 || b >= 192) break; p-- }
+        if (p > 0) { n = (b >= 240 && b <= 244 ? 4 : b >= 224 && b < 240 ? 3 : b >= 194 && b < 224 ? 2 : 0); if (n > 0 && m - p + 1 < n) s = substr(s, 1, p - 1) }
+        return s
+      }
+      NF && $0 !~ /^[1-9][0-9]*$/ {if (!bad) print "认不出的一行：" trunc($0, 200) > "/dev/stderr"; bad=1}
       /^[1-9][0-9]*$/ {print; seen=1} END {exit (bad ? 2 : seen ? 0 : 3)}' || return $(( $? == 2 ? 200 : 201 ))
   else
     printf '%s\n' "$ids" | grep -E '^[1-9][0-9]*$' || return 201

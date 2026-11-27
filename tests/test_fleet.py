@@ -80,6 +80,89 @@ class ParseTest(unittest.TestCase):
             m = run()
             self.assertEqual((m["anon"], m["used"]), (5.5, 25.5))
 
+    def test_probe_ps_utf8_safe_truncation(self):
+        """探针截断长 ps 命令行时按 UTF-8 字节边界回退（#232）：LC_ALL=C 与 UTF-8 环境下，
+        2/3/4 字节字符落在第 400 字节边界都不腰斩成非法 UTF-8，且 fleet.fetch 正常采纳。"""
+        # 每条行前段（PID 等列 + 'a' 填充）控制目标多字节字符落在第 400 字节的不同偏移位
+        cases = []  # (pid, line, expected_tail, expected_bytes)
+        pid = 100
+        for ch, nbytes in [("\u00e9", 2), ("中", 3), ("\U0001f680", 4)]:
+            for cut_at in range(1, nbytes + 1):
+                pid += 1
+                prefix = f"{pid} 1 10 00:00:01 0.0 1000 "
+                pad_len = 400 - len(prefix.encode("utf-8")) - cut_at
+                line = prefix + ("a" * pad_len) + ch + "tail_after"
+                if cut_at == nbytes:
+                    cases.append((pid, line, ch, 400))
+                else:
+                    cases.append((pid, line, "a", 400 - cut_at))
+        # 短行（含中文，<=400 字节）原样保留
+        short_pid = 200
+        short_line = f"{short_pid} 1 10 00:00:01 0.0 1000 python3 /data/中文目录/train.py"
+
+        with tempfile.TemporaryDirectory() as td:
+            td_path = Path(td)
+            ps_data = td_path / "ps.txt"
+            ps_data.write_text("\n".join([c[1] for c in cases] + [short_line]) + "\n", encoding="utf-8")
+            fake_ps = td_path / "ps"
+            fake_ps.write_text(f"#!/bin/sh\ncat {str(ps_data)!r}\n", encoding="utf-8")
+            fake_ps.chmod(0o755)
+            path_env = f"{td}:{os.environ.get('PATH', '')}"
+
+            for lc in ("C", "C.UTF-8"):
+                env = dict(os.environ, PATH=path_env, LC_ALL=lc)
+                res = subprocess.run(["bash", "-s"], input=F.PROBE.read_bytes(), capture_output=True, timeout=60, env=env)
+                self.assertEqual(res.returncode, 0)
+                raw = res.stdout.decode("utf-8")  # 严格 UTF-8 解码，不允许非法字节
+                ps_lines = {}
+                in_ps = False
+                for l in raw.splitlines():
+                    if l.startswith("@@ "):
+                        in_ps = (l == "@@ ps")
+                    elif in_ps and l.strip():
+                        ps_lines[int(l.split()[0])] = l
+                for c_pid, _, exp_tail, exp_bytes in cases:
+                    self.assertIn(c_pid, ps_lines)
+                    got = ps_lines[c_pid]
+                    self.assertEqual(len(got.encode("utf-8")), exp_bytes, f"lc={lc} pid={c_pid}")
+                    self.assertTrue(got.endswith(exp_tail), f"lc={lc} pid={c_pid} got={got[-10:]!r}")
+                self.assertEqual(ps_lines[short_pid], short_line)
+
+            # 经 fleet.fetch 端到端验证：LC_ALL=C 下严格 UTF-8 解码正常采纳，不误报掉线
+            def run_local(cmd, **kw):
+                return subprocess.run(
+                    ["bash", "-s"], input=kw.get("input"), capture_output=True, text=True,
+                    timeout=kw.get("timeout", 60), env=dict(os.environ, PATH=path_env, LC_ALL="C"),
+                )
+
+            with unittest.mock.patch.object(F.L, "ssh_run", side_effect=run_local), \
+                    unittest.mock.patch.object(F, "_ssh_cmd", return_value=["ssh"]), \
+                    unittest.mock.patch.object(F, "conf", return_value=cfg()):
+                raw, err = F.fetch(cfg()["servers"][0])
+                self.assertIsNone(err)
+                self.assertIsNotNone(raw)
+                parsed = F.parse(raw)
+                self.assertIn(short_pid, parsed["ps"])
+                self.assertIn("中文目录/train.py", parsed["ps"][short_pid]["args"])
+                for c_pid, _, _, _ in cases:
+                    self.assertIn(c_pid, parsed["ps"])
+
+    def test_guard_running_groups_utf8_safe_truncation(self):
+        """fleet_guard.sh 的 strict 报错截断到 200 字节同样按 UTF-8 边界回退（#232）。"""
+        bad_line = "x" * 199 + "中文报错信息"
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            (d / "ka.sh").write_text(f"printf '%s\\n' {bad_line!r}\n", encoding="utf-8")
+            (d / "proc" / "11").mkdir(parents=True)
+            (d / "proc" / "11" / "stat").write_text("11 (python) S 1 9 9 0\n")
+            env = dict(os.environ, LC_ALL="C", LABMON_GUARD_PROC=str(d / "proc"))
+            res = subprocess.run(["bash", "-s", "--", "kacheck", f"bash {d / 'ka.sh'}", "11"],
+                                 input=F.GUARD.read_bytes(), capture_output=True, timeout=15, env=env)
+            self.assertEqual(res.returncode, 0)
+            err = res.stderr.decode("utf-8")  # 严格 UTF-8 解码，不允许末尾残缺字节
+            self.assertIn("认不出的一行：" + "x" * 199, err)
+            self.assertNotIn("中", err)
+
     def test_brief(self):
         self.assertEqual(F.brief("/x/python -u -m pkg.run --config /a/b/c.yaml --seed 1"), "pkg.run · c.yaml")
         self.assertEqual(F.brief("/x/python3.8 /a/train.py"), "train.py")
