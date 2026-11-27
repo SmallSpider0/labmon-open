@@ -2231,6 +2231,24 @@ t("timeline", "#247 历史多道并发但当前窗口仅 1 道时 othersRow 紧�
   run(P, `TL.v = {a: ${-16 * 86400}, b: ${-14 * 86400}}; drawTimeline()`);
   const ocH6 = run(P, 'TL.last.rows.get("occ:srv-a")');
   ok(ocH6 >= 44, `历史 6 道并发窗口应展开多道，实际 ${ocH6}`);
+  // 拖动期间部分并发任务滑出窗口，剩余任务的道号 y 与条高不跳动不膨胀；松手后再收紧为 16px
+  const dragOcc = [
+    ...Array.from({length: 5}, (_, i) => ({p: "proj-b", n: `short_${i}`, lane: "车道 1", t0: NOW - 7200, t1: NOW - 3600, g: [0], st: "done"})),
+    {p: "proj-b", n: "long_5", lane: "车道 1", t0: NOW - 7200, t1: NOW + 3600, g: [0], st: "run"},
+  ];
+  const PD = pjCtx(clone(PJ), {...EVN, occ: {"srv-a": dragOcc}});
+  run(PD, `TL.v = {a: ${-3 * H}, b: ${2 * H}}; drawTimeline()`);
+  const longRect = X => {
+    const m = el(X, "tlbox").innerHTML.match(/<rect x="[^"]+" y="([^"]+)" width="[^"]+" height="([^"]+)" rx="3" fill="transparent" stroke="var\(--fg\)"[^>]*data-tip="[^"]*long_5/);
+    ok(m, "找不到 long_5 任务条"); return [+m[1], +m[2]];
+  };
+  const [y0, bh0] = longRect(PD), hDrag0 = run(PD, 'TL.last.rows.get("occ:srv-a")');
+  run(PD, `tlLock(); TL.v = {a: ${-1800}, b: ${3 * H}}; drawTimeline()`);
+  const [y1, bh1] = longRect(PD), hDrag1 = run(PD, 'TL.last.rows.get("occ:srv-a")');
+  ok(y1 === y0 && bh1 === bh0 && hDrag1 === hDrag0, `拖动中 long_5 不该跳道或膨胀：y ${y0}→${y1}, bh ${bh0}→${bh1}, rowH ${hDrag0}→${hDrag1}`);
+  run(PD, "TL.lk = null; drawTimeline()");
+  const hDrag2 = run(PD, 'TL.last.rows.get("occ:srv-a")');
+  ok(hDrag2 === 16, `松手后应按当前可见 1 道收紧为 16px，实际 ${hDrag2}`);
   // 2. 主机表头事件带（ev）底部留出微间距：hostRow 高 36px，事件带画在 y + 23（高 8px），距行底留 5px
   const evH = run(P, `TL.v = {a: ${-6 * H}, b: ${18 * H}}; drawTimeline(); TL.last.rows.get("host:srv-a")`);
   ok(evH === 36, `有事件的主机表头应为 36px，实际 ${evH}`);
