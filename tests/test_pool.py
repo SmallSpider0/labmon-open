@@ -483,6 +483,22 @@ members = ["alice"]
         self.assertNotIn(k_b_other, got_ph)
         self.assertIn(k_b, got_ph)
 
+    def test_remove_user_clears_pool_member(self):
+        """Codex P1：删除账号时同步清理 [pools.*].members 显式成员；重建同名账号绝不继承旧池权限。"""
+        self.assertTrue(P.member(who("alice"), "a100"))
+        self.assertTrue(U.may_host(who("alice"), "h1"))
+        self.assertTrue(U.may_host(who("alice"), "pool:a100"))
+        # 删除 alice 后为新人重新开通同名账号 alice
+        with mock.patch.object(U, "_check_bind"):
+            U.remove("alice", "boss")
+            U.add("alice", "user", "boss", person="NewAlice")
+        self.assertNotIn("alice", CF.pools()["a100"]["members"])
+        self.assertFalse(P.member(who("alice"), "a100"))
+        self.assertFalse(U.may_host(who("alice"), "h1"))
+        self.assertFalse(U.may_host(who("alice"), "pool:a100"))
+        # 不影响其他池成员 bob
+        self.assertTrue(P.member(who("bob"), "rtx4090"))
+
 
 class PoolSchedulingTest(Base):
     def setUp(self):
@@ -706,6 +722,79 @@ members = ["alice", "bob"]
         usr_txt = P.status_text(pcfg, snap, own=True, projects={"pa"}, now=self.t)
         self.assertIn("pa /data/lab/pa/jobs/a.txt", usr_txt)
         self.assertNotIn("pb", usr_txt)
+
+    def test_picked_host_does_not_mark_next_list_nofit(self):
+        """Codex P2：异构池大显存机 h1 本轮已落 1 条进入 picked 后，下一条仅评小显存机 h2 返回 nofit，绝不标全池 nofit=True。"""
+        (self.d / "hosts.toml").write_text(SHARED_HOSTS.format(pools="""
+[pools.a100]
+label = "异构池"
+hosts = ["h1", "h2"]
+members = ["alice", "bob"]
+"""))
+        k1 = "pool:a100|/data/lab/pa|jobs/big1.txt"
+        k2 = "pool:a100|/data/lab/pb|jobs/big2.txt"
+        heads = {
+            k1: {"pool": "pool:a100", "pool_id": "a100", "head": "a1", "n": 1},
+            k2: {"pool": "pool:a100", "pool_id": "a100", "head": "b1", "n": 1},
+        }
+        hosts = [
+            make_host_entry("h1", gpus=1, busy_gpus=0, pool_heads=heads, t=self.t),
+            make_host_entry("h2", gpus=1, busy_gpus=0, pool_heads=heads, t=self.t),
+        ]
+        regs = [{"host": "pool:a100", "state": "pool", "queues": [
+            {"root": "/data/lab/pa", "jobs": "jobs/big1.txt", "project": "pa"},
+            {"root": "/data/lab/pb", "jobs": "jobs/big2.txt", "project": "pb"},
+        ]}]
+        moves = []
+
+        def fake_fit(pcfg, item, eval_hosts):
+            # h1 放得下，h2 显存太小放不下
+            res = {}
+            for h in eval_hosts:
+                if h == "h1":
+                    res[h] = {"ok": True, "nofit": False, "load": {"running": 0, "queued": 0, "until": None}, "free_cards": 1, "free_vram": 80000}
+                else:
+                    res[h] = {"ok": False, "nofit": True, "why": "单卡显存不够（要 60 GiB）"}
+            return {"head": "x", "need": {"ngpu": 1}, "dur": 60, "hosts": res}
+
+        out = P.tick(hosts, regs, self.sw, self.t, lan_ok=True,
+                     move_fn=lambda to, it, pid, rsn: moves.append((to, it["project"])),
+                     fit_fn=fake_fit)
+        # 两条清单里第一条落到 h1；第二条只评估了 h2 放不下，不得被标为全池 nofit=True
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(moves[0][0], "h1")
+        remain = list(out["lists"].values())
+        self.assertEqual(len(remain), 1)
+        self.assertFalse(remain[0]["nofit"], remain[0])
+        self.assertIn("下一轮", remain[0]["why"])
+
+    def test_fit_read_failure_falls_back_and_not_marked_done(self):
+        """Codex P2：_default_fit 首台读失败返回非 0 时自动回退下一台健康机；全员读失败不标 done=True 且保留 wait_since。"""
+        pcfg = CF.resolve_pool("pool:a100")
+        item = {"root": "/data/lab/pa", "jobs": "jobs/q.txt", "project": "pa"}
+        tried = []
+
+        def fake_run_out(cmd, via, args, **kw):
+            tried.append(via)
+            if via == "h1":
+                return (2, "读不到清单 /data/lab/pa/jobs/q.txt\n")
+            return (0, '{"head": "j1", "need": {"ngpu": 1}, "dur": 30, "hosts": {"h2": {"ok": true}}}\n')
+
+        with mock.patch.object(W, "run_out", side_effect=fake_run_out):
+            got = P._default_fit(pcfg, item, ["h1", "h2"])
+        self.assertEqual(tried, ["h1", "h2"])
+        self.assertIsNotNone(got)
+        self.assertEqual(got["head"], "j1")
+
+        # 若所有候选机拟合均返回 None（读失败），tick 绝不误标 done=True，且保留 wait_since
+        k = "pool:a100|/data/lab/pa|jobs/q.txt"
+        heads = {k: {"pool": "pool:a100", "pool_id": "a100", "head": "j1", "n": 1}}
+        hosts = [make_host_entry("h1", gpus=1, busy_gpus=0, pool_heads=heads, t=self.t)]
+        regs = [{"host": "pool:a100", "state": "pool", "queues": [{"root": "/data/lab/pa", "jobs": "jobs/q.txt", "project": "pa"}]}]
+        out = P.tick(hosts, regs, self.sw, self.t, lan_ok=True, move_fn=lambda *a: None, fit_fn=lambda *a: None)
+        lk = P.key("/data/lab/pa", "jobs/q.txt")
+        self.assertFalse(out["lists"][lk].get("done"))
+        self.assertIn(lk, P.load_json(P.state_file(), {}).get("wait_since", {}))
 
 
 class PoolInfraTest(Base):

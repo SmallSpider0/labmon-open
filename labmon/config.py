@@ -427,6 +427,43 @@ def set_host_users(name: str, hosts: list[str], by: str) -> str:
     return f"{name} {what}"
 
 
+@_hosts_edit
+def remove_pool_member(name: str, by: str) -> list[str]:
+    """删除账号时同步移除主机清单 [pools.*].members 里显式列出的该账号（#212，users.remove 调）：
+    不触碰 "*" 通配项；无改动时不写文件。返回移除过该账号的共有池 id 列表。"""
+    p, low = hosts_file(), name.strip().lower()
+    if not low or not p.exists():
+        return []
+    raw_pools = _read_toml(p).get("pools")
+    if not isinstance(raw_pools, dict) or not raw_pools:
+        return []
+    lines = p.read_text().splitlines(keepends=True)
+    targets: list[tuple[int, int, str, list[str]]] = []
+    for pid, cfg in raw_pools.items():
+        if not isinstance(cfg, dict) or not isinstance(cfg.get("members"), list):
+            continue
+        cur = [str(x) for x in cfg["members"]]
+        new = [x for x in cur if x.strip().lower() != low]
+        if len(new) == len(cur):
+            continue
+        bl = (_blocks(lines, f"[pools.{pid}]")
+              or _blocks(lines, f'[pools."{pid}"]')
+              or _blocks(lines, f"[pools.'{pid}']"))
+        if not bl:
+            continue
+        s, end, _ = bl[0]
+        targets.append((s, end, str(pid), new))
+    if not targets:
+        return []
+    rm: list[str] = []
+    for s, end, pid, new in sorted(targets, key=lambda x: -x[0]):
+        lines = lines[:s + 1] + _set_keys(lines[s + 1:end], {"members": new}) + lines[end:]
+        rm.append(pid)
+    rm.sort()
+    _write_checked(p, "".join(lines), f"{by} 删账号 {name} 时移除共有池成员：{'、'.join(rm)}")
+    return rm
+
+
 HOST_RE = re.compile(r"(\[[0-9a-f:.]+\]|[a-z0-9.\-]+)(?::(\d{1,5}))?")    # Host 头与 [server] 里的“主机[:端口]”：名字或 IP（IPv6 带方括号），可带端口
 
 

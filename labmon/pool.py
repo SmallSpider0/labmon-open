@@ -176,21 +176,24 @@ def _free_gpu_count(st: dict) -> int:
 
 
 def _default_fit(pcfg: dict, item: dict, eval_hosts: list[str]) -> dict | None:
-    """单条 SSH 在同域在线主机上调用 worker fit --list --json，评估队首在 eval_hosts 各台上的适配与负载。"""
+    """在同域在线主机上调用 worker fit --list --json，评估队首在 eval_hosts 各台上的适配与负载。
+    若首台因共享盘临时读失败返回非 0 或无有效 JSON，依次回退到其余候选健康主机重试，避免单机读失败误伤整个池。"""
     if not eval_hosts:
         return None
-    rc, out = W.run_out("fit", eval_hosts[0], [item["root"], item["jobs"]],
-                        project=item["project"], list=True, json=True, hosts=",".join(eval_hosts))
-    if rc != 0:
-        return None
-    lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
-    for ln in reversed(lines):
-        try:
-            data = json.loads(ln)
-            if isinstance(data, dict) and "hosts" in data:
-                return data
-        except ValueError:
+    hosts_arg = ",".join(eval_hosts)
+    for via in eval_hosts:
+        rc, out = W.run_out("fit", via, [item["root"], item["jobs"]],
+                            project=item["project"], list=True, json=True, hosts=hosts_arg)
+        if rc != 0:
             continue
+        lines = [l.strip() for l in (out or "").splitlines() if l.strip()]
+        for ln in reversed(lines):
+            try:
+                data = json.loads(ln)
+                if isinstance(data, dict) and "hosts" in data:
+                    return data
+            except ValueError:
+                continue
     return None
 
 
@@ -574,14 +577,27 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
                     pending_count = max(0, pending_count - 1)
                     placed_count += 1
             else:
-                # 所有健康候选均 nofit
+                # 仅当本轮覆盖了全部健康主机（未被 picked 排除也未 skip）且均确认 nofit 时，才标记全池放不下；
+                # 否则只是本轮大显存/候选主机已接 1 条或暂跳过，留待下一轮继续评估，不提前触发 pool_wait:...:nofit 告警。
+                others = [h for h in healthy if h != it["src"]]
+                all_healthy_nofit = (
+                    bool(others)
+                    and all(h in cand_evals and cand_evals[h].get("nofit") for h in others)
+                    and (it["src"] not in healthy or it["orig_nofit"])
+                )
                 why_all = "；".join(f"{h}：{v.get('why') or '放不下'}" for h, v in sorted(cand_evals.items())) or "池内所有健康主机均放不下队首"
                 if it["pending"] and it["lk"] in out_lists:
-                    out_lists[it["lk"]]["why"] = why_all
-                    out_lists[it["lk"]]["nofit"] = bool(cand_evals)
-                elif (it["back"] or it["orig_nofit"]) and it["src"] != phid:
+                    if all_healthy_nofit:
+                        out_lists[it["lk"]]["why"] = why_all
+                        out_lists[it["lk"]]["nofit"] = True
+                    else:
+                        out_lists[it["lk"]]["why"] = "本轮其余候选主机已落机或暂跳过，下一轮继续评估"
+                        out_lists[it["lk"]]["nofit"] = False
+                elif (it["back"] or (it["orig_nofit"] and all_healthy_nofit)) and it["src"] != phid:
                     try:
-                        do_move(phid, it, pid, f"{it['reason']}，全池暂无放得下的主机，退回待放")
+                        msg_back = (f"{it['reason']}，全池暂无放得下的主机，退回待放"
+                                    if all_healthy_nofit else f"{it['reason']}，本轮其余健康主机已落机，暂退回待放")
+                        do_move(phid, it, pid, msg_back)
                         moved_at[it["lk"]] = {"t": round(t), "host": phid}
                         wait_since.setdefault(it["lk"], t)
                     except CF.ConfigError:

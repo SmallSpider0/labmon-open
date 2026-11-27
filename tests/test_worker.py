@@ -3117,6 +3117,24 @@ class PoolListTest(UnitBase):
         self.assertFalse(h.get("sleeping"), h)
         self.assertEqual((h["head"], h["n"]), ("A", 1))
 
+    def test_fit_list_read_failure_returns_error(self):
+        # Codex P2：清单文件存在但读取失败（_jobs_ok=False）时，fit --list --json 返回非 0 错误，绝不返回退出码 0 + head=null 误判为已完成。
+        self.w.tick([], True)
+        cmod = self.m.fit_list.__globals__["_C"]
+        orig_read = cmod.read
+
+        def fail_jobs(path, default=""):
+            if os.path.normpath(str(path)) == os.path.normpath(str(self.q["jobs_path"])):
+                return None
+            return orig_read(path, default)
+
+        out = io.StringIO()
+        with mock.patch.object(cmod, "read", side_effect=fail_jobs), \
+                mock.patch("sys.stdout", out), mock.patch("sys.stderr", out):
+            rc = self.m.fit_list(self.w.p, self.q["root"], "jobs/q.txt", "pa", [self.w.host], as_json=True)
+        self.assertEqual(rc, 2, out.getvalue())
+        self.assertNotIn('"head": null', out.getvalue())
+
 class SelfPoolTest(UnitBase):
     """入池的自用主机（#79）：看板把池清单放到这台时 worker add --pool，登记里记 pool；它与主人自己的清单在同一台按人的份额排（不另设优先），
     状态的 queues、todo 带 pool，offers 不叫会话挪它（落点由看板定）。"""

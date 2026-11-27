@@ -37,7 +37,7 @@ from pathlib import Path
 
 from . import disk as DK
 from . import projects as PJ
-from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, active_hosts, host_users, is_pool_id, pause_by, resolve_pool, sched, set_host_users, share_host, user_hosts
+from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, active_hosts, host_users, is_pool_id, pause_by, remove_pool_member, resolve_pool, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
 from .state import file_sig, snapshot, state_root, write_atomic
 from .worker.pure import pool_id_of, same_list  # noqa: F401 — 与 worker 共用唯一实现
@@ -741,7 +741,7 @@ def reset(name: str, by: str, self_ok: bool = False, keep_tokens: bool = False, 
 
 def remove(name: str, by: str) -> str:
     """删掉一个账号（这人不再用看板）：删人时唯一的清理入口（#19）。连同它的会话与令牌（下一次请求就失效）、人员绑定（随账号一起删）、
-    能用的主机（主机清单的 users）、项目归属（meta.json 的 owner）与推送配置。暂停是谁下的（[sched.pause_by]、worker 指令的 by）不动：
+    能用的主机（主机清单的 users）、共有池显式成员（[pools.*].members，#212）、项目归属（meta.json 的 owner）与推送配置。暂停是谁下的（[sched.pause_by]、worker 指令的 by）不动：
     同名新账号要管理员再把项目交给它才用得上。删不了自己，也删不了最后一个管理员。"""
     from .config import HOSTS_LOCK
     with HOSTS_LOCK, PJ._reg_locked(), _edit() as d:
@@ -754,6 +754,7 @@ def remove(name: str, by: str) -> str:
             raise Denied(409, f"{k} 是最后一个管理员，删不掉：先把别人设为管理员")
         from .service import set_user_push
         set_host_users(k, [], by)
+        remove_pool_member(k, by)
         for pid in PJ.registered():
             PJ._set_owner(pid, None, by, previous=k)
         set_user_push(k, None)
