@@ -223,10 +223,12 @@ function hostStrip(h) {
   const it = (ic, html, t = "") => `<span class="it" ${t ? tip(t) : ""}>${icon(ic)}<span>${html}</span></span>`;
   const deps = h.status?.local?.jobs || [], bad = deps.filter(r => !r.heal), miss = missW(h);
   let s = "";
+  if (h.standalone) s += it("server", `${h.platform_kind === "other" ? "外平台独立主机" : "独立主机"} <span class="mut">不共享集群盘</span>`,
+    "不共享集群 worker_home：仅自用，不支持借用、算力池与跨主机搬登记");
   if (h.borrow) s += it("users", `${esc(borrowText(h.borrow, D.generated))}${!h.borrow.swap && LIVE && srvById(h.id) ? ` <a href="${DH.srv(h.id)}">借用详情</a>` : ""}`
       + (BMSG?.id === h.id ? `<span class="mut">（${esc(BMSG.msg)}）</span>` : ""),
     h.borrow.swap ? "改约定：labmon borrow " + h.id + " --until …（none 去掉）" : "");
-  if (h.lease_end) s += it("hourglass", `${leaseHtml(h.lease_end, "租期")} <span class="mut">${ts(h.lease_end)} 到期</span> ${renewChip(h)}`);
+  if (h.lease_end) s += it("hourglass", `${leaseHtml(h.lease_end, "租期")} <span class="mut">${ts(h.lease_end)} 到期${h.platform_kind === "other" ? "（外平台手动续租）" : ""}</span> ${renewChip(h)}`);
   if (info.started) s += it("clock", `容器已运行 ${dur(now - info.started)} <span class="mut">${ts(info.started)} 启动</span>`);
   const L = h.lw;
   if (L?.risk && !h.borrow) s += it("db", `${heatNum(lwHeat(L), `本地盘 labmon 之外写了 ${g1(lwOut(L))} GiB`)}，续租会清空`, lwText(L) + "\n各目录在下方「记录 · 本地盘」");
@@ -234,7 +236,8 @@ function hostStrip(h) {
       + (miss.length ? `，<b style="color:var(--bad)">${miss.length} 格缺文件</b>` : ""),
     deps.map(r => `${r.project} ${r.job}：${r.files.length} 个文件 ${G(r.bytes)}，${healText([r])}`).join("\n") + "\n（明细在下方「记录 · 本地依赖」）");
   const lent = h.borrow && !h.borrow.swap && LIVE && srvById(h.id);     // 借来的组内服务器：改约定、还（续租是对方的事）
-  const b = h.platform ? renewBtns(h) : lent ? borrowBtns(lent) : "", btn = b ? `<div class="rn">${b}</div>` : "";
+  const scm = h.platform && (!h.platform_kind || h.platform_kind === "scm");
+  const b = scm ? renewBtns(h) : lent ? borrowBtns(lent) : "", btn = b ? `<div class="rn">${b}</div>` : "";
   if (!s && !btn) return "";
   return `<div class="card strip"><div class="info"><div class="line">${s}</div></div>${btn}${RERR[h.id] ? `<div class="rn-err">${esc(RERR[h.id])}</div>` : b ? fErr() : ""}</div>`;
 }

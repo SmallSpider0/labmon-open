@@ -40,7 +40,7 @@ from . import rebalance as RB
 from . import renew as R
 from .projects import archived_rows, registered
 from .collect import eta_by_progress, write_page
-from .config import POOL, POOL_LABEL, STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, parse_time, pause_by, pick_color, sched, user_hosts
+from .config import POOL, POOL_LABEL, STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, home_key, host_platform, host_share, is_standalone, parse_time, pause_by, pick_color, sched, shell_path, user_hosts
 from .health import container_step, lease_due, lease_end, link_step
 from .records import EVENT_CATS, EVENT_KINDS, log_events, told
 from .state import append_row, load_json, load_rows, parse_rows, save_json, snapshot, state_dir, usage_file, write_atomic
@@ -62,20 +62,20 @@ def fetch(h: dict, timeout: int = 60) -> tuple[str | None, str | None]:
     h["regs"]（每个 worker_home 挑的那一台才有）：顺带读这个 worker_home 下别的主机目录里的登记文件（_reg_cmd），给登记的全局视图（_regs）。
     h["lease"]（collect 给的 "renew"）：先在这台的 worker_home 上续服务租约（lease.remote_sh），租约这一刻是这台看板服务的才写 put（#163）；
     读回的租约是倒数第二段（lease_part 取）。没给的（测试直接调）照旧写。"""
-    d = shlex.quote(h["worker_home"].rstrip("/") + "/hosts/" + h["id"])
-    ix = shlex.quote(h["worker_home"].rstrip("/") + "/disk/index.json")
+    d = shell_path(h["worker_home"].rstrip("/") + "/hosts/" + h["id"])
+    ix = shell_path(h["worker_home"].rstrip("/") + "/disk/index.json")
     new = {n: v for n, v in (h.get("put") or {}).items() if _sig(v) != _SENT.get((h["id"], n))}
     put = "".join(f"[ -d {d} ] && printf '%s\\n' {shlex.quote(json.dumps(v, ensure_ascii=False))} > {d}/{n}.tmp && mv {d}/{n}.tmp {d}/{n} && put=\"$put {n}\"; "
                   for n, v in new.items())
     n = 60 if usage_file(h["id"]).exists() else 3000
     # 服务租约（#163）：先续约，$lok 为 0（这一刻租约是这台看板服务的）才写 put；读回的租约作为倒数第二段带回（collect 交给 lease.decide）
     lz = LS.remote_sh(h, h["lease"]) if h.get("lease") else "lease=; lok=0; "
+    ix_cmd = "" if is_standalone(h) else f"m=$(stat -c %Y {ix} 2>/dev/null || stat -f %m {ix} 2>/dev/null); echo \"$m\"; [ -n \"$m\" ] && [ \"$m\" != {DK.seen()} ] && cat {ix}; "
     remote = (f"{lz}put=; if [ \"$lok\" = 0 ]; then :; {put}fi; cat {d}/status.json 2>/dev/null; echo; echo {SEP}; tail -n 40 {d}/worker.log 2>/dev/null; "
               f"echo {SEP}; tail -n {n} {d}/usage.jsonl 2>/dev/null; echo {SEP}; date +%s; "
               f"echo {SEP}; tail -n 100 {d}/events.jsonl 2>/dev/null; echo {SEP}; cat {d}/stopped 2>/dev/null; echo; "
-              f"echo {SEP}; m=$(stat -c %Y {ix} 2>/dev/null || stat -f %m {ix} 2>/dev/null); echo \"$m\"; "
-              f"[ -n \"$m\" ] && [ \"$m\" != {DK.seen()} ] && cat {ix}; echo; echo {SEP}; {_reg_cmd(h)}echo {SEP}; echo \"$lease\"; echo {SEP}; echo \"$put\"")
-    cmd = L.ssh_argv(h["ssh"], h["port"], known_hosts=h.get("known_hosts")) + [remote] if h.get("ssh") else ["bash", "-c", remote]
+              f"echo {SEP}; {ix_cmd}echo; echo {SEP}; {_reg_cmd(h)}echo {SEP}; echo \"$lease\"; echo {SEP}; echo \"$put\"")
+    cmd = L.host_ssh_argv(h) + [remote] if h.get("ssh") else ["bash", "-c", remote]
     try:
         r = (L.ssh_run if h.get("ssh") else subprocess.run)(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
@@ -101,12 +101,19 @@ def reset_sent() -> None:
 
 
 def _reg_cmd(h: dict) -> str:
-    """fetch 里读登记文件的那一段（只有 h["regs"] 的那一台有）：这个 worker_home 下每个有 queues/ 的主机目录先打一行「REG 主机」，
-    再逐个登记文件打「REG 主机 文件名 修改时刻」与原文（修改时刻是共享盘服务器的时钟，epoch 秒：登记的 added_t，算力池待放从它算，#24）。h["regs"] 是在用主机的 id：它们有 status.json 时跳过（登记取状态里的 queues），
-    worker 从没写过状态的照读（刚 worker add、worker 还没起）。只列 hosts/*/queues/*.json 几个小文件，不遍历别的目录。"""
+    """fetch 里读登记文件的那一段（只有 h["regs"] 的那一台有）：共享盘主机枚举这个 worker_home 下各主机目录；
+    独立主机只读自身 hosts/<id>/queues，防止本机残留目录或与其他独立机同名路径串扰。"""
     if h.get("regs") is None:
         return ""
-    home, act = shlex.quote(h["worker_home"].rstrip("/")), shlex.quote(" " + " ".join(h["regs"]) + " ")
+    home, act = shell_path(h["worker_home"].rstrip("/")), shlex.quote(" " + " ".join(h["regs"]) + " ")
+    if is_standalone(h):
+        hd = shell_path(h["worker_home"].rstrip("/") + "/hosts/" + str(h["id"]))
+        hid = shlex.quote(str(h["id"]))
+        return (f"hd={hd}; if [ -d \"$hd/queues\" ]; then "
+                f"case {act} in *\" {h['id']} \"*) [ -f \"$hd/status.json\" ] && hd=;; esac; "
+                f"if [ -n \"$hd\" ]; then echo \"{REG} \"{hid}; "
+                f"for f in \"$hd\"/queues/*.json; do [ -f \"$f\" ] || continue; "
+                f"echo \"{REG} \"{hid}\" ${{f##*/}} $(stat -c %Y \"$f\" 2>/dev/null || stat -f %m \"$f\" 2>/dev/null)\"; cat \"$f\"; echo; done; fi; fi; ")
     return (f"for hd in {home}/hosts/*/; do hd=${{hd%/}}; [ -d \"$hd/queues\" ] || continue; id=${{hd##*/}}; "
             f"case {act} in *\" $id \"*) [ -f \"$hd/status.json\" ] && continue;; esac; echo \"{REG} $id\"; "
             f"for f in \"$hd\"/queues/*.json; do [ -f \"$f\" ] || continue; "
@@ -154,27 +161,28 @@ def _regs(hosts: list[dict], by: dict, got: dict, old: dict, t: float, fleet_cfg
     在用的在前（照主机清单顺序，带 pool（平台资源池名）与上一台 prev），再是算力池（host 为 config.POOL、state 为 pool，#24）、
     已归还的（归还晚的在前）、主机清单里没有的。
     只读，不改登记。"""
-    files, read = {}, set()                          # 主机 → (worker_home, 登记)；这一轮读到了的 worker_home
+    files, read = {}, set()                          # 主机 → (worker_home, 登记)；这一轮读到了的 home_key
     for hid, h in by.items():
         raw = got[hid][0] if h.get("regs") is not None else None
         parts = raw.split(SEP + "\n") if raw else []
         if len(parts) > 7:
             files.update({k: (h["worker_home"], v) for k, v in _parse_regs(parts[7]).items()})
-            read.add(h["worker_home"])
+            read.add(home_key(h))
     prev = {x["host"]: x for x in old.get("regs") or []}
     out = []
     for e in hosts:
         h, st = by[e["id"]], e.get("status") or {}
+        standalone = is_standalone(h)
         # pool、prev：自用主机的资源池与同池最近归还的那台（fleetboot.last_mine）：换了 id 的新主机页上「接上原来的项目」把 prev 的登记排第一
         pool = h.get("platform_pool")
-        prev_host = FB.last_mine(pool, skip=e["id"], cfg=fleet_cfg, holder=F.host_holder(h, fleet_cfg)) if pool else None
-        x = {"host": e["id"], "label": e["label"], "state": "active", "returned": None, "home": h["worker_home"], "stale": False,
-             "pool": h.get("platform_pool"), "prev": (prev_host or {}).get("id")}
+        prev_host = FB.last_mine(pool, skip=e["id"], cfg=fleet_cfg, holder=F.host_holder(h, fleet_cfg)) if pool and not standalone else None
+        x = {"host": e["id"], "label": e["label"], "state": "active", "returned": None, "home": h["worker_home"], "standalone": standalone,
+             "stale": False, "pool": h.get("platform_pool"), "prev": (prev_host or {}).get("id")}
         if "queues" in st:                            # 不在内网时 status 是沿用上一次采到的
             x.update(t=st.get("t"), queues=[{**{k: q.get(k) for k in REG_KEYS}, **_pool_mark(q), "empty": bool(q.get("empty")),
                                              "sleeping": bool(q.get("sleeping")), "added_t": q.get("added_t")} for q in st["queues"]],
                      stale=bool(e.get("lan_off")))
-        elif e["id"] in files or (h["worker_home"] in read and got[e["id"]][0] is not None and not st and not e.get("status_error")):
+        elif e["id"] in files or (home_key(h) in read and got[e["id"]][0] is not None and not st and not e.get("status_error")):
             # 代读读到了这台的目录，或这台连得上、没有 status.json（代读不会跳过它）而目录里没有登记
             x.update(t=t, queues=files.get(e["id"], (None, []))[1])
         elif e["id"] in prev:
@@ -184,24 +192,36 @@ def _regs(hosts: list[dict], by: dict, got: dict, old: dict, t: float, fleet_cfg
         out.append(x)
     act, known = {e["id"] for e in hosts}, {str(h["id"]): h for h in all_hosts()}
     # 算力池（#24）：保留 id pool 下的登记是交给池、还没放到哪台的清单（state 为 pool）
-    tag = lambda hid: {"label": POOL_LABEL, "state": "pool", "returned": None} if hid == POOL else {   # noqa: E731
+    tag = lambda hid: {"label": POOL_LABEL, "state": "pool", "returned": None, "standalone": False} if hid == POOL else {   # noqa: E731
         "label": known[hid]["label"] if hid in known else hid, "state": "returned" if hid in known else "unlisted",
+        "standalone": is_standalone(known[hid]) if hid in known else False,
         "returned": parse_time(str(known[hid]["returned"])) if hid in known and known[hid].get("returned") else None}
     rest = [{"host": hid, **tag(hid), "home": home, "stale": False, "t": t, "queues": qs} for hid, (home, qs) in files.items() if hid not in act]
     seen = {x["host"] for x in rest}
+    def _prev_key(hid: str, x: dict) -> tuple:
+        wh = str(x.get("home") or "").rstrip("/")
+        st_flag = x.get("standalone") if "standalone" in x else (is_standalone(known[hid]) if hid in known else False)
+        return ("host", hid, wh) if st_flag else ("shared", wh)
     rest += [{**x, **tag(hid), "stale": True} for hid, x in prev.items()
-             if hid not in act | seen and x.get("home") not in read and x.get("queues") is not None]
+             if hid not in act | seen and _prev_key(hid, x) not in read and x.get("queues") is not None]
     rest.sort(key=lambda x: (x["state"] != "pool", x["state"] != "returned", -(x.get("returned") or 0), x["host"]))
     return out + rest
 
 
 def _project_worker_state(host: dict) -> tuple[str | None, str | None]:
-    """即使有 status.json，也读实际的登记文件。只读这份 worker 目录，留着的归还或旧主机目录一并核对。"""
-    home = shlex.quote(host["worker_home"].rstrip("/"))
-    remote = (f"set -e; if [ -e {home}/hosts ]; then [ -d {home}/hosts ] && [ -r {home}/hosts ] && [ -x {home}/hosts ] || exit 1; fi; "
-              f"{_reg_cmd({**host, 'regs': []})}echo {SEP}; "
-              f'for f in {home}/hosts/*/status.json {home}/hosts/*/overrides.json; do '
-              '[ -f "$f" ] || continue; printf "%s\\n" "$f"; cat "$f"; echo; ' + f'echo {SEP}; done')
+    """即使有 status.json，也读实际的登记文件。共享盘主机读整个 worker 目录，独立主机只读自身目录。"""
+    home = shell_path(host["worker_home"].rstrip("/"))
+    if is_standalone(host):
+        hd = shell_path(host["worker_home"].rstrip("/") + "/hosts/" + str(host["id"]))
+        remote = (f"set -e; if [ -e {hd} ]; then [ -d {hd} ] && [ -r {hd} ] && [ -x {hd} ] || exit 1; fi; "
+                  f"{_reg_cmd({**host, 'regs': []})}echo {SEP}; "
+                  f'for f in {hd}/status.json {hd}/overrides.json; do '
+                  '[ -f "$f" ] || continue; printf "%s\\n" "$f"; cat "$f"; echo; ' + f'echo {SEP}; done')
+    else:
+        remote = (f"set -e; if [ -e {home}/hosts ]; then [ -d {home}/hosts ] && [ -r {home}/hosts ] && [ -x {home}/hosts ] || exit 1; fi; "
+                  f"{_reg_cmd({**host, 'regs': []})}echo {SEP}; "
+                  f'for f in {home}/hosts/*/status.json {home}/hosts/*/overrides.json; do '
+                  '[ -f "$f" ] || continue; printf "%s\\n" "$f"; cat "$f"; echo; ' + f'echo {SEP}; done')
     try:
         rc, out = ssh(host, remote, timeout=20)
     except (OSError, subprocess.TimeoutExpired):
@@ -210,7 +230,8 @@ def _project_worker_state(host: dict) -> tuple[str | None, str | None]:
 
 
 def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict) -> None:
-    """只核对与本项目相关的 worker 目录；快照提供线索，删除以本次读到的文件为准。"""
+    """只核对与本项目相关的 worker 共享域（按 home_key 隔离）；快照提供线索，删除以本次读到的文件为准。
+    已归还的独立主机没有共享盘代办机：若最后快照已无本项目在跑任务与未移除登记，直接放行，不永久阻断项目删除。"""
     known = {h["id"]: h for h in all_hosts()}
     configured = {h["id"]: h for h in cfg.get("hosts", [])}
     active = [h for h in [*known.values(), *configured.values()] if not h.get("returned")]
@@ -221,29 +242,46 @@ def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict
     states = ("running", "waiting", "external")
     associated.update(h["id"] for h in glob.get("hosts", [])
                       if any(j.get("project") == pid for key in (*states, "queues") for j in (h.get("status") or {}).get(key) or []))
-    reg_homes = {r["host"]: r.get("home") for r in glob.get("regs", [])}
-    related_homes = {h["worker_home"].rstrip("/") for h in configured.values()}
+    reg_by = {r["host"]: r for r in glob.get("regs", [])}
+    snap_by = {h["id"]: h for h in glob.get("hosts", [])}
+    related_keys: set[tuple] = {home_key(h) for h in configured.values() if not (h.get("returned") and is_standalone(h))}
     for reg in glob.get("regs", []):
         if any(q.get("project") == pid for q in reg.get("queues") or []):
             associated.add(reg["host"])
-            if reg.get("home"):
-                related_homes.add(reg["home"].rstrip("/"))
+            h = known.get(reg["host"]) or configured.get(reg["host"])
+            if h and not (h.get("returned") and is_standalone(h)):
+                related_keys.add(home_key(h))
+            elif reg.get("home") and not reg.get("standalone"):
+                related_keys.add(("shared", reg["home"].rstrip("/")))
     active_ids = {h["id"] for h in active}
     for hid in associated - {None, ""}:
         h = known.get(hid) or configured.get(hid)
-        home = (h or {}).get("worker_home") or reg_homes.get(hid)
+        if h and h.get("returned") and is_standalone(h):
+            # 已归还独立主机无共享盘代办：按最后快照核实，仍有在跑进程或未撤登记才阻断
+            st = (snap_by.get(hid) or {}).get("status") or {}
+            if any(j.get("project") == pid for key in ("running", "external") for j in st.get(key) or []):
+                raise ConfigError(f"独立主机 {hid} 归还前的最后状态仍有本项目在跑任务，请先确认已收尾")
+            if any(q.get("project") == pid for q in (reg_by.get(hid) or {}).get("queues") or []):
+                raise ConfigError(f"独立主机 {hid} 归还前仍有本项目队列登记，请先移除或确认已清理")
+            continue
+        if h:
+            related_keys.add(home_key(h))
+            continue
+        reg = reg_by.get(hid) or {}
+        home = reg.get("home")
         if not home:
             raise ConfigError(f"主机 {hid} 的 worker 目录未知，暂时无法确认任务和登记已收尾")
-        home = home.rstrip("/")
-        related_homes.add(home)
+        related_keys.add(("host", hid, home.rstrip("/")) if reg.get("standalone") else ("shared", home.rstrip("/")))
     targets = {}
-    for home in sorted(related_homes):
-        h = home_host(home, active)
+    for key in sorted(related_keys):
+        h = home_host(key, active)
         if h is None:
+            home = key[-1]
             raise ConfigError(f"worker 目录 {home} 没有在用主机代读，暂时无法确认任务和登记已收尾")
-        targets[home] = h
+        targets[key] = h
     _, readings = L.gather(targets, _project_worker_state, lambda key: bool(targets[key].get("ssh")))
-    for home, (raw, error) in readings.items():
+    for key, (raw, error) in readings.items():
+        home = key[-1]
         try:
             if error or not raw:
                 raise ValueError("读不到状态")
@@ -348,8 +386,11 @@ def _host_entry(h: dict, raw: str | None, err: str | None, lan_off: bool, prev: 
     """一台主机这轮采到的：拆 fetch 读回的几段（状态、日志尾、用量尾、时钟、事件、stopped、共享盘索引；第 8 段别的主机目录里的登记由 _regs 拆），事件与用量存进本机记录。
     error 是连不上（进掉线判定）；status_error 是连上了但 status.json 读不出（半行、坏文件），页面另标，不算掉线；
     lan_off 是这轮没连（远程主机、本机不在内网），error 里是给页面看的那句话，状态沿用上一次采到的 prev。"""
+    pk, standalone = host_platform(h), is_standalone(h)
     e = {"id": h["id"], "label": h.get("label", h["id"]), "error": err, "status_error": None, "status": None, "log": [], "done": [],
-         "lan_off": lan_off, "auto": h.get("worker") == "auto", "platform": {"job": h.get("platform_job")} if h.get("platform") else None}
+         "lan_off": lan_off, "auto": h.get("worker") == "auto",
+         "platform_kind": pk, "share": host_share(h), "standalone": standalone,
+         "platform": {"job": h.get("platform_job")} if pk == "scm" and h.get("platform") else None}
     if lan_off and prev:
         e.update({k: v for k, v in prev.items() if k in ("status", "log", "done", "clock", "stopped", "series")})
     if raw is None:
@@ -366,7 +407,7 @@ def _host_entry(h: dict, raw: str | None, err: str | None, lan_off: bool, prev: 
     if e["clock"]:
         _CLOCK[h["id"]] = e["clock"] - round(t)
     e["stopped"] = (parts[5] if len(parts) > 5 else "").strip() or None   # 手动 labmon worker stop 过：不自动拉起
-    if len(parts) > 6:
+    if len(parts) > 6 and not standalone:
         DK.absorb(parts[6], t)
     _keep_log(sd, h["id"], parse_rows(parts[4] if len(parts) > 4 else ""), t)    # worker 的事件进记录（页面经 records 读）
     _keep_usage(sd, h["id"], e["done"], t, {g["uuid"]: g["i"] for g in ((e["status"] or {}).get("info") or {}).get("gpus") or []})
@@ -463,11 +504,22 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True, pool_tick=
     sw = dict(sw, owner={p: F.share_key(n) for p, n in people.items()}) if people else sw
     prog, put = _to_worker(projects, t, sw)
     hcfg = {h["id"]: h for h in active_hosts()}
-    by = {h["id"]: dict(h, put=put(h), lease="renew") if use_ssh else dict(h, ssh=None, put=put(h), lease="renew") for h in hcfg.values()}
-    for home in {h["worker_home"] for h in by.values()}:   # 每个 worker_home 挑一台在用主机（config.home_host）顺带读别的主机目录里的登记（_regs）
-        by[home_host(home, list(by.values()))["id"]]["regs"] = list(by)
-    lan, got = L.gather(by, fetch, lambda k: bool(by[k].get("ssh")), t)
     homes = LS.homes(list(hcfg.values()))
+    lease_ids = {h["id"] for g in homes.values() for h in g}
+    is_pri = LS.primary()
+    by = {}
+    for h in hcfg.values():
+        in_lease = h["id"] in lease_ids
+        item = dict(h, put=put(h) if (in_lease or is_pri) else {}, **({"lease": "renew"} if in_lease else {}))
+        if not use_ssh:
+            item["ssh"] = None
+        by[h["id"]] = item
+    by_key: dict[tuple, list[dict]] = {}
+    for h in by.values():
+        by_key.setdefault(home_key(h), []).append(h)
+    for hk, group in by_key.items():                        # 每个共享域（home_key）挑第一台顺带读同域主机目录里的登记（_regs）
+        group[0]["regs"] = [group[0]["id"]] if hk[0] == "host" else list(by)
+    lan, got = L.gather(by, fetch, lambda k: bool(by[k].get("ssh")), t)
     readings = {home: [lease_part(got[h["id"]][0]) for h in g] for home, g in homes.items()}
     if LS.decide(readings, list(homes), t) != "primary":   # 租约在别人手里（#163）：这一轮到此为止，不动指令、不续租不借用、不写快照、不通知
         reset_sent()
@@ -530,7 +582,8 @@ def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | Non
     项目级的暂停另带 by（谁下的，config.pause_by；没记的为 None，当管理员下的，#16）；
     没有项目级的、只在几台单独下的（worker 状态 overrides 里不带 global 的）hosts 列出这几台，until 取最晚的；暂停另带 by：{主机: 谁下的}（不算 once，没记的为 None，#27）。
     项目取看板上的，另加此刻在跑、在等的别的项目名；没有 worker 状态带 share 时为 None。"""
-    sts = [h["status"] for h in hosts if (h.get("status") or {}).get("share")]
+    cluster = [h["status"] for h in hosts if not h.get("standalone") and (h.get("status") or {}).get("share")]
+    sts = cluster or [h["status"] for h in hosts if (h.get("status") or {}).get("share")]
     if not sts:
         return None
     sh = max(sts, key=lambda s: s.get("t", 0))["share"]
@@ -599,16 +652,17 @@ def health(hosts: list[dict], cfg: dict, t: float, probe=platform_ok, per_host: 
         started = ((e.get("status") or {}).get("info") or {}).get("started")
         label = e["label"]
         step = link_step(hs, None if e.get("lan_off") else not e.get("error"), t)
+        pk = host_platform(c)
         if e.get("lan_off"):
             pass
         elif e.get("error"):
             if step == "down":
-                end = lease_end(hs.get("started"), c.get("lease_days"))
+                end = lease_end(hs.get("started"), c.get("lease_days"), c.get("lease_until"))
                 if end and t >= end - 3600:
-                    why = "租期到了，需在平台续租（停止后克隆）"
-                elif c.get("platform") and not probe(c["platform"]):
+                    why = "租期到了，请在外平台手动续租或迁移" if pk == "other" else "租期到了，需在平台续租（停止后克隆）"
+                elif pk == "scm" and c.get("platform") and not probe(c["platform"]):
                     why = "平台网页也打不开，多半是平台出了问题"
-                elif c.get("platform"):
+                elif pk == "scm" and c.get("platform"):
                     why = "平台能打开但这台连不上：作业可能被平台停掉了（平台异常或被误停），需在平台克隆重开"
                 else:
                     why = "连不上"
@@ -631,12 +685,12 @@ def health(hosts: list[dict], cfg: dict, t: float, probe=platform_ok, per_host: 
         e["health"] = {"state": "lan", "fails": 0, "since": None, "why": None} if e.get("lan_off") else \
             {"state": "down" if hs["down"] else "suspect" if hs["fails"] else "ok", "fails": hs["fails"],
              "since": hs.get("since") if hs["fails"] else None, "why": hs["down"]}
-        end = lease_end(hs.get("started"), c.get("lease_days"))
+        end = lease_end(hs.get("started"), c.get("lease_days"), c.get("lease_until"))
         if end:
             e["lease_end"] = end
             if lease_due([(hs, end)], t):
-                msg = (f"{label} 租期约剩 {(end - t) / 3600:.0f} 小时（{fmt_time(end)} 到期），"
-                       "可在看板主机页点「预备续租」，等这格跑完再续")
+                hint = "请在外平台手动续租或提前迁移任务" if pk == "other" else "可在看板主机页点「预备续租」，等这格跑完再续"
+                msg = f"{label} 租期约剩 {(end - t) / 3600:.0f} 小时（{fmt_time(end)} 到期），{hint}"
                 evs.append({"host": e["id"], "kind": "lease", "msg": msg})
                 out.append(msg)
         miss = {w["name"]: w["why"] for w in ((e.get("status") or {}).get("waiting") or []) if w.get("miss")}

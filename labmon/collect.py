@@ -147,7 +147,7 @@ def lanes_cfg(cfg: dict, glob_snap: dict, sd: Path, t: float, save: bool = True)
 def run_probe(cfg: dict, host: dict) -> tuple[dict | None, str | None]:
     arg = base64.b64encode(json.dumps(probe_spec(cfg, host)).encode()).decode()
     if host["ssh"]:
-        cmd = L.ssh_argv(host["ssh"], host["port"], known_hosts=host.get("known_hosts")) + [f"{host['python']} - {arg}"]
+        cmd = L.host_ssh_argv(host) + [f"{host['python']} - {arg}"]
     else:
         cmd = [host.get("python_local") or sys.executable, "-", arg]
     try:

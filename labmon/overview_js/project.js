@@ -58,8 +58,9 @@ const freeCards = h => { const gs = h?.status?.info?.gpus || [], busy = new Set(
 // 能换去的主机：worker 目录相同（同一块共享盘，换过去时才删得掉原来那份）的别的在用主机；借来的只给别的项目用的置灰（worker 也会拒），drain、worker 没在跑的写在后面；
 // info 是给人挑的：空着几张卡、租期
 function regTo(x, pid) {
-  return (D.regs || []).filter(y => y.state === "active" && y.host !== x.host && canUseHost(y.host) && nrm(y.home) === nrm(x.home)
-      && !D.hosts.find(e => e.id === y.host)?.borrow?.pool).map(y => {        // 算力池借来的不列：放什么由看板定（#25）
+  if (x.standalone) return [];
+  return (D.regs || []).filter(y => y.state === "active" && !y.standalone && y.host !== x.host && canUseHost(y.host) && nrm(y.home) === nrm(x.home)
+      && !D.hosts.find(e => e.id === y.host)?.borrow?.pool).map(y => {        // 算力池借来的与独立主机不列：不共享 worker 目录
     const h = D.hosts.find(e => e.id === y.host), b = h?.borrow, ov = h?.status?.overrides || [];
     const no = b?.for?.length && !b.for.includes(pid) ? `借来的，只给 ${b.for.join("、")} 用` : "";
     const note = no || [ov.some(o => o.kind === "drain") ? "drain 中，不放行" : "", !h?.worker_up ? "worker 没在跑，拉起后放行" : ""].filter(Boolean).join("，");
@@ -76,7 +77,8 @@ function regHostBtns(x, qs, p) {
   const go = (act, text) => `<button class="btn pri" data-reg="${act}" ${da} ${POP?.busy ? "disabled" : ""}>${POP?.busy ? "正在做…" : text}</button>`;
   const err = () => POP?.err ? `<div class="rn-err">${esc(POP.err)}</div>` : "";
   const open = popIs("rmv", id), tgt = open && to.find(t => t.id === POP.to), tn = tgt ? `<b>${esc(tgt.name)}</b>` : "选好的那台";
-  const why = !to.length ? "没有能换去的在用主机：要有使用权限，并与这台共用 worker 目录（同一块共享盘）" : `能换去的主机都不收它：${to.map(t => `${t.name}（${t.note}）`).join("、")}`;
+  const why = x.standalone ? "独立主机不共享 worker 目录，不能把登记搬到别的主机"
+    : !to.length ? "没有能换去的在用主机：要有使用权限，并与这台共用 worker 目录（同一块共享盘）" : `能换去的主机都不收它：${to.map(t => `${t.name}（${t.note}）`).join("、")}`;
   const mvBtn = ok.length ? b("mv", ok.length === 1 ? `换到 ${esc(ok[0].name)}` : "换到其他主机", `把这项目在这台的 ${n} 条清单改到别的在用主机上跑`, false) : b("mv", "换到其他主机", why, true);
   const pick = to.length > 1 ? `<div class="rg-tos">${to.map(t => `<label class="rg-to${t.no ? " mut" : ""}"><input type="radio" name="regto" data-regto="${esc(t.id)}"${POP?.to === t.id ? " checked" : ""}${t.no ? " disabled" : ""}>`
     + `<b>${esc(t.name)}</b><span class="sm mut">${esc([t.info, t.note].filter(Boolean).join(" · "))}</span></label>`).join("")}</div>` : tgt?.info || tgt?.note ? `<div class="sm mut">${esc([tgt.info, tgt.note].filter(Boolean).join(" · "))}</div>` : "";
@@ -126,8 +128,8 @@ const regMsg = () => RMSG ? `<div class="rn-state">${esc(RMSG)}</div>` : "";
 let ADOPT = null;                                         // {host, sel: {登记 id: 勾没勾}, busy, err}
 function adoptSrc(h) {
   const me = (D.regs || []).find(x => x.host === h.id);
-  if (!canWrite() || !me || me.state !== "active" || me.stale || !Array.isArray(me.queues) || me.queues.length || !h.status) return null;
-  const src = D.regs.filter(x => (x.state === "returned" || x.state === "unlisted") && nrm(x.home) === nrm(me.home) && (x.queues || []).some(q => q.project));
+  if (!canWrite() || !me || me.standalone || h.standalone || me.state !== "active" || me.stale || !Array.isArray(me.queues) || me.queues.length || !h.status) return null;
+  const src = D.regs.filter(x => !x.standalone && (x.state === "returned" || x.state === "unlisted") && nrm(x.home) === nrm(me.home) && (x.queues || []).some(q => q.project));
   return src.length ? {me, src: [...src.filter(x => x.host === me.prev), ...src.filter(x => x.host !== me.prev)]} : null;
 }
 function adoptCard(h) {

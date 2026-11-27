@@ -13,6 +13,7 @@ import ssl
 import json
 import os
 import re
+import shlex
 import threading
 import time
 import tomllib
@@ -26,6 +27,12 @@ from .worker.pure import GIB, GROUP_RE as AUTO_GROUP_RE, HOLD_RE, POOL, STALE_S 
 PALETTE = ["#7F77DD", "#1D9E75", "#D85A30", "#378ADD", "#D4537E", "#BA7517", "#639922", "#888780"]
 PORT = 8765                    # 看板服务的缺省端口（labmon serve / service install --port）
 POOL_LABEL = "算力池"
+PLATFORM_KINDS = ("scm", "other", "none")          # 主机平台分类：SCM 集群平台 / 外部平台租用 / 自有机器
+SHARE_MODES = ("pool", "borrow", "private")        # 主机共享分类：可入算力池 / 仅手动借用 / 仅自用
+SSH_KEY_MODES = ("managed", "system")              # 主机 SSH 密钥模式：看板托管专用密钥 / 宿主机默认密钥
+STANDALONE_DATA_ROOT = "~/.local/share/labmon/work"  # 独立主机缺省隔离工作根目录
+DISK_WARN_GB = 20                                  # 独立主机本地盘预警线（GiB）
+DISK_STOP_GB = 10                                  # 独立主机本地盘准入停止线（GiB，0 关闭）
 
 
 def pick_color(colors: dict, key: str, taken=()) -> str:
@@ -92,13 +99,125 @@ def check_future(v: float | None, what: str = "到期时间", t: float | None = 
         raise ConfigError(f"{what} {fmt_time(v)} 已经过去了：换一个更晚的时刻")
 
 
+def shell_path(p: str) -> str:
+    """把路径安全拼进 POSIX shell 命令：支持以 ~ 或 ~/ 开头的远端用户家目录展开，其余字符全走 shlex.quote。"""
+    s = str(p)
+    if s == "~":
+        return '"$HOME"'
+    if s.startswith("~/"):
+        return '"$HOME"/' + shlex.quote(s[2:])
+    return shlex.quote(s)
+
+
+def host_platform(h: dict | None) -> str:
+    """主机的平台分类（唯一实现）：scm（SCM 平台）/ other（外平台租用，只做租期提醒不做平台操作）/ none（自有机器）。
+    显式写了 platform_kind 时校验合法值；未写时按已有字段自动推断，确保旧 hosts.toml 零改写。"""
+    h = h or {}
+    v = h.get("platform_kind")
+    if v is not None:
+        if not isinstance(v, str) or v not in PLATFORM_KINDS:
+            raise ConfigError(f"主机 {h.get('id', '?')} 的 platform_kind 只能写 {' / '.join(PLATFORM_KINDS)}，写的是 {v!r}")
+        return v
+    if any(h.get(k) for k in ("platform_job", "platform", "platform_pool", "platform_holder")):
+        return "scm"
+    if h.get("lease_until") or h.get("lease_days"):
+        return "other"
+    return "none"
+
+
+def is_standalone(h: dict | None) -> bool:
+    """这台主机是不是独立主机（不共享集群 worker_home，唯一实现）。
+    显式写了 standalone 时直接按它；未写时：声明了 shared 共享盘的不是独立机，否则显式标了 platform_kind=other|none、
+    写了外平台 lease_until（且无 SCM 字段）、归属 owner 或托管密钥 ssh_key=managed 的判为独立机；旧式集群配置缺省 False。"""
+    if not h:
+        return False
+    if "standalone" in h and h["standalone"] is not None:
+        if not isinstance(h["standalone"], bool):
+            raise ConfigError(f"主机 {h.get('id', '?')} 的 standalone 要写 true 或 false，写的是 {h['standalone']!r}")
+        return h["standalone"]
+    if h.get("shared"):
+        return False
+    pk_raw = h.get("platform_kind")
+    if pk_raw is not None:
+        return host_platform(h) != "scm"
+    if h.get("lease_until") and not any(h.get(k) for k in ("platform_job", "platform", "platform_pool", "platform_holder")):
+        return True
+    if h.get("owner") or h.get("ssh_key") == "managed":
+        return True
+    return False
+
+
+def host_share(h: dict | None) -> str:
+    """主机的共享分类（唯一实现）：pool（可入池）/ borrow（仅手动借用）/ private（仅自用）。
+    缺省：SCM 集群共享盘且允许普通用户（share_host）的为 pool，其余（独立主机、外平台、自有机、本机回环）强制缺省 private。"""
+    h = h or {}
+    v = h.get("share")
+    if v is not None:
+        if not isinstance(v, str) or v not in SHARE_MODES:
+            raise ConfigError(f"主机 {h.get('id', '?')} 的 share 只能写 {' / '.join(SHARE_MODES)}，写的是 {v!r}")
+        return v
+    return "pool" if host_platform(h) == "scm" and not is_standalone(h) and share_host(h) else "private"
+
+
+def host_ssh_key(h: dict | None) -> str:
+    """主机的 SSH 密钥模式（唯一实现）：managed（看板 LABMON_SECRETS/ssh_keys 托管专用密钥）或 system（宿主机默认密钥，缺省）。"""
+    h = h or {}
+    v = h.get("ssh_key")
+    if v is None:
+        return "system"
+    if not isinstance(v, str) or v not in SSH_KEY_MODES:
+        raise ConfigError(f"主机 {h.get('id', '?')} 的 ssh_key 只能写 {' / '.join(SSH_KEY_MODES)}，写的是 {v!r}")
+    return v
+
+
+def home_key(h: dict) -> tuple:
+    """主机的 worker_home 共享域唯一键（唯一实现）：共享盘主机按路径共用 ("shared", worker_home)；
+    独立主机按主机隔离 ("host", id, worker_home)，防止多台独立机默认路径撞名串扰。"""
+    wh = str(h["worker_home"]).rstrip("/")
+    return ("host", str(h["id"]), wh) if is_standalone(h) else ("shared", wh)
+
+
+def _check_num(hid: str, key: str, v, *, positive: bool = False) -> None:
+    if v is None:
+        return
+    if isinstance(v, bool) or not isinstance(v, (int, float)) or (v <= 0 if positive else v < 0):
+        want = "正数" if positive else "非负数"
+        raise ConfigError(f"主机 {hid} 的 {key} 要写{want}，写的是 {v!r}")
+
+
 def host_defaults(h: dict) -> dict:
-    """一台主机的缺省值（项目配置的 [[hosts]] 与用户级主机清单共用）：端口、Python、自己在共享盘上的目录（data_root）、
-    与其它主机共用的目录（shared）、worker 目录、名称。"""
-    h = {"port": 22, "python": "python3", "data_root": "/data/labmon", **h}
-    h["id"] = str(h["id"])
+    """一台主机的缺省值（项目配置的 [[hosts]] 与用户级主机清单共用）：端口、Python、分类与共享域、
+    工作根目录（data_root：集群主机缺省 /data/labmon，独立主机缺省 ~/.local/share/labmon/work）、
+    与其它主机共用的目录（shared）、worker 目录、本地临时目录（local_dir）、水位与名称。"""
+    hid = str(h["id"])
+    pk = host_platform(h)
+    standalone = is_standalone(h)
+    sh = host_share(h)
+    sk = host_ssh_key(h)
+    raw_until = h.get("lease_until")
+    if raw_until is not None and raw_until != "":
+        if parse_time(str(raw_until)) is None:
+            raise ConfigError(f"主机 {hid} 的 lease_until「{raw_until}」认不出：写成 2026-12-01 18:00 这样")
+    for k, pos in (("disk_warn_gb", False), ("disk_stop_gb", False), ("disk_quota_gb", True), ("cpu_quota", True), ("mps_vram_gb", True)):
+        _check_num(hid, k, h.get(k), positive=pos)
+    for k in ("allow_outside_root", "allow_shared_gpu"):
+        if k in h and h[k] is not None and not isinstance(h[k], bool):
+            raise ConfigError(f"主机 {hid} 的 {k} 要写 true 或 false，写的是 {h[k]!r}")
+    if "owner" in h and h["owner"] is not None and (not isinstance(h["owner"], str) or not h["owner"].strip()):
+        raise ConfigError(f"主机 {hid} 的 owner 要写非空账号名")
+    default_root = STANDALONE_DATA_ROOT if standalone else "/data/labmon"
+    h = {"port": 22, "python": "python3", "data_root": default_root, **h}
+    h["id"] = hid
+    h["platform_kind"] = pk
+    h["standalone"] = standalone
+    h["share"] = sh
+    h["ssh_key"] = sk
     h.setdefault("label", h["id"])
     h.setdefault("worker_home", h["data_root"].rstrip("/") + "/labmon")
+    if standalone:
+        h.setdefault("local_dir", h["data_root"].rstrip("/") + "/.tmp")
+        h.setdefault("disk_warn_gb", DISK_WARN_GB)
+        h.setdefault("disk_stop_gb", DISK_STOP_GB)
     # 与其它主机共用的目录（如 NFS 的 /root/data1）：归还后经别的主机读队列状态；第一个由 worker 按人统计用量（组内服务器的「共享盘」）
     h.setdefault("shared", [])
     return h
@@ -214,24 +333,30 @@ def all_hosts() -> list[dict]:
     return sorted((host_defaults(h) for h in user_hosts()), key=lambda h: bool(h.get("returned")))
 
 
-def home_host(home: str, hosts: list[dict] | None = None) -> dict | None:
-    """一个 worker_home（共享盘上各主机共用的 worker 目录）由哪台在用主机代读、代办：照主机清单顺序第一台 worker_home 相同的在用主机（hosts 缺省 active_hosts）。
-    工作台读已归还主机留下的登记（overview.collect 挑给 _reg_cmd 的那台）、移除已归还主机上的登记（workerctl.run_out 的 rm）都经它：
-    改的是共享盘上我们自己 worker_home 里的文件，不连已归还的主机。没有就是 None。"""
+def home_host(home: str | tuple, hosts: list[dict] | None = None) -> dict | None:
+    """一个 worker_home 共享域由哪台在用主机代读、代办：照主机清单顺序第一台匹配域键的在用主机（hosts 缺省 active_hosts）。
+    home 可以是 home_key(h) 返回的元组，或共享盘 worker_home 路径字符串（仅匹配非独立主机，防独立主机默认路径撞名）。
+    工作台读已归还主机留下的登记、移除已归还主机上的登记（workerctl.run_out 的 rm）都经它：没有就是 None。"""
     return next((h for h in (active_hosts() if hosts is None else hosts) if _same_home(h, home)), None)
 
 
-def _same_home(h: dict, home: str) -> bool:
-    """主机 h 的 worker_home 是不是 home（末尾的 / 不算）：home_host、home_peers 共用。"""
-    return h["worker_home"].rstrip("/") == home.rstrip("/")
+def _same_home(h: dict, home: str | tuple) -> bool:
+    """主机 h 是不是属于共享域 home（经 home_key 统一判定）：home 为元组时精确比对 home_key(h)；
+    home 为字符串时只匹配非独立主机且 worker_home 路径相同（末尾 / 不算）。"""
+    if isinstance(home, tuple):
+        return home_key(h) == home
+    return not is_standalone(h) and h["worker_home"].rstrip("/") == home.rstrip("/")
 
 
 def home_peers(hid: str, hosts: list[dict] | None = None) -> list[str]:
-    """与 hid 共用 worker_home 的在用主机 id（含 hid 自己，照主机清单顺序；hosts 缺省 active_hosts，含借来的）：同一块共享盘，
-    放在那里的文件各台都读得到（#35 A）。labmon host list 按它分组、worker status 补一行（api.hosts、api.worker）。hid 不在用时为 []。"""
+    """与 hid 共用 worker_home 共享域的在用主机 id（含 hid 自己，照主机清单顺序；hosts 缺省 active_hosts，含借来的）。
+    独立主机（is_standalone）自成一域，只返回自己。hid 不在用时为 []。"""
     act = active_hosts() if hosts is None else hosts
     me = next((h for h in act if str(h["id"]) == str(hid)), None)
-    return [str(h["id"]) for h in act if _same_home(h, me["worker_home"])] if me else []
+    if not me:
+        return []
+    key = home_key(me)
+    return [str(h["id"]) for h in act if home_key(h) == key]
 
 
 def share_host(h: dict | None) -> bool:
@@ -241,9 +366,15 @@ def share_host(h: dict | None) -> bool:
 
 
 def host_users(h: dict | None) -> list[str]:
-    """主机清单里一台主机允许哪些普通用户用（主机项的 users = [...]，#167；管理员不用列）：账号名，小写去重；没写、写错类型的是空（只有管理员）。"""
-    v = (h or {}).get("users") if share_host(h) else None
-    return list(dict.fromkeys(str(x).strip().lower() for x in v if str(x).strip())) if isinstance(v, list) else []
+    """主机清单里一台主机允许哪些普通用户用（主机项的 users = [...]，#167；外部机 owner 天然包含；管理员不用列）：账号名，小写去重；没写、写错类型的是空（只有管理员）。"""
+    if not share_host(h):
+        return []
+    v = (h or {}).get("users")
+    out = [str(x).strip().lower() for x in v if str(x).strip()] if isinstance(v, list) else []
+    owner = (h or {}).get("owner")
+    if isinstance(owner, str) and owner.strip():
+        out.append(owner.strip().lower())
+    return list(dict.fromkeys(out))
 
 
 @_hosts_edit
@@ -478,8 +609,9 @@ def expire_sched(t: float | None = None) -> list[str]:
 
 
 def _guest_tpl(hosts: list[dict]) -> dict:
-    """借来的主机与算力池照抄哪台自用主机（同一套镜像与共享盘）：第一台在用、不是换来借的；都不在用取第一台；没有为 {}。hosts：[[hosts]] 各块。"""
-    return next((h for h in hosts if not h.get("returned") and not h.get("borrow")), hosts[0] if hosts else {})
+    """借来的主机与算力池照抄哪台自用主机（同一套镜像与共享盘）：跳过独立主机，取第一台在用、不是换来借的；都不在用取第一台非独立主机；没有为 {}。hosts：[[hosts]] 各块。"""
+    cand = [h for h in hosts if not is_standalone(h)]
+    return next((h for h in cand if not h.get("returned") and not h.get("borrow")), cand[0] if cand else {})
 
 
 def pool_home(hosts: list[dict] | None = None) -> str | None:
@@ -567,14 +699,14 @@ def _reader(q: dict, hosts: list[dict]) -> str | None:
     if h.get("pool"):
         o = home_host(h["worker_home"], [x for x in hosts if not x["returned"] and not x.get("pool")])
         return o["id"] if o else None
-    if not h["returned"]:
+    if not h["returned"] or is_standalone(h):
         return None
     root = str(q.get("root", "")).split("*")[0]
     for p in h["shared"]:
         p = p.rstrip("/") + "/"
         if root.startswith(p):
             for o in hosts:
-                if not o["returned"] and o["id"] != h["id"] and p in [s.rstrip("/") + "/" for s in o["shared"]]:
+                if not o["returned"] and not is_standalone(o) and o["id"] != h["id"] and p in [s.rstrip("/") + "/" for s in o["shared"]]:
                     return o["id"]
     return None
 

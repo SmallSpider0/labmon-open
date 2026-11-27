@@ -372,6 +372,7 @@ function renewAsk(x) {
 // 自用主机的续租按钮（概况条）：预备续租 ↔ 取消预备原地换，续租；续租完保持不放行时只有「恢复放行」。
 // 预备续租先在按钮旁确认；取消预备一点就生效，只有在自动预备的时段里（取消后这一期不再自动预备）才先确认
 function renewBtns(h) {
+  if (h.platform_kind && h.platform_kind !== "scm") return "";
   if (!canOps()) return opsNote();
   const r = h.renew, id = esc(h.id), dis = fops().op?.active ? "disabled" : "";
   const rb = (act, cls, ic, text, hint = "") => `<button class="btn ${cls}" data-renew="${act}" data-host="${id}" ${dis} ${hint ? tip(hint) : ""}>${ic ? icon(ic) : ""}${text}</button>`;
@@ -391,7 +392,7 @@ function renewBtns(h) {
 }
 // 续租卡：只在续租进行中、停下了、在面板里输验证码时出现（进度与「继续」）；按钮都在概况条里
 function renewCard(h) {
-  if (!h.platform) return "";
+  if (!h.platform || (h.platform_kind && h.platform_kind !== "scm")) return "";
   const run = renewOp(h.id), P = fPanel(srvById(h.id) || {id: h.id});
   if (!P.h) return "";
   const lease = h.lease_end ? `${ts(h.lease_end)} 到期（${leaseRem(h.lease_end)}）` : "租期未知";

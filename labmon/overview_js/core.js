@@ -106,7 +106,7 @@ function alertsOf(h) {
   const ks = h.status?.keepalive?.stuck;   // worker 判的：要卡时停保活一直没停成（#102），任务和它同卡分算力
   if (ks) add("user", `${h.label}：GPU 保活停不下来（${ks.why}，${tsNear(ks.t0)} 起 ${ks.n} 次），任务和它同卡分算力、少了它占的显存；${h.borrow ? `请 ${h.borrow.holder || "对方"} 停掉它或查 ka.sh` : "请查 ka.sh"}`);
   if (h.renew?.state === "ready") add("user", `${h.label}：可以续租了（${h.renew.why}），${srvById(h.id) ? "到主机页点「续租」" : "去平台续租（主机清单没有 [fleet] 段，看板不能替你续）"}`);
-  else if (leaseSoon(h.lease_end)) add("user", `${h.label}：${leaseText(h)}（${ts(h.lease_end)} 到期）${h.renew ? "，已预备续租：" + h.renew.why : h.platform ? "，到主机页点「预备续租」" : "，找个任务间隙在平台续租"}`);
+  else if (leaseSoon(h.lease_end)) add("user", `${h.label}：${leaseText(h)}（${ts(h.lease_end)} 到期）${h.renew ? "，已预备续租：" + h.renew.why : h.platform_kind === "other" ? "，请在外平台手动续租或提前迁移任务" : h.platform ? "，到主机页点「预备续租」" : "，找个任务间隙在平台续租"}`);
   if (h.auto && !h.error && h.status && !h.worker_up && !h.stopped) add("user", `${h.label}：worker 不在，看板会自动拉起（10 分钟内一次）`);
   return out;
 }
@@ -126,6 +126,11 @@ function thrTag(h, cls = "sm") {
   return `<span class="${cls}${th ? "" : " mut"}" style="${th ? `color:var(${th.alert ? "--bad" : "--warn"})` : ""}" ${tip(t)}>限流 ${g1(thr)}%</span>`;
 }        // 给用户的（总览红框与告警数）
 
+function standaloneBadge(h) {
+  if (!h?.standalone) return "";
+  const pk = h.platform_kind === "other" ? "外平台独立主机" : "自有独立主机";
+  return ` <span class="badge b-mute" ${tip(`${pk}：不共享集群盘，不可借用、不可入池、不支持跨机搬登记`)}>独立</span>`;
+}
 function workerBadge(h) {
   const st = h.status;
   return h.lan_off ? `<span class="badge b-mute" ${tip("本机不在内网，下面是离开前的数据")}>本机不在内网</span>` : h.error ? `<span class="badge b-bad">连不上</span>` : !st ? `<span class="badge b-mute">无 worker</span>`

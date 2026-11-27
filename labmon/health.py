@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from .config import fmt_time
+from .config import fmt_time, parse_time
 
 DOWN_S = 150                   # 连不上持续这么久（约 3 轮采集）才算掉线，网络抖一下不报
 LEASE_WARN_H = (24, 6)         # 租期到期前这么多小时各提醒一次
@@ -28,8 +28,12 @@ def link_step(hs: dict, ok: bool | None, t: float) -> str | None:
     return "down" if hs["fails"] >= 2 and t - hs["since"] >= DOWN_S and not hs.get("down") else None
 
 
-def lease_end(started: float | None, days) -> float | None:
-    """租期到期时刻：容器启动（或作业创建）时刻加 lease_days 天。"""
+def lease_end(started: float | None, days, until=None) -> float | None:
+    """租期到期时刻：优先取显式绝对到期时刻 until（外平台租机 lease_until），否则取容器启动（或作业创建）时刻加 lease_days 天。"""
+    if until is not None and until != "":
+        if isinstance(until, (int, float)) and not isinstance(until, bool):
+            return float(until)
+        return parse_time(str(until))
     return started + float(days) * 86400 if started and days else None
 
 

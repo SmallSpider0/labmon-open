@@ -17,6 +17,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import subprocess
 import sys
 import time
@@ -24,11 +25,12 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from .config import fmt_time
+from .config import fmt_time, host_ssh_key
 from .state import write_atomic
 
 SECRETS = {"platform": "labmon-platform", "platform-token": "labmon-platform-token"}   # 种类 → 钥匙串的服务名（已有条目接着用）
 SECRET_NAMES = {"platform": "平台密码", "platform-token": "平台登录令牌"}
+SSH_SEG_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")   # ssh_keys/<owner>/<host_id> 的合法目录与文件名段
 TOKEN_TTL = 48 * 3600                            # 登录令牌（JWT）的有效期：存成秘密，看板服务重启后接着用，免得再输验证码
 PORTS = (10000, 20000)                           # 平台前端对主机端口的校验范围
 NAME_RE = re.compile(r"^[0-9A-Za-z_~-]{1,32}$")   # 平台前端对作业名的校验（^[0-9a-zA-Z-_\\~]*$，去掉反斜杠，限长）
@@ -98,11 +100,16 @@ def _off() -> bool:
     return bool(os.environ.get("LABMON_NO_KEYCHAIN")) and not os.environ.get("LABMON_SECRETS")
 
 
+def secrets_root() -> Path:
+    """秘密文件根目录（缺省 ~/.config/labmon/secrets，LABMON_SECRETS 改；不在 state_root 下，冷备天然不含秘密）。"""
+    return Path(os.environ.get("LABMON_SECRETS") or "~/.config/labmon/secrets").expanduser()
+
+
 def secret_file(kind: str, user: str) -> Path:
     """文件后端的一份秘密：<目录>/<种类>/<账号>，目录 700、文件 600（目录缺省 ~/.config/labmon/secrets，LABMON_SECRETS 改）。"""
     if kind not in SECRETS or not user or "/" in user or user.startswith("."):
         raise PlatformError(f"秘密的种类或账号不对：{kind} {user!r}")
-    return Path(os.environ.get("LABMON_SECRETS") or "~/.config/labmon/secrets").expanduser() / kind / user
+    return secrets_root() / kind / user
 
 
 def secret(kind: str, user: str) -> str | None:
@@ -168,6 +175,122 @@ def prompt_secret(kind: str, user: str, ask=None) -> str:
         raise PlatformError("两遍不一样，什么都没存")
     set_secret(kind, user, v)
     return f"{name}（{user}）存进了 {secret_file(kind, user)}（600 权限）"
+
+
+# ---------- 外部机专用 SSH 密钥对（零私钥上传，#114） ----------
+def _ssh_seg(val: str, what: str) -> str:
+    s = str(val or "").strip()
+    if not SSH_SEG_RE.fullmatch(s) or ".." in s:
+        raise PlatformError(f"{what}格式不对：{val!r}")
+    return s
+
+
+def ssh_key_owner(owner: str | None) -> str:
+    """外部机密钥目录的归属段：普通用户取小写账号名，管理员/未指定归属取 _admin。"""
+    s = str(owner or "").strip().lower()
+    return _ssh_seg(s, "密钥归属账号") if s else "_admin"
+
+
+def ssh_key_path(owner: str | None, host_id: str) -> Path:
+    """外部机专用 Ed25519 私钥路径：<LABMON_SECRETS>/ssh_keys/<owner>/<host_id>（目录 0700，私钥 0600，绝不进状态目录与冷备）。"""
+    return secrets_root() / "ssh_keys" / ssh_key_owner(owner) / _ssh_seg(host_id, "主机 id")
+
+
+def ssh_auth_cmd(pubkey: str) -> str:
+    """用户在目标机粘贴一次即可授权看板专用公钥的一行命令。"""
+    q = shlex.quote(pubkey.strip())
+    return f"mkdir -p ~/.ssh && chmod 700 ~/.ssh && printf '%s\\n' {q} >> ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+
+
+def _ssh_fingerprint(pub_path: Path) -> str | None:
+    r = subprocess.run(["ssh-keygen", "-lf", str(pub_path)], capture_output=True, text=True, timeout=15)
+    if r.returncode != 0:
+        return None
+    parts = r.stdout.strip().split()
+    return parts[1] if len(parts) >= 2 else (r.stdout.strip() or None)
+
+
+def ssh_key_info(owner: str | None, host_id: str) -> dict | None:
+    """读取已有外部机专用公钥与 SHA256 指纹（只读公钥，绝不返回私钥内容或路径）；不存在返回 None。"""
+    if _off():
+        return None
+    priv = ssh_key_path(owner, host_id)
+    pub = priv.with_name(priv.name + ".pub")
+    if not (priv.is_file() and pub.is_file()):
+        return None
+    pubkey = pub.read_text().strip()
+    if not pubkey:
+        return None
+    return {"pubkey": pubkey, "fingerprint": _ssh_fingerprint(pub), "auth_cmd": ssh_auth_cmd(pubkey)}
+
+
+def ensure_ssh_key(owner: str | None, host_id: str, *, rotate: bool = False) -> dict:
+    """在隔离秘密目录下按 (owner, host_id) 生成或读取专用 Ed25519 密钥对（目录 0700、私钥 0600）。
+    零私钥上传：私钥永不离开看板机、不回显、不进日志与冷备；返回 {pubkey, fingerprint, auth_cmd}。"""
+    if _off():
+        raise PlatformError("设着 LABMON_NO_KEYCHAIN（测试用），不碰真的秘密存放处")
+    priv = ssh_key_path(owner, host_id)
+    pub = priv.with_name(priv.name + ".pub")
+    base = secrets_root()
+    ssh_dir = base / "ssh_keys"
+    owner_dir = priv.parent
+    owner_dir.mkdir(parents=True, exist_ok=True)
+    for d in (base, ssh_dir, owner_dir):
+        os.chmod(d, 0o700)
+    if not rotate and priv.is_file() and pub.is_file():
+        os.chmod(priv, 0o600)
+        info = ssh_key_info(owner, host_id)
+        if info:
+            return info
+    own_seg = ssh_key_owner(owner)
+    hid_seg = _ssh_seg(host_id, "主机 id")
+    tmp = owner_dir / f".{hid_seg}.{secrets.token_hex(4)}.tmp"
+    tmp_pub = tmp.with_name(tmp.name + ".pub")
+    try:
+        r = subprocess.run(
+            ["ssh-keygen", "-t", "ed25519", "-N", "", "-C", f"labmon:{own_seg}:{hid_seg}", "-f", str(tmp), "-q"],
+            capture_output=True, text=True, timeout=30,
+        )
+        if r.returncode != 0:
+            raise PlatformError(f"生成 SSH 密钥失败：{(r.stderr or r.stdout).strip() or f'退出码 {r.returncode}'}")
+        os.chmod(tmp, 0o600)
+        os.chmod(tmp_pub, 0o644)
+        os.replace(tmp, priv)
+        os.replace(tmp_pub, pub)
+    finally:
+        tmp.unlink(missing_ok=True)
+        tmp_pub.unlink(missing_ok=True)
+    info = ssh_key_info(owner, host_id)
+    if not info:
+        raise PlatformError("生成了 SSH 密钥但读不到公钥")
+    return info
+
+
+def del_ssh_key(owner: str | None, host_id: str) -> bool:
+    """销毁外部机专用 SSH 密钥对（私钥与公钥一并 unlink，空目录顺手清理）。"""
+    if _off():
+        return False
+    priv = ssh_key_path(owner, host_id)
+    pub = priv.with_name(priv.name + ".pub")
+    removed = False
+    for f in (priv, pub):
+        if f.exists() or f.is_symlink():
+            f.unlink(missing_ok=True)
+            removed = True
+    try:
+        if priv.parent.is_dir() and not any(priv.parent.iterdir()):
+            priv.parent.rmdir()
+    except OSError:
+        pass
+    return removed
+
+
+def ssh_identity(h: dict | None) -> str | None:
+    """主机配置 → 传给 lan.ssh_argv 的专用私钥路径（唯一实现）：
+    仅当 ssh_key == "managed" 时返回路径（即使文件尚未生成也返回路径，配合 IdentitiesOnly=yes 绝不回退试看板宿主 ~/.ssh/ 里的维护者个人密钥）。"""
+    if not h or host_ssh_key(h) != "managed":
+        return None
+    return str(ssh_key_path(h.get("owner"), str(h["id"])))
 
 
 # ---------- 接口 ----------

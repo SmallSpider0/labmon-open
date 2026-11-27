@@ -25,7 +25,7 @@ import time
 
 from . import fleet as F
 from . import platform as P
-from .config import fmt_time
+from .config import fmt_time, host_platform
 from .records import log_events
 from .service import log
 from .state import load_json, save_json, state_dir
@@ -163,13 +163,14 @@ def check(hosts: list[dict], cfg: dict, t: float, reserve_fn=reserve, ovr=_ovr, 
 
     for e in hosts:
         c, end = cfg.get(e["id"], {}), e.get("lease_end")
+        scm = host_platform(c) == "scm" and bool(c.get("platform"))
         auto_h = c.get("lease_reserve_h", AUTO_H)
-        if c.get("platform") and e.get("status") is not None:     # 续租前的本地文件依赖：续租开始时记进进度，续租后据此决定放不放行
+        if scm and e.get("status") is not None:     # 续租前的本地文件依赖：续租开始时记进进度，续租后据此决定放不放行
             l = loss_of(e["status"])
             if st["loss"].get(e["id"]) != l:
                 change(lambda s, hid=e["id"], l=l: s["loss"].__setitem__(hid, l))
         lt = "；".join(x for x in (loss_text(st["loss"].get(e["id"])), F.lw_text(e.get("lw"))) if x)   # 本地文件依赖与本地盘开机以来的新写入（#149）
-        k, at = st["kept"].get(e["id"]), end - auto_h * 3600 if c.get("platform") and end and auto_h else None
+        k, at = st["kept"].get(e["id"]), end - auto_h * 3600 if scm and end and auto_h else None
         off = bool(k and at and abs(k["end"] - end) < 600 and k["t"] >= at)      # 同一期、在自动预备时段里取消过
         e["auto_res"] = {"at": round(at), "off": off} if at else None
         if (e["id"] not in st["res"] and at and at <= t < end and not off

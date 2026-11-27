@@ -20,7 +20,7 @@ import re
 import time
 
 from . import fleet as F
-from .config import GIB, active_hosts, all_hosts, pick_color
+from .config import GIB, active_hosts, all_hosts, is_standalone, pick_color
 from .records import log_events
 from .state import append_row, file_sig, load_json, load_rows, save_json, snapshot, usage_file
 
@@ -183,10 +183,16 @@ def whose(cfg: dict | None, hosts: list[dict]):
     return f
 
 
+def _shared_hosts(hosts: list[dict], hc: dict | None = None) -> list[dict]:
+    """筛出非独立（共享集群盘）主机，防止独立主机本地盘混入集群「共享盘」容量与历史曲线。"""
+    hc = {h["id"]: h for h in active_hosts()} if hc is None else hc
+    return [e for e in hosts if not e.get("standalone") and not is_standalone(hc.get(e.get("id")))]
+
+
 def _df(hosts: list[dict], ix: dict) -> dict | None:
-    """总量与剩余（字节）：最新的一台自用主机读的 statvfs；都没有就用索引里扫描者记的。"""
+    """总量与剩余（字节）：最新的一台非独立自用主机读的 statvfs；都没有就用索引里扫描者记的。"""
     best = None
-    for e in hosts:
+    for e in _shared_hosts(hosts):
         st = e.get("status") or {}
         d = next(iter((st.get("info") or {}).get("disk") or []), None)
         if d and (not best or st.get("t", 0) > best["t"]):
@@ -255,7 +261,7 @@ def update(hosts: list[dict], t: float | None = None, cfg: dict | None = None) -
         hrs = _rows("hours.jsonl")
     scanned = sum(o["b"] for o in out)
     dc = cfg.get("disk") or {}
-    scan = next((e["status"]["disk"] for e in hosts if ((e.get("status") or {}).get("disk") or {}).get("mine")), None) or {}   # 拿着租约在扫的那台
+    scan = next((e["status"]["disk"] for e in _shared_hosts(hosts) if ((e.get("status") or {}).get("disk") or {}).get("mine")), None) or {}   # 拿着租约在扫的那台
     v = {"root": root, "scanner": ix.get("host"), "at": ix.get("t"), "df": df, "owners": out,
          "eta": _eta(hrs, df, t - 86400), "eta7": _eta(hrs, df, t - 7 * 86400),
          "units": len(units), "pending": sum(o["pending"] for o in out), "unscanned": max(0, df["used"] - scanned),
@@ -283,11 +289,12 @@ def _ours(hosts: list[dict], units: dict, ser: dict, grow: dict, gone: dict, t: 
     dirs 每项带近 24 小时、7 天的增量（grow）；projects 是各项目的合计（含删掉的单位 gone）、还没扫到的单位数、涨得快不快（_burst），
     以及近来结束的任务的写入量（_job_writes），#53。worker 把登记了清单的项目根拆开扫（Disk.want），项目根下的一级目录各是一个单位。"""
     hc = {h["id"]: h for h in active_hosts()}
-    base = next((hc[e["id"]]["data_root"].rstrip("/") for e in hosts if e["id"] in hc), None)
+    sh = _shared_hosts(hosts, hc)
+    base = next((hc[e["id"]]["data_root"].rstrip("/") for e in sh if e["id"] in hc), None)
     if not base:
         return None
     projects: dict = {}
-    for e in hosts:
+    for e in sh:
         projects.update(((e.get("status") or {}).get("storage") or {}).get("projects") or {})
     roots: dict = {}
     for d, p in projects.items():
@@ -304,9 +311,9 @@ def _ours(hosts: list[dict], units: dict, ser: dict, grow: dict, gone: dict, t: 
         d24, d7 = grow.get(u, (0, 0))
         dirs.append({"u": u, "name": u[len(base) + 1:], "b": r["b"], "t": r.get("t"), "p": p, "d24": d24, "d7": d7,
                      "n": r.get("n"), "m": r.get("m"), "top": (r.get("top") or [])[:5]})
-    rows = [dict(r, host=e["id"]) for e in hosts for r in load_rows(usage_file(e["id"]))
+    rows = [dict(r, host=e["id"]) for e in sh for r in load_rows(usage_file(e["id"]))
             if r.get("t", 0) >= t - JOBS_S and r.get("p") in roots and r.get("root")]          # 只认清单任务：单元申请没有 root
-    running = [(e["id"], j.get("project"), j.get("name"), j.get("t0")) for e in hosts for j in (e.get("status") or {}).get("running") or []]
+    running = [(e["id"], j.get("project"), j.get("name"), j.get("t0")) for e in sh for j in (e.get("status") or {}).get("running") or []]
     out = {}
     for p, rs in roots.items():
         mine = [x for x in dirs if x["p"] == p]

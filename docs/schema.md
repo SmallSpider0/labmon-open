@@ -214,7 +214,7 @@
 - 顶层 `pool` 是算力池这一轮（`pool.tick`，#25；不持有服务租约的那台为空）：`{lists {"目录|清单": {project, root, jobs, host 此刻登记在哪（pool 是池里待放）, since 从何时起等（epoch 秒）, why 为什么还没放（放过去了的没有）, done 清单里的行都跑完了（#86：不算在等，只在为真时带）, sleeping 空满 2 天已休眠（只在为真时带，#164）, nofit 这一轮问到了 fit、借着的都放不下，也挑不出能借的入池服务器（#130：`pool_wait:` 据此另报一次，只在为真时带）}}, gone [这一轮换了容器、直接还的主机]}`；
   项目车道的等待原因与 `pool_wait:` 告警取它。
 - 顶层 `regs` 是登记的全局视图（`overview._regs`，项目「管理」抽屉用，[workbench.md「项目的管理抽屉」](workbench.md#项目的管理抽屉)）：各主机目录下登记的清单，每台一项
-  `{host, label, state active|pool|returned|unlisted（在用、算力池里待放的（host 为 pool，#24）、主机清单里已归还、主机清单里已没有）, returned 归还时刻（epoch 秒，没有为 null）, home 所在 worker_home, t 读到的时刻（在用的是那份状态的 t）,
+  `{host, label, state active|pool|returned|unlisted（在用、算力池里待放的（host 为 pool，#24）、主机清单里已归还、主机清单里已没有）, returned 归还时刻（epoch 秒，没有为 null）, home 所在 worker_home, standalone 是否独立主机（#114；前端 regTo / adoptSrc 据此禁止跨独立机搬登记）, t 读到的时刻（在用的是那份状态的 t）,
   stale 这一轮没读到、沿用上一轮的, queues [{root, jobs, project, stop, gpus}] 或 null（在用主机这轮既没状态、也没读到文件，上一轮也没有）}`；
   算力池放过去的登记（`worker add --pool`，登记文件与状态 `queues[]` 里的 `pool`，#79）另带 `pool: true`，别的不带这个键（`overview._pool_mark`）；
   在用主机那项另带 `pool`（`platform_pool`）与 `prev`（上一台：同一个池里最近归还的自用主机的 id，`fleetboot.last_mine`，没有为 null；接上卡排序用，#95）；
@@ -282,6 +282,13 @@ worker 在共享盘上本机状态目录 `hosts/<主机>/press.jsonl` 每 5 分�
 项目看板不再写 `out_dir/.labmon/durations.jsonl`（11-07 起）：失败的尝试取工作台的用量记录，已落盘的旧文件不再读，可以删。
 
 自用的远端 SSH 主机 `[[hosts]]` 可用 `users = ["账号名"]` 保存普通用户的主机授权；缺省为空。`[server].ca_cert` 可选，指向随命令行安装脚本附带的 CA 公钥证书。
+`[[hosts]]` 还支持主机分类与独立主机隔离字段（#114，全部可选且向后兼容）：
+- `platform_kind`：`scm`（SCM 平台）/ `other`（外平台租用，只做租期提醒、不做平台操作与预备续租）/ `none`（自有机器）；缺省按已有 `platform*` / `lease_*` 推断。
+- `share`：`pool`（可入算力池）/ `borrow`（仅手动借用）/ `private`（仅自用）；SCM 共享集群主机缺省 `pool`，独立机与非 SCM 主机强制缺省 `private`。
+- `standalone`：是否独立主机（不共享集群 `worker_home`），经 `config.home_key` 按 `("host", id, worker_home)` 严格隔离；独立主机缺省 `data_root = "~/.local/share/labmon/work"`、`local_dir = "<data_root>/.tmp"`、`disk_warn_gb = 20`、`disk_stop_gb = 10`（可设 `0` 关闭）、可选 `disk_quota_gb`、`allow_outside_root = false`（默认拒绝登记 `<data_root>/projects/` 之外的目录）。
+- `lease_until`：带年份的绝对到期时刻（外平台租机用，`health.lease_end` 优先取它）。
+- `owner`（可选外部机归属账号）与 `ssh_key`（`"managed" | "system"`，缺省 `"system"`；`"managed"` 走 `LABMON_SECRETS/ssh_keys/<owner>/<host_id>` 专用 Ed25519 私钥，强制 `IdentitiesOnly=yes` 与按机 `ControlPath`/独立 `known_hosts`，私钥不进状态根与冷备包）。
+全局快照 `hosts[]` 每项另带 `platform_kind`、`share`、`standalone`；`GET /api/hosts` 另带分类字段与 `ssh_key_mode` / `ssh_key_fp`（绝不返回私钥路径或原文）。
 
 个人推送配置在看板服务那台机器的 `~/.config/labmon/notify.d/<账号>.toml`（600，账号名小写，字段与 `notify.toml` 一致），由「我的账号」保存和试推，不进冷备。
 

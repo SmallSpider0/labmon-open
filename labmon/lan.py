@@ -12,15 +12,17 @@ ssh_argv / ssh_run：各处（全局页、项目页、组内服务器、worker �
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import socket
 import subprocess
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from urllib.parse import urlparse
 
-from .config import active_hosts
+from .config import ConfigError, active_hosts, host_ssh_key, is_standalone
 from .records import log_events
 from .state import load_json, save_json, state_dir
 
@@ -34,14 +36,65 @@ _ssh: dict = {"ok": 0.0, "fail": 0.0}
 CTL = os.path.expanduser("~/.ssh/cm-labmon-%C")
 
 
-def ssh_argv(target: str, port, *extra: str, known_hosts=None) -> list[str]:
+def ctl_path(ctl_tag: str | None = None) -> str:
+    """SSH ControlMaster 套接字路径：无 ctl_tag 沿用全局 CTL；带 ctl_tag（外部机/专用密钥）按标签哈希隔离，
+    防止多用户或换钥复用旧连接，且控制长度不超过 UNIX domain socket 路径上限。"""
+    if not ctl_tag:
+        return CTL
+    tag = hashlib.sha256(str(ctl_tag).encode()).hexdigest()[:12]
+    return os.path.expanduser(f"~/.ssh/cm-labmon-{tag}-%C")
+
+
+def ext_known_hosts(host_id: str) -> Path:
+    """外部机/独立机专用的 known_hosts 文件（<state_dir>/known_hosts_ext/<host_id>），不与宿主机 ~/.ssh/known_hosts 混用。"""
+    s = str(host_id or "").strip()
+    if not s or "/" in s or "\\" in s or s.startswith(".") or ".." in s:
+        raise ConfigError(f"主机 id 不合法：{host_id!r}")
+    return state_dir() / "known_hosts_ext" / s
+
+
+def ssh_argv(target: str, port, *extra: str, known_hosts=None, identity: str | None = None, ctl_tag: str | None = None) -> list[str]:
     """连一台服务器的 ssh 命令（不含远端命令）：每个 sshd 只保持一条长连接，15 分钟不用才断，30 秒心跳（断网后约 90 秒失效）。
     主机密钥 accept-new：第一次连（续租后 fleet.forget 删掉旧条目，新容器就算第一次）自动记下，变了照样拒连。
-    known_hosts：记在这个文件里（不给就是 ssh 缺省的 ~/.ssh/known_hosts；经 fleet.ssh 连的哪台记哪份由 fleet._ssh_cmd 定）。"""
+    known_hosts：记在这个文件里（不给就是 ssh 缺省的 ~/.ssh/known_hosts；经 fleet.ssh 连的哪台记哪份由 fleet._ssh_cmd 定）。
+    identity：专用私钥路径；传入时强制 -i <identity> -o IdentitiesOnly=yes，禁止回退尝试看板宿主机 ~/.ssh/ 的默认密钥。
+    ctl_tag：按主机/归属隔离的 ControlPath 标签（防多用户或换钥复用旧长连接）。"""
     kh = ["-o", f"UserKnownHostsFile={known_hosts}"] if known_hosts else []
-    return ["ssh", "-o", "ControlMaster=auto", "-o", f"ControlPath={CTL}", "-o", "ControlPersist=15m",
+    ident = ["-i", str(identity), "-o", "IdentitiesOnly=yes"] if identity else []
+    return ["ssh", "-o", "ControlMaster=auto", "-o", f"ControlPath={ctl_path(ctl_tag)}", "-o", "ControlPersist=15m",
             "-o", "ConnectTimeout=20", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=30", "-o", "LogLevel=ERROR",
-            "-o", "StrictHostKeyChecking=accept-new", *kh, "-p", str(port), *extra, target]
+            "-o", "StrictHostKeyChecking=accept-new", *ident, *kh, "-p", str(port), *extra, target]
+
+
+def host_ssh_argv(h: dict, *extra: str) -> list[str]:
+    """按主机配置拼 ssh_argv（唯一实现，overview / workerctl / collect / lease 共用）：
+    使用托管密钥（ssh_key=managed）或独立主机时，自动启用按机隔离的 ControlPath 与独立 known_hosts，
+    托管密钥额外强制 -i <key> -o IdentitiesOnly=yes；旧集群主机完全沿用原参数。"""
+    from .platform import ssh_identity               # platform 在顶层 import config，延迟 import 避免循环
+    managed = host_ssh_key(h) == "managed"
+    standalone = is_standalone(h)
+    identity = ssh_identity(h) if managed else None
+    kh = h.get("known_hosts")
+    if not kh and (managed or standalone):
+        p = ext_known_hosts(str(h["id"]))
+        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        kh = str(p)
+    tag = f"{h.get('owner') or ''}:{h['id']}" if (managed or standalone) else None
+    return ssh_argv(h["ssh"], h["port"], *extra, known_hosts=kh, identity=identity, ctl_tag=tag)
+
+
+def close_host_ssh(h: dict, *, drop_known_hosts: bool = False) -> None:
+    """切断一台主机的 ControlMaster 复用连接；drop_known_hosts 为真时同步清理该机独立 known_hosts（绝不触碰宿主机 ~/.ssh/known_hosts）。"""
+    if h.get("ssh"):
+        try:
+            subprocess.run(host_ssh_argv(h, "-O", "exit"), capture_output=True, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if drop_known_hosts and h.get("id") is not None:
+        try:
+            ext_known_hosts(str(h["id"])).unlink(missing_ok=True)
+        except (ConfigError, OSError):
+            pass
 
 
 def ssh_run(cmd: list[str], **kw) -> subprocess.CompletedProcess:

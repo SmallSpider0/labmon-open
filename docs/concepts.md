@@ -7,7 +7,7 @@
 
 | # | 概念 | 唯一实现 |
 |---|---|---|
-| 1 | ssh 参数与执行 | `lan.ssh_argv`、`lan.ssh_run` |
+| 1 | ssh 参数与执行；按主机隔离长连接与专用密钥 | `lan.ssh_argv`（`ctl_path`、`ext_known_hosts`）、`lan.host_ssh_argv`、`lan.close_host_ssh`、`lan.ssh_run` |
 | 2 | 传到服务器上留着用的文件只取 main 上已提交的版本 | `workerctl.committed`（`DEPLOY_REF`、`committed_tree`、`worker_bundle`） |
 | 3 | 本机在不在内网；按主机并行探测 | `lan.check`、`lan.gather` |
 | 4 | 整文件覆盖写 | `state.write_atomic`；`save_json`、`collect.write_page`、`users.json` 都经它 |
@@ -23,7 +23,7 @@
 | 14 | 时长文字 | 页面上 `dur`（common.js）；看板 Python 侧 `config.fmt_dur` |
 | 15 | 看板服务交给系统托管 | `service._write_and_restart`、`service._args`（`_read`）、`service.restart`、`service.restart_later`、`service.stop`、`service.installed` |
 | 16 | 服务日志的一行；系统通知 | `service.log`；`service.notify`（`service.push_conf`、`labmon notify test`、`service.notify_test`）；推送本身（`notify.toml`）只在 `labmon/push.py`（`push.load`、`push.one`、`push.target`、`push.err`） |
-| 17 | 秘密 | `platform.secret`、`platform.set_secret`、`platform.del_secret`、`platform.prompt_secret`（`labmon secret`）；平台操作登录取密码 `platform.password` |
+| 17 | 秘密；外部机专用 SSH 密钥对（零私钥上传） | `platform.secrets_root`、`platform.secret`、`platform.set_secret`、`platform.del_secret`、`platform.prompt_secret`（`labmon secret`）；平台操作登录取密码 `platform.password`；外部机专用密钥 `platform.ssh_key_path`、`platform.ensure_ssh_key`、`platform.ssh_key_info`、`platform.del_ssh_key`、`platform.ssh_identity`、`platform.ssh_auth_cmd` |
 | 18 | 看板服务所在机的体检 | `hostcheck.enabled`、`hostcheck.tick`（`run_ps`、`read_win`、`read_updates`、`read_wsl`、`sample`、`judge`、`due`）、`hostcheck.view`（`hostcheck`）；页面上 `svcCard`（overview_js/home.js） |
 | 19 | 看板服务的计划维护 | `maint.until`、`maint.start`、`maint.stop`（`overview/maint.json`）；读它的：`serve.health`、`hostcheck.loop`（`tick`）、`hostcheck.view` |
 | 20 | 服务租约（这台是主还是备用；备用时不做的主动动作都先过它） | `lease.remote_sh`（`overview.fetch`、`overview.lease_part`）、`lease.decide`、`lease.tick`、`lease.release`、`lease.take`、`lease.set_marker`；门 `lease.primary`（`fleet.tick`、`labmon fleet probe`）、`lease.need`（`collect.collect`、`labmon collect`、`workerctl.run_out`、`CHANGE`、`override_each`、`borrow.begin`）；看板的写请求 `serve.Handler._standby`、`lease.flag`（`/healthz`）；页面与快照的 `lease.view`、那句话 `lease.text`（`standbyBar`、overview_js/app.js）；备用时照收的写请求 `serve.standby_ok`、发页面时现填 `serve.live_snapshot` |
@@ -44,7 +44,7 @@
 | 35 | 一条清单只归一台 | worker 的 `main` 的 add、`Worker.registry`（`peer_regs`、`peers`、`yielded`）、`Worker.adopt_left`（`Worker.load_prev`）、`Worker.start`；锁 `reg_lock`；旧名登记搬回来换了文件名时在跑的改记到新名下 `Worker.rekey` |
 | 36 | 清单登记的全局视图 | 全局快照的 `regs`：`overview._regs`（`config.home_host`、`overview.fetch` 的 `_reg_cmd`、`_parse_regs`、`REG_KEYS`；worker 另有一份）；页面上 `projRegSec`、`regRow`、`regQuiet`、`regTally`、`tallyBar`、`tallyHtml`、`REG_ST`（overview_js/project.js） |
 | 37 | 项目配置的摘要与页面上改项目的 monitor.toml；计划项的进度 | `serve.Overview.cfg_info`（`projects[].cfg`、`spec`、`config.cfg_spec`）、`serve.Overview.proj_info`；`projects.set_config`→ `config.set_project`（`PROJ_KEYS`、`ALERT_KEYS`、`_proj_val`、`_move_groups`、`_set_markers`，接新块 `_append_blocks`、值的写法 `_toml_val`（`_set_keys`）；`POST /project/config`）；页面上 `projCfgSec`（`cfRow`、`cfDurRow`、`cfRhythm`、`cfMarkers`、`cfGroups`、`cfAlerts`、`cfgSaveBar`、`cfgDiffText`），草稿 `CFE`（`cfgEdit`、`cfgCur`、`cfgDraft`）、改了哪些 `cfgDiff`（`cfgKeep`）、当场校验 `cfgErrs`、画一节要的 `cfgCtx`、打字时就地换 `cfgPatch`、`cfgAct`、`cfgInput`（overview_js/project.js） |
-| 38 | 哪几台在用主机共用一个 worker_home | `config.home_peers`（`config.home_host`、`_same_home`）；`api.hosts` 的 `home_with`、`api.home_text` |
+| 38 | 哪几台在用主机共用一个 worker_home（共享域） | `config.home_key`、`config.home_peers`（`config.home_host`、`_same_home`）；`api.hosts` 的 `home_with`、`api.home_text` |
 | 39 | 在哪台上操作一台主机目录下的登记与清理临时指令 | `workerctl.via`（`run_out`、`config.home_host`）、`workerctl.clear_overrides`（`borrow.finish`、`fleetops.run_swap`） |
 | 40 | 页面上搬、移除登记；能搬去哪些主机 | `serve.reg_move`、`serve.reg_rm`（`POST /reg/move|rm`）；页面上 `regHostBtns`、`regTo`（`freeCards`）、`regAct`（`regMine`），一条登记的进度 `regLeft`（`regRow`、`queueRow`、overview_js/project.js；`queueRow` 在 overview_js/storage.js） |
 | 41 | 上一台自用主机；新主机页接上原来的项目；无登记自用主机「给项目用」 | `fleetboot.last_mine`（`back_port`、`regs`、`prev`）；页面上 `adoptSrc`、`adoptCard`、平台操作结果后的一句 `adoptHint`；给项目用 `serve.host_assign`（`POST /host/assign`、`records.tell`）、页面上 `assignSrc`、`assignCard`、`assignDrawer`、`assignAct`（overview_js/project.js） |
@@ -184,6 +184,8 @@
 | 175 | 部署到看板；哪些改动不用重启、要拉起 worker 或要浏览器核对页面；一次启动以来的 Traceback；页面文字漏 NaN/undefined/Infinity | `tools/deploy.py` 的 `deploy`（`_update_remote`、`make_bundle`、`wait_new`）；服务端与两种模式共用的判断在 `labmon/deploy.py`：`is_doc`、`is_worker`、`has_worker`、`is_page`、`log_text`、`tracebacks`、`apply`、`status`、在跑哪个提交 `RUNNING`；`leak`（`tests/pages/dom.js`、`check.js`、`smoke.js`） |
 | 176 | 一台主机上除本项目外其他项目的聚合负载与提示（不含他人明细） | `worker.pure.other_load`、`worker.pure.other_load_text`（`fit.fit_list` 与 `api.status` 共用） |
 | 177 | 项目页主机的 CPU 实时占用与时间线同轴折线 | `collect._host_cpu`（`hosts[].cpu`、`history[].cpu_pct`）、`collect._add_hourly`（`util_hourly`、`cpu_hourly` 共用）；页面上 `cpuView`、`hostSeries`、`tlHostHover`（page.html） |
+| 178 | 主机分类、独立主机判定与共享域隔离 | `config.host_platform`、`config.host_share`、`config.is_standalone`、`config.host_ssh_key`、`config.home_key`、`config.shell_path`；页面上 `standaloneBadge`（overview_js/core.js） |
+| 179 | 独立主机清单目录防污染边界校验 | worker 的 `queue_root_ok`（`worker/cli.py` `add` 经 `realpath` 校验）；看板前置 `workerctl._check_standalone_root`（`workerctl.worker_env` 透传 `LABMON_DATA_ROOT`/`LABMON_LOCAL`/`LABMON_STANDALONE`/`LABMON_ALLOW_OUTSIDE_ROOT`） |
 
 ## 现有的兼容代码
 
@@ -554,3 +556,7 @@
    实现：`worker.pure.other_load`、`worker.pure.other_load_text`（worker 的 `fit.fit_list` 与看板的 `api.status` 共用）
 177. **项目页主机的 CPU 实时占用与时间线同轴折线**：项目快照 `hosts[].cpu` 优先复用经 `fleet.worker_fresh` 判定的新鲜 worker 状态（`info.cpu_used` / `cpu_quota` / `nproc` / `press.thr` 与 `throttle`），不新鲜时回退探针 `cgroup` 差分，百分比按 0–100% 封顶（有配额按配额、无配额按可用核数换算）；`_long_term` 经共用 `_add_hourly` 同步维护 30 天 `cpu_hourly`；项目页顶部 CPU 卡片、顶栏悬停、时间线主机行与资源小图共用 `cpuView`，时间线经 `hostSeries` 在 GPU 折线区同轴叠画橙色 CPU 折线并由 `tlHostHover` 按样本自身间隔提供双读数（`#208`）
    实现：`collect._host_cpu`、`collect._add_hourly`；页面上 `cpuView`、`hostSeries`、`tlHostHover`（page.html）
+178. **主机分类、独立主机判定与共享域隔离**：主机按正交属性 `platform_kind`（`scm | other | none`）、`share`（`pool | borrow | private`）与 `standalone` 分类（均支持向后兼容缺省推断）；`config.home_key` 对共享集群盘返回 `("shared", worker_home)`、对独立主机返回 `("host", id, worker_home)`，避免多台独立机默认 `worker_home` 撞名串扰；`lease.homes` 在有共享盘主机时排除独立机，`overview.sched_view` 优先集群主机，`disk._df`/`_ours` 排除独立机，`serve.reg_move` 与前端 `regTo`/`adoptSrc` 禁止跨 `home_key` 搬登记，`overview.check_project_idle` 对已归还独立机按最后状态放行；`health.lease_end` 支持外平台 `lease_until`，`renew.check` 跳过非 SCM 主机，`pool._self_bar` 与 `borrow.begin` 统一按 `host_share` 与 `is_standalone` 拦截（`#114`）
+   实现：`config.host_platform`、`config.host_share`、`config.is_standalone`、`config.host_ssh_key`、`config.home_key`、`config.shell_path`；页面上 `standaloneBadge`（overview_js/core.js）
+179. **独立主机清单目录防污染边界校验**：独立主机缺省 `data_root = ~/.local/share/labmon/work`、`local_dir = <data_root>/.tmp`，`workerctl.project_init` 建 `projects/<项目>/{code,queues,runs}` 隔离分层与独立机 README；`worker add` 在独立主机模式默认拒绝登记 `<data_root>/projects/` 之外的目录（含符号链接越界，可由 `allow_outside_root = true` 显式放行）（`#114`）
+   实现：worker 的 `queue_root_ok`（`worker/cli.py`）；看板前置 `workerctl._check_standalone_root`、`workerctl.worker_env`

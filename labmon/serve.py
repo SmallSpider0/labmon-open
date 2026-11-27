@@ -130,7 +130,7 @@ from . import client as CL
 from .config import CLIENT_HEADER, server as server_conf
 from . import dist as DI
 from . import service as S
-from .config import ALERT_KEYS, HOSTS_LOCK, POOL, ConfigError, active_hosts, cfg_spec, check_future, host_pair, host_users, hosts_file, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
+from .config import ALERT_KEYS, HOSTS_LOCK, POOL, ConfigError, active_hosts, all_hosts, cfg_spec, check_future, home_key, host_pair, host_users, hosts_file, is_standalone, pool_home, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
     stale_limit, user_hosts, STALE_PAD_S, STALE_RUNS
 from .records import ReportQuota, cat_of, log_events, project_mine, records, report, report_headers, schedule_project, tell
 from .service import log, notify, rotate_log
@@ -1667,12 +1667,28 @@ def reg_move(to: str, items: list, own: bool = False, pool: str | None = None) -
     wait --job 按快照车道认任务，去向在 kind=pool 的事件里，labmon records 与项目页时间线看得到；要会话动手的有 pool_wait: 兜着）。"""
     if not to or not items:
         raise ConfigError("没说搬到哪台、搬哪几条")
+    known = {str(h["id"]): h for h in all_hosts()}
+    def _domain(hid: str) -> tuple | None:
+        if hid == POOL:
+            ph = pool_home()
+            return ("shared", ph.rstrip("/")) if ph else None
+        h = known.get(hid)
+        return home_key(h) if h else None
+    to_dom = _domain(to)
+    to_h = known.get(to)
     done, moved = [], {}
     try:
         for it in items:
             root, jobs, pid, frm = str(it.get("root") or ""), str(it.get("jobs") or ""), str(it.get("project") or ""), str(it.get("host") or "")
             if not (root and jobs and pid):
                 raise ConfigError("登记缺目录、清单或项目")
+            if frm and frm != to:
+                frm_h = known.get(frm)
+                frm_dom = _domain(frm)
+                if (to_h and is_standalone(to_h)) or (frm_h and is_standalone(frm_h)):
+                    raise ConfigError(f"不能跨独立主机搬登记（{frm} 与 {to} 不共享 worker 目录）")
+                if frm_dom and to_dom and frm_dom != to_dom:
+                    raise ConfigError(f"不能跨不同 worker 目录搬登记（{frm} 与 {to} 不在同一块共享盘）")
             with PJ._reg_locked():
                 if reason := A.unknown_project(pid, require=True):
                     raise ConfigError(reason)

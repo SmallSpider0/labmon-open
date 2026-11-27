@@ -3219,5 +3219,40 @@ t("overview", "选规格与同池换节点（#172）：多规格池分组显示�
   has(prog, "换节点（→ nodeB-1GPU）完成"); has(prog, "ssh -p 15003 root@192.0.2.10");
   run(C, "FWIZ = null");
 });
+t("overview", "独立主机分类与域隔离（#114）：主机表与主机页显「独立」标签、不显集群共享盘条、外平台保留到期提醒并隐藏续租按钮、管理抽屉禁跨独立机搬登记", () => {
+  const S = JSON.parse(JSON.stringify(OV));
+  const ext = JSON.parse(JSON.stringify(OV.hosts[0]));
+  Object.assign(ext, {
+    id: "ext-1", label: "ext-1（外租机）", platform: null, platform_kind: "other", share: "private", standalone: true,
+    lease_end: NOW + 5 * H, renew: null, auto_res: null, lend: null, borrow: null,
+  });
+  const ext2 = JSON.parse(JSON.stringify(ext));
+  Object.assign(ext2, {id: "ext-2", label: "ext-2（自有机）", platform_kind: "none", lease_end: null});
+  S.hosts.push(ext, ext2);
+  S.regs.push(
+    {host: "ext-1", label: "ext-1（外租机）", state: "active", returned: null, home: "~/.local/share/labmon/work/labmon", standalone: true, stale: false, t: NOW - 4,
+      queues: [{root: "/home/u/work/projects/proj-a", jobs: "queues/q.txt", project: "proj-a", stop: "boundary", gpus: null, empty: false}]},
+    {host: "ext-2", label: "ext-2（自有机）", state: "active", returned: null, home: "~/.local/share/labmon/work/labmon", standalone: true, stale: false, t: NOW - 4, queues: []},
+  );
+  const C = ovCtx(S, RR);
+  const home = page(C, "#/");
+  clean(home, "含独立主机的总览");
+  has(home, "ext-1（外租机）");
+  has(home, ">独立</span>");
+  has(home, "独立主机不挂集群共享盘");
+  has(home, "请在外平台手动续租或提前迁移任务");
+  const hp = page(C, "#/host/ext-1");
+  clean(hp, "外平台独立主机页");
+  has(hp, "外平台独立主机");
+  has(hp, "外平台手动续租");
+  ok(!hp.includes("预备续租"), "外平台独立主机不应显示预备续租按钮");
+  // 两台独立主机即使 home 字符串相同，regTo 也不允许互搬登记，且 adoptSrc 返回 null
+  ok(run(C, 'regTo(D.regs.find(x => x.host === "ext-1"), "proj-a").length') === 0, "独立主机不应列出可搬目标");
+  ok(run(C, 'regTo(D.regs.find(x => x.host === "srv-a"), "proj-a").every(x => x.id !== "ext-1" && x.id !== "ext-2")'), "共享主机不应把独立主机列为可搬目标");
+  ok(run(C, 'adoptSrc(D.hosts.find(x => x.id === "ext-2"))') === null, "独立主机不应触发跨机接上项目");
+  const mg = page(C, "#/p/proj-a/manage");
+  clean(mg, "含独立主机的项目管理抽屉");
+  has(tips(mg), "独立主机不共享 worker 目录，不能把登记搬到别的主机");
+});
 
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));
