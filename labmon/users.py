@@ -903,6 +903,34 @@ def need_host(who: Ident, hid: str) -> None:
         raise Denied(403, f"主机 {hid} 没开给你用：找管理员在「组内服务器 → 人员」里给你开（主机清单这台的 users）")
 
 
+USER_EXT_HOSTS = 3      # 普通用户名下私有外部主机的数量上限（#114，防刷爆采集线程）
+
+
+def is_external_host(h: dict | None) -> bool:
+    """是否属于可经外部主机接口管理的非 SCM / 非借用主机（唯一判定）。"""
+    if not h or h.get("borrow") or h.get("platform_job") or h.get("platform") or h.get("platform_pool") or h.get("platform_holder"):
+        return False
+    from .config import host_platform, is_standalone
+    return host_platform(h) != "scm" and is_standalone(h)
+
+
+def need_external_host(who: Ident, hid: str) -> dict:
+    """外部主机改、删、测、换钥的对象鉴权（唯一实现，#114）：
+    普通用户仅可管理本人名下（owner == who.name）的外部主机（越权或不存在统一 403，不暴露他人主机名）；
+    管理员可管理任意外部主机，但不可经外部机接口改删 SCM 平台或借用主机。返回补全后的主机配置字典。"""
+    from .config import host_defaults
+    raw = next((h for h in user_hosts() if str(h.get("id")) == str(hid)), None)
+    if who.role != "admin":
+        if not raw or not is_external_host(raw) or not _is(raw.get("owner"), who.name):
+            raise Denied(403, "只能管理你自己名下的外部主机")
+        return host_defaults(raw)
+    if not raw:
+        raise Denied(404, f"主机清单里没有主机 {hid}")
+    if not is_external_host(raw):
+        raise Denied(409, f"{hid} 不是独立外部主机（属于集群或借用主机），不能经外部主机接口修改或删除")
+    return host_defaults(raw)
+
+
 def pause_ok(who: Ident, pid: str, host: str | None = None, snap: dict | None = None) -> bool:
     """能不能加、改或撤项目 pid 的暂停：管理员都能；普通用户只能动自己下的，已有别人下的（管理员、没记是谁的）还没到期的暂停时不能，
     免得重下一次把管理员的暂停改成自己的再撤（#16）。项目是不是他的另由 need_project 核。

@@ -179,6 +179,7 @@ const offBadge = (off, tail = "") => off ? `<span class="sm" style="color:var(--
    不另写发 POST 的 fetch：漏了类型的那个按钮会被服务拒掉（415；tests/test_pages.py 查模板里只有这一处 POST）。body 缺省 {}；
    how 传给 api：只有做两遍也没事的（立即采集、立即探测）才带 {retry: true} ---------- */
 const postJSON = (url, body = {}, how) => api(url, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}, how);
+const sendJSON = (method, url, body = {}, how) => api(url, {method, headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)}, how);
 
 /* ---------- 看板账号（#160）：ME 是看板服务发页面时填进来的“我是谁”（users.me，与 /api/me 同一份）；file:// 打开的、离线预览没填的是 null（只读）。
    canOps：平台操作（续租、关机、换人、开机、借卡、保活守护、探测、人员、共享盘归属：管理员、入口获准）；

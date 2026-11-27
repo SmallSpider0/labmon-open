@@ -37,13 +37,15 @@ from . import lan as L
 from . import lease as LS
 from . import rebalance as RB
 from . import renew as R
+from . import users as U
 from .projects import archived_rows, registered
 from .collect import eta_by_progress, write_page
 from .config import POOL, POOL_LABEL, STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, home_key, host_platform, host_share, is_standalone, parse_time, pause_by, pick_color, sched, shell_path, user_hosts
 from .health import container_step, lease_due, lease_end, link_step
 from .records import EVENT_CATS, EVENT_KINDS, log_events, told
-from .state import append_row, load_json, load_rows, parse_rows, save_json, snapshot, state_dir, usage_file, write_atomic
+from .state import append_row, load_json, load_rows, parse_rows, save_json, snapshot, state_dir, usage_file, usage_hosts, write_atomic
 from .service import log
+from .worker import RATIO_N, base_name
 from .worker.pure import is_hold, person_use
 from .workerctl import run_out, ssh
 
@@ -51,6 +53,8 @@ KEEP_S = 7 * 86400
 SHOW_S = 24 * 3600
 SEP = "@@labmon@@"
 REG = "@@labmon-reg@@"
+HIST_SHARED_MAX = 300                # 转送给独立主机 hist_shared.json 的历史总条数封顶（#114）
+_PUT_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def fetch(h: dict, timeout: int = 60) -> tuple[str | None, str | None]:
@@ -63,14 +67,24 @@ def fetch(h: dict, timeout: int = 60) -> tuple[str | None, str | None]:
     读回的租约是倒数第二段（lease_part 取）。没给的（测试直接调）照旧写。"""
     d = shell_path(h["worker_home"].rstrip("/") + "/hosts/" + h["id"])
     ix = shell_path(h["worker_home"].rstrip("/") + "/disk/index.json")
-    new = {n: v for n, v in (h.get("put") or {}).items() if _sig(v) != _SENT.get((h["id"], n))}
-    put = "".join(f"[ -d {d} ] && printf '%s\\n' {shlex.quote(json.dumps(v, ensure_ascii=False))} > {d}/{n}.tmp && mv {d}/{n}.tmp {d}/{n} && put=\"$put {n}\"; "
-                  for n, v in new.items())
+    new = {n: v for n, v in (h.get("put") or {}).items()
+           if _PUT_NAME_RE.fullmatch(str(n)) and _sig(v) != _SENT.get((h["id"], n))}
+    # put 载荷经同一条 SSH 的 stdin 逐行（<文件名>\t<单行 JSON>）落盘，彻底避开远端命令行 ARG_MAX / MAX_ARG_STRLEN 限制（#114）
+    if new:
+        stdin_data = "".join(f"{n}\t{json.dumps(v, ensure_ascii=False, separators=(',', ':'))}\n" for n, v in new.items())
+        put = (f"if [ \"$lok\" = 0 ] && [ -d {d} ]; then "
+               f"while IFS='\t' read -r _pn _pv; do "
+               f"[ -n \"$_pn\" ] || continue; "
+               f"printf '%s\\n' \"$_pv\" > {d}/\"$_pn\".tmp && mv {d}/\"$_pn\".tmp {d}/\"$_pn\" && put=\"$put $_pn\"; "
+               f"done; else cat >/dev/null; fi; ")
+    else:
+        stdin_data = None
+        put = ""
     n = 60 if usage_file(h["id"]).exists() else 3000
     # 服务租约（#163）：先续约，$lok 为 0（这一刻租约是这台看板服务的）才写 put；读回的租约作为倒数第二段带回（collect 交给 lease.decide）
     lz = LS.remote_sh(h, h["lease"]) if h.get("lease") else "lease=; lok=0; "
     ix_cmd = "" if is_standalone(h) else f"m=$(stat -c %Y {ix} 2>/dev/null || stat -f %m {ix} 2>/dev/null); echo \"$m\"; [ -n \"$m\" ] && [ \"$m\" != {DK.seen()} ] && cat {ix}; "
-    remote = (f"{lz}put=; if [ \"$lok\" = 0 ]; then :; {put}fi; cat {d}/status.json 2>/dev/null; echo; echo {SEP}; tail -n 40 {d}/worker.log 2>/dev/null; "
+    remote = (f"{lz}put=; {put}cat {d}/status.json 2>/dev/null; echo; echo {SEP}; tail -n 40 {d}/worker.log 2>/dev/null; "
               f"echo {SEP}; tail -n {n} {d}/usage.jsonl 2>/dev/null; echo {SEP}; date +%s; "
               f"echo {SEP}; tail -n 100 {d}/events.jsonl 2>/dev/null; echo {SEP}; cat {d}/stopped 2>/dev/null; echo; "
               f"echo {SEP}; {ix_cmd}echo; echo {SEP}; {_reg_cmd(h)}echo {SEP}; echo \"$lease\"; echo {SEP}; echo \"$put\"")
@@ -82,7 +96,8 @@ def fetch(h: dict, timeout: int = 60) -> tuple[str | None, str | None]:
     else:
         cmd = ["bash", "-c", remote]
     try:
-        r = (L.ssh_run if h.get("ssh") else subprocess.run)(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
+        kw = {"input": stdin_data} if stdin_data is not None else {"stdin": subprocess.DEVNULL}
+        r = (L.ssh_run if h.get("ssh") else subprocess.run)(cmd, capture_output=True, text=True, timeout=timeout, **kw)
     except subprocess.TimeoutExpired:
         return None, "ssh 超时"
     if r.returncode != 0 and SEP not in r.stdout:
@@ -383,16 +398,103 @@ def _expire(t: float) -> None:
             log(f"到期的暂停、优先没删掉（不影响生效）：{e}")
 
 
-def _to_worker(projects: list[dict], t: float, sw: dict):
-    """给 worker 的文件（eta.json、sched.json、returned.json；overview.fetch 变了才写）：运行中任务的预计结束（项目看板按日志进度算的）给 worker 推演，
+def _hist_payload(h: dict, projects: list[dict], t: float, snap: dict | None = None) -> dict | None:
+    """为独立主机裁剪并拼装跨机同类历史载荷 hist_shared.json（唯一实现，#114）：
+    只筛选该机已登记队列所属项目（尚无登记时取当前活跃项目）；若该机归属普通用户，强制按其名下项目过滤，绝不泄露他人项目历史。
+    按 (project, tag/base_name, gpu) 每类留最近 RATIO_N 条、整份封顶 HIST_SHARED_MAX 条；仅含估时与峰值所需字段。"""
+    if not is_standalone(h):
+        return None
+    hid = str(h["id"])
+    snap = snap or {}
+    allowed: set[str] | None = None
+    owner = h.get("owner")
+    if owner:
+        acc = U.account(owner)
+        if not acc or acc.get("role") != "admin":
+            want = acc["name"] if acc else owner
+            allowed = {pid for pid in registered() if U.owner_of(pid) == want}
+    reg_pids = {q.get("project") for r in snap.get("regs") or [] if r.get("host") == hid for q in r.get("queues") or [] if q.get("project")}
+    reg_pids.update(q.get("project") for e in snap.get("hosts") or [] if e.get("id") == hid
+                    for q in (e.get("status") or {}).get("queues") or [] if q.get("project"))
+    reg_pids.update(p["id"] for p in projects if any(ln.get("host") == hid for ln in p.get("lanes") or []))
+    target_pids = reg_pids or {p["id"] for p in projects}
+    if allowed is not None:
+        target_pids = target_pids & allowed
+    if not target_pids:
+        return {"t": round(t), "rows": []} if (hid, "hist_shared.json") in _SENT else None
+    cands = []
+    for src_hid in usage_hosts():
+        if src_hid == hid:
+            continue
+        for r in load_rows(usage_file(src_hid)):
+            p = r.get("p")
+            if p not in target_pids or (r.get("t") or 0) < t - USAGE_KEEP_S:
+                continue
+            if not any(r.get(k) is not None for k in ("min", "ram_peak", "vram_peak", "cores_peak", "oom")):
+                continue
+            cands.append((src_hid, r))
+    cands.sort(key=lambda x: -(x[1].get("t") or 0))
+    counts: dict[tuple, int] = {}
+    rows = []
+    for src_hid, r in cands:
+        key = (r.get("p"), r.get("tag") or base_name(r.get("n") or ""), r.get("gpu"))
+        if counts.get(key, 0) >= RATIO_N:
+            continue
+        counts[key] = counts.get(key, 0) + 1
+        row = {
+            "host": src_hid, "t0": r["s"], "t1": r["t"], "project": r["p"], "name": r["n"],
+            "min": r.get("min"), "est_min": r.get("est_min"), "tag": r.get("tag"),
+            "gpu": r.get("gpu"), "conc": r.get("conc"), "ram_peak": r.get("ram_peak"),
+            "vram_peak": r.get("vram_peak"), "cores_peak": r.get("cores_peak"),
+            "give": r.get("give"), "oom": r.get("oom"), "rc": r.get("rc"),
+            "kind": r.get("kind") or "queue", "gpus": r.get("g") or [],
+        }
+        if r.get("ngpu") is not None:
+            row["ngpu"] = r["ngpu"]
+        if r.get("est") is not None:
+            row["est"] = r["est"]
+        if r.get("cpus") is not None:
+            row["cpus"] = r["cpus"]
+        if r.get("root"):
+            row["root"] = r["root"]
+        if r.get("queue"):
+            row["queue"] = r["queue"]
+        if r.get("st") == "stop":
+            row["requeued"] = True
+        rows.append(row)
+        if len(rows) >= HIST_SHARED_MAX:
+            break
+    rows.sort(key=lambda x: (x.get("t1") or 0, x.get("host") or "", x.get("name") or ""))
+    if not rows and (hid, "hist_shared.json") not in _SENT:
+        return None
+    return {"t": round(t), "rows": rows}
+
+
+def _to_worker(projects: list[dict], t: float, sw: dict, snap: dict | None = None):
+    """给 worker 的文件（eta.json、sched.json、returned.json；独立机另带 hist_shared.json；overview.fetch 变了才写）：运行中任务的预计结束（项目看板按日志进度算的）给 worker 推演，
     整分钟取整，免得每轮都写。写的时刻 t 是 worker 拿来与任务开始时刻（服务器时钟）比的，按这台的时钟差换算（第一轮还不知道，按本机的）。
     returned.json 是主机清单里已归还的主机（host return，平台上关了机的自用主机也标成归还）：worker 不在时负载均衡的提示不让它们挡（#25）。
-    sched.json 是这一轮读的调度设置 sw（config.sched：权重与项目级的暂停、优先；collect 加上 owner：各项目算在谁名下，#23），各在用主机同一份，后加入的主机下一轮就有。"""
+    sched.json 是这一轮读的调度设置 sw（config.sched：权重与项目级的暂停、优先；collect 加上 owner：各项目算在谁名下，#23）；
+    独立主机（或配了磁盘水位/配额的主机）另随 sched.json 下发 standalone、disk_warn_gb、disk_stop_gb、disk_quota_gb（改配置免重启 worker 即时生效）。"""
     prog = {(p["id"], j["id"]): j for p in projects for j in p.get("running") or []}
     jobs = {f"{p}|{j}": round(x["eta_ts"] / 60) * 60 for (p, j), x in prog.items() if x.get("eta_ts")}
     by_prog = sorted(f"{p}|{j}" for (p, j), x in prog.items() if x.get("eta_ts") and eta_by_progress(x.get("eta_source")))
     gone = {"hosts": sorted({str(h["id"]) for h in user_hosts() if h.get("returned")})}
-    return prog, lambda h: {"eta.json": {"t": round(t + _CLOCK.get(h["id"], 0)), "jobs": jobs, "prog": by_prog}, "sched.json": sw, "returned.json": gone}
+
+    def for_host(h: dict) -> dict:
+        sh = dict(sw)
+        if is_standalone(h):
+            sh["standalone"] = True
+        for k in ("disk_warn_gb", "disk_stop_gb", "disk_quota_gb"):
+            if h.get(k) is not None:
+                sh[k] = h[k]
+        out = {"eta.json": {"t": round(t + _CLOCK.get(h["id"], 0)), "jobs": jobs, "prog": by_prog},
+               "sched.json": sh, "returned.json": gone}
+        hp = _hist_payload(h, projects, t, snap)
+        if hp is not None:
+            out["hist_shared.json"] = hp
+        return out
+    return prog, for_host
 
 
 def _host_entry(h: dict, raw: str | None, err: str | None, lan_off: bool, prev: dict | None, sd: Path, t: float) -> dict:
@@ -403,6 +505,8 @@ def _host_entry(h: dict, raw: str | None, err: str | None, lan_off: bool, prev: 
     e = {"id": h["id"], "label": h.get("label", h["id"]), "error": err, "status_error": None, "status": None, "log": [], "done": [],
          "lan_off": lan_off, "auto": h.get("worker") == "auto",
          "platform_kind": pk, "share": host_share(h), "standalone": standalone,
+         "owner": h.get("owner"), "data_root": h.get("data_root"),
+         "disk_warn_gb": h.get("disk_warn_gb"), "disk_stop_gb": h.get("disk_stop_gb"), "disk_quota_gb": h.get("disk_quota_gb"),
          "platform": {"job": h.get("platform_job")} if pk == "scm" and h.get("platform") else None}
     if lan_off and prev:
         e.update({k: v for k, v in prev.items() if k in ("status", "log", "done", "clock", "stopped", "series")})
@@ -434,7 +538,8 @@ def _annotate(e: dict, h: dict, projects: list[dict], prog: dict, colors: dict, 
     if not st:
         return
     sg = st.get("storage") or {}
-    e["lw"] = F.local_writes((st.get("info") or {}).get("rootfs"), sg.get("wrote"), sg.get("own"))   # 借来的主机上 scan 只数借来以后的（归还确认列它）
+    e["lw"] = None if e.get("standalone") else F.local_writes((st.get("info") or {}).get("rootfs"), sg.get("wrote"), sg.get("own"))   # 借来的主机上 scan 只数借来以后的（归还确认列它）
+    e["work_disk"] = DK.host_work_disk(e, h, t) if e.get("standalone") else None
     now = e.get("clock") or t
     e["age"] = now - st.get("t", 0)
     e["worker_up"] = e["age"] < STALE_S
@@ -514,7 +619,8 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
         fcfg = {}
     people = F.project_people(sorted({*registered(), *(p["id"] for p in projects)}), fcfg)
     sw = dict(sw, owner={p: F.share_key(n) for p, n in people.items()}) if people else sw
-    prog, put = _to_worker(projects, t, sw)
+    old = snapshot()                                  # 上一轮的全局快照：不在内网时沿用各台的状态；挪法建议的滞回；独立机历史筛选登记项目
+    prog, put = _to_worker(projects, t, sw, old)
     hcfg = {h["id"]: h for h in active_hosts()}
     homes = LS.homes(list(hcfg.values()))
     lease_ids = {h["id"] for g in homes.values() for h in g}
@@ -543,7 +649,6 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
         if not by_lease or (lan["ok"] and not lan2["ok"]):
             lan = lan2
     _expire(t)
-    old = snapshot()                                  # 上一轮的全局快照：不在内网时沿用各台的状态；挪法建议的滞回
     prev = {} if lan["ok"] else {x["id"]: x for x in old.get("hosts", [])}
     hosts = []
     for h in by.values():
@@ -783,9 +888,15 @@ def _keep_usage(sd: Path, hid: str, rows: list[dict], t: float, idx: dict) -> No
             continue
         st = "stop" if r.get("requeued") or r.get("void") else "done" if r.get("rc") == "0" or (r.get("rc") is None and r.get("kind") == "slot") else "failed"
         g = r.get("gpus") or []
-        append_row(f, {"t": e, "s": s0, "n": r.get("name"), "p": r.get("project"), "root": r.get("root"), "queue": r.get("queue"),
-                       "g": g, "gi": [idx[u] for u in g if u in idx], "st": st, "wait": r.get("wait"),
-                       "u": r.get("gpu_util")}, USAGE_KEEP_S, t)   # 所用卡的平均利用率（worker 的 util_mean）：项目近 24 小时的平均利用率（collect.gpu_mine）
+        row = {"t": e, "s": s0, "n": r.get("name"), "p": r.get("project"), "root": r.get("root"), "queue": r.get("queue"),
+               "g": g, "gi": [idx[u] for u in g if u in idx], "st": st, "wait": r.get("wait"),
+               "u": r.get("gpu_util")}   # 所用卡的平均利用率（worker 的 util_mean）：项目近 24 小时的平均利用率（collect.gpu_mine）
+        # 追加独立主机历史转送（_hist_payload → hist_shared.json）所需估时与资源峰值字段（#114，旧行缺字段安全跳过）
+        for k in ("min", "est_min", "tag", "gpu", "conc", "ram_peak", "vram_peak", "cores_peak", "give", "oom", "rc", "kind", "est", "cpus"):
+            if r.get(k) is not None:
+                row[k] = r[k]
+        row["ngpu"] = r["ngpu"] if r.get("ngpu") is not None else len(g)
+        append_row(f, row, USAGE_KEEP_S, t)
         seen.add((s0, r.get("name"), r.get("root"), r.get("queue")))
 
 

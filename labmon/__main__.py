@@ -18,9 +18,12 @@
                                                             连不上看板不退出、连回来报 server_back；连着 1 小时连不上才以 server_unreachable 告警退出（1）
                                                             一个项目只让一个会话等：已有别的会话在等时拒绝（退出码 3）；--take 改由本会话等（那边下一轮退出）
     labmon host list | return <id> [--at 时间 | --now] | restore <id>  用户级主机清单：查看、标记已归还（借来的：跑完就还）、恢复在用（借来的：撤销跑完就还）；改的要 admin 令牌
+    labmon host add <id> --ssh user@host [--port 22] [--platform other|none] [--label 名称] [--until 到期] [--data-root 目录] [--disk-warn 20] [--disk-stop 10] [--disk-quota N]
+    labmon host edit|test|rm|key <id> [...]                 外部主机双入口：增删改查、连通测试与专用公钥查看/轮换（零私钥上传）
     labmon borrow [<组内服务器> [--until "明天 18:30"] [--for a1,b] [--away]]   借来给自己的项目跑（见 borrow.py；--away 对方说好约定前不用；要 admin 令牌）；不给参数列出在借的
     labmon borrow <自用主机> --until … [--from 名字]             换给自己借来的：记下约定还的时间（--until none 去掉）
     labmon worker start|stop|status <id> | add|rm <id> ROOT JOBS [--gpus 0] [--project P] [--stop term] | limit <id> tag=N
+    labmon worker clean <id> [--project P] [--cache] [--scratch] [--dry-run] [--yes]   仅清理本地自管缓存与已结束临时目录（默认预览，绝不动 projects/ 产物）
     labmon worker fit <id> 任务名… [--project P]               开并行车道前：放不放得下（与真放行同一份准入）、卡吃不满是不是 CPU 受限
     labmon worker fit <id> ROOT JOBS --list --project P        一条清单还会跑的行此刻能在共用 worker 目录的几台上再开几条车道
                                                             服务器端队列执行器（见 workerctl.py；start、stop、limit 要 admin 令牌）
@@ -102,10 +105,15 @@ def _call(method: str, path: str, body=None, **kw) -> dict | int:
         return 2
 
 
-def cmd_host(ap: argparse.ArgumentParser, a: argparse.Namespace) -> int:
-    """用户级主机清单（看板那台机器上的）：查看（GET /api/hosts）、标记已归还与恢复在用（POST /api/host/…，api.host，要 admin 令牌）。"""
-    sub = a.sub or "list"
+def cmd_host(argv: list[str]) -> int:
+    """用户级主机清单与外部主机管理：
+    - list / return / restore（查看、标记已归还与恢复在用）；
+    - add / edit / test / rm / key（外部主机双入口，走 /api/hosts/external*，零私钥上传）。"""
+    sub = argv[0] if argv and not argv[0].startswith("-") else "list"
+    rest = argv[1:] if argv and not argv[0].startswith("-") else argv
     if sub == "list":
+        ap = argparse.ArgumentParser(prog="labmon host list", description="查看用户级主机清单")
+        ap.parse_args(rest)
         r = _call("GET", "/api/hosts")
         if isinstance(r, int):
             return r
@@ -114,7 +122,11 @@ def cmd_host(ap: argparse.ArgumentParser, a: argparse.Namespace) -> int:
             return 1
         for h in r["hosts"]:
             st = f"已归还 {h['returned']}" if h.get("returned") else "在用"
-            print(f"  {h['id']:<10} {st:<22} {h.get('ssh') or '本机'}:{h.get('port', 22)}  {h.get('label') or ''}  {borrow_text(h.get('borrow'))}")
+            extra = borrow_text(h.get("borrow"))
+            if h.get("standalone"):
+                tag = "外部机" + (f" · {h['owner']}" if h.get("owner") else "")
+                extra = f"{tag}{' ' + extra if extra else ''}"
+            print(f"  {h['id']:<10} {st:<22} {h.get('ssh') or '本机'}:{h.get('port', 22)}  {h.get('label') or ''}  {extra}".rstrip())
         groups: dict = {}                   # 共用 worker 目录的在用主机按目录分组（#35 A；旧看板没有 home_with 时不打）
         for h in r["hosts"]:
             if h.get("home_with") and not h.get("returned"):
@@ -123,15 +135,105 @@ def cmd_host(ap: argparse.ArgumentParser, a: argparse.Namespace) -> int:
             order = [str(h["id"]) for h in r["hosts"] if str(h["id"]) in ids]
             print(f"  共用 worker 目录 {home}（同一块共享盘，放在这块盘上的文件各台都读得到）：{'、'.join(order)}")
         return 0
-    if sub not in ("return", "restore") or not a.target:
-        ap.error("用法：labmon host list | labmon host return <id> [--at 时间 | --now] | labmon host restore <id>（借来的：撤销跑完就还）")
-    at = None
-    if sub == "return" and a.at:                        # 相对写法按这台机器的现在解析，清单里写带年份的绝对时刻（看板那边写）
-        at = parse_time(a.at, rel=True)
-        if at is None:
-            print(f"[labmon] 看不懂归还时间：{a.at}（用 2026-11-04 18:40、11-04 18:40、18:40 或 明天 9:00）", file=sys.stderr)
-            return 3
-    return client.run("POST", f"/api/host/{sub}", {"id": a.target, "at": at, "now": a.now}, admin=True, ap=ap)
+    if sub in ("return", "restore"):
+        ap = argparse.ArgumentParser(prog=f"labmon host {sub}")
+        ap.add_argument("id", help="主机 id")
+        if sub == "return":
+            ap.add_argument("--at", help="归还时间（缺省现在）：2026-11-04 18:40、11-04 18:40、18:40、明天 9:00")
+            ap.add_argument("--now", action="store_true", help="借来的组内服务器：正在跑的按各自的停法停下，不等跑完")
+        a = ap.parse_args(rest)
+        at = None
+        if sub == "return" and a.at:
+            at = parse_time(a.at, rel=True)
+            if at is None:
+                print(f"[labmon] 看不懂归还时间：{a.at}（用 2026-11-04 18:40、11-04 18:40、18:40 或 明天 9:00）", file=sys.stderr)
+                return 3
+        return client.run("POST", f"/api/host/{sub}", {"id": a.id, "at": at, "now": bool(getattr(a, "now", False))}, admin=True, ap=ap)
+    if sub in ("add", "edit"):
+        ap = argparse.ArgumentParser(prog=f"labmon host {sub}", description="新增或修改外部主机（零私钥上传，走看板专用 Ed25519 公钥）")
+        ap.add_argument("id", help="主机 id（小写字母/数字/-/_，如 ext-4090）")
+        ap.add_argument("--ssh", help="SSH 地址，如 user@203.0.113.10（管理员留空表示看板本机）")
+        ap.add_argument("--port", type=int, help="SSH 端口（缺省 22）")
+        ap.add_argument("--label", help="页面显示名称")
+        ap.add_argument("--platform", dest="platform_kind", choices=["other", "none"], help="平台分类：other（外租平台）或 none（自有机器）")
+        ap.add_argument("--key-mode", dest="ssh_key", choices=["managed", "system"], help="密钥模式：managed（看板专用密钥，缺省）或 system（仅管理员）")
+        ap.add_argument("--owner", help="归属看板账号（仅管理员可代指）")
+        ap.add_argument("--until", dest="lease_until", help="到期时间（外租平台提醒用，空串清除）")
+        ap.add_argument("--data-root", dest="data_root", help="独立工作根目录（缺省 ~/.local/share/labmon/work）")
+        ap.add_argument("--python", help="远端 python 路径（缺省 python3）")
+        ap.add_argument("--disk-warn", dest="disk_warn_gb", type=float, help="磁盘低水位预警线 GiB（缺省 20）")
+        ap.add_argument("--disk-stop", dest="disk_stop_gb", type=float, help="磁盘准入停止线 GiB（缺省 10，0 关闭）")
+        ap.add_argument("--disk-quota", dest="disk_quota_gb", type=float, help="工作目录软配额 GiB")
+        ap.add_argument("--cpu-quota", dest="cpu_quota", type=float, help="允许占用的 CPU 核数上限")
+        ap.add_argument("--mps-vram", dest="mps_vram_gb", type=float, help="Apple Silicon 统一内存显存上限 GiB")
+        ap.add_argument("--admin", action="store_true", help="使用管理员令牌（管理员操作或内网管理他人/本机外部主机时使用）")
+        a = ap.parse_args(rest)
+        body: dict = {}
+        if sub == "add":
+            body["id"] = a.id
+            if a.ssh is not None:
+                body["ssh"] = a.ssh
+            elif not a.admin:
+                ap.error("labmon host add 需要 --ssh user@host")
+        elif a.ssh is not None:
+            body["ssh"] = a.ssh
+        for k in ("port", "label", "platform_kind", "ssh_key", "owner", "lease_until", "data_root", "python",
+                  "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "cpu_quota", "mps_vram_gb"):
+            v = getattr(a, k)
+            if v is not None:
+                body[k] = v
+        path = "/api/hosts/external" if sub == "add" else f"/api/hosts/external/{quote(a.id, safe='')}"
+        r = _call("POST" if sub == "add" else "PUT", path, body, admin=a.admin)
+        if isinstance(r, int):
+            return r
+        print(f"[labmon] {r.get('msg') or '已保存'}")
+        if r.get("pubkey"):
+            print(f"  公钥指纹：{r.get('fingerprint') or '-'}")
+            print(f"  专用公钥：{r['pubkey']}")
+            print(f"  目标机一行授权命令：\n    {r.get('auth_cmd')}")
+        return 0
+    if sub == "test":
+        ap = argparse.ArgumentParser(prog="labmon host test", description="单次测试外部主机 SSH 连通性、GPU、Python 与工作目录")
+        ap.add_argument("id", help="外部主机 id")
+        ap.add_argument("--admin", action="store_true", help="使用管理员令牌")
+        a = ap.parse_args(rest)
+        r = _call("POST", f"/api/hosts/external/{quote(a.id, safe='')}/test", {}, admin=a.admin, timeout=30)
+        if isinstance(r, int):
+            return r
+        if r.get("ok"):
+            print(f"[labmon] {r.get('msg') or '连通正常'}")
+            return 0
+        print(f"[labmon] 连通测试失败：{r.get('error') or '未知错误'}", file=sys.stderr)
+        if r.get("hint"):
+            print(f"  建议：{r['hint']}", file=sys.stderr)
+        return 1
+    if sub == "key":
+        ap = argparse.ArgumentParser(prog="labmon host key", description="查看或轮换外部主机专用 Ed25519 公钥（零私钥上传）")
+        ap.add_argument("id", help="外部主机 id")
+        ap.add_argument("--rotate", action="store_true", help="轮换生成新密钥对（旧连接将被断开，需重新授权公钥）")
+        ap.add_argument("--admin", action="store_true", help="使用管理员令牌")
+        a = ap.parse_args(rest)
+        r = _call("POST", f"/api/hosts/external/{quote(a.id, safe='')}/key", {"rotate": a.rotate}, admin=a.admin)
+        if isinstance(r, int):
+            return r
+        print(f"[labmon] {r.get('msg') or '专用公钥'}")
+        print(f"  公钥指纹：{r.get('fingerprint') or '-'}")
+        print(f"  专用公钥：{r.get('pubkey')}")
+        print(f"  目标机一行授权命令：\n    {r.get('auth_cmd')}")
+        return 0
+    if sub == "rm":
+        ap = argparse.ArgumentParser(prog="labmon host rm", description="删除外部主机并销毁看板专用私钥")
+        ap.add_argument("id", help="外部主机 id")
+        ap.add_argument("--force", action="store_true", help="强制删除（即使仍有在跑或排队任务）")
+        ap.add_argument("--admin", action="store_true", help="使用管理员令牌")
+        a = ap.parse_args(rest)
+        r = _call("DELETE", f"/api/hosts/external/{quote(a.id, safe='')}", {"force": a.force}, admin=a.admin)
+        if isinstance(r, int):
+            return r
+        print(f"[labmon] {r.get('msg') or '已删除'}")
+        return 0
+    print("用法：labmon host list | return <id> [--at 时间 | --now] | restore <id> | add|edit|test|key|rm <id> ...", file=sys.stderr)
+    return 2
 
 
 def cmd_borrow(argv: list[str]) -> int:
@@ -676,6 +778,8 @@ def main(argv: list[str] | None = None) -> int:
     dist.hold_version()                                # 看板装的：这版在用，别的命令更新时不删它（#18）
     if argv[:1] and argv[0] in OVR:
         return cmd_override(argv)
+    if argv[:1] == ["host"]:
+        return cmd_host(argv[1:])
     if argv[:1] == ["borrow"]:
         return cmd_borrow(argv[1:])
     if argv[:1] == ["user"]:
@@ -715,16 +819,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("cmd", choices=["collect", "render", "check", "serve", "wait", "service", "host", "worker", "project", "fleet", "notify", "hostcheck", *OVR, "borrow", "user",
                                     "server", "secret", "backup", "login", "url", "update", "report", *READS],
                     help="见下面的用法；pause / resume / focus / unfocus / drain / undrain / borrow / user / server / secret / backup / login / status / disk / records 各有自己的 --help")
-    ap.add_argument("sub", nargs="?", choices=["install", "add", "status", "restart", "stop", "list", "return", "restore", "start", "rm", "init", "limit", "probe", "boot", "import", "fit",
+    ap.add_argument("sub", nargs="?", choices=["install", "add", "status", "restart", "stop", "list", "return", "restore", "start", "rm", "init", "limit", "probe", "boot", "import", "fit", "clean",
                                                "archive", "push", "pull", "test"],
-                    help="service 的动作（install/status/restart/stop），host 的动作（list/return/restore），"
-                         "worker 的动作（start/stop/status/add/rm/limit/fit），project 的动作（push/pull/init/archive/restore），fleet 的动作（status/probe/boot/import），notify 的动作（test）")
+                    help="service 的动作（install/status/restart/stop），host 的动作（list/return/restore/add/edit/test/key/rm），"
+                         "worker 的动作（start/stop/status/add/rm/limit/fit/clean），project 的动作（push/pull/init/archive/restore），fleet 的动作（status/probe/boot/import），notify 的动作（test）")
     ap.add_argument("target", nargs="?", help="host / worker / fleet 的主机 id；project init 的主机；project archive / restore 的项目 id；notify test 的文字")
     ap.add_argument("rest", nargs="*", help="worker add / rm 的 ROOT JOBS；worker fit 的任务名；project init 的项目名；fleet import 的 Json 文件")
     ap.add_argument("--gpus", help="worker add：这条队列只用这些卡（nvidia-smi 序号，逗号分隔）")
-    ap.add_argument("--project", help="worker add 必写：看板的项目 id（monitor.toml 里的 id；pause、focus、借卡的“只给谁用”都按它认）")
+    ap.add_argument("--project", help="worker add 必写（worker clean 可选）：看板的项目 id（monitor.toml 里的 id；pause、focus、借卡的“只给谁用”都按它认）")
     ap.add_argument("--stop", help="worker add：暂停时怎么停：boundary（缺省）/ term / file:<相对 ROOT 的路径>")
     ap.add_argument("--list", action="store_true", help="worker fit：位置参数是 ROOT JOBS，看这条清单还会跑的行能在共用 worker 目录的几台在用主机上再开几条车道（要 --project）")
+    ap.add_argument("--cache", action="store_true", help="worker clean：仅清理自管缓存（<LOCAL>/cache）")
+    ap.add_argument("--scratch", action="store_true", help="worker clean：仅清理已结束任务的临时目录（<LOCAL>/jobs）")
+    ap.add_argument("--dry-run", dest="dry_run", action="store_true", help="worker clean：仅列出可清理项，不删文件（默认行为）")
+    ap.add_argument("--yes", action="store_true", help="worker clean：显式确认实际删除自管缓存/临时目录（绝不碰 projects/ 产物）")
     ap.add_argument("--at", help="host return 的归还时间（缺省为现在）：2026-11-04 18:40、11-04 18:40、18:40、明天 9:00，写进清单的是带年份的")
     ap.add_argument("--now", action="store_true", help="host return 借来的组内服务器：正在跑的按各自的停法停下，不等跑完")
     ap.add_argument("-c", "--config", action="append", help="项目目录里的配置文件（缺省 monitor.toml）")
@@ -744,8 +852,6 @@ def main(argv: list[str] | None = None) -> int:
         ap.error("--probe 只用于 check")
     if a.out and a.cmd != "render":
         ap.error("--out 只用于 render（collect 由看板采，写看板上这个项目的输出目录）")
-    if a.cmd == "host":
-        return cmd_host(ap, a)
     if a.cmd == "hostcheck":
         if a.sub or a.target:
             ap.error("用法：labmon hostcheck")
@@ -799,9 +905,14 @@ def main(argv: list[str] | None = None) -> int:
         if a.sub not in WORKER_ACTS or not a.target:
             ap.error("用法：labmon worker start|stop|status <主机> | labmon worker add <主机> ROOT JOBS --project <项目 id> [--gpus 0]"
                      " | labmon worker rm <主机> ROOT JOBS | labmon worker limit <主机> tag=N | labmon worker fit <主机> 任务名… [--project <项目 id>]"
-                     " | labmon worker fit <主机> ROOT JOBS --list --project <项目 id>")
+                     " | labmon worker fit <主机> ROOT JOBS --list --project <项目 id>"
+                     " | labmon worker clean <主机> [--project <项目 id>] [--cache] [--scratch] [--dry-run] [--yes]")
         if a.list and (a.sub != "fit" or len(a.rest) != 2 or not a.project):
             ap.error("--list 只用于 worker fit：labmon worker fit <主机> ROOT JOBS --list --project <项目 id>")
+        if (a.cache or a.scratch or a.dry_run or a.yes) and a.sub != "clean":
+            ap.error("--cache、--scratch、--dry-run、--yes 只用于 worker clean")
+        if a.sub == "clean" and a.rest:
+            ap.error("worker clean 不接受额外位置参数：labmon worker clean <主机> [--project <项目 id>] [--cache] [--scratch] [--yes]")
         if a.sub == "fit" and not a.rest:
             ap.error("worker fit 需要任务名")
         if a.sub in ("add", "rm") and len(a.rest) != 2:
@@ -809,7 +920,8 @@ def main(argv: list[str] | None = None) -> int:
         if a.sub == "add" and not a.project:            # worker 缺省取共享盘目录名，与看板的项目 id 常不一样：暂停、优先、借卡的“只给谁用”就对不上
             ap.error("worker add 需要 --project <项目 id>（monitor.toml 里的 id）")
         return client.run("POST", f"/api/worker/{a.sub}", {"host": a.target, "args": a.rest, "gpus": a.gpus, "project": a.project, "stop": a.stop,
-                                                           **({"list": True} if a.list else {})},
+                                                           **({"list": True} if a.list else {}),
+                                                           **({"cache": a.cache, "scratch": a.scratch, "dry_run": a.dry_run, "yes": a.yes} if a.sub == "clean" else {})},
                           admin=a.sub in ("start", "stop", "limit"), ap=ap)
     if a.cmd == "serve":                              # -c 只给迁移用（可删：#161 部署后 labmon service install 去掉了 plist 里的 -c 就删）
         return serve(a.port or PORT, a.interval, a.public_port or None, legacy=a.config or [])

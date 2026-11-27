@@ -1219,6 +1219,28 @@ def _storage(cfg: dict, snap: dict, glob_snap: dict, t: float) -> None:
                                     head + "：能重算的缓存放 $LABMON_CACHE（用 needs= 声明），不再用的中间结果清掉；删结果、旧 checkpoint 前先问用户", head))
     for key, js in write_groups([j for j in st["jobs"] if j["big"] and t - j["t1"] < 86400]):
         snap["alerts"].append(alert(f"bigwrite:{key}", "agent", write_text(js) + "：能重算的缓存放 $LABMON_CACHE（用 needs= 声明），共享盘只留数据集、代码与结果"))
+    seen_keys = {a["key"] for a in snap["alerts"]}
+    for hid, sw in (st.get("standalone") or {}).items():
+        root = sw.get("root") or "work"
+        ak = f"disk_low:{hid}:{root}"
+        if ak in seen_keys:
+            continue
+        dg = sw.get("disk_gate") or {}
+        free, warn_gb, quota_gb, wb = sw.get("free"), sw.get("warn_gb"), sw.get("quota_gb"), sw.get("work_b")
+        low = bool(dg.get("on")) or (free is not None and warn_gb and free < warn_gb * GIB) or (quota_gb and wb is not None and wb >= 0.85 * quota_gb * GIB)
+        if not low:
+            continue
+        if dg.get("on"):
+            short = f"{sw.get('label') or hid} 磁盘闸门已开启（暂停放新任务）"
+            full = f"{sw.get('label') or hid}：{dg.get('why') or short}；可用 labmon worker clean {hid} --project {cfg['id']} 预览清理自管缓存，删 projects/ 旧产物前先问用户"
+        elif quota_gb and wb is not None and wb >= 0.85 * quota_gb * GIB:
+            short = f"{sw.get('label') or hid} 本地工作盘已占 {gb(wb)} / {quota_gb:g} GiB（达 85% 预警）"
+            full = f"{short}：请运行 labmon disk 查看各目录与可回收项，先清理缓存（labmon worker clean {hid} --project {cfg['id']}），删旧产物前先问用户"
+        else:
+            short = f"{sw.get('label') or hid} 本地工作盘只剩 {gb(free)} GiB（低于 {warn_gb:g} GiB）"
+            full = f"{short}：请运行 labmon disk 查看占用并清理缓存（labmon worker clean {hid} --project {cfg['id']}），低于停止线将暂停放新任务"
+        snap["alerts"].append(alert(ak, "both", full, short))
+        seen_keys.add(ak)
 
 
 def gb(b: float) -> str:

@@ -1045,9 +1045,11 @@ function resourcesCard() {
       const col = c.state === "ok" ? "var(--ok)" : c.state === "fail" ? "var(--faint)" : "var(--line)";
       chips.push(`<span class="chip" ${tip([c.out, ...(c.detail || [])].filter(Boolean).join("\n") || "无输出")}><span class="cdot" style="background:${col}"></span> ${esc(c.label)}：${c.state === "ok" ? "是" : c.state === "fail" ? "否" : "不适用"}</span>`);
     }
-    // 共享盘各服务器挂的是同一块，只在第一台非临时主机上写一次；本地盘按主机
-    const sg = D.storage || {}, sh = !h.ephemeral && h === D.hosts.find(x => !x.pool && !x.ephemeral) ? sg.dirs || [] : [], loc = h.ephemeral ? null : sg.local?.[h.id], lb = loc ? (loc.cache || 0) + (loc.scratch || 0) : 0;
-    if (sh.length || loc) chips.push(storageChip(sg, sh, loc, lb));
+    // 共享盘各服务器挂的是同一块，只在第一台非临时非独立主机上写一次；独立主机按各自本地工作盘显示；本地临时按主机
+    const sg = D.storage || {}, wd = h.ephemeral ? null : sg.standalone?.[h.id];
+    const firstShared = D.hosts.find(x => !x.pool && !x.ephemeral && !sg.standalone?.[x.id]);
+    const sh = !h.ephemeral && !wd && h === firstShared ? sg.dirs || [] : [], loc = h.ephemeral ? null : sg.local?.[h.id], lb = loc ? (loc.cache || 0) + (loc.scratch || 0) : 0;
+    if (wd || sh.length || loc) chips.push(storageChip(sg, sh, loc, lb, wd));
     const head = `<span class="cdot" style="background:${h.ok ? "var(--ok)" : h.ephemeral ? "var(--faint)" : "var(--bad)"}" ${tip(h.ephemeral ? (h.ok ? "临时主机在线" : h.error || "临时主机已离线") : h.ok ? "探针正常" : h.error || "失败")}></span> ${esc(h.label)}${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : ""}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}${h.stale ? ` <span class="sm" style="color:var(--bad)">（显示 ${ts(h.last_ok)} 的数据）</span>` : ""}`;
     out.push(block(head, chips, tiles.length ? tiles : [`<div class="sm mut">没有数据</div>`]));
   }
@@ -1062,7 +1064,18 @@ function resourcesCard() {
 const dirName = n => n === "." ? "项目根下的文件" : n || "整个项目目录";
 // 「资源」里本项目的存储一格（项目快照的 storage，disk.project_storage，#53）：共享盘上本项目的合计与近 24 小时增量（涨得快时标色，同 disk: 告警），
 // 悬停按项目根下的一级目录列占用与增量，再列近来写得多的任务（跑的期间本项目目录净增，同期本项目别的任务也算在内）；本地盘这台的缓存与单格临时
-function storageChip(sg, sh, loc, lb) {
+function storageChip(sg, sh, loc, lb, wd) {
+  if (wd) {
+    const gOn = !!wd.disk_gate?.on;
+    const lines = [`本地工作盘（${wd.root}，独立主机不共享集群盘）：`,
+      `本项目占用 ${GB(wd.b)} GiB · 24 小时 ${dGB(wd.d24)}`,
+      `整盘剩 ${GB(wd.free)} / ${GB(wd.total)} GiB（预警 ${wd.warn_gb} GiB / 停止线 ${wd.stop_gb} GiB）`];
+    if (gOn) lines.push(`磁盘闸门已触发：${wd.disk_gate.why || "暂停放新任务"}`);
+    if (wd.reclaimable?.length) lines.push(`14 天闲置可回收：${wd.reclaimable.map(x => `${x.u || x.path} ${GB(x.b)} GiB`).join("、")}`);
+    if (loc) lines.push(`自管缓存 ${f1((loc.cache || 0) / GIB, 2)} GiB · 单格临时 ${f1((loc.scratch || 0) / GIB, 2)} GiB`);
+    const label = `本地工作盘 ${GB(wd.b)} GiB · 剩 ${Math.round((wd.free || 0) / GIB)} GiB${gOn ? " · 闸门" : ""}`;
+    return `<span class="chip" ${tip(lines.join("\n"))}${gOn || wd.low ? ` style="color:var(--bad);font-weight:600"` : ""}>${esc(label)}</span>`;
+  }
   const dirs = [...sh].sort((a, b) => (b.b || 0) - (a.b || 0)), jobs = (sg.jobs || []).filter(j => j.wait || Math.abs(j.b) >= GIB).slice(0, 6);
   const lines = [];
   if (sh.length) {

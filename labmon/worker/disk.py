@@ -451,3 +451,99 @@ class LocalDisk(Disk):
         wrote = {"since": cfg.get("since"), "b": b, "n": n, "top": rows[:LOCAL_TOP], "more": [len(rows[LOCAL_TOP:]), sum(x[1] for x in rows[LOCAL_TOP:])],
                  "pending": pend, "t": max((r.get("t") or 0 for r in units.values()), default=0) or None} if cfg.get("prune") is not None else None
         return {"t": ix.get("t"), "local": local, "own": own if units else None, "wrote": wrote}
+
+
+class WorkDisk(Disk):
+    """独立主机隔离工作盘（<data_root>）的限速轮流扫描（#114）：直接复用 Disk 与 Pace(LOCAL_IOPS)，
+    仅扫 <data_root> 一棵隔离目录树（projects/、datasets/、weights/、envs/、labmon/、.tmp/ 等），绝不遍历系统根盘 /；
+    scan_units/scan_unit 强制 follow_symlinks=False，本机 Mac 在 datasets/ 建软链接指向外部数据时不重复计容、绝不越界扫描个人目录。
+    索引本地化存于 <HOME>/disk/index.json（无需跨机扫描租约），仅将精简汇总 storage.work 写入 status.json 带回看板。"""
+    key = "wscan"
+    iops = LOCAL_IOPS
+    slack = LOCAL_DRIFT
+
+    def __init__(self, host, root=None):
+        Disk.__init__(self, (root or _C.DATA_ROOT).rstrip("/"), host)
+        self.dir = os.path.join(_C.HOME, "disk")
+        self.ixf = os.path.join(self.dir, "index.json")
+        self.mine = True
+
+    def lease(self, now):
+        if self.ix is None:
+            self.load()
+        return True
+
+    def splits(self, split):
+        """把 projects/<项目>（经 want/forced）与 .tmp/cache、.tmp/jobs 拆开，按项目与公共目录汇总。"""
+        out = set(split)
+        L, top = _C.LOCAL.rstrip("/"), self.root.rstrip("/")
+        for d in (L, os.path.join(L, "cache"), os.path.join(L, "jobs")):
+            cur = d
+            while cur != top and cur.startswith(top + "/"):
+                out.add(cur)
+                cur = os.path.dirname(cur)
+        return out
+
+    def lister(self, split, pace):
+        return scan_units(self.root, self.splits(split), pace)
+
+    def scanner(self, u, now, pace):
+        return scan_unit(u, now, pace)
+
+    def total_bytes(self):
+        units = (self.ix or {}).get("units") or {}
+        vals = [r["b"] for r in units.values() if r.get("b") is not None]
+        return sum(vals) if vals else None
+
+    def summary(self):
+        """返回 (work, local)：
+        work 写入 status.json 的 storage.work（root、b、t、pending、projects {pid: {b, m, d24, top}}、common {envs, datasets, weights, labmon, archive, tmp, other}）；
+        local 写入 status.json 的 storage.local（{pid: {cache, scratch}}，与集群 LocalDisk 同口径）。"""
+        ix = self.ix or {}
+        units = ix.get("units") or {}
+        base = self.root.rstrip("/")
+        L = _C.LOCAL.rstrip("/")
+        local, projs, common = {}, {}, {"envs": 0, "datasets": 0, "weights": 0, "labmon": 0, "archive": 0, "tmp": 0, "other": 0}
+        total_b, pend = 0, 0
+        for u, r in units.items():
+            if r.get("b") is None:
+                pend += 1
+                continue
+            b = r["b"]
+            m = r.get("m")
+            total_b += b
+            if u == L or u.startswith(L + "/"):
+                common["tmp"] += b
+                rel_l = os.path.relpath(u, L).split("/")
+                if len(rel_l) >= 2 and rel_l[0] in ("cache", "jobs") and rel_l[1] != ".":
+                    ent = local.setdefault(rel_l[1], {"cache": 0, "scratch": 0, "m": None})
+                    ent["cache" if rel_l[0] == "cache" else "scratch"] += b
+                    if m and (not ent["m"] or m > ent["m"]):
+                        ent["m"] = m
+                continue
+            rel = os.path.relpath(u, base) if u.startswith(base + "/") else u
+            parts = [x for x in rel.split("/") if x]
+            if not parts or parts == ["."]:
+                common["other"] += b
+                continue
+            top_dir = parts[0]
+            if top_dir == "projects" and len(parts) >= 2 and parts[1] != ".":
+                pid = parts[1]
+                pe = projs.setdefault(pid, {"b": 0, "m": None, "d24": 0, "top": []})
+                pe["b"] += b
+                if m and (not pe["m"] or m > pe["m"]):
+                    pe["m"] = m
+                if r.get("pb") is not None and r.get("pt") and r.get("t") and r["t"] - r["pt"] <= 86400 * 2:
+                    pe["d24"] += b - r["pb"]
+                sub = "/".join(parts[2:]) if len(parts) > 2 else "."
+                pe["top"].append([sub, b, m])
+            elif top_dir in ("envs", "datasets", "weights", "labmon", "archive"):
+                common[top_dir] += b
+            else:
+                common["other"] += b
+        for pid, pe in projs.items():
+            pe["top"] = sorted((x for x in pe["top"] if x[1] > 0), key=lambda x: -x[1])[:8]
+        work = {"root": base, "b": total_b if units else None, "t": ix.get("t"), "pending": pend,
+                "projects": projs, "common": common}
+        loc_out = {pid: {"cache": v["cache"], "scratch": v["scratch"], **({"m": v["m"]} if v.get("m") else {})} for pid, v in local.items()}
+        return work, loc_out

@@ -33,6 +33,8 @@ SOON_FREE = 0.2
 BURST_GB = 30           # 一人近 24 小时增长超过这么多 GiB，且超过剩余的 BURST_FREE，告警（burst_gb）
 BURST_FREE = 0.1
 COLD = 3                # 分龄（7、30、90、365 天）从第几档起算“90 天没改过”
+RECLAIM_DAYS = 14       # 独立主机本地工作盘闲置可回收提示门槛（天）：超过 14 天未修改 + 无活跃队列 + >= 1 GiB（#114）
+RECLAIM_MIN_B = GIB     # 独立主机闲置可回收提示最小体积（1 GiB）
 SCANS_KEEP = 35 * 86400
 HOURS_KEEP = 366 * 86400
 LIST_S = 600            # worker 多久列一次目录（删掉的目录在两次之间消失）
@@ -407,12 +409,90 @@ def _alerts(v: dict, t: float) -> list[str]:
     return [m for k, (m, n) in cur.items() if n and k not in was]
 
 
+def host_work_disk(e: dict, hcfg: dict | None = None, t: float | None = None) -> dict | None:
+    """独立主机本地工作盘汇总（唯一实现，overview._annotate、disk.project_storage、页面与 labmon disk 共用，#114）：
+    区分共享盘与独立机本地工作盘；计算各项目占用、公共目录占用、磁盘闸门与 14 天闲置可回收候选（>= 1 GiB 且无活跃队列），绝不自动删 projects/ 产物。"""
+    if not (e.get("standalone") or is_standalone(hcfg)):
+        return None
+    t = time.time() if t is None else t
+    st = e.get("status") or {}
+    info = st.get("info") or {}
+    d0 = next(iter(info.get("disk") or []), None)
+    sg = st.get("storage") or {}
+    wk = sg.get("work") or {}
+    loc = sg.get("local") or {}
+    if not d0 and not wk and not loc:
+        return None
+    total = d0["total"] * GIB if d0 and d0.get("total") is not None else None
+    free = d0["free"] * GIB if d0 and d0.get("free") is not None else None
+    used = (total - free) if total is not None and free is not None else None
+    root = wk.get("root") or (d0.get("path") if d0 else None) or (hcfg or {}).get("data_root") or e.get("data_root") or ""
+    warn_gb = (hcfg or {}).get("disk_warn_gb") if hcfg and hcfg.get("disk_warn_gb") is not None else e.get("disk_warn_gb")
+    stop_gb = (hcfg or {}).get("disk_stop_gb") if hcfg and hcfg.get("disk_stop_gb") is not None else e.get("disk_stop_gb")
+    quota_gb = (hcfg or {}).get("disk_quota_gb") if hcfg and hcfg.get("disk_quota_gb") is not None else e.get("disk_quota_gb")
+    active_p = {j.get("project") for k in ("running", "waiting") for j in st.get(k) or [] if j.get("project")}
+    active_p.update(q.get("project") for q in st.get("queues") or [] if q.get("project") and not q.get("empty") and not q.get("sleeping"))
+    projects = {}
+    reclaimable = []
+    wprojs = wk.get("projects") or {}
+    all_pids = sorted(set(wprojs) | set(loc))
+    for pid in all_pids:
+        wp = wprojs.get(pid) or {}
+        lp = loc.get(pid) or {}
+        b = int(wp.get("b") or 0)
+        m = wp.get("m")
+        cache_b = int(lp.get("cache") or 0)
+        scratch_b = int(lp.get("scratch") or 0)
+        is_act = pid in active_p
+        idle_days = int((t - m) // 86400) if m and t > m else 0
+        rec_proj = (not is_act) and bool(m) and (t - m >= RECLAIM_DAYS * 86400) and (b >= RECLAIM_MIN_B)
+        if rec_proj:
+            reclaimable.append({"u": f"projects/{pid}", "path": f"{root.rstrip('/')}/projects/{pid}", "project": pid, "kind": "project",
+                                "b": b, "idle_days": idle_days, "m": m})
+        lm = lp.get("m") or m
+        l_idle = int((t - lm) // 86400) if lm and t > lm else 0
+        if (not is_act) and cache_b >= RECLAIM_MIN_B and (not lm or t - lm >= RECLAIM_DAYS * 86400):
+            reclaimable.append({"u": f".tmp/cache/{pid}", "path": f"{root.rstrip('/')}/.tmp/cache/{pid}", "project": pid, "kind": "cache",
+                                "b": cache_b, "idle_days": l_idle, "m": lm})
+        if (not is_act) and scratch_b >= RECLAIM_MIN_B and (not lm or t - lm >= RECLAIM_DAYS * 86400):
+            reclaimable.append({"u": f".tmp/jobs/{pid}", "path": f"{root.rstrip('/')}/.tmp/jobs/{pid}", "project": pid, "kind": "scratch",
+                                "b": scratch_b, "idle_days": l_idle, "m": lm})
+        projects[pid] = {
+            "b": b, "m": m, "d24": wp.get("d24") or 0, "top": wp.get("top") or [],
+            "cache": cache_b, "scratch": scratch_b, "active": is_act,
+            "idle_days": idle_days, "reclaimable": rec_proj,
+        }
+    reclaimable.sort(key=lambda x: -x["b"])
+    common = wk.get("common") or {}
+    dirs = [
+        {"u": f"projects/{pid}", "name": pid, "p": pid, "b": v["b"], "d24": v["d24"], "m": v["m"]}
+        for pid, v in projects.items() if v["b"] > 0
+    ] + [
+        {"u": k, "name": k, "p": None, "b": int(b), "d24": None, "m": None}
+        for k, b in common.items() if (b or 0) > 0
+    ]
+    dirs.sort(key=lambda x: -x["b"])
+    work_b = wk.get("b")
+    low = bool(free is not None and warn_gb and warn_gb > 0 and free < warn_gb * GIB)
+    quota_warn = bool(quota_gb and quota_gb > 0 and work_b is not None and work_b >= quota_gb * 0.9 * GIB)
+    return {
+        "host": e.get("id"), "label": e.get("label") or e.get("id"), "root": root,
+        "total": total, "free": free, "used": used, "work_b": work_b,
+        "t": wk.get("t"), "pending": wk.get("pending") or 0,
+        "warn_gb": warn_gb, "stop_gb": stop_gb, "quota_gb": quota_gb,
+        "low": low, "quota_warn": quota_warn,
+        "disk_gate": st.get("disk_gate"),
+        "dirs": dirs, "projects": projects, "common": common,
+        "reclaimable": reclaimable,
+    }
+
+
 def project_storage(pid: str, snap: dict | None = None) -> dict:
     """项目 pid 的存储（项目快照的 storage：项目页「本项目占用」、labmon disk 读它，#53；字段见 docs/schema.md）。都是字节与 epoch 秒：
     共享盘上的项目根 roots、合计 b、近 24 小时 d24 与 7 天 d7（含删掉的）、还没扫到的单位数 pending、涨得快不快 burst（disk: 告警），
     项目根下各一级目录 dirs（name 是相对项目根的路径：「.」是项目根本层的文件，空串是还没拆开时的整个项目目录）、删掉的 gone、
     近来结束的任务的写入量 jobs（_job_writes）；共享盘整块的 at（扫描索引的时刻）、free、total、eta（按近 24 小时约几天满）、eta7、warn_gb、burst_gb、bigwrite_gb；
-    各主机本地盘的缓存与单格临时 local。"""
+    各主机本地盘的缓存与单格临时 local；独立主机本地工作盘 standalone（#114）。"""
     snap = snap if snap is not None else snapshot()
     dk = (snap or {}).get("disk") or {}
     ours = dk.get("ours") or {}
@@ -422,13 +502,40 @@ def project_storage(pid: str, snap: dict | None = None) -> dict:
     dirs = [{"path": d["u"], "name": rel(d["u"]), **{k: d.get(k) for k in ("b", "d24", "d7", "n", "m", "t", "top")}}
             for d in ours.get("dirs") or [] if d["p"] == pid]
     local = {h["id"]: loc for h in (snap or {}).get("hosts") or [] for loc in [(((h.get("status") or {}).get("storage") or {}).get("local") or {}).get(pid)] if loc}
+    standalone = {}
+    hc = {h["id"]: h for h in active_hosts()}
+    t = (snap or {}).get("generated") or time.time()
+    for h in (snap or {}).get("hosts") or []:
+        if not (h.get("standalone") or is_standalone(hc.get(h.get("id")))):
+            continue
+        st = h.get("status") or {}
+        wd = h.get("work_disk") or host_work_disk(h, hc.get(h.get("id")), t)
+        if not wd:
+            continue
+        has_pid = (pid in (wd.get("projects") or {})
+                   or any(q.get("project") == pid for q in st.get("queues") or [])
+                   or any(j.get("project") == pid for k in ("running", "waiting") for j in st.get(k) or []))
+        if not has_pid:
+            continue
+        pe = (wd.get("projects") or {}).get(pid) or {}
+        standalone[h["id"]] = {
+            "host": h["id"], "label": wd["label"], "root": wd["root"],
+            "free": wd["free"], "total": wd["total"], "work_b": wd["work_b"],
+            "warn_gb": wd["warn_gb"], "stop_gb": wd["stop_gb"], "quota_gb": wd["quota_gb"],
+            "low": wd.get("low", False), "quota_warn": wd.get("quota_warn", False),
+            "disk_gate": wd["disk_gate"], "t": wd["t"], "pending": wd["pending"],
+            "b": pe.get("b", 0), "m": pe.get("m"), "d24": pe.get("d24", 0), "top": pe.get("top") or [],
+            "cache": pe.get("cache", 0), "scratch": pe.get("scratch", 0),
+            "reclaimable": [r for r in wd.get("reclaimable") or [] if r.get("project") == pid],
+        }
     df = dk.get("df") or {}
     return {"roots": roots, "b": pr.get("b", sum(d["b"] for d in dirs)), "d24": pr.get("d24"), "d7": pr.get("d7"),
             "pending": pr.get("pending", 0), "burst": bool(pr.get("burst")), "dirs": dirs,
             "gone": [{"path": g["u"], "name": rel(g["u"]), "d24": g["d24"], "d7": g["d7"]} for g in pr.get("gone") or []],
             "jobs": pr.get("jobs") or [],
             "at": dk.get("at"), "free": df.get("free"), "total": df.get("total"), "eta": dk.get("eta"), "eta7": dk.get("eta7"),
-            "warn_gb": dk.get("warn_gb"), "burst_gb": dk.get("burst_gb"), "bigwrite_gb": dk.get("bigwrite_gb"), "local": local}
+            "warn_gb": dk.get("warn_gb"), "burst_gb": dk.get("burst_gb"), "bigwrite_gb": dk.get("bigwrite_gb"),
+            "local": local, "standalone": standalone}
 
 
 # 普通用户可见的共享盘字段白名单（#17、#211）：总盘概况与提醒线；不含全组 names、owners_set、正在扫的路径 now 与全组聚合量

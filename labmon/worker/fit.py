@@ -249,7 +249,7 @@ def fit(p, names, project=None):
     if st is None:
         print("%s：先 labmon worker start，再判断" % why)
         return 2
-    hist = _C.load_hist({}) or []
+    hist = _C.load_hist({}, host=p.host) or []
     fh = FitHost(p.host, st, hist, fit_eta(p))
     if not fh.cards:
         print("看不到 GPU")
@@ -305,7 +305,7 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
     if not rows and not os.path.exists(q["jobs_path"]):
         print("读不到清单 %s" % path)
         return 2
-    hist, fhs, skip = _C.load_hist({}) or [], [], {}
+    hist, fhs, skip = _C.load_hist({}, host=p.host) or [], [], {}
     running = set()
     for h in hosts if as_json else hosts or [p.host]:        # --json 只看给的几台（池目录没有 worker，不看这台）
         hp = _C.Paths(h)

@@ -66,6 +66,15 @@ SLOTS = os.environ.get("LABMON_SLOTS", os.path.join(LOCAL, "slots"))   # 单元�
 GATE = 0.9               # 容器里收不回的内存（mem.anon，不算页缓存）超过上限的这个比例就停止放行
 
 
+DISK_WARN_GB = 20.0      # 独立主机本地盘预警线（GiB）
+
+
+DISK_STOP_GB = 10.0      # 独立主机本地盘准入停止线（GiB，0 关闭）
+
+
+DISK_HYST_GB = 2.0       # 磁盘闸门滞回恢复带宽（GiB）：余量回升至 stop+2 且占用降至 quota-2 才自动解除
+
+
 WAIT_CAP_S = 1800        # 缺省：请求卡在资源上等了这么久，排在它后面的就不能再越过它，只能回填（预计在它放行前跑完的才放）；sched.json 的 wait_cap_min 可改
 
 
@@ -230,7 +239,7 @@ IO_MIN_OPS = 2           # 共享盘每秒读写不到这么多次时不判慢�
 IO_YIELD_MAX_S = 1800    # 共享盘慢时扫描与拷本地依赖推迟，同一件事连着推迟满这么久就照做一次（不能永远不扫、不拷）
 
 
-IO_WHAT = {"scan": "共享盘扫描", "lscan": "本地盘扫描"}   # io_yield 推迟的事（键）在 worker.log 里的说法；别的键是拷本地依赖 (请求 key, 任务)
+IO_WHAT = {"scan": "共享盘扫描", "lscan": "本地盘扫描", "wscan": "本地工作盘扫描"}   # io_yield 推迟的事（键）在 worker.log 里的说法；别的键是拷本地依赖 (请求 key, 任务)
 
 
 SLOW_RATIO = 1.5         # 运行中任务已跑过同类历史预计时长的这么多倍、同时共享盘慢：记一条“读写拥塞嫌疑”（只记录）
@@ -420,6 +429,7 @@ class Paths:
         self.frozen = os.path.join(self.dir, "frozen.json")        # 借来的主机上暂停着的保活看门狗（还卡时 thaw 恢复）与可能的看门狗
         self.press = os.path.join(self.dir, "press.jsonl")         # 主机的 CPU 与 IO 压力每 5 分钟一行（Worker.press 写，留 14 天；共享盘延迟的基线 io_base 按它算）
         self.gang = os.path.join(self.dir, "gang.json")            # 本机成组成员此刻怎样（gang_publish 写，同组别的主机读；建了不删）
+        self.hist_shared = os.path.join(self.dir, "hist_shared.json")  # 看板经 put 转送给独立主机的跨机同类历史（只供 estimate/duration，不进 share/dep_state/disk_ends）
 
 
 def project_dir(root):
@@ -520,21 +530,57 @@ def append_jsonl(path, row, keep_s=None):
             write(path, "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in load_jsonl(path) if (r.get("t") or 0) >= now - keep_s))
 
 
-def load_hist(cache):
+def load_hist(cache, host=None, standalone=False):
     """各主机的 usage.jsonl（共享盘上同一个 HOME）：资源与时长都看所有主机的同类记录，借来的主机一上来就有历史。
+    独立主机（standalone=True）只读本机 usage.jsonl，并一并读入看板经 put 转送的 hist_shared.json（标 shared_hist=True，同 (host, t0, name) 本机优先去重）。
+    shared_hist 仅用于 estimate/duration，share()/dep_state()/disk_ends() 显式跳过它。
     cache 为 {文件: (fsig, 记录)}，文件没变不重读；有变化返回按结束时刻排好的全部记录（记上主机），没变返回 None。
     几秒内就结束、没量到用量的（ram_peak 为空）也留着：依赖要看到这次的结果（别的主机上起不来就失败的），资源估计（estimate）自己跳过它们。"""
     changed = False
-    for f in glob.glob(os.path.join(HOME, "hosts", "*", "usage.jsonl")):
+    usage_files = [os.path.join(HOME, "hosts", host, "usage.jsonl")] if (standalone and host) else glob.glob(os.path.join(HOME, "hosts", "*", "usage.jsonl"))
+    shared_files = [os.path.join(HOME, "hosts", host, "hist_shared.json")] if host else glob.glob(os.path.join(HOME, "hosts", "*", "hist_shared.json"))
+    live = set()
+    for f in usage_files:
         try:
             m = fsig(f)
         except OSError:
             continue
+        live.add(f)
         if cache.get(f, (None,))[0] != m:
-            host = os.path.basename(os.path.dirname(f))
-            cache[f] = (m, [dict(h, host=h.get("host") or host) for h in load_jsonl(f)])
+            hname = os.path.basename(os.path.dirname(f))
+            cache[f] = (m, [dict(h, host=h.get("host") or hname) for h in load_jsonl(f)])
             changed = True
-    return sorted((h for _, rows in cache.values() for h in rows), key=lambda h: h.get("t1") or 0) if changed else None
+    for sf in shared_files:
+        try:
+            m = fsig(sf)
+        except OSError:
+            if sf in cache:
+                cache.pop(sf, None)
+                changed = True
+            continue
+        live.add(sf)
+        if cache.get(sf, (None,))[0] != m:
+            try:
+                raw = json.loads(read(sf, "") or "{}")
+                rows = raw.get("rows") if isinstance(raw, dict) else []
+                rows = [dict(r, shared_hist=True) for r in (rows or []) if isinstance(r, dict)]
+            except ValueError:
+                rows = []
+            cache[sf] = (m, rows)
+            changed = True
+    for k in list(cache):
+        if k not in live and (k.endswith("hist_shared.json") or (standalone and k.endswith("usage.jsonl"))):
+            cache.pop(k, None)
+            changed = True
+    if not changed:
+        return None
+    local_rows, shared_rows = [], []
+    for _, rows in cache.values():
+        for h in rows:
+            (shared_rows if h.get("shared_hist") else local_rows).append(h)
+    seen = {(h.get("host"), h.get("t0"), h.get("name")) for h in local_rows}
+    merged = local_rows + [h for h in shared_rows if (h.get("host"), h.get("t0"), h.get("name")) not in seen]
+    return sorted(merged, key=lambda h: h.get("t1") or 0)
 
 
 # 任务日志里每次开跑的分隔行（launch 写「===== 时刻 labmon 开始（GPU …）=====」；11-07 前写的是「… 开始（可能是续跑；…）=====」，也认）。

@@ -3202,4 +3202,73 @@ t("project", "项目页临时主机与云盘存储（#213）：资源卡区隔�
   clean(app(pjCtx(badPj, EVN)), "ephemeral evil project");
 });
 
+t("overview", "独立主机本地工作盘、磁盘闸门、可回收目录与外部主机右侧抽屉（#114 P2）", () => {
+  const S = JSON.parse(JSON.stringify(OV));
+  const ext = JSON.parse(JSON.stringify(OV.hosts[0]));
+  const wd = {
+    host: "ext-4090", label: "ext-4090（外租）",
+    root: "/home/u/.local/share/labmon/work", free: 8 * 2 ** 30, total: 500 * 2 ** 30, used: 492 * 2 ** 30, work_b: 120 * 2 ** 30,
+    warn_gb: 20, stop_gb: 10, quota_gb: 200, low: true, quota_warn: false,
+    disk_gate: {on: true, why: "本地盘可用空间不足：剩 8.0 GiB（低于停止线 10 GiB）", free_gb: 8.0, stop_gb: 10, recover_gb: 12},
+    dirs: [
+      {u: "projects/proj-a", name: "proj-a", p: "proj-a", b: 80 * 2 ** 30, d24: 4 * 2 ** 30, m: NOW - 3600},
+      {u: "projects/old-exp", name: "old-exp", p: "old-exp", b: 30 * 2 ** 30, d24: 0, m: NOW - 20 * 86400},
+      {u: "datasets", name: "datasets", p: null, b: 10 * 2 ** 30, d24: null, m: null},
+    ],
+    projects: {"proj-a": {b: 80 * 2 ** 30, d24: 4 * 2 ** 30, m: NOW - 3600}, "old-exp": {b: 30 * 2 ** 30, d24: 0, m: NOW - 20 * 86400}},
+    common: {datasets: 10 * 2 ** 30},
+    reclaimable: [{u: "projects/old-exp", path: "/home/u/.local/share/labmon/work/projects/old-exp", project: "old-exp", kind: "project", b: 30 * 2 ** 30, idle_days: 20, m: NOW - 20 * 86400}],
+    pending: 0, t: NOW - 60,
+  };
+  Object.assign(ext, {
+    id: "ext-4090", label: "ext-4090（外租）", platform: null, platform_kind: "other", share: "private", standalone: true,
+    owner: "amy", lw: null, work_disk: wd, lease_end: NOW + 5 * 86400, renew: null, auto_res: null, lend: null, borrow: null,
+  });
+  ext.status.disk_gate = wd.disk_gate;
+  S.hosts.push(ext);
+  const C = ovCtx(S, RR);
+  const home = page(C, "#/");
+  clean(home, "含本地工作盘与闸门的总览");
+  has(home, "+ 添加外部主机");
+  has(home, "闸门 · 剩 8");
+  has(home, "本地盘可用空间不足");
+  C.RTAB = "lw";
+  const hp = page(C, "#/host/ext-4090");
+  clean(hp, "独立主机本地工作盘与选项卡");
+  has(hp, "本地工作盘");
+  has(hp, "已暂停放新任务");
+  has(hp, "绝不自动删除");
+  has(hp, "可回收");
+  has(hp, "labmon worker clean ext-4090");
+  has(hp, "管理外部机");
+  ok(!hp.includes("续租会清空"), "独立主机资源卡与工作盘不应出现续租清空提示");
+  // 打开新增外部机抽屉
+  const drw = page(C, "#/ext/new");
+  clean(drw, "新增外部主机右侧抽屉");
+  has(drw, "添加外部主机");
+  has(drw, "保存并生成公钥");
+  has(drw, "零私钥上传");
+  // 「我的账号」概览展示我的外部主机
+  const me = page(C, "#/me");
+  clean(me, "我的账号含外部主机");
+  has(me, "我的外部主机");
+  has(me, "ext-4090（外租）");
+  // 恶意字符串转义检查
+  const SE = JSON.parse(JSON.stringify(S));
+  SE.hosts.find(x => x.id === "ext-4090").work_disk.root = "/work/" + BAD;
+  SE.hosts.find(x => x.id === "ext-4090").work_disk.disk_gate.why = "原因" + BAD;
+  SE.hosts.find(x => x.id === "ext-4090").status.disk_gate.why = "原因" + BAD;
+  const CE = ovCtx(SE, RR);
+  CE.RTAB = "lw";
+  clean(page(CE, "#/host/ext-4090"), "恶意 work_disk 转义");
+  // 项目页 storageChip 独立主机分支
+  const PS = JSON.parse(JSON.stringify(PJ));
+  PS.storage = {...(PS.storage || {}), standalone: {"srv-a": {root: "/home/u/work", b: 12 * 2 ** 30, d24: 2 ** 30, free: 8 * 2 ** 30, total: 500 * 2 ** 30, warn_gb: 20, stop_gb: 10, low: true, disk_gate: wd.disk_gate, reclaimable: wd.reclaimable}}};
+  const PC = mkCtx(pgSrc, PS, {filename: "page.js"});
+  const ph = run(PC, "resourcesCard()");
+  clean(ph, "项目页独立主机 storageChip");
+  has(ph, "本地工作盘");
+  has(ph, "闸门");
+});
+
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));

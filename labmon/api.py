@@ -27,7 +27,7 @@ from .state import load_json, snapshot
 
 OVR = {"pause": ("add", "pause"), "resume": ("rm", "pause"), "focus": ("add", "focus"), "unfocus": ("rm", "focus"),
        "drain": ("add", "drain"), "undrain": ("rm", "drain")}
-WORKER_ACTS = ("start", "stop", "status", "add", "rm", "limit", "fit")
+WORKER_ACTS = ("start", "stop", "status", "add", "rm", "limit", "fit", "clean")
 
 
 class Out:
@@ -196,11 +196,12 @@ def override(verb: str, target: str, host_ids: list[str] | None, until: float | 
 
 
 def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project: str | None = None, stop: str | None = None, own: bool = False,
-           lst: bool = False, may=None) -> dict:
-    """labmon worker start|stop|status|add|rm|limit|fit：经 workerctl.run_out 一次 ssh；输出是 worker 打印的原文。
+           lst: bool = False, may=None, *, cache: bool = False, scratch: bool = False, dry_run: bool = False, yes: bool = False) -> dict:
+    """labmon worker start|stop|status|add|rm|limit|fit|clean：经 workerctl.run_out 一次 ssh；输出是 worker 打印的原文。
     status 成功时末尾补一行与这台共用 worker 目录的在用主机（home_text，#35 A）；may：普通用户能用哪台（None 不限），只列他能用的。
     hid 是 pool（算力池）时只认 add、rm；rm 在清单此刻登记的地方撤（pool.locate）。
-    fit --list（lst）：看与这台共用 worker 目录的在用主机（config.home_peers；may 是普通用户能用哪台，None 不限），在这台上读它们的状态（#35 B）。"""
+    fit --list（lst）：看与这台共用 worker 目录的在用主机（config.home_peers；may 是普通用户能用哪台，None 不限），在这台上读它们的状态（#35 B）。
+    clean（#114）：仅清理 <LABMON_LOCAL>/{cache,jobs} 自管缓存与已结束单格临时，默认 --dry-run，显式 --yes 才删，绝不触碰 projects/ 产物。"""
     if sub not in WORKER_ACTS or not hid:
         return usage(f"不认识的 worker 动作 {sub}")
     if hid == POOL and sub not in ("add", "rm"):         # 算力池只收清单、撤清单：没有 worker，状态看项目页
@@ -209,11 +210,12 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
         hid = P.locate(rest[0], rest[1])
     try:
         with PJ._reg_locked() if sub == "add" else nullcontext():
-            if project and sub != "rm" and (reason := unknown_project(project, require=sub == "add")):
+            if project and sub not in ("rm", "clean") and (reason := unknown_project(project, require=sub == "add")):
                 return usage(reason)
             fl = {"list": True, "hosts": ",".join(h for h in home_peers(hid) if h == hid or may is None or may(h))} if lst and sub == "fit" else {}
+            cl = {"cache": cache, "scratch": scratch, "dry_run": dry_run, "yes": yes} if sub == "clean" else {}
             rc, out = W.run_out(sub, hid, rest, gpus, project=project if sub != "rm" else None, stop=stop,
-                                **({"expect_project": project} if own and sub in ("add", "rm") else {}), **fl)
+                                **({"expect_project": project} if own and sub in ("add", "rm") else {}), **fl, **cl)
     except ConfigError as e:
         return {"rc": 3, "out": "", "err": f"[labmon] {e}\n"}
     extra = home_text(hid, may) if sub == "status" and rc == 0 else ""
@@ -280,6 +282,33 @@ def check(pid: str, text: str, may=None, *, probe: bool = False) -> dict:
     if ign:
         why = ([f"输出目录固定在 {out}"] if "out_dir" in ign else []) + (["项目页「本机」一栏删了"] if "local" in ign else [])
         after.append(f"[labmon] monitor.toml 里的 {'、'.join('[local]' if k == 'local' else k for k in ign)} 不再生效（{'，'.join(why)}），不用改")
+    # 静态核对独立主机的跨主机依赖 / 成组（读全局快照 todo，不新增 ssh 连接，#114）
+    glob = snapshot() or {}
+    sa_ids = {h["id"] for h in cfg["hosts"] if is_standalone(h)}
+    if sa_ids:
+        job_hosts: dict[tuple, set[str]] = {}
+        for he in glob.get("hosts") or []:
+            for ln in (he.get("status") or {}).get("todo") or []:
+                for n in ln.get("jobs") or []:
+                    job_hosts.setdefault((ln.get("project"), n), set()).add(he["id"])
+        for he in glob.get("hosts") or []:
+            hid = he.get("id")
+            if hid not in sa_ids:
+                continue
+            loc_gang: dict[tuple, int] = {}
+            for ln in (he.get("status") or {}).get("todo") or []:
+                if ln.get("project") != pid:
+                    continue
+                for n, ds in (ln.get("deps") or {}).items():
+                    for dp, dn in ds:
+                        others = job_hosts.get((dp, dn), set()) - {hid}
+                        if others and hid not in job_hosts.get((dp, dn), set()):
+                            after.append(f"[labmon] 警告：独立主机 {hid} 的任务 {n} 依赖 {dp}/{dn}（位于 {'、'.join(sorted(others))}）；独立主机不共享 worker_home，不支持跨主机 after=")
+                for n, (g, gn) in (ln.get("gang") or {}).items():
+                    loc_gang[(g, gn)] = loc_gang.get((g, gn), 0) + 1
+            for (g, gn), cnt in loc_gang.items():
+                if gn and cnt < gn:
+                    after.append(f"[labmon] 警告：独立主机 {hid} 的成组 {g} 声明 {gn} 个成员但本机仅 {cnt} 个；独立主机不支持跨主机成组，只支持同机多清单成组")
     after += [f"[labmon] {m}" for m in told]
     return o.done(0, after=after)
 
@@ -456,23 +485,25 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
 
 
 def disk(pid: str, psnap: dict | None = None) -> dict:
-    """labmon disk（#52）：本项目在共享盘上的合计与各一级目录（大小、近 24 小时与 7 天增量、最大的几项）、删掉的目录、近来结束的任务写了多少，
-    整块盘的剩余与几天满，各主机本地盘上本项目的缓存与单格临时、本地盘余量。数据是项目快照的 storage（disk.project_storage，#53；与项目页「本项目占用」同一份）。
-    psnap：项目快照（缺省现读）。data 是 storage 原样（快照还没有为 None）。"""
+    """labmon disk（#52、#114）：区分「共享盘（集群主机共用）」与「独立主机本地工作盘（各机独立）」。
+    数据是项目快照的 storage（disk.project_storage，#53；与项目页「本项目占用」同一份）。
+    纯独立机项目不再输出“共享盘的总量与剩余还没读到”的误导文案。"""
     o = Out()
     psnap = psnap if psnap is not None else load_json(PJ.out_dir(pid) / "snapshot.json", None)
     if not psnap:
         o.p(f"[labmon] 看板上还没有 {pid} 的快照：第一次采集还没完成，过一两分钟再看")
         return o.done(0, data=None)
     s = psnap.get("storage") or {}
+    sa = s.get("standalone") or {}
     free, total = s.get("free"), s.get("total")
+    dirs = sorted(s.get("dirs") or [], key=lambda d: -(d.get("b") or 0))
+    has_shared = bool(total or dirs or s.get("roots"))
     if total:
         eta = "，".join(f"按近 {w}的速度约 {d:g} 天满" for w, d in (("24 小时", s.get("eta")), ("7 天", s.get("eta7"))) if d is not None)
         o.p(f"[labmon] 共享盘剩 {_gib(free)} / 共 {_gib(total)}（{free / total:.0%}）" + (f"；{eta}" if eta else "；近来没在涨")
             + (f"；索引 {fmt_time(s['at'])}" if s.get("at") else ""))
-    else:
+    elif not sa:
         o.p("[labmon] 共享盘的总量与剩余还没读到")
-    dirs = sorted(s.get("dirs") or [], key=lambda d: -(d.get("b") or 0))
     if dirs:
         grow = "，".join(f"近 {w} {_delta(x) or '没变'}" for w, x in (("24 小时", s.get("d24")), ("7 天", s.get("d7"))) if x is not None)
         o.p(f"本项目在共享盘上（{'、'.join(s.get('roots') or []) or '项目目录'}）：合计 {_gib(s.get('b'))}" + (f"（{grow}）" if grow else "")
@@ -488,7 +519,7 @@ def disk(pid: str, psnap: dict | None = None) -> dict:
         for g in s.get("gone") or []:
             if g.get("d7"):
                 o.p(f"  {C.dir_name(g.get('name'))}（已删）  近 7 天 {_delta(g['d7'])}")
-    else:
+    elif has_shared or not sa:
         o.p("共享盘还没扫到本项目的目录（扫描轮流做，新目录要等一阵）")
     groups = C.write_groups(s.get("jobs") or [])
     if groups:
@@ -497,11 +528,35 @@ def disk(pid: str, psnap: dict | None = None) -> dict:
         j = js[-1]
         o.p(f"  {C.write_text(js)}；{j.get('host')} 上 {fmt_time(j['t1'])} 结束" + ("；还在等重扫，数字会变" if any(x.get("wait") for x in js) else "")
             + ("；超过提醒线（bigwrite: 告警）" if j.get("big") else ""))
+    if sa:
+        o.p("独立主机本地工作盘（各机持久保存、无共享盘；labmon 绝不自动删 projects/ 产物）：")
+        for hid, sw in sa.items():
+            dg = sw.get("disk_gate") or {}
+            fr, tot = sw.get("free"), sw.get("total")
+            room = f"剩 {_gib(fr)} / 共 {_gib(tot)}" if tot else "余量未读到"
+            thr = []
+            if sw.get("quota_gb"):
+                thr.append(f"配额 {sw['quota_gb']:g} GiB")
+            if sw.get("stop_gb"):
+                thr.append(f"停止线 {sw['stop_gb']:g} GiB")
+            if sw.get("warn_gb"):
+                thr.append(f"预警 {sw['warn_gb']:g} GiB")
+            gate = "；磁盘闸门已开启（暂停放新任务）" if dg.get("on") else ""
+            o.p(f"  {sw.get('label') or hid}（{sw.get('root') or ''}）：{room}" + (f"（{'，'.join(thr)}）" if thr else "") + gate)
+            o.p(f"    本项目占 {_gib(sw.get('b') or 0)}，缓存 {_gib(sw.get('cache') or 0)}，单格临时 {_gib(sw.get('scratch') or 0)}"
+                + (f"（还有 {sw['pending']} 个目录未扫）" if sw.get("pending") else ""))
+            for sub in (sw.get("top") or [])[:5]:
+                o.p(f"      {sub[0]}  {_gib(sub[1])}")
+            for r in sw.get("reclaimable") or []:
+                kind_zh = {"project": "闲置项目目录（删前先问用户）", "cache": "闲置缓存（可用 labmon worker clean）", "scratch": "闲置单格临时（可用 labmon worker clean）"}.get(r.get("kind"), "可回收")
+                o.p(f"      [可回收] {r['path']}  {_gib(r['b'])}（闲置 {r['idle_days']} 天，{kind_zh}）")
+            if (sw.get("cache") or 0) + (sw.get("scratch") or 0) > 0:
+                o.p(f"    清理自管缓存预览：labmon worker clean {hid} --project {pid}")
     local = s.get("local") or {}
-    hosts = {h["id"]: h for h in psnap.get("hosts") or [] if not h.get("returned") and not h.get("pool") and not h.get("ephemeral")}
+    hosts = {h["id"]: h for h in psnap.get("hosts") or [] if not h.get("returned") and not h.get("pool") and not h.get("ephemeral") and h["id"] not in sa}
     ids = [i for i in dict.fromkeys([*hosts, *local]) if i in hosts]
     if ids:
-        o.p("各主机本地盘（续租、容器重启会清空；能重算的缓存放这里，用 needs= 声明）：")
+        o.p("各集群主机本地盘（续租、容器重启会清空；能重算的缓存放这里，用 needs= 声明）：")
     for hid in ids:
         loc, h = local.get(hid) or {}, hosts[hid]
         mine = f"本项目缓存 {_gib(loc.get('cache') or 0)}，单格临时 {_gib(loc.get('scratch') or 0)}" if loc else "本项目没有缓存"

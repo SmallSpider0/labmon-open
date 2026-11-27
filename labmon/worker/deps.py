@@ -155,7 +155,9 @@ class DepsMixin:
             self.dep_idx, self.dead, self.dep_where, self.dep_lanes, self.dep_miss = {}, set(), {}, [], {}
             return
         last = {}
-        for h in self.hist:                       # 按结束时刻排好的：后面的盖前面的
+        for h in self.hist:                       # 按结束时刻排好的：后面的盖前面的；看板转送的跨机历史不进依赖完成判定
+            if h.get("shared_hist"):
+                continue
             if not h.get("requeued") and not h.get("void"):
                 last[(h.get("project"), h.get("name"))] = ("done" if h.get("rc") == "0" else "failed", h.get("t1") or 0)
         idx = {k: v for k, (v, _) in last.items()}
@@ -249,6 +251,8 @@ class DepsMixin:
         if bad:
             return "failed", "等的 %s 跑失败了，不会放行：修好重跑（删掉它的 .failed）后接着等；不等了就删掉这一行的 after=" % dep_names(bad, r["project"])
         if miss:
+            if self.is_standalone():
+                return "missing", "找不到等的 %s（独立主机不共享 worker_home，读不到别的主机的任务状态；只支持同机依赖）：改对 after= 后下一轮生效" % dep_names(miss, r["project"])
             return "missing", "找不到等的 %s（任务名写错了，或它所在的清单没登记）：改对 after= 后下一轮生效" % dep_names(miss, r["project"])
         ring = pend and self.dep_cycle(r, [k[:2] for k in pend])
         if ring:
@@ -489,6 +493,13 @@ class DepsMixin:
         ctx = self.gctx.get(gk) or {"mem": {}, "why": [], "bad": "凑不齐：还没认出同组的成员"}
         ms, bad = ctx["mem"], ctx["bad"]
         if bad:
+            if self.is_standalone():
+                loc_n = sum(1 for v in ms.values() if v.get("host") is None)
+                if r["gn"] > loc_n:
+                    t0 = self.gang_miss.setdefault(gk, now)
+                    if now - t0 < _C.DEP_MISS_S:
+                        return "wait", "成组 %s %s（独立主机不支持跨主机成组，只支持同机多清单成组）；%d 分钟后仍这样就报找不到" % (g, bad, _C.DEP_MISS_S // 60)
+                    return "missing", "成组 %s %s（独立主机不支持跨主机成组，只支持同机多清单成组）：改清单后下一轮生效" % (g, bad)
             t0 = self.gang_miss.setdefault(gk, now)
             if now - t0 < _C.DEP_MISS_S:
                 return "wait", "成组 %s %s；刚加的行要等那台 worker 认出，%d 分钟后仍这样就报找不到" % (g, bad, _C.DEP_MISS_S // 60)

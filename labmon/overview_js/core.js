@@ -14,6 +14,8 @@ function route(h = location.hash) {
   const ha = h.match(/^#\/host\/([^/]+)\/assign$/);
   if (ha) return {kind: "host", id: dec(ha[1]), drw: {k: "assign", id: dec(ha[1])}};
   if (h === "#/archived") return {kind: "home", drw: {k: "arch", id: ""}};
+  const ext = h.match(/^#\/ext\/([^/]+)$/);
+  if (ext) return {kind: "home", drw: {k: "ext", id: ext[1] === "new" ? "" : dec(ext[1])}};
   const account = h.match(/^#\/me(?:\/(security|tokens|push))?$/);
   if (account) return {kind: "me", tab: account[1] || "overview"};
   const user = h.match(/^#\/admin\/users(?:\/([^/]+)(?:\/(usage))?)?$/);
@@ -71,7 +73,7 @@ function closeDrw() {
 }
 function stepDrw(dir) {
   const d = route().drw;
-  if (!d || d.k === "new" || d.k === "guard" || d.k === "renew" || d.k === "proj" || d.k === "arch" || d.k === "assign" || d.k === "account" || d.id === "+") return;
+  if (!d || d.k === "new" || d.k === "guard" || d.k === "renew" || d.k === "proj" || d.k === "arch" || d.k === "assign" || d.k === "account" || d.k === "ext" || d.id === "+") return;
   const ids = d.k === "srv" ? srvOrder() : peopleOrder(), k = ids.indexOf(d.id);
   if (k >= 0 && ids.length > 1) nav(DH[d.k](ids[(k + dir + ids.length) % ids.length]));
 }
@@ -99,6 +101,10 @@ function alertsOf(h) {
   else if (!h.worker_up) add("user", `${h.label}：worker 已 ${dur(h.age)}没更新状态（容器重启过？labmon worker start ${h.id}）`);
   const m = h.status?.info?.mem;
   if (m && m.limit && m.anon / m.limit >= 0.9) add("user", `${h.label}：收不回的内存 ${g1(m.anon)} / ${g1(m.limit)} GiB，超过 90%${h.status?.gate?.on ? "，已停止放行" : ""}`);
+  const dg = h.status?.disk_gate || h.work_disk?.disk_gate, wd = h.work_disk;
+  if (dg?.on) add("both", `${h.label}：${dg.why || "本地工作盘空间不足，已暂停放行新任务"}`);
+  else if (wd?.low) add("both", `${h.label}：本地工作盘 ${wd.root} 剩 ${GB(wd.free)} GiB（低于预警线 ${wd.warn_gb} GiB）`);
+  else if (wd?.quota_warn) add("both", `${h.label}：本地工作盘 ${wd.root} 已用 ${GB(wd.work_b)} GiB，接近软配额 ${wd.quota_gb} GiB`);
   for (const w of missW(h)) add("user", `${h.label}：${w.name} ${w.why}`);
   for (const w of (h.status?.waiting || []).filter(w => w.dep && w.dep !== "wait")) add("agent", `${h.label}：${pname(w.project)} 的 ${w.name} ${w.why}`);
   for (const w of (h.status?.waiting || []).filter(w => w.cpu_wait)) add("agent", `${h.label}：${pname(w.project)} 的 ${w.name} 因 CPU 被挡 ${dur(w.cpu_wait)}：${w.why}`);

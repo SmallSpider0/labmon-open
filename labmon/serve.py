@@ -106,6 +106,7 @@ from . import collect as C
 from . import deploy as DP
 from . import disk as DK
 from . import ephemeral as EP
+from . import exthost as EH
 from . import fleet as F
 from . import fleetboot as FB
 from . import fleetops as FO
@@ -615,7 +616,7 @@ class Handler(BaseHTTPRequestHandler):
             ok = "、".join(sorted(_host_text(x, self.server.dport) for x in self.server.hosts))
             self._json(403, {"error": f"不认这个 Host：{h or '（没带）'}；看板只认 {ok}（另认的写在主机清单 [server] 的 lan_hosts、public_hosts）"})
             return False
-        if self.command not in ("POST", "PUT"):
+        if self.command not in ("POST", "PUT", "DELETE"):
             return True
         if self.headers.get_content_type() != "application/json":
             self._json(415, {"error": "写请求要带 Content-Type: application/json（防别的网站用表单跨站提交）"})
@@ -652,8 +653,7 @@ class Handler(BaseHTTPRequestHandler):
         if who.cookie:                                   # 会话续了期：重发 Cookie，浏览器里的过期时刻跟着往后挪
             self.cookies.append(self._cookie(who.cookie))
         # 备用的项目与主机权限可能落后于主看板，先让客户端切换入口。
-        needs_primary = (m == "POST" or (m == "PUT" and PROJECT_CONFIG_PATH.fullmatch(path))
-                         or (m == "GET" and CLI_READS.fullmatch(path)))
+        needs_primary = (m in ("POST", "PUT", "DELETE") or (m == "GET" and CLI_READS.fullmatch(path)))
         if needs_primary and self._standby(path):
             return False
         minimum = self.board.min_client_commit
@@ -693,6 +693,15 @@ class Handler(BaseHTTPRequestHandler):
         不行抛 users.Denied(403)；请求体不是 JSON 对象时已回 400、返回 False。管理员、读的路由（没写 own）不核；没写 own 的写路由普通用户一律 403。
         对象鉴权只在这里定（#19）：项目的主人、登记新项目的名额（need_room）、暂停是不是他下的（need_pause）当场核一次，同一份记成 self.guard(主机)，
         要在锁里再核的业务函数（推配置、改配置、归档、恢复的 check_owner，调度卡与命令行的暂停）都调它，不各自另写。"""
+        if r.own == "ext_host":                        # 外部主机双入口（#114）：管理员走 can_ops；普通用户仅可自助增删改测本人名下外部机
+            if who.role == "admin":
+                if not U.can_ops(who, self.entry):
+                    raise U.Denied(403, "管理员操作外部主机需在内网入口或开启公网平台操作（命令行需 admin 令牌）")
+                return True
+            m = EXT_HOST_PATH.fullmatch(path) or EXT_HOST_ACT.fullmatch(path)
+            if m:
+                U.need_external_host(who, unquote(m[1]))
+            return True
         if who.role == "admin" or r.own == "self" or (r.own is None and r.method == "GET"):
             return True
         if r.own is None:
@@ -761,6 +770,10 @@ class Handler(BaseHTTPRequestHandler):
                 U.need_list(who, *args, s("project"))
             elif sub == "rm":                          # 池（#24）：按清单此刻登记在哪核（池里，或已放到借给池的主机上；api.worker 同样经 pool.locate）
                 body["project"] = U.need_reg(who, PO.locate(*args) if s("host") == POOL and len(args) == 2 else s("host"), *args)
+            elif sub == "clean":
+                if not body.get("project"):
+                    raise U.Denied(403, "普通用户运行 worker clean 必须通过 --project 指定自己的项目")
+                U.need_project(who, s("project"))
             elif body.get("project"):
                 U.need_project(who, s("project"))
                 if sub == "fit" and body.get("list"):     # fit --list 读这条清单：别的项目名下的清单不给看
@@ -1064,13 +1077,28 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(200, snap)
 
     def do_PUT(self):
-        """推项目配置（#161）：PUT /api/project/<id>/config，见模块说明与 projects.put_config。"""
+        """推项目配置（PUT /api/project/<id>/config）与修改外部主机（PUT /api/hosts/external/<id>）。"""
         if not self._gate():
             return
         path = urlsplit(self.path).path
         who = self._allow(path)
         if who is False:
             return
+        em = EXT_HOST_PATH.fullmatch(path)
+        if em:
+            body = self._body()
+            if body is None:
+                return
+            hid = unquote(em[1])
+            try:
+                out = EH.edit_external(hid, body, who)
+            except U.Denied as x:
+                return self._json(x.code, {"error": x.msg})
+            except ConfigError as x:
+                return self._json(409, {"error": str(x)})
+            self.board.overview.wake.set()
+            log(f"外部主机：{who.name} 修改了 {hid}")
+            return self._json(200, out)
         m = PROJECT_CONFIG_PATH.fullmatch(path)
         if not m:
             return self._json(404, {"error": "没有这个接口"})
@@ -1096,6 +1124,31 @@ class Handler(BaseHTTPRequestHandler):
         if r["created"] or r["changed"]:
             log(f"项目：{msg}（{who.name}）")
         return self._send(200, json.dumps({**r, "msg": msg}, ensure_ascii=False), "application/json", extra={"ETag": f'"{r["ver"]}"'})
+
+    def do_DELETE(self):
+        """删除外部主机（DELETE /api/hosts/external/<id>）。"""
+        if not self._gate():
+            return
+        path = urlsplit(self.path).path
+        who = self._allow(path)
+        if who is False:
+            return
+        em = EXT_HOST_PATH.fullmatch(path)
+        if not em:
+            return self._json(404, {"error": "没有这个接口"})
+        body = self._body()
+        if body is None:
+            return
+        hid = unquote(em[1])
+        try:
+            out = EH.remove_external(hid, who, force=bool(body.get("force")))
+        except U.Denied as x:
+            return self._json(x.code, {"error": x.msg})
+        except ConfigError as x:
+            return self._json(409, {"error": str(x)})
+        self.board.overview.wake.set()
+        log(f"外部主机：{who.name} 删除了 {hid}")
+        return self._json(200, out)
 
     def _api(self, act: str, who: U.Ident | None):
         """账号（#160，users.py）：登录、用设置码设口令、退出不要登录；改口令、自己的令牌只认浏览器会话；/api/users/* 只给管理员（路由表定）。
@@ -1156,6 +1209,21 @@ class Handler(BaseHTTPRequestHandler):
                 self.board.overview.wake.set()
                 log(f"账号：{msg}（{who.name}）")
                 return self._json(200, {"msg": msg})
+            if act == "hosts/external":
+                out = EH.add_external(body, who)
+                self.board.overview.wake.set()
+                log(f"外部主机：{who.name} 添加了 {out['host']['id']}")
+                return self._json(201, out)
+            em = re.fullmatch(r"hosts/external/([^/]+)/(test|key)", act)
+            if em:
+                hid, what = unquote(em[1]), em[2]
+                if what == "test":
+                    out = EH.test_external(hid, who)
+                    return self._json(200, out)
+                out = EH.key_external(hid, who, rotate=bool(body.get("rotate")))
+                if body.get("rotate"):
+                    log(f"外部主机：{who.name} 轮换了 {hid} 的专用密钥")
+                return self._json(200, out)
             if act == "admin/deploy":
                 out = DP.apply(body.get("bundle"))
                 log(f"部署由 {who.name} 发起：{out['msg']}")
@@ -1227,7 +1295,9 @@ class Handler(BaseHTTPRequestHandler):
             args = _worker_args(sub, body)
             r = A.worker(sub, s("host"), args, body.get("gpus") or None, project=body.get("project") or None,
                          stop=body.get("stop") or None, own=who.role != "admin", lst=bool(body.get("list")),
-                         may=None if who.role == "admin" else lambda hid: U.may_host(who, hid))
+                         may=None if who.role == "admin" else lambda hid: U.may_host(who, hid),
+                         cache=bool(body.get("cache")), scratch=bool(body.get("scratch")),
+                         dry_run=bool(body.get("dry_run")), yes=bool(body.get("yes")))
             what = f"worker {sub} {s('host')} {' '.join(args)}"
         elif act.startswith("override/"):
             verb = act[len("override/"):]
@@ -1582,8 +1652,12 @@ def _worker_args(sub: str, body: dict) -> list[str]:
         raise U.Denied(400, "args 只接受位置参数，选项请单独传")
     if body.get("list") not in (None, False, True) or (body.get("list") and (sub != "fit" or len(args) != 2 or not body.get("project"))):
         raise U.Denied(400, "list 只用于 worker fit：位置参数是 ROOT JOBS，要写 project")
-    if (sub in ("add", "rm") and len(args) != 2) or (sub in ("start", "stop", "status") and args) or (sub == "fit" and not args):
+    if (sub in ("add", "rm") and len(args) != 2) or (sub in ("start", "stop", "status", "clean") and args) or (sub == "fit" and not args):
         raise U.Denied(400, f"worker {sub} 的位置参数数量不对")
+    if sub == "clean":
+        for flag in ("cache", "scratch", "dry_run", "yes"):
+            if body.get(flag) not in (None, False, True):
+                raise U.Denied(400, f"worker clean 的 {flag} 要是布尔值")
     for key in ("project", "gpus") if sub == "add" else ("project", "gpus", "stop"):
         if body.get(key) is not None and (not isinstance(body[key], str) or "\x00" in body[key] or body[key].startswith("-")):
             raise U.Denied(400, f"worker 的 {key} 要是有效的字符串")
@@ -1797,6 +1871,8 @@ def live_snapshot() -> dict:
 # 备用时照收的写请求（#163）：登录与账号（只动本机的账号库）、部署（换代码、重启，主备都要能部署）。别的写请求回 409。
 PROJECT_CONFIG_PATH = re.compile(r"/api/project/([^/]+)/config")
 PROJECT_READ_PATH = re.compile(r"/api/project/([^/]+)/(status|disk|records)")   # 实验会话的只读命令（#52）：labmon status、disk、records
+EXT_HOST_PATH = re.compile(r"/api/hosts/external/([^/]+)")                      # 外部主机改/删（#114）：PUT / DELETE
+EXT_HOST_ACT = re.compile(r"/api/hosts/external/([^/]+)/(test|key)")            # 外部主机测试/密钥（#114）：POST
 CLI_READS = re.compile(r"/api/(hosts|disk|project/[^/]+/(config|status|disk|records)|client/wheel|reports)")     # 命令行读的接口：备用上同样回 409 standby（_standby），命令行接着找主那台
 STANDBY_OK = re.compile(r"/api/(login|setup|logout|password|tokens/add|revoke|users/.*|admin/deploy)")
 
@@ -1820,8 +1896,8 @@ class Route(NamedTuple):
 
 OPEN = ""
 # own（#167，Handler._own）：普通用户的这个请求按什么核。path 地址里的项目要是他的；new 同 path，还没登记的也放（第一次推就登记）；
-# body 请求体的 project；worker、override、init、wait、reg 见 _own；self 只动自己的账号；fleet_srv 本人持有服务器的曲线（#211）。
-OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self", "host_assign", "fleet_srv")
+# body 请求体的 project；worker、override、init、wait、reg 见 _own；self 只动自己的账号；fleet_srv 本人持有服务器的曲线（#211）；ext_host 外部主机（#114）。
+OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self", "host_assign", "fleet_srv", "ext_host")
 _R = lambda m, p, scope, admin=False, lan=False, own=None, ops=False: Route(m, re.compile(p), scope, admin, lan, own, ops)   # noqa: E731
 # 看板服务的路由表（#160）：每条路由要什么权限只在这里写；Handler._allow 按它调 users.check。
 # 没登记的路径 GET 按 read、POST 与 PUT 按管理员的 admin（新写路由忘了登记时从严）。平台操作由 ops 核对账号入口许可；部署等纯内网路由用 lan。
@@ -1839,7 +1915,11 @@ ROUTES = [
     _R("POST", r"/api/worker/start", "deploy", admin=True, lan=True),  # 拉起 worker（部署后、labmon worker start）：要连服务器、推代码，仍只在内网入口
     # 命令行（#162，api.py）：会改整台主机、借卡、改主机清单在用不在用的要 admin 令牌（实验会话的 project 令牌做不了，交给用户）
     _R("POST", r"/api/worker/(stop|limit)", "admin", admin=True),
-    _R("POST", r"/api/worker/(add|rm|status|fit)", "project", own="worker"),
+    _R("POST", r"/api/worker/(add|rm|status|fit|clean)", "project", own="worker"),
+    _R("POST", r"/api/hosts/external", "project", own="ext_host"),     # 外部主机双入口（#114）：管理员走 can_ops，普通用户限本人私有（上限 3 台）
+    _R("PUT", EXT_HOST_PATH.pattern, "project", own="ext_host"),
+    _R("DELETE", EXT_HOST_PATH.pattern, "project", own="ext_host"),
+    _R("POST", EXT_HOST_ACT.pattern, "project", own="ext_host"),
     _R("POST", r"/api/override/(focus|unfocus)", "project", admin=True),   # 优先只给管理员（#16），带不带 --host 都一样
     _R("POST", r"/api/override/(pause|resume)", "project", own="override"),
     _R("POST", r"/api/override/(drain|undrain)", "admin", admin=True),

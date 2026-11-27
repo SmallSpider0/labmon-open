@@ -11,6 +11,7 @@ labmon worker status 29                                  # 查看队列状态、
 labmon worker fit 29 <目录> <清单> --list --project <id>   # 评估该清单在共用 worker 目录的各主机上可新开几条车道
 labmon worker fit 29 <任务名>…                            # 单独评估具体任务在本主机是否放得下
 labmon worker limit 29 heavy=2                           # 限制同 tag 任务并发上限（整机共用；项目独占 tag 需带项目名）
+labmon worker clean ext-4090 [--project <id>] [--cache|--scratch] [--yes]   # 仅清理自管缓存与已结束单格临时（默认 --dry-run 预览，绝不动 projects/）
 labmon worker rm 29 <目录> <清单> / labmon worker stop 29
 labmon worker add pool <目录> <清单> --project <id>    # 提交给算力池；撤回用 worker rm pool <目录> <清单>
 ```
@@ -24,14 +25,15 @@ labmon worker add pool <目录> <清单> --project <id>    # 提交给算力池�
 
 NFS 共享盘（如 `/root/data1`）数据持久；容器本地盘在续租或平台重启时会被清空。
 
-| 类别 | 放哪 | 要求 |
-|---|---|---|
-| 结果、日志；不可重算或重算代价高（>30分钟）的文件 | 共享盘 `projects/<项目>/` | 规范控制体积 |
-| 跨任务使用的可重算中间文件 | `$LABMON_CACHE`（本地缓存） | 行尾声明 `needs=`；命令中编写 `[ -f 文件 ] \|\| 生成命令;` |
-| 需跨机复用且重算代价中等（>10分钟、几GB以内）的文件 | `$LABMON_CACHE`，且在共享盘留主副本 | 声明 `needs=本地<主副本`（本地缺失时 worker 自动从共享盘拉取） |
-| 单任务运行中使用的临时文件 | `$LABMON_SCRATCH`（单格临时目录） | 任务成功后 worker 自动清理 |
+| 类别 | 集群共享盘主机 | 独立主机（外租 Linux / WSL2 / 本机 Mac） | 要求 |
+|---|---|---|---|
+| 代码、结果、日志与长期产物 | 共享盘 `projects/<项目>/` | `<data_root>/projects/<项目>/`（持久，默认 `~/.local/share/labmon/work`） | 独立机严禁直接指向源码开发仓；Mac 用 `git worktree add --detach` / `cp -cR`，产物落 `runs/` |
+| 共用环境、数据集、权重 | 共享盘 `envs/`、`datasets/`、`weights/` | `<data_root>/{envs,datasets,weights}` | 只读引用/软链，不另存副本 |
+| 跨任务可重算中间缓存 | `$LABMON_CACHE`（容器 `/tmp`，续租清空） | `$LABMON_CACHE`（`<data_root>/.tmp/cache`，持久） | 行尾声明 `needs=`；可用 `labmon worker clean` 按需清理 |
+| 需跨机复用且重算代价中等的文件 | `$LABMON_CACHE` + 共享盘主副本（`needs=本地<主副本`） | 独立机不共享集群盘，直接放本机 `$LABMON_CACHE` | 独立机无跨机共享主副本 |
+| 单任务运行中临时文件 | `$LABMON_SCRATCH`（`/tmp/labmon/jobs`） | `$LABMON_SCRATCH`（`<data_root>/.tmp/jobs`） | 任务成功后自动清理；残留可用 `labmon worker clean --scratch --yes` |
 
-“共享盘各机可读”仅适用于代码、数据集与最终结果。可重算的缓存放本地；下游用完的中间产物在清单中编写收尾任务删除（行尾 `after=<下游任务>`），或通过 `labmon disk` 定期清理。
+“共享盘各机可读”仅适用于集群主机上的代码、数据集与最终结果。可重算的缓存放 `$LABMON_CACHE`；下游用完的中间产物在清单中编写收尾任务删除（行尾 `after=<下游任务>`），或通过 `labmon disk` 查看并在用户确认后清理。
 
 ## 清单行
 

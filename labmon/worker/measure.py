@@ -351,7 +351,8 @@ def host_info(gpus, data_root):
     h["disk"] = []
     try:
         s = os.statvfs(data_root)
-        h["disk"].append({"path": data_root, "free": s.f_bavail * s.f_frsize / _C.GIB, "total": s.f_blocks * s.f_frsize / _C.GIB})
+        h["disk"].append({"path": data_root, "free": s.f_bavail * s.f_frsize / _C.GIB, "total": s.f_blocks * s.f_frsize / _C.GIB,
+                          "kind": "local" if os.environ.get("LABMON_STANDALONE") == "1" else "shared"})
     except OSError:
         pass
     h["started"] = _C.started_at(1)          # 容器启动时间 = PID 1 的启动时刻（服务器"重启"多半只是重启容器）
@@ -651,6 +652,56 @@ class MeasureMixin:
         if fc is not None and self.failcnt is not None and fc > self.failcnt:
             self.event("failcnt", "容器内存撞上限 %d 次（累计 %d）" % (fc - self.failcnt, fc))
         self.failcnt = fc
+
+    def disk_events(self, info, pol):
+        """本地盘低水位/软配额准入闸门（#114，复用内存闸门模式）：
+        - 触发：data_root 所在卷 free < disk_stop_gb，或配置了 disk_quota_gb 且已扫描 <data_root> 总占用 > disk_quota_gb；
+        - 滞回恢复：剩余空间回升至 disk_stop_gb + DISK_HYST_GB 且占用降至 disk_quota_gb - DISK_HYST_GB 以下自动解除；
+        - 不杀在跑任务，仅在 Worker.place() 的 pre() 拦截新任务放行并记 disk_gate 事件。"""
+        stop_gb = pol.get("disk_stop_gb")
+        quota_gb = pol.get("disk_quota_gb")
+        d0 = next(iter((info or {}).get("disk") or []), None)
+        free_gb = d0.get("free") if isinstance(d0, dict) else None
+        wb = ((self.storage or {}).get("work") or {}).get("b")
+        work_gb = (wb / _C.GIB) if wb is not None else None
+        was = bool((self.disk_gate or {}).get("on"))
+        has_stop = stop_gb is not None and stop_gb > 0
+        has_quota = quota_gb is not None and quota_gb > 0
+        if not (has_stop or has_quota):
+            on = False
+        elif not was:
+            on = (has_stop and free_gb is not None and free_gb < stop_gb) or (has_quota and work_gb is not None and work_gb > quota_gb)
+        else:
+            free_ok = (not has_stop) or free_gb is None or free_gb >= stop_gb + _C.DISK_HYST_GB
+            quota_ok = (not has_quota) or work_gb is None or work_gb <= max(0.0, quota_gb - _C.DISK_HYST_GB)
+            on = not (free_ok and quota_ok)
+        why = None
+        if on:
+            bits = []
+            if has_stop and free_gb is not None and free_gb < stop_gb + _C.DISK_HYST_GB:
+                if free_gb < stop_gb:
+                    bits.append("本地盘仅剩 %.1f GiB（低于停止线 %g GiB）" % (free_gb, stop_gb))
+                else:
+                    bits.append("本地盘剩 %.1f GiB（需回升至 %g GiB 以上解除）" % (free_gb, stop_gb + _C.DISK_HYST_GB))
+            if has_quota and work_gb is not None and work_gb > max(0.0, quota_gb - _C.DISK_HYST_GB):
+                if work_gb > quota_gb:
+                    bits.append("%s 已占 %.1f GiB 超过配额 %g GiB" % (_C.DATA_ROOT, work_gb, quota_gb))
+                else:
+                    bits.append("%s 已占 %.1f GiB（需降至 %g GiB 以下解除）" % (_C.DATA_ROOT, work_gb, max(0.0, quota_gb - _C.DISK_HYST_GB)))
+            why = "磁盘闸门：" + ("；".join(bits) or "本地盘空间不足") + "，暂停放新任务；请运行 labmon disk 查看并清理缓存或旧运行目录"
+        if on != was:
+            if on:
+                self.event("disk_gate", why)
+            else:
+                self.event("disk_gate", "磁盘闸门打开，恢复放行（本地盘剩 %s GiB）" % ("%.1f" % free_gb if free_gb is not None else "?"))
+        self.disk_gate = {
+            "on": on,
+            "why": why,
+            "free_gb": round(free_gb, 2) if free_gb is not None else None,
+            "stop_gb": stop_gb,
+            "quota_gb": quota_gb,
+            "work_gb": round(work_gb, 2) if work_gb is not None else None,
+        }
 
     def gpu_now(self):
         """停保活之后此刻的 GPU 进程（放行独占任务前看）：归属沿用这一轮 sample 认的，之后才冒出来的算 labmon 之外的。"""

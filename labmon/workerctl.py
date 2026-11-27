@@ -305,7 +305,7 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
             queue_stop_path(opts.get("stop"))
         except ValueError as e:
             return 2, str(e)
-    if sub in CHANGE:
+    if sub in CHANGE or (sub == "clean" and opts.get("yes")):
         LS.need(f"worker {sub}")
     h = via(hid, home) if sub == "rm" or hid == POOL else host_conf(hid)
     if sub == "add" and hid != POOL and args:
@@ -317,7 +317,8 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
     hq = shlex.quote(hid)
     if sub == "start":
         guest = h.get("borrow") and not h["borrow"].get("swap")                  # 直接借来的：不在对方的容器里扫共享盘
-        sh = f" --shared {shlex.quote(h['shared'][0])}" if h["shared"] and not guest else ""      # 共享盘用量由这台的 worker 统计
+        sh = f" --shared {shlex.quote(h['shared'][0])}" if h["shared"] and not guest and not is_standalone(h) else ""      # 共享盘用量由这台的 worker 统计
+        sa = " --standalone" if is_standalone(h) else ""
         # 一条连接：把 main 上已提交的 labmon_worker.py、worker/*.py 与停启保活的 ka.sh 打成 tar.gz 经标准输入送出，
         # 先在 worker_home 下建临时目录解包（失败则清理退出、不破坏现有文件），再替换 worker/*.py、清掉已删模块与旧 __pycache__、替换 ka.sh 与入口脚本，
         # 最后后台拉起（--replace 让旧 worker 退出、由新进程接管任务）。后台那句单独写、不接在 cd 或 && 后面，否则 ssh 会挂到进程结束。
@@ -341,7 +342,7 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
             f'mv "$d/ka.sh" {hq_home}/ka.sh && '
             f'mv "$d/labmon_worker.py" {hq_home}/labmon_worker.py); then rm -rf "$d"; exit 1; fi\n'
             f'rm -rf "$d"\n'
-            f"setsid nohup {w} run --host {hq} --replace{sh} > /dev/null 2>&1 < /dev/null &\n"
+            f"setsid nohup {w} run --host {hq} --replace{sh}{sa} > /dev/null 2>&1 < /dev/null &\n"
             f"sleep {START_CHECK_S}; o=$({w} ls --host {hq}); echo \"$o\"\n"
             f"case \"$o\" in worker：运行中*) ;; *) echo '---- worker.log 末尾'; tail -n 12 {log}; exit 3;; esac"
         )
@@ -352,6 +353,10 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
     extra += " --idle" if opts.pop("idle", False) else ""
     extra += " --list" if opts.pop("list", False) else ""    # fit --list（#35 B）：位置参数是 ROOT JOBS，hosts 是看哪几台
     extra += " --pool" if opts.pop("pool", False) else ""    # add：算力池放过去的（#79），登记里记 pool
+    extra += " --cache" if opts.pop("cache", False) else ""
+    extra += " --scratch" if opts.pop("scratch", False) else ""
+    extra += " --dry-run" if opts.pop("dry_run", False) else ""
+    extra += " --yes" if opts.pop("yes", False) else ""
     extra += "".join(f" --{k.replace('_', '-')} {shlex.quote(v)}" for k, v in opts.items() if v)
     rc, out = ssh(h, f"{w} {'ls' if sub == 'status' else sub} {extra} --host {hq}")   # 位置参数要在 --host 前
     if opts.get("expect_project") and rc != 0 and "unrecognized arguments: --expect-project" in out:
