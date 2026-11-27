@@ -1777,8 +1777,20 @@ class RegsTest(unittest.TestCase):
                          ("returned", "借 X", K.parse_time("2026-11-01 10:00"), ["term"]))
         self.assertEqual((regs["old"]["state"], regs["old"]["queues"][0]["project"]), ("unlisted", "p2"))
         self.assertEqual(regs["empty"]["queues"], [])
-        # 代读的那台这一轮连不上：已归还的沿用上一轮、标 stale；连不上的那台自己的也沿用
+        # 首选代读主机 a 这一轮连不上、同域 b 仍在线：自动切换到 b 补读登记（#212），a 自己沿用并标 stale，b 与 gone 均读到最新（不标 stale）
         O.fetch = lambda h, timeout=60: (None, "ssh 超时") if h["id"] == "a" else real(h, timeout)
+        try:
+            snap = O.collect([], use_ssh=False)
+        finally:
+            O.fetch = real
+        regs = {x["host"]: x for x in snap["regs"]}
+        self.assertEqual((regs["gone"]["stale"], regs["gone"]["queues"][0]["jobs"]), (False, "jobs/g.txt"))
+        self.assertEqual((regs["a"]["stale"], regs["a"]["queues"][0]["jobs"]), (True, "jobs/a.txt"))
+        self.assertEqual((regs["b"]["stale"], regs["b"]["queues"][0]["jobs"]), (False, "jobs/b.txt"))
+        self.assertFalse(regs["c"]["stale"])
+        self.assertEqual({x["host"] for x in snap["regs"]}, {"a", "b", "c", "gone", "empty", "old"})
+        # 整块共享域（a 与 b）都连不上：已归还的与该域主机均沿用上一轮、标 stale，另一域 c 不受影响
+        O.fetch = lambda h, timeout=60: (None, "ssh 超时") if h["id"] in ("a", "b") else real(h, timeout)
         try:
             snap = O.collect([], use_ssh=False)
         finally:
