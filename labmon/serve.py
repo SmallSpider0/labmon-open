@@ -1756,7 +1756,13 @@ def reg_move(to: str, items: list, own: bool = False, pool: str | None = None, p
     wait --job 按快照车道认任务，去向在 kind=pool 的事件里，labmon records 与项目页时间线看得到；要会话动手的有 pool_wait: 兜着）。"""
     if not to or not items:
         raise ConfigError("没说搬到哪台、搬哪几条")
-    if pool is None and not is_pool_id(to):
+    if is_pool_id(to) or str(to).startswith("pool:"):
+        pcfg = resolve_pool(str(to))
+        if pcfg:
+            to = pcfg["host_id"]
+        elif pool is None:
+            raise ConfigError(f"未配置算力池 {to}（先在 hosts.toml 里定义 [pools.<id>]）")
+    elif pool is None:
         if ep := PO.exclusive_pool(to):
             raise ConfigError(f"主机 {to} 属于独占共有算力池「{ep['label']}」（{ep['host_id']}），不能手动搬到单台；请改用 {ep['host_id']}")
     known = {str(h["id"]): h for h in all_hosts()}

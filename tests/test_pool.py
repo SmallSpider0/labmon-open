@@ -675,9 +675,9 @@ members = ["alice", "bob"]
         with mock.patch.object(LS, "primary", return_value=True):
             res = P.tick(hosts, regs, self.sw, self.t, move_fn=lambda *a: moves.append(a), fit_fn=nofit_all)
         self.assertEqual(moves, [])
-        self.assertIn("等 prep 跑完", res["lists"]["/data/lab/pa|jobs/dep.txt"]["why"])
-        self.assertIn("h2", res["lists"]["/data/lab/pa|jobs/ew.txt"]["why"])
-        big = res["lists"]["/data/lab/pa|jobs/big.txt"]
+        self.assertIn("等 prep 跑完", res["lists"][P.key("/data/lab/pa", "jobs/dep.txt", "a100")]["why"])
+        self.assertIn("h2", res["lists"][P.key("/data/lab/pa", "jobs/ew.txt", "a100")]["why"])
+        big = res["lists"][P.key("/data/lab/pa", "jobs/big.txt", "a100")]
         self.assertTrue(big["nofit"])
         self.assertIn("要 8 张卡", big["why"])
 
@@ -792,9 +792,72 @@ members = ["alice", "bob"]
         hosts = [make_host_entry("h1", gpus=1, busy_gpus=0, pool_heads=heads, t=self.t)]
         regs = [{"host": "pool:a100", "state": "pool", "queues": [{"root": "/data/lab/pa", "jobs": "jobs/q.txt", "project": "pa"}]}]
         out = P.tick(hosts, regs, self.sw, self.t, lan_ok=True, move_fn=lambda *a: None, fit_fn=lambda *a: None)
-        lk = P.key("/data/lab/pa", "jobs/q.txt")
+        lk = P.key("/data/lab/pa", "jobs/q.txt", "a100")
         self.assertFalse(out["lists"][lk].get("done"))
         self.assertIn(lk, P.load_json(P.state_file(), {}).get("wait_since", {}))
+
+    def test_cross_domain_same_path_lists_isolated(self):
+        """Codex P2：两个不同 worker_home 的共有池存在同名 ROOT/JOBS 时，状态键带池 id，互不覆盖 lists/wait_since。"""
+        (self.d / "hosts.toml").write_text("""
+[[hosts]]
+id = "h1"
+ssh = "u@10.0.0.1"
+worker_home = "/data/cluster_a/.labmon"
+
+[[hosts]]
+id = "h2"
+ssh = "u@10.0.0.2"
+worker_home = "/data/cluster_b/.labmon"
+
+[pools.pa_pool]
+label = "A 域池"
+hosts = ["h1"]
+members = ["alice"]
+
+[pools.pb_pool]
+label = "B 域池"
+hosts = ["h2"]
+members = ["bob"]
+""")
+        k1 = "pool:pa_pool|/projects/demo|jobs.txt"
+        k2 = "pool:pb_pool|/projects/demo|jobs.txt"
+        hosts = [
+            make_host_entry("h1", gpus=1, busy_gpus=0, pool_heads={k1: {"pool": "pool:pa_pool", "pool_id": "pa_pool", "head": "j_a", "n": 1}}, t=self.t),
+            make_host_entry("h2", gpus=1, busy_gpus=0, pool_heads={k2: {"pool": "pool:pb_pool", "pool_id": "pb_pool", "head": "j_b", "n": 1}}, t=self.t),
+        ]
+        regs = [
+            {"host": "pool:pa_pool", "state": "pool", "queues": [{"root": "/projects/demo", "jobs": "jobs.txt", "project": "pa"}]},
+            {"host": "pool:pb_pool", "state": "pool", "queues": [{"root": "/projects/demo", "jobs": "jobs.txt", "project": "pb"}]},
+        ]
+        out = P.tick(hosts, regs, self.sw, self.t, lan_ok=True, use_ssh=False)
+        lk1 = P.key("/projects/demo", "jobs.txt", "pa_pool")
+        lk2 = P.key("/projects/demo", "jobs.txt", "pb_pool")
+        self.assertIn(lk1, out["lists"])
+        self.assertIn(lk2, out["lists"])
+        self.assertEqual(out["lists"][lk1]["pool"], "pa_pool")
+        self.assertEqual(out["lists"][lk2]["pool"], "pb_pool")
+        self.assertEqual(out["lists"][lk1]["head"], "j_a")
+        self.assertEqual(out["lists"][lk2]["head"], "j_b")
+
+    def test_api_fit_fallback_and_reg_move_pool_alias(self):
+        """Codex P2：① worker fit pool:<id> --list 首台不可达时自动回退下一台可用池主机；② reg_move('pool', ...) 规范化为实际池入口 pool:a100。"""
+        tried = []
+
+        def fake_fit(cmd, via, args, *p, **kw):
+            tried.append((cmd, via, kw.get("hosts")))
+            if via == "h1":
+                return (255, "ssh: connect failed\n")
+            return (0, "ok from " + via + "\n")
+
+        with mock.patch.object(W, "run_out", side_effect=fake_fit):
+            r = A.worker("fit", "pool:a100", ["/data/lab/pa", "jobs/q.txt"], project="pa", lst=True)
+        self.assertEqual(r["rc"], 0, r)
+        self.assertEqual([v for _, v, _ in tried][:2], ["h1", "h2"])
+
+        moved_to = []
+        with mock.patch.object(W, "run_out", side_effect=lambda cmd, to, *a, **k: moved_to.append(to) or (0, "已登记")):
+            S.reg_move("pool", [{"host": "h1", "root": "/data/lab/pa", "jobs": "jobs/q.txt", "project": "pa"}])
+        self.assertEqual(moved_to, ["pool:a100"])
 
 
 class PoolInfraTest(Base):

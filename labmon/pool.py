@@ -30,9 +30,10 @@ POOL_WAIT_S = 10 * 60          # 已落机排队等满 10 分钟进入搬移/空
 POOL_MOVE_COOL_S = 10 * 60     # 单条清单搬移后冷却 10 分钟防乒乓抖动
 
 
-def key(root: str, jobs: str) -> str:
-    """一条池清单的稳定键（规整后的 目录|清单）。"""
-    return f"{posixpath.normpath(root or '')}|{posixpath.normpath(jobs or '')}"
+def key(root: str, jobs: str, pid: str | None = None) -> str:
+    """一条池清单的稳定键：传入池 id 时返回 池id|规整目录|规整清单（隔离不同共享盘域的同名路径），未传时返回 规整目录|规整清单。"""
+    base = f"{posixpath.normpath(root or '')}|{posixpath.normpath(jobs or '')}"
+    return f"{pid}|{base}" if pid else base
 
 
 def state_file() -> Path:
@@ -372,9 +373,10 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
             root, jobs, proj = q.get("root"), q.get("jobs"), q.get("project")
             if not (root and jobs and proj):
                 continue
-            lk = key(root, jobs)
+            rk = key(root, jobs)
+            lk = key(root, jobs, pid)
             seen_waiting_keys.add(lk)
-            hi = hmap.get((phid, lk)) or (hmap.get((POOL, lk)) if pid == POOL else None)
+            hi = hmap.get((phid, rk)) or (hmap.get((POOL, rk)) if pid == POOL else None)
             since = wait_since.setdefault(lk, t)
             rec = {
                 "pool": pid, "pool_host": phid, "project": proj, "root": root, "jobs": jobs,
@@ -442,7 +444,7 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
                 placed_count += 1
                 if proj in paused_projs:
                     continue
-                lk = key(root, jobs)
+                lk = key(root, jobs, pid)
                 e = by_host.get(xh)
                 st = (e or {}).get("status") or {}
                 busy = any(same_list({"root": j.get("root"), "jobs": j.get("queue")}, root, jobs)

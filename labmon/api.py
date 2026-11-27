@@ -238,8 +238,18 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
                         return {"rc": 3, "out": "", "err": f"[labmon] 算力池「{pcfg['label']}」（{pcfg['host_id']}）目前没有在用主机\n"}
                     if project and (reason := unknown_project(project, require=False)):
                         return usage(reason)
-                    rc, out = W.run_out("fit", pcfg["active_hosts"][0], rest, project=project, list=True,
-                                        hosts=",".join(pcfg["active_hosts"]))
+                    # 优先选全局快照里在线且 worker 运行中的池主机；若 SSH 不可达或读清单失败，依次回退其余在用主机
+                    snap_hosts = {e.get("id"): e for e in (snapshot() or {}).get("hosts") or []}
+                    cands = sorted(
+                        pcfg["active_hosts"],
+                        key=lambda h: 0 if (snap_hosts.get(h) and not snap_hosts[h].get("error") and snap_hosts[h].get("worker_up")) else 1,
+                    )
+                    hosts_arg = ",".join(pcfg["active_hosts"])
+                    rc, out = 3, ""
+                    for via in cands:
+                        rc, out = W.run_out("fit", via, rest, project=project, list=True, hosts=hosts_arg)
+                        if rc == 0:
+                            break
                     return {"rc": rc, "out": out, "err": ""}
                 if sub == "rm" and len(rest) == 2:
                     hid = P.locate(rest[0], rest[1], pid=pcfg["id"])

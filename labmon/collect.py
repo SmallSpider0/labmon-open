@@ -27,7 +27,7 @@ from . import lan as L
 from . import lease as LS
 from . import pool as PO
 from . import projects as PJ
-from .config import AUTO_GROUP_RE, GIB, POOL_LABEL, STALE_S, ConfigError, fmt_dur, fmt_time, is_pool_id, parse_time, pick_color, stale_limit, with_queues
+from .config import AUTO_GROUP_RE, GIB, POOL_LABEL, STALE_S, ConfigError, fmt_dur, fmt_time, is_pool_id, parse_time, pick_color, pool_id_of, stale_limit, with_queues
 from .fleet import worker_fresh
 from .health import link_step
 from .state import load_json, load_rows, save_json, snapshot, usage_file, usage_hosts, write_atomic
@@ -276,11 +276,30 @@ def _last_act(q: dict, raw: dict) -> float:
     return float(raw.get("activity") or max((raw.get("marks") or {}).values(), default=0) or 0)
 
 
+def _pool_rec(pool: dict | None, q: dict, hcfg: dict | None = None) -> dict:
+    """按池 id + 清单键在 pool.lists 里查找对应待放记录（隔离跨共享盘域同名路径），兼顾旧两段键与单池默认名。"""
+    if not pool:
+        return {}
+    root, jobs, host = q.get("root"), q.get("jobs"), q.get("host")
+    pid = ((hcfg or {}).get(host) or {}).get("pool_id") or pool_id_of(host)
+    if pid:
+        r = pool.get(PO.key(root, jobs, pid))
+        if r is not None:
+            return r
+    rk = PO.key(root, jobs)
+    if rk in pool:
+        return pool[rk]
+    for v in pool.values():
+        if isinstance(v, dict) and v.get("pool_host") == host and PO.key(v.get("root"), v.get("jobs")) == rk:
+            return v
+    return {}
+
+
 def _sleeping_of(q: dict, raw: dict | None, pool: dict | None = None) -> bool:
     """这条队列此刻是不是已休眠（#164）：在用主机有探针现场结果时只认现场（raw.sleeping / raw.worker.sleeping），
     不因 worker 状态过期（raw.worker 为 None）误回退旧快照的 reg_sleeping；算力池看 pool.lists[].sleeping；其余才退回 reg_sleeping。"""
     if is_pool_id(q.get("host")):
-        if pool and (pool.get(PO.key(q.get("root"), q.get("jobs"))) or {}).get("sleeping"):
+        if _pool_rec(pool, q).get("sleeping"):
             return True
         return bool(raw.get("sleeping")) if raw is not None else bool(q.get("reg_sleeping"))
     if raw is not None:
@@ -752,7 +771,7 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
         info["fs_skew"] = raw["fs_skew"]
     lane.update(info)
     if hcfg[q["host"]].get("pool"):                  # 算力池里待放的（#24）：没有 worker 管，等看板放到某台；不报队列进程不在
-        pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {}     # 为什么还没放（全局快照 pool.lists）
+        pv = _pool_rec(snap.get("pool"), q, hcfg)     # 为什么还没放（全局快照 pool.lists）
         done = pv.get("done")                         # 池里跑完了的（pool.lists 的 done，#86）：不算在等、不写已等多久
         lane.update(pool=True, managed=True, alive=False, waiting=None if lane.get("paused") or done else POOL_WAIT + (f"：{pv['why']}" if pv.get("why") else ""),
                     pool_since=None if done else pv.get("since"))     # 从何时起在池里等（页面上写已等多久，#89）
@@ -801,7 +820,7 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
                 failed=sum(j["status"] == "failed" for j in jobs), unfinished=unfinished, no_gpu=no_gpu,
                 eta_ts=max(ends) if unfinished and None not in ends and not lane.get("paused") else None)   # 有推演不出的（stuck）就不写
     snap["lanes"].append(lane)
-    pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {} if lane.get("pool") else {}
+    pv = _pool_rec(snap.get("pool"), q, hcfg) if lane.get("pool") else {}
     if pv.get("since") and unfinished and not pv.get("done") and not lane.get("paused") and (pv.get("nofit") or t - pv["since"] >= PO.POOL_TELL_S):
         # 池里待放满 2 小时，或全池所有健康主机均放不下（nofit）立即报：一条清单一条，只给会话（池里排队是常态，不标红）。
         nofit = bool(pv.get("nofit"))
