@@ -637,7 +637,7 @@ function tlPack(items) {
 // 单行道数与行高布局（#178）：totalN 是全量分道数；cap 是该行上限（不超过整行高度 maxH 按 minStep 放得下的道数）。
 // 1..hi 道用舒适步长（base + step*(n-1)，封顶 softH）；超 hi 道压细到 minStep（如 8px），总高封顶 maxH。totalN > cap 时 over=true，多出来的在最后一道经 tlOverflow 聚合，不叠在同一位置
 const OCC_CARD_LAY = {base: 15, step: 10, hi: 3, softH: 32, maxH: 44, pad: 2, minStep: 7, cap: 6};
-const OCC_OTHER_LAY = {base: 18, step: 10, hi: 4, softH: 44, maxH: 52, pad: 4, minStep: 8, cap: 6};
+const OCC_OTHER_LAY = {base: 16, step: 10, hi: 4, softH: 44, maxH: 52, pad: 2, minStep: 8, cap: 6};
 function tlRowLayout(totalN, o) {
   const pad = o.pad ?? 4, ms = o.minStep || 8, hi = o.hi || 4;
   const cap = Math.max(1, Math.min(o.cap || 6, Math.floor((o.maxH - pad) / ms)));

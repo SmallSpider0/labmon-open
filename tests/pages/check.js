@@ -2213,6 +2213,45 @@ t("timeline", "#244 项目页「别的项目」行包含纯 CPU 任务，条标�
   has(tp, "· 纯 CPU", "项目页别的项目行纯 CPU 任务悬停应写「纯 CPU」");
   ok(!tp.includes("· 卡 \n") && !tp.endsWith("· 卡 "), "项目页别的项目行纯 CPU 任务悬停不该出现空的「卡 」");
 });
+t("timeline", "#247 历史多道并发但当前窗口仅 1 道时 othersRow 紧凑居中、事件带留微间距、依赖线柔化并可一键开关", () => {
+  // 1. 30 天内历史曾有 6 道并发，但当前 24h 窗口仅 1 道时，othersRow 按可见任务收紧为 16px、单条居中贴合灰线与标签
+  const hist6 = Array.from({length: 6}, (_, i) => ({p: "proj-b", n: `old_${i}`, lane: "车道 1", t0: NOW - 15 * 86400 - 3600, t1: NOW - 15 * 86400 + 3600, g: [0], st: "done"}));
+  const cur1 = [{p: "proj-b", n: "now_one", lane: "车道 1", t0: NOW - 3600, t1: NOW + 3600, g: [0], st: "run"}];
+  const P = pjCtx(clone(PJ), {...EVN, occ: {"srv-a": [...hist6, ...cur1]}});
+  run(P, `TL.v = {a: ${-6 * H}, b: ${18 * H}}; drawTimeline()`);
+  const tl = el(P, "tlbox").innerHTML; clean(tl, "#247 紧凑 othersRow");
+  const ocH = run(P, 'TL.last.rows.get("occ:srv-a")');
+  ok(ocH === 16, `当前窗口仅 1 道时 othersRow 应为 16px，实际 ${ocH}`);
+  const lineY = Number((tl.match(/<rect x="[^"]+" y="([^"]+)" width="[^"]+" height="1" fill="var\(--line\)"\/>/) || [])[1]);
+  const barM = tl.match(/<rect x="[^"]+" y="([^"]+)" width="[^"]+" height="([^"]+)" rx="3" fill="transparent" stroke="var\(--fg\)"[^>]*data-tip="[^"]*now_one/);
+  ok(barM && Number.isFinite(lineY), "找不到 now_one 任务条或灰线");
+  const barMid = Number(barM[1]) + Number(barM[2]) / 2;
+  ok(Math.abs(barMid - (lineY + 0.5)) <= 1, `单道任务条中心(${barMid})应贴合灰线(${lineY + 0.5})`);
+  // 切到包含历史 6 道并发的窗口时照常展开为多道
+  run(P, `TL.v = {a: ${-16 * 86400}, b: ${-14 * 86400}}; drawTimeline()`);
+  const ocH6 = run(P, 'TL.last.rows.get("occ:srv-a")');
+  ok(ocH6 >= 44, `历史 6 道并发窗口应展开多道，实际 ${ocH6}`);
+  // 2. 主机表头事件带（ev）底部留出微间距：hostRow 高 36px，事件带画在 y + 23（高 8px），距行底留 5px
+  const evH = run(P, `TL.v = {a: ${-6 * H}, b: ${18 * H}}; drawTimeline(); TL.last.rows.get("host:srv-a")`);
+  ok(evH === 36, `有事件的主机表头应为 36px，实际 ${evH}`);
+  // 3. 依赖线默认极淡虚线且工具栏有「依赖线」开关；无依赖项目不显示开关；关掉常驻线后悬停仍高亮上下游
+  has(pgHtml, "stroke-opacity: .14; stroke-dasharray: 2 2;", "默认依赖线应柔化为极淡虚线");
+  has(pgHtml, "#tlbox.nodep:not(.dh) .dl.k { display: none; }", "关闭常驻线且未悬停时隐藏关键线");
+  has(pgHtml, "stroke-dasharray: none;", "悬停高亮上下游应恢复实线");
+  const D1 = pjCtx(J("project_deps.json"), EVN); app(D1);
+  run(D1, `TL.v = {a: ${-10 * H}, b: ${8 * H}}; drawTimeline()`);
+  has(el(D1, "tlbar").innerHTML, 'data-tldep aria-pressed="true"', "有依赖时工具栏应显示「依赖线」按钮且默认开启");
+  ok(!el(D1, "tlbox").classList.contains("nodep"), "默认开启时不该带 nodep");
+  const depBtn = {dataset: {tldep: ""}, matches: s => s.includes("data-tldep"), closest(s) { return s.includes("data-tldep") ? this : null; }};
+  fire(D1, "click", depBtn);
+  ok(el(D1, "tlbox").classList.contains("nodep"), "点「依赖线」后应隐藏常驻线（加 nodep）");
+  has(el(D1, "tlbar").innerHTML, 'data-tldep aria-pressed="false"', "关闭后 aria-pressed 应为 false");
+  run(D1, "DEPH.id = 'dp_tr3'; drawTimeline()");
+  ok(el(D1, "tlbox").classList.contains("nodep") && el(D1, "tlbox").classList.contains("dh"), "关闭常驻线时悬停仍应加 dh 高亮上下游");
+  const N = clone(PJ); N.jobs.forEach(j => delete j.deps);
+  const D0 = pjCtx(N, EVN); app(D0); run(D0, "drawTimeline()");
+  ok(!el(D0, "tlbar").innerHTML.includes("data-tldep"), "无依赖项目不该显示「依赖线」按钮");
+});
 t("escape", "恶意项目快照与事件：转义", () => {
   const E = pjCtx(PJE, EVE); run(E, 'LS.get = (k, d) => k === "filter" ? "all" : d; render()');
   const h = app(E); ok(!raw(h), "项目页没转义"); has(h, BADESC);
