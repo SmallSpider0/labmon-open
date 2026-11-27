@@ -30,6 +30,7 @@ import contextlib
 import json
 import os
 import re
+import secrets
 import signal
 import socket
 import subprocess
@@ -38,7 +39,6 @@ import threading
 import time
 import urllib.error
 import urllib.request
-import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 GIB = float(1 << 30)
@@ -262,9 +262,9 @@ def default_host_id(gpus: List[Dict[str, Any]]) -> str:
                 slug = short
                 break
         slug = slug[:16] or "gpu"
-        return "colab-{}-{}".format(slug, uuid.uuid4().hex[:4])
+        return "colab-{}-{}".format(slug, secrets.token_hex(2))
     hn = re.sub(r"[^a-zA-Z0-9_.-]+", "-", socket.gethostname()).strip("-")[:16] or "cpu"
-    return "colab-{}-{}".format(hn.lower(), uuid.uuid4().hex[:4])
+    return "colab-{}-{}".format(hn.lower(), secrets.token_hex(2))
 
 
 def default_label(host_id: str, gpus: List[Dict[str, Any]]) -> str:
@@ -342,7 +342,7 @@ class EphemeralTracker:
         self._cpu = _CpuSampler()
         init_gpus = collect_gpus()
         self.host_id = host_id or default_host_id(init_gpus)
-        self.instance_id = instance_id or ("run-" + uuid.uuid4().hex[:8])
+        self.instance_id = instance_id or ("run-" + secrets.token_hex(4))
         self.label = label or default_label(self.host_id, init_gpus)
         self.est_min = est_min
         self.job_gpus = list(gpus) if gpus is not None else [g["index"] for g in init_gpus]
