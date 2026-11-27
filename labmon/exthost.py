@@ -16,6 +16,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import re
+import shlex
 import socket
 import subprocess
 
@@ -35,7 +36,7 @@ from .state import snapshot
 HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 RESERVED_IDS = frozenset({"pool", "new", "all", "local-reserved"})
 SSH_TARGET_RE = re.compile(r"^(?:([A-Za-z0-9._][A-Za-z0-9._-]{0,63})@)?([A-Za-z0-9._][A-Za-z0-9._-]{0,252}|\[[0-9A-Fa-f:.]+\])$")
-PYTHON_RE = re.compile(r"^[A-Za-z0-9._/~-]+$")
+PYTHON_RE = re.compile(r"^[A-Za-z0-9._/~@-]+$")
 FORBIDDEN_KEY_FIELDS = frozenset({"private_key", "ssh_private_key", "identity_file", "key_pem", "pem", "key_content", "key_file"})
 EXT_PLATFORM_KINDS = tuple(k for k in PLATFORM_KINDS if k != "scm")
 TEST_TIMEOUT_S = 15
@@ -463,10 +464,20 @@ def remove_external(hid: str, who: U.Ident, *, force: bool = False) -> dict:
             snap = snapshot() or {}
             he = next((x for x in snap.get("hosts") or [] if x.get("id") == hid), None)
             st = (he or {}).get("status") or {}
-            running = len(st.get("running") or [])
-            queued = len(st.get("queued") or [])
+            runs = st.get("running") or []
+            waits = st.get("waiting") or []
+            todos = st.get("todo") or []
+            run_keys = {(j.get("project"), j.get("name")) for j in runs if isinstance(j, dict) and j.get("name")}
+            pend_keys = {(w.get("project"), w.get("name")) for w in waits if isinstance(w, dict) and w.get("name")}
+            for ln in todos:
+                if isinstance(ln, dict):
+                    p_id = ln.get("project")
+                    for nm in ln.get("jobs") or []:
+                        pend_keys.add((p_id, nm))
+            running = len(runs)
+            queued = max(len(waits), len(pend_keys - run_keys))
             if running or queued:
-                raise U.Denied(409, f"主机 {hid} 还有 {running} 个在跑、{queued} 个排队任务：先停下任务，或加 --force 强制删除")
+                raise U.Denied(409, f"主机 {hid} 还有 {running} 个在跑、{queued} 个待跑任务：先停下任务，或加 --force 强制删除")
         try:
             remove_host(hid, f"{who.name} 删除了外部主机 {hid}")
         except ConfigError as e:
@@ -515,7 +526,7 @@ def test_external(hid: str, who: U.Ident) -> dict:
             r = subprocess.run([py, "-c", _TEST_PY, dr], capture_output=True, text=True, timeout=TEST_TIMEOUT_S)
         else:
             argv = lan.host_ssh_argv(h, "-o", f"ConnectTimeout={TEST_TIMEOUT_S}")
-            remote_cmd = f"{shell_path(py)} -c {json.dumps(_TEST_PY)} {shell_path(dr)}"
+            remote_cmd = f"{shell_path(py)} -c {shlex.quote(_TEST_PY)} {shell_path(dr)}"
             r = lan.ssh_run(argv + [remote_cmd], capture_output=True, text=True, timeout=TEST_TIMEOUT_S + 5)
     except ConfigError as e:
         return {"ok": False, "id": hid, "error": str(e), "hint": "请先生成专用公钥并授权到目标机"}

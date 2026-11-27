@@ -103,25 +103,49 @@ def _fmt_bytes(b):
     return "%d B" % b
 
 
+def _job_alive(pid):
+    """检查任务自身进程或进程组是否仍在运行（与 worker 是否退出无关，#114）：
+    Worker.run() 退出时故意保留运行中任务，因此仅凭 worker PID 不在绝不能认定任务已结束。"""
+    if not isinstance(pid, int) or pid <= 0:
+        return False
+    for fn in (os.kill, os.killpg):
+        try:
+            fn(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            continue
+    return False
+
+
 def clean_local(p, project=None, cache=False, scratch=False, yes=False):
     """清理本机自管临时目录（<LABMON_LOCAL>/{cache,jobs}）：
     - 绝不触碰 projects/、datasets/、weights/、envs/ 或任何 <LABMON_LOCAL> 之外的路径（经 realpath 严格校验且不跟随符号链接）；
     - 默认仅预览（dry-run），显式传 yes=True 才执行删除；
-    - 清理 jobs/ 单格临时目录时自动跳过当前运行中任务的目录。"""
+    - 清理 jobs/ 单格临时目录时按任务自身进程存活状态保护运行中任务（worker 退出但任务仍在跑时同样受保护）。"""
     do_cache = cache or (not cache and not scratch)
     do_scratch = scratch or (not cache and not scratch)
     base = os.path.realpath(_C.LOCAL)
     running = set()
     if do_scratch:
-        try:
-            st = json.loads(_C.read(p.status, "{}") or "{}")
-            pid = _C.read_pid(p.pid)
-            if _C.alive(pid, ("labmon_worker",)):
-                for j in st.get("running") or []:
-                    if j.get("project") and j.get("name"):
+        raw_st = _C.read(p.status, "")
+        if raw_st:
+            try:
+                st = json.loads(raw_st)
+            except ValueError:
+                print("状态文件 %s 无法解析，为避免误删运行中任务的临时目录已跳过 jobs/ 清理" % p.status)
+                do_scratch = False
+                st = {}
+            if do_scratch:
+                w_alive = _C.alive(_C.read_pid(p.pid), ("labmon_worker",))
+                for j in (st.get("running") or []) + (st.get("external") or []):
+                    if not (isinstance(j, dict) and j.get("project") and j.get("name")):
+                        continue
+                    jpid = j.get("pid")
+                    # worker 活着时信任 status.running；worker 已退出时按任务自身进程/进程组是否存活判定（缺 pid 时保守跳过）
+                    if w_alive or jpid is None or _job_alive(jpid):
                         running.add((_C.NAME_RE.sub("_", j["project"]), _C.NAME_RE.sub("_", j["name"])))
-        except ValueError:
-            pass
     targets = []
     skipped = []
 

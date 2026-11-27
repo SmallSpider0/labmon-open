@@ -1191,9 +1191,9 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 self.wdisk.want({p for q in queues for p in [_C.project_dir(q["root"])] if p})
                 self.wdisk.step(now, self.io_yield)
                 self.disk_ends(now)
-                wk, loc = self.wdisk.summary()
-                self.storage = {"t": wk.get("t"), "local": loc, "own": wk.get("b"), "wrote": None, "work": wk,
-                                "projects": {p: q["project"] for q in queues for p in [_C.project_dir(q["root"])] if p}}
+                pmap = {p: q["project"] for q in queues for p in [_C.project_dir(q["root"])] if p}
+                wk, loc = self.wdisk.summary(pmap)
+                self.storage = {"t": wk.get("t"), "local": loc, "own": wk.get("b"), "wrote": None, "work": wk, "projects": pmap}
             self.disk_do("工作盘", work)
             return
         def local():

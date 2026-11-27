@@ -222,6 +222,19 @@ class DiskGateWorkDiskCleanTest(unittest.TestCase):
             w.disk_events(info_ok, pol)
             self.assertFalse(w.disk_gate["on"])
 
+            # 4b. 小配额（<= 2 GiB，如 1.0 GiB）滞回仍保留可达恢复水位（0.8 GiB）
+            pol_small = {"standalone": True, "disk_warn_gb": 20.0, "disk_stop_gb": 0.0, "disk_quota_gb": 1.0}
+            w.storage = {"work": {"b": int(1.2 * m.GIB)}}
+            w.disk_events(info_ok, pol_small)
+            self.assertTrue(w.disk_gate["on"])
+            self.assertEqual(w.disk_gate["quota_recover_gb"], 0.8)
+            w.storage = {"work": {"b": int(0.9 * m.GIB)}}
+            w.disk_events(info_ok, pol_small)
+            self.assertTrue(w.disk_gate["on"])
+            w.storage = {"work": {"b": int(0.5 * m.GIB)}}
+            w.disk_events(info_ok, pol_small)
+            self.assertFalse(w.disk_gate["on"])
+
             # 5. place() 的 pre() 在闸门开启时拦截新任务，但不终止在跑任务
             w.disk_gate = {"on": True, "why": "本地盘空间不足：剩 8.0 GiB", "free_gb": 8.0, "stop_gb": 10.0, "recover_gb": 12.0}
             S = {"now": time.time(), "cards": [], "jobs": [{"name": "already_running", "project": "p1", "gpus": [], "vram": {}, "ram": 1.0, "cpu": 1.0, "excl": None, "tag": None, "hold": False}],
@@ -271,6 +284,17 @@ class DiskGateWorkDiskCleanTest(unittest.TestCase):
             self.assertIn(str(proj_a), units)
             b_pa = wd.scanner(str(proj_a), now, pace)["b"]
             self.assertLess(b_pa, 100_000)
+            # 1b. WorkDisk.summary(proj_map) 按登记项目 ID 归属（目录名与 --project 不一致时不归到虚构目录名）
+            wd.ix = {
+                "t": now,
+                "units": {
+                    str(data_root / "projects/folder-name/code"): {"b": 3 * m.GIB, "m": now - 20 * 86400, "t": now},
+                },
+            }
+            wk_mapped, _ = wd.summary({str(data_root / "projects/folder-name/code"): "proj-a"})
+            self.assertIn("proj-a", wk_mapped["projects"])
+            self.assertNotIn("folder-name", wk_mapped["projects"])
+            self.assertEqual(wk_mapped["projects"]["proj-a"]["b"], 3 * m.GIB)
 
             # 2. host_work_disk 计算 14 天闲置可回收候选 & project_storage / api.disk 区分共享盘与本地工作盘
             old_t = now - 20 * 86400
@@ -345,6 +369,25 @@ class DiskGateWorkDiskCleanTest(unittest.TestCase):
                 self.assertTrue(job_run.exists())       # 运行中 scratch 受保护
                 self.assertTrue(cache_b.exists())       # 别的项目缓存不受影响
                 self.assertTrue((proj_a / "result.bin").exists())  # projects/ 产物绝对不动
+
+            # 3b. worker 已停止（pid 文件删除）但任务自身进程仍在跑时，clean --scratch --yes 仍须保护该任务目录
+            Path(p_obj.pid).unlink(missing_ok=True)
+            job_dead = local / "jobs" / "proj-a" / "dead_job"
+            job_dead.mkdir(parents=True, exist_ok=True)
+            (job_dead / "tmp.dat").write_bytes(b"z" * 1024)
+            Path(p_obj.status).write_text(json.dumps({
+                "running": [
+                    {"project": "proj-a", "name": "running_job", "pid": os.getpid()},
+                    {"project": "proj-a", "name": "dead_job", "pid": 999_999_999},
+                ],
+            }), encoding="utf-8")
+            with mock.patch.object(m.clean_local.__globals__["_C"], "alive", return_value=False):
+                buf3 = io.StringIO()
+                with contextlib.redirect_stdout(buf3):
+                    rc_stop = m.clean_local(p_obj, project="proj-a", scratch=True, yes=True)
+                self.assertEqual(rc_stop, 0)
+                self.assertTrue(job_run.exists())       # worker 停止后，仍在跑的任务 scratch 绝不被误删
+                self.assertFalse(job_dead.exists())     # 已退出任务的 scratch 正常清理
 
 
 class ExternalHostDualEntrySecurityTest(unittest.TestCase):
@@ -459,13 +502,47 @@ class ExternalHostDualEntrySecurityTest(unittest.TestCase):
             m_close.assert_called_once()
             self.assertTrue(m_close.call_args.kwargs.get("drop_known_hosts"))
 
-        # 8. 删除外部机同步销毁私钥与 close_host_ssh
+        # 8. 非 force 删除在主机仍有 waiting / todo 任务时必须返回 409 拒绝
+        ST.save_json(ST.state_dir() / "snapshot.json", {
+            "hosts": [{"id": "ext-1", "status": {"running": [], "waiting": [{"project": "p1", "name": "j1"}], "todo": [{"project": "p1", "jobs": ["j1", "j2"]}]}}],
+        })
+        with self.assertRaises(U.Denied) as cm:
+            EH.remove_external("ext-1", self.amy, force=False)
+        self.assertEqual(cm.exception.code, 409)
+        self.assertIn("待跑任务", str(cm.exception))
+        # 清空状态后正常删除并同步销毁私钥与 close_host_ssh
+        ST.save_json(ST.state_dir() / "snapshot.json", {"hosts": []})
         with mock.patch.object(L, "close_host_ssh") as m_close:
             rm = EH.remove_external("ext-1", self.amy)
             self.assertTrue(rm["key_removed"])
             self.assertFalse(priv.exists())
             m_close.assert_called_once()
             self.assertTrue(m_close.call_args.kwargs.get("drop_known_hosts"))
+
+    def test_external_test_ssh_cmd_shell_quote_and_api_hosts_editable_fields(self):
+        """回归测试：SSH test_external 多行脚本用 shlex.quote 在远端 bash 中可执行；GET /api/hosts 完整返回 python/cpu_quota/mps_vram_gb。"""
+        import subprocess
+        EH.add_external({
+            "id": "ext-py", "ssh": "u@203.0.113.88", "python": sys.executable,
+            "data_root": str(self.root / "dr"), "cpu_quota": 6, "mps_vram_gb": 24,
+        }, self.boss)
+        # 1. api.hosts() 完整透出 python / cpu_quota / mps_vram_gb
+        got = next(h for h in A.hosts()["hosts"] if h["id"] == "ext-py")
+        self.assertEqual(got["python"], sys.executable)
+        self.assertEqual(got["cpu_quota"], 6)
+        self.assertEqual(got["mps_vram_gb"], 24)
+        # 2. SSH test_external 构造的 remote_cmd 在真实 bash -c 下可执行且输出合法 JSON（无 SyntaxError）
+        captured = []
+
+        def fake_ssh_run(argv, **kwargs):
+            captured.append(argv[-1])
+            return subprocess.run(["bash", "-c", argv[-1]], capture_output=True, text=True, timeout=15)
+
+        with mock.patch.object(L, "ssh_run", side_effect=fake_ssh_run):
+            res = EH.test_external("ext-py", self.boss)
+        self.assertTrue(res["ok"], res)
+        self.assertEqual(len(captured), 1)
+        self.assertTrue(res["info"]["writable"])
 
     def test_http_routes_and_standby_and_worker_clean_auth(self):
         """走真实 HTTP Server 验证 /api/hosts/external* 与 /api/worker/clean 路由、鉴权与备用拒写。"""

@@ -77,7 +77,7 @@ def hosts() -> dict:
     hf = hosts_file()
     if not hf.exists():
         return {"missing": str(hf), "hosts": []}
-    keys = ("id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until")
+    keys = ("id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until", "python", "cpu_quota", "mps_vram_gb")
     act, full = active_hosts(), {str(h["id"]): h for h in all_hosts()}
     out = []
     for raw in user_hosts():

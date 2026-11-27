@@ -495,14 +495,34 @@ class WorkDisk(Disk):
         vals = [r["b"] for r in units.values() if r.get("b") is not None]
         return sum(vals) if vals else None
 
-    def summary(self):
+    def summary(self, proj_map=None):
         """返回 (work, local)：
         work 写入 status.json 的 storage.work（root、b、t、pending、projects {pid: {b, m, d24, top}}、common {envs, datasets, weights, labmon, archive, tmp, other}）；
-        local 写入 status.json 的 storage.local（{pid: {cache, scratch}}，与集群 LocalDisk 同口径）。"""
+        local 写入 status.json 的 storage.local（{pid: {cache, scratch}}，与集群 LocalDisk 同口径）。
+        proj_map：{项目目录路径: 登记项目 id}（来自队列登记，Worker.scan_local 传入）；优先按已登记目录映射归属项目 ID，
+        避免目录名与 --project 不一致时归到虚构项目或误标可回收。"""
         ix = self.ix or {}
         units = ix.get("units") or {}
         base = self.root.rstrip("/")
         L = _C.LOCAL.rstrip("/")
+        pmap = sorted(
+            ((os.path.normpath(k).rstrip("/"), v) for k, v in (proj_map or {}).items() if k and v),
+            key=lambda kv: -len(kv[0]),
+        )
+
+        def _mapped_pid(u_path):
+            un = os.path.normpath(u_path).rstrip("/")
+            if un.endswith("/."):
+                un = un[:-2] or "/"
+            for root_p, p_id in pmap:
+                if un == root_p or un.startswith(root_p + "/"):
+                    return p_id, root_p
+            # 若整个 projects/<dir> 尚未拆分子目录而登记根在其下，也归属到该登记项目
+            hits = [p_id for root_p, p_id in pmap if root_p.startswith(un + "/")]
+            if len(set(hits)) == 1:
+                return hits[0], un
+            return None, None
+
         local, projs, common = {}, {}, {"envs": 0, "datasets": 0, "weights": 0, "labmon": 0, "archive": 0, "tmp": 0, "other": 0}
         total_b, pend = 0, 0
         for u, r in units.items():
@@ -526,16 +546,21 @@ class WorkDisk(Disk):
             if not parts or parts == ["."]:
                 common["other"] += b
                 continue
+            mpid, mroot = _mapped_pid(u)
             top_dir = parts[0]
-            if top_dir == "projects" and len(parts) >= 2 and parts[1] != ".":
-                pid = parts[1]
+            if mpid is not None or (top_dir == "projects" and len(parts) >= 2 and parts[1] != "."):
+                pid = mpid if mpid is not None else parts[1]
                 pe = projs.setdefault(pid, {"b": 0, "m": None, "d24": 0, "top": []})
                 pe["b"] += b
                 if m and (not pe["m"] or m > pe["m"]):
                     pe["m"] = m
                 if r.get("pb") is not None and r.get("pt") and r.get("t") and r["t"] - r["pt"] <= 86400 * 2:
                     pe["d24"] += b - r["pb"]
-                sub = "/".join(parts[2:]) if len(parts) > 2 else "."
+                if mroot is not None:
+                    un = os.path.normpath(u).rstrip("/")
+                    sub = os.path.relpath(un, mroot) if un != mroot else "."
+                else:
+                    sub = "/".join(parts[2:]) if len(parts) > 2 else "."
                 pe["top"].append([sub, b, m])
             elif top_dir in ("envs", "datasets", "weights", "labmon", "archive"):
                 common[top_dir] += b

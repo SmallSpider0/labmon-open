@@ -667,13 +667,15 @@ class MeasureMixin:
         was = bool((self.disk_gate or {}).get("on"))
         has_stop = stop_gb is not None and stop_gb > 0
         has_quota = quota_gb is not None and quota_gb > 0
+        # 软配额滞回：默认 2 GiB，小配额时按配额的 20% 封顶，保证恢复水位始终 > 0 且可达（避免 <= 2 GiB 时归零无法恢复）
+        quota_recover = round(quota_gb - min(_C.DISK_HYST_GB, quota_gb * 0.2), 2) if has_quota else None
         if not (has_stop or has_quota):
             on = False
         elif not was:
             on = (has_stop and free_gb is not None and free_gb < stop_gb) or (has_quota and work_gb is not None and work_gb > quota_gb)
         else:
             free_ok = (not has_stop) or free_gb is None or free_gb >= stop_gb + _C.DISK_HYST_GB
-            quota_ok = (not has_quota) or work_gb is None or work_gb <= max(0.0, quota_gb - _C.DISK_HYST_GB)
+            quota_ok = (not has_quota) or work_gb is None or work_gb <= quota_recover
             on = not (free_ok and quota_ok)
         why = None
         if on:
@@ -683,11 +685,11 @@ class MeasureMixin:
                     bits.append("本地盘仅剩 %.1f GiB（低于停止线 %g GiB）" % (free_gb, stop_gb))
                 else:
                     bits.append("本地盘剩 %.1f GiB（需回升至 %g GiB 以上解除）" % (free_gb, stop_gb + _C.DISK_HYST_GB))
-            if has_quota and work_gb is not None and work_gb > max(0.0, quota_gb - _C.DISK_HYST_GB):
+            if has_quota and work_gb is not None and work_gb > quota_recover:
                 if work_gb > quota_gb:
                     bits.append("%s 已占 %.1f GiB 超过配额 %g GiB" % (_C.DATA_ROOT, work_gb, quota_gb))
                 else:
-                    bits.append("%s 已占 %.1f GiB（需降至 %g GiB 以下解除）" % (_C.DATA_ROOT, work_gb, max(0.0, quota_gb - _C.DISK_HYST_GB)))
+                    bits.append("%s 已占 %.1f GiB（需降至 %g GiB 以下解除）" % (_C.DATA_ROOT, work_gb, quota_recover))
             why = "磁盘闸门：" + ("；".join(bits) or "本地盘空间不足") + "，暂停放新任务；请运行 labmon disk 查看并清理缓存或旧运行目录"
         if on != was:
             if on:
@@ -699,7 +701,9 @@ class MeasureMixin:
             "why": why,
             "free_gb": round(free_gb, 2) if free_gb is not None else None,
             "stop_gb": stop_gb,
+            "recover_gb": (stop_gb + _C.DISK_HYST_GB) if has_stop else None,
             "quota_gb": quota_gb,
+            "quota_recover_gb": quota_recover,
             "work_gb": round(work_gb, 2) if work_gb is not None else None,
         }
 
