@@ -186,6 +186,7 @@
 | 177 | 项目页主机的 CPU 实时占用与时间线同轴折线 | `collect._host_cpu`（`hosts[].cpu`、`history[].cpu_pct`）、`collect._add_hourly`（`util_hourly`、`cpu_hourly` 共用）；页面上 `cpuView`、`hostSeries`、`tlHostHover`（page.html） |
 | 178 | 主机分类、独立主机判定与共享域隔离 | `config.host_platform`、`config.host_share`、`config.is_standalone`、`config.host_ssh_key`、`config.home_key`、`config.shell_path`；页面上 `standaloneBadge`（overview_js/core.js） |
 | 179 | 独立主机清单目录防污染边界校验 | worker 的 `queue_root_ok`（`worker/cli.py` `add` 经 `realpath` 校验）；看板前置 `workerctl._check_standalone_root`（`workerctl.worker_env` 透传 `LABMON_DATA_ROOT`/`LABMON_LOCAL`/`LABMON_STANDALONE`/`LABMON_ALLOW_OUTSIDE_ROOT`） |
+| 180 | 推模式临时主机与云盘存储监控 | 服务端 `ephemeral.py`（`push`、`tick`、`duplicate_jobs`、`overview_hosts`、`project_hosts`、`as_probe`、`online_for_project`、`running_for_project`、`remove_project`）；零依赖客户端 `labmon/labmon_ephemeral.py`（`check_drive_mount`、`collect_storage`、`EphemeralTracker`、`track`、`run_command_wrapped`）；接入 `serve.ROUTES`（`POST /api/ephemeral/push`、`GET /api/client/ephemeral.py`）、`collect.parse_ephemeral_queue` / `_ephemeral_alerts`、`overview.collect` / `check_project_idle`、`projects.archive_block` / `delete`、`users.access`、`api.status` / `disk`、`waits.job_state`；前端 `hostShort`（common.js）及 `overview_js/`、`page.html` 临时分支 |
 
 ## 现有的兼容代码
 
@@ -560,3 +561,5 @@
    实现：`config.host_platform`、`config.host_share`、`config.is_standalone`、`config.host_ssh_key`、`config.home_key`、`config.shell_path`；页面上 `standaloneBadge`（overview_js/core.js）
 179. **独立主机清单目录防污染边界校验**：独立主机缺省 `data_root = ~/.local/share/labmon/work`、`local_dir = <data_root>/.tmp`，`workerctl.project_init` 建 `projects/<项目>/{code,queues,runs}` 隔离分层与独立机 README；`worker add` 在独立主机模式默认拒绝登记 `<data_root>/projects/` 之外的目录（含符号链接越界，可由 `allow_outside_root = true` 显式放行）（`#114`）
    实现：worker 的 `queue_root_ok`（`worker/cli.py`）；看板前置 `workerctl._check_standalone_root`、`workerctl.worker_env`
+180. **推模式临时主机与云盘存储监控**：面向 Google Colab 等无 SSH 入口、无实验室共享盘的短生命周期 GPU 实例（`#213`）。服务端状态独立存在 `overview/ephemeral/<host_id>.json`（绝不写 `hosts.toml`，绝不写入 `labmon/disk.py`），经 `POST /api/ephemeral/push`（`project` 令牌、128 KiB 上限、5s 节流、单项目 5 台活跃上限、TTL 180s 钳制 90–600s、过 `lease.need`）接收推模式心跳与纯 `statvfs` 元数据 `storage[]`；超时结转残留 `running` 任务为 `failed` 并复用 `overview._keep_usage` 写 `usage/<host_id>.jsonl`、产 `ephemeral_down:`（`to="both"`）；同项目多在线实例同时 `running` 同 `job_id` 返回 `warnings` 并产 `ephemeral_dup:`（`to="agent"`）；云盘剩余 `< 1 GiB` 标红并产 `ephemeral_disk_low:`（`to="agent"`）；无缝接入 `overview.occupancy`、`collect._segment_eta`、`waits.JobWatch` 与 `labmon status`/`disk` 独立分区
+   实现：`ephemeral.py`、`labmon_ephemeral.py`、`serve.py`、`collect.py`、`overview.py`、`projects.py`、`users.py`、`api.py`、`waits.py`、前端 `common.js`/`overview_js/`/`page.html`

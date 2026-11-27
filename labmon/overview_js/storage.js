@@ -221,6 +221,12 @@ async function diskSet(body) {
 function hostStrip(h) {
   const info = h.status?.info || {}, now = D.generated;
   const it = (ic, html, t = "") => `<span class="it" ${t ? tip(t) : ""}>${icon(ic)}<span>${html}</span></span>`;
+  if (h.ephemeral) {
+    let es = it("cloud", `推模式临时主机${h.instance_id ? ` <span class="mut">实例 ${esc(h.instance_id)}</span>` : ""}${h.project && visibleProject(h.project) ? ` · <a href="#/p/${encodeURIComponent(h.project)}">${esc(h.project)}</a>` : ""}`,
+      "仅监控上报，不接入队列调度、平台操作与实验室共享盘");
+    if (info.started) es += it("clock", `实例已上报 ${dur(now - info.started)} <span class="mut">${ts(info.started)} 起</span>`);
+    return `<div class="card strip"><div class="info"><div class="line">${es}</div></div></div>`;
+  }
   const deps = h.status?.local?.jobs || [], bad = deps.filter(r => !r.heal), miss = missW(h);
   let s = "";
   if (h.standalone) s += it("server", `${h.platform_kind === "other" ? "外平台独立主机" : "独立主机"} <span class="mut">不共享集群盘</span>`,
@@ -260,22 +266,22 @@ function hostPage(id) {
   const h = D.hosts.find(x => x.id === id);
   if (!h) return `<div class="card empty">没有这台主机（可能已归还）。<a href="#/">回总览</a></div>`;
   const st = h.status;
-  let s = alertBox(alertsOf(h), ST.get("agal", false)) + hostStrip(h) + renewCard(h) + poolCard(h);
+  let s = alertBox(alertsOf(h), ST.get("agal", false)) + hostStrip(h) + (h.ephemeral ? "" : renewCard(h) + poolCard(h));
   const evTab = {id: "events", name: "事件", note: recNote({host: h.id}, 40), body: () => recSlice({host: h.id}, 40)};
   if (!st) return s + `<div class="card empty">${esc(h.error || h.status_error || "这台主机上还没有 worker 状态。")}</div>` + recCard("host", [evTab]);
-  s += adoptCard(h) + assignCard(h) + resCard(h);
+  s += (h.ephemeral ? "" : adoptCard(h) + assignCard(h)) + resCard(h);
   s += tasksCard([h], jobsOf(h).map(j => ({...j, h})), (st.waiting || []).map(w => ({...w, h})), false);
   const done = (h.done || []).slice(-15).reverse(), ho = st.overrides || [], qs = st.queues || [], tags = Object.entries(st.limits?.tags || {});
   const deps = st.local?.jobs || [];
-  s += recCard("host", [
-    {id: "done", name: "最近跑完", note: done.length ? `${ts(done[0].t1)} ${esc(done[0].name || "")}` : "无", body: () => doneTable(done.map(r => ({...r, h})), false)},
-    evTab,
+  const tabs = [{id: "done", name: "最近跑完", note: done.length ? `${ts(done[0].t1)} ${esc(done[0].name || "")}` : "无", body: () => doneTable(done.map(r => ({...r, h})), false)}, evTab];
+  if (!h.ephemeral) tabs.push(
     {id: "ovr", name: "临时指令", note: [ho.length ? `${ho.length} 条` : "无", ...tags.map(([k, v]) => `${esc(k)} ≤ ${v}`)].join("，"), body: () => ovrTable(ho.map(o => ({...o, h})), false)},
     {id: "queues", name: "队列", note: nOf(qs.length), body: () => (qs.length ? `<table>${qs.map(q => queueRow(h, q)).join("")}</table>` : `<div class="empty">没有登记队列。</div>`)
       + (qs.length && LIVE ? `<div class="sm mut" style="margin-top:6px">按项目换到别的主机、不用这台，在项目页的「管理」里。</div>` : "")},
     {id: "deps", name: "本地依赖", note: deps.length ? `${deps.length} 格` : "无", body: () => depsTable(h)},
     {id: "lw", name: "本地盘", note: h.lw?.ok ? `labmon 之外 ${g1(h.lw.user)} GiB` : h.lw ? "测不准" : "无",
       body: () => lwBlock(hostLw(h), {started: st.info?.started, loc: st.storage?.local, why: "worker 还没扫到：限速轮流扫，开机或借来后头一轮要一会儿"})},
-    {id: "log", name: "worker 日志", note: h.log.length ? `${Math.min(40, h.log.length)} 行` : "无", body: () => h.log.length ? `<pre>${esc(h.log.slice(-40).join("\n"))}</pre>` : `<div class="empty">没有日志。</div>`}]);
+    {id: "log", name: "worker 日志", note: h.log.length ? `${Math.min(40, h.log.length)} 行` : "无", body: () => h.log.length ? `<pre>${esc(h.log.slice(-40).join("\n"))}</pre>` : `<div class="empty">没有日志。</div>`});
+  s += recCard("host", tabs);
   return s;
 }

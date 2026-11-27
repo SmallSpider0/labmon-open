@@ -22,6 +22,7 @@ import time
 from pathlib import Path
 
 from . import disk as DK
+from . import ephemeral as EP
 from . import lan as L
 from . import lease as LS
 from . import pool as PO
@@ -225,7 +226,36 @@ def parse_gpu_queue(raw: dict, t: float) -> tuple[dict, list[dict]]:
     return lane, jobs
 
 
-QUEUE_PARSERS = {"gpu_queue": parse_gpu_queue}
+def parse_ephemeral_queue(raw: dict, t: float) -> tuple[dict, list[dict]]:
+    """解析推模式临时主机上报的任务列表（ephemeral.as_probe，#213）。"""
+    jobs = []
+    for j in raw.get("jobs") or []:
+        row: dict = {
+            "id": j["id"], "status": j["status"], "est_min": j.get("est_min"),
+            "dur": None, "plan": None,
+            "start_ts": j.get("start_ts"), "end_ts": j.get("end_ts"),
+            "last_line": j.get("last_line"), "log_mtime": j.get("log_mtime"),
+        }
+        if j.get("progress"):
+            row["progress"] = j["progress"]
+        if j.get("artifact_dir"):
+            row["artifact_dir"] = j["artifact_dir"]
+        if j.get("fail_reason"):
+            row["fail_reason"] = j["fail_reason"]
+        if j["status"] == "failed" and j.get("rc") in (130, 137, 143):
+            row["killed"] = j["rc"]
+        jobs.append(row)
+    lane = {
+        "alive": bool(raw.get("online")), "pid": None, "state_dir": None, "logs_dir": None,
+        "paused": None, "managed": True, "waiting": None, "held": None, "held_t": None,
+        "dep": None, "head": None, "bad": {}, "stuck": None, "cpu_wait": None,
+        "par": 1, "running_n": sum(j["status"] == "running" for j in jobs),
+        "ephemeral": True, "instance_id": raw.get("instance_id"),
+    }
+    return lane, jobs
+
+
+QUEUE_PARSERS = {"gpu_queue": parse_gpu_queue, "ephemeral": parse_ephemeral_queue}
 
 
 # ---------------- 主体 ----------------
@@ -462,6 +492,7 @@ def build(cfg: dict, probes: dict, out_dir: Path, lan: dict | None = None, glob_
     _sync_returned_done(cfg, raw_by_host, sd, t)
     _groups(cfg, snap, state, ratios)
     _host_alerts(cfg, snap, state, hist, glob_snap, t)
+    _ephemeral_alerts(cfg, snap, raw_by_host, t)
     _no_work(cfg, snap, glob_snap, quiet, t)
     state.pop("idle_regs", None)                     # #164 已改由 worker 自动休眠，删除旧 idle_regs: 状态字段
     _storage(cfg, snap, glob_snap, t)
@@ -542,6 +573,53 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
             else:
                 save_json(last_path, p)
             raw_by_host[h["id"]] = p
+            continue
+        if h.get("ephemeral"):
+            # 推模式临时主机（#213）：数据来自服务端状态文件，不走 SSH/link_step/ssh_fail/disk_low
+            online = bool(p and p.get("online"))
+            hd = {"id": h["id"], "label": h["label"], "ephemeral": True, "ok": online,
+                  "error": None if online else (p.get("down_reason") or err or "已离线" if p else err),
+                  "instance_id": p.get("instance_id") if p else None}
+            raw_by_host[h["id"]] = p
+            rec = {"t": t, "host": h["id"], "ok": online}
+            if p:
+                gp = p.get("gpu") or []
+                cg = p.get("cgroup") or {}
+                hd.update(gpus=gp, gpu_procs=[], cgroup=cg, loadavg=None)
+                if online:
+                    rec.update(util=[g.get("util") for g in gp], busy=[g.get("util") for g in gp],
+                               mem=[g.get("mem_used") for g in gp], ram=cg.get("mem_rss"))
+                    cpu_pct = p.get("cpu_pct")
+                    cpu_cnt = p.get("cpu_count")
+                    if cpu_pct is not None:
+                        rec["cpu_pct"] = round(min(100.0, max(0.0, float(cpu_pct))), 1)
+                        used_c = round(rec["cpu_pct"] / 100.0 * cpu_cnt, 2) if cpu_cnt else None
+                        hd["cpu"] = {"used": used_c, "quota": float(cpu_cnt) if cpu_cnt else None,
+                                     "cpus": int(cpu_cnt) if cpu_cnt else None, "pct": rec["cpu_pct"]}
+                        hd["cpu_pct"] = rec["cpu_pct"]
+                hd["mounts"] = []
+                for s in p.get("storage") or []:
+                    tot_gb = float(s.get("total_gb") or 0.0)
+                    av_gb = float(s.get("avail_gb") or 0.0)
+                    kind = s.get("kind") or "local"
+                    min_gb = EP.CLOUD_LOW_GB if kind == "cloud" else None
+                    md = {"path": s["path"], "label": s.get("label") or s["path"], "kind": kind,
+                          "total_gb": tot_gb, "avail_gb": av_gb,
+                          "used_pct": max(0.0, min(100.0, (1.0 - av_gb / tot_gb) * 100.0)) if tot_gb > 0 else None,
+                          "min_gb": min_gb}
+                    hd["mounts"].append(md)
+                    if online:
+                        rec.setdefault("disk", {})[md["path"]] = round(av_gb, 2)
+                        if kind == "cloud" and av_gb < EP.CLOUD_LOW_GB:
+                            low = f"临时主机 {h['label']} 云盘 {md['label']} 仅剩 {av_gb:.2f} GiB（低于 {EP.CLOUD_LOW_GB:g} GiB）"
+                            alerts.append(alert(
+                                f"ephemeral_disk_low:{h['id']}:{md['path']}", "agent",
+                                f"{low}：请及时清理云盘上旧 checkpoint 或已无用的归档，避免训练回写失败（严禁对 Google Drive 跑 du/find）",
+                            ))
+                hd["checks"] = []
+            if online:
+                hist.append(rec)
+            snap["hosts"].append(hd)
             continue
         if h["returned"]:
             # 已归还：只留一张标注卡片；没有代读主机的队列沿用归还前最后一次采到的状态
@@ -652,7 +730,7 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     host_ok = next((x["ok"] for x in snap["hosts"] if x["id"] in (src, q["host"])), False)     # 只替池代读的主机不在快照里：看池那张卡
     returned = hcfg[q["host"]]["returned"]
     where = f"{hcfg[q['host']]['label']} {q['name']}"     # 告警里指明车道：主机名 + 车道名
-    lane = {"id": q["id"], "label": q["name"], "host": q["host"], "type": q["type"], "stale": not host_ok and not returned,
+    lane = {"id": q["id"], "label": q["name"], "host": q["host"], "type": q["type"], "stale": not host_ok and not returned and q["type"] != "ephemeral",
             **({"done_lane": True} if q.get("done_lane") else {})}
     if not q["discover"]:                                  # 页面按 root、queue 认 worker 事件（等待原因、队列结束）属于哪条车道
         lane.update(root=q.get("root"), queue=q.get("jobs"))
@@ -695,10 +773,18 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
         j["group"] = None if j["hold"] else _group_of(j["id"], cfg["groups"], cfg["auto_groups"])
         _job_times(j, q["id"], cfg["id"], cfg["alerts"], work, alerts, t, where, fresh=host_ok)
         if j["status"] == "failed":
-            redo = f"要重跑请删除 {lane.get('state_dir') or '状态目录'}/{j['id']}.failed"
-            alerts.append(alert(f"failed:{j['id']}", "agent",
-                                f"任务被终止（退出码 {j['killed']}）：{j['id']}（{where}）；{redo}" if j.get("killed")
-                                else f"任务失败：{j['id']}（{where}）；{redo}"))
+            art = j.get("artifact_dir")
+            if q["type"] == "ephemeral":
+                why = f"：{j['fail_reason']}" if j.get("fail_reason") else ""
+                tail = f"；产物目录 {art}（确认旧实例已离线后可在新实例从 ckpt/latest.pt 续跑）" if art else ""
+                alerts.append(alert(f"failed:{j['id']}", "agent",
+                                    f"任务被终止（退出码 {j['killed']}）：{j['id']}（{where}）{why}{tail}" if j.get("killed")
+                                    else f"任务失败：{j['id']}（{where}）{why}{tail}"))
+            else:
+                redo = f"要重跑请删除 {lane.get('state_dir') or '状态目录'}/{j['id']}.failed"
+                alerts.append(alert(f"failed:{j['id']}", "agent",
+                                    f"任务被终止（退出码 {j['killed']}）：{j['id']}（{where}）；{redo}" if j.get("killed")
+                                    else f"任务失败：{j['id']}（{where}）；{redo}"))
     _queued_times(jobs, plans, t, cfg["id"], lane.get("par") or 1)
     snap["jobs"].extend(jobs)
     work["running"] |= {f"{q['id']}/{j['id']}" for j in jobs if j["status"] == "running"}
@@ -909,7 +995,7 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
     al_cfg, alerts, hstate = cfg["alerts"], snap["alerts"], state.setdefault("hosts", {})
     fits = {}                                     # (how, 类按什么认, 类) → [(运行中任务, cpu_fit, 在哪, 哪台)]：cpu_low:、cpu_high: 跨主机合并（_cpu_fit_alerts）
     for hd in snap["hosts"]:
-        if not hd["ok"]:
+        if not hd["ok"] or hd.get("ephemeral"):
             continue
         lanes = [ln for ln in snap["lanes"] if ln["host"] == hd["id"]]
         # 占位、暂停、队首在等依赖的车道不算：卡空着是在等别的任务（依赖等不来另有 dep 告警）；不用卡的任务（车道的 no_gpu，#73）不算：卡本来就不用
@@ -1068,6 +1154,34 @@ def _cpu_room_text(where: str, rm: dict) -> str:
 
 
 NO_WORK_WAKE_S = 86400   # 项目跑空后这么久内给实验会话那条 no_work:（只给会话，#43）
+
+
+def _ephemeral_alerts(cfg: dict, snap: dict, raw_by_host: dict, t: float) -> None:
+    """推模式临时主机专属告警（#213）：运行中失联/被回收（ephemeral_down，to=both）与同项目多实例重复 job_id（ephemeral_dup，to=agent）。"""
+    alerts = snap["alerts"]
+    for hd in snap["hosts"]:
+        if not hd.get("ephemeral") or hd.get("ok"):
+            continue
+        p = raw_by_host.get(hd["id"]) or {}
+        lost = p.get("lost_jobs") or []
+        if not lost:
+            continue
+        names = "、".join(x["id"] for x in lost)
+        arts = list(dict.fromkeys(x["artifact_dir"] for x in lost if x.get("artifact_dir")))
+        art_s = f"；产物目录：{'、'.join(arts)}" if arts else ""
+        why = hd.get("error") or "心跳超时"
+        page_msg = f"临时主机 {hd['label']} 失联离线（{why}），中断任务：{names}{art_s}"
+        agent_msg = f"{page_msg}。请确认旧实例已离线后，在新 Colab 实例挂载云盘并从产物目录的 ckpt/latest.pt 续跑"
+        iid = p.get("instance_id") or "none"
+        alerts.append(alert(f"ephemeral_down:{hd['id']}:{iid}", "both", agent_msg, page_msg))
+    for jid, xs in sorted(EP.duplicate_jobs(cfg["id"], t).items()):
+        hosts_s = "、".join(f"{x['label']}（{x['instance_id']}）" for x in xs)
+        arts = list(dict.fromkeys(x["artifact_dir"] for x in xs if x.get("artifact_dir")))
+        art_s = f"（产物目录 {'、'.join(arts)}）" if arts else ""
+        alerts.append(alert(
+            f"ephemeral_dup:{cfg['id']}:{jid}", "agent",
+            f"同项目多个临时实例同时在跑任务 {jid}（{hosts_s}）{art_s}：存在云盘并发写入冲突风险，请核对并停止重复实例",
+        ))
 
 
 def _no_work(cfg: dict, snap: dict, glob_snap: dict, quiet: float, t: float) -> None:
@@ -1394,12 +1508,30 @@ def collect(cfg: dict, out_dir: Path | None = None, use_ssh: bool = True) -> dic
     out_dir = Path(out_dir or PJ.out_dir(cfg["id"])).expanduser()
     out_dir.mkdir(parents=True, exist_ok=True)
     glob_snap = snapshot()                             # 工作台上一轮的全局快照：本项目的登记（车道按它）、借来的主机、同机别的项目
-    cfg = lanes_cfg(cfg, glob_snap, out_dir / ".labmon", time.time())
-    live = {h["id"]: h for h in cfg["hosts"] if not h["returned"] and not h.get("pool")}     # 算力池是合成主机（#24）：不探测，车道由代读的那台读
+    now = time.time()
+    cfg = lanes_cfg(cfg, glob_snap, out_dir / ".labmon", now)
+    ephs = EP.project_hosts(cfg["id"], now, hide_s=cfg["hide_done_hours"] * 3600)
+    if ephs:
+        ehs = list(cfg["hosts"])
+        eqs = list(cfg["queues"])
+        seen_h = {h["id"] for h in ehs}
+        for rec in ephs:
+            hid = rec["host_id"]
+            if hid in seen_h:
+                continue
+            seen_h.add(hid)
+            ehs.append({"id": hid, "label": rec.get("label") or hid, "ephemeral": True, "ssh": None, "returned": None,
+                        "mounts": [], "checks": [], "shared": [], "worker_home": ""})
+            eqs.append({"id": f"ephemeral:{hid}", "host": hid, "root": f"ephemeral/{hid}", "jobs": EP.EPHEMERAL_QUEUE,
+                        "type": "ephemeral", "discover": False, "reg": True, "reg_live": True,
+                        "hide_done_hours": cfg["hide_done_hours"], "read_via": None, "label": ""})
+        cfg = dict(cfg, hosts=ehs, queues=eqs)
+    live = {h["id"]: h for h in cfg["hosts"] if not h["returned"] and not h.get("pool") and not h.get("ephemeral")}     # 算力池与临时主机都不走 SSH 探测
     lan, probes = L.gather(live, lambda h: run_probe(cfg, h) if (use_ssh or not h["ssh"]) else (None, "未连接（--no-ssh）"),
                            lambda k: use_ssh and bool(live[k]["ssh"]))     # 本机不在内网：不连，也不算探针失败
     probes.update({h["id"]: (None, "已归还") for h in cfg["hosts"] if h["returned"]})     # 不再连接
     probes.update({h["id"]: (None, POOL_LABEL) for h in cfg["hosts"] if h.get("pool")})
+    probes.update({h["id"]: EP.as_probe(h["id"], now) for h in cfg["hosts"] if h.get("ephemeral")})
     snap = build(cfg, probes, out_dir, lan, glob_snap)
     if not lan["ok"]:                                  # 数据是离开内网前的：日志多久没更新、GPU 闲置这些按它算不准，不报
         snap["alerts"] = [a for a in snap["alerts"] if a["key"].split(":")[0] not in ("ssh_fail", "log_silent", "noprogress", "gpu_idle")]

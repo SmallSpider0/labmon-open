@@ -371,6 +371,9 @@ def archive_block(pid: str, psnap: dict | None, glob: dict | None, interval: flo
         return "还有实验：" + "，".join(x for x in why if x)
     if not psnap.get("no_work_since"):
         return "项目看板还没说暂时没实验，等下一轮采集"
+    from . import ephemeral as EP
+    if ephs := EP.online_for_project(pid, t):
+        return f"还有在线临时主机（{'、'.join(r['host_id'] for r in ephs)}），请等待其退出或离线后再归档"
     return None
 
 
@@ -523,6 +526,8 @@ def delete(pid: str, revision: str, by: str, check_collector) -> str:
             _save(a)
         except OSError as e:
             raise ConfigError("看板清理未完成，归档条目仍保留，请稍后重试") from e
+        from . import ephemeral as EP
+        EP.remove_project(pid)
         msg = f"永久删除了看板项目 {pid}"
         log_events([{"kind": "project", "project": pid, "who": by, "msg": msg}])
         return msg

@@ -361,6 +361,17 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
         if h.get("pool"):                          # 算力池（#24）：合成主机，没有卡；连没连上看代读池车道的那台
             o.p(f"  {name}：交给池、还没放到哪台的清单在这里等" + ("" if h.get("ok") else f"；这一轮没读到池里的清单（{h.get('error') or '代读的主机连不上'}）"))
             continue
+        if h.get("ephemeral"):                     # 推模式临时主机（#213）：标注 [临时] 并附云盘/本地盘余量，省略保活与借用
+            st = "在线" if h.get("ok") else f"已离线：{h.get('error') or '离线'}"
+            cards = "，".join(_card(g) for g in h.get("gpus") or [])
+            mounts = "，".join(
+                f"{m.get('label') or m['path']} 剩 {m['avail_gb']:.1f}"
+                + (f"/{m['total_gb']:.1f}" if m.get("total_gb") else "") + " GiB"
+                + (" [余量低]" if m.get("kind") == "cloud" and m.get("min_gb") is not None and m["avail_gb"] < m["min_gb"] else "")
+                for m in h.get("mounts") or [] if m.get("avail_gb") is not None
+            )
+            o.p(f"  {name} [临时]：{st}" + (f"；{cards}" if cards else "") + (f"；{mounts}" if mounts else ""))
+            continue
         st = "正常" if h.get("ok") else f"连不上：{h.get('error')}" + (f"（上次 {fmt_time(h['last_ok'])}）" if h.get("last_ok") else "")
         cards = "，".join(_card(g) for g in h.get("gpus") or [])
         hst = (wst.get(h["id"]) or {}) if h.get("ok") else {}
@@ -401,6 +412,8 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
                 "挂起中（SIGSTOP）" if j.get("suspended") else "",
                 f"CPU {cores[(host, j['id'])]:.1f} 核" if cores.get((host, j["id"])) is not None else ""]
         o.p(f"  {j['id']}（{where(j)}）：" + "，".join(b for b in bits if b))
+        if j.get("artifact_dir"):
+            o.p(f"      产物：{j['artifact_dir']}")
         if j.get("last_line") and (tail := _clip_line(str(j["last_line"]))):
             o.p("      日志" + (f" {fmt_dur(now - j['log_mtime'])}前" if j.get("log_mtime") else "") + f"：{tail}")
     queued = [j for j in jobs if j.get("status") == "queued"]
@@ -418,6 +431,8 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
             log = f"{ln['logs_dir']}/{j['id']}.log" if ln.get("logs_dir") else ""
             o.p(f"  {j['id']}（{where(j)}）" + (f" {fmt_time(j['end_ts'])}" if j.get("end_ts") else "") + (f"，退出码 {j['killed']}（被信号终止）" if j.get("killed") else "")
                 + (f"：{j['last_line']}" if j.get("last_line") else "") + (f"；日志 {log}" if log else ""))
+            if j.get("artifact_dir"):
+                o.p(f"      产物：{j['artifact_dir']}")
     groups = snap.get("groups") or []
     if groups:
         o.p("计划项：")
@@ -485,7 +500,7 @@ def disk(pid: str, psnap: dict | None = None) -> dict:
         o.p(f"  {C.write_text(js)}；{j.get('host')} 上 {fmt_time(j['t1'])} 结束" + ("；还在等重扫，数字会变" if any(x.get("wait") for x in js) else "")
             + ("；超过提醒线（bigwrite: 告警）" if j.get("big") else ""))
     local = s.get("local") or {}
-    hosts = {h["id"]: h for h in psnap.get("hosts") or [] if not h.get("returned") and not h.get("pool")}
+    hosts = {h["id"]: h for h in psnap.get("hosts") or [] if not h.get("returned") and not h.get("pool") and not h.get("ephemeral")}
     ids = [i for i in dict.fromkeys([*hosts, *local]) if i in hosts]
     if ids:
         o.p("各主机本地盘（续租、容器重启会清空；能重算的缓存放这里，用 needs= 声明）：")
@@ -494,6 +509,20 @@ def disk(pid: str, psnap: dict | None = None) -> dict:
         mine = f"本项目缓存 {_gib(loc.get('cache') or 0)}，单格临时 {_gib(loc.get('scratch') or 0)}" if loc else "本项目没有缓存"
         room = "，".join(f"{m.get('label') or m['path']} 剩 {m['avail_gb']:.1f} GiB" for m in h.get("mounts") or [] if m.get("avail_gb") is not None)
         o.p(f"  {h.get('label') or hid}：{mine}" + (f"；{room}" if room else ""))
+    eph_hosts = [h for h in psnap.get("hosts") or [] if h.get("ephemeral") and h.get("ok") and (h.get("mounts") or [])]
+    if eph_hosts:
+        o.p("临时主机存储（云盘与实例本地盘，不计入实验室共享盘）：")
+        for h in eph_hosts:
+            items = []
+            for m in h.get("mounts") or []:
+                if m.get("avail_gb") is None:
+                    continue
+                kind = "云盘" if m.get("kind") == "cloud" else "本地盘"
+                tot = f"/{m['total_gb']:.1f}" if m.get("total_gb") else ""
+                low = " [余量低]" if m.get("kind") == "cloud" and m.get("min_gb") is not None and m["avail_gb"] < m["min_gb"] else ""
+                items.append(f"[{kind}] {m.get('label') or m['path']} 剩 {m['avail_gb']:.1f}{tot} GiB{low}")
+            if items:
+                o.p(f"  {h.get('label') or h['id']} [临时]：{'；'.join(items)}")
     return o.done(0, data=s)
 
 

@@ -3260,4 +3260,64 @@ t("overview", "独立主机分类与域隔离（#114）：主机表与主机页�
   has(tips(mg), "独立主机不共享 worker 目录，不能把登记搬到别的主机");
 });
 
+/* ---------- #213 推模式临时主机与云盘存储 ---------- */
+const OVEPH = J("overview_ephemeral.json"), PJEPH = J("project_ephemeral.json");
+t("overview", "推模式临时主机（#213）：总览标「临时」徽标、云盘余量与低余量标红、租期列写临时实例，主机页隐藏续租/借用/临时指令与实验室共享盘", () => {
+  const C = ovCtx(OVEPH, RR);
+  ok(run(C, 'hostShort({id: "colab-t4-01", ephemeral: true})') === "临时 colab-t4-01", "hostShort 临时前缀");
+  const home = page(C, "#/"); clean(home, "ephemeral #/");
+  has(home, '<span class="badge b-mute">临时</span>');
+  has(home, "临时实例");
+  has(home, "Google Drive 剩 12.4 GiB");
+  has(home, 'style="color:var(--bad);font-weight:600"', "云盘 < 1 GiB 标红");
+  has(home, "Google Drive 剩 0.6 GiB");
+  has(home, "临时离线");
+  ok(!run(C, 'alertsOf(D.hosts.find(h => h.id === "colab-t4-01"))').some(a => a.msg.includes("worker 不在")), "在线临时主机不报 worker 不在");
+  ok(!run(C, 'alertsOf(D.hosts.find(h => h.id === "colab-l4-down"))').some(a => a.msg.includes("labmon worker start")), "离线临时主机不提示 labmon worker start");
+  // 主机页：展示实例 id、项目链接、云盘/本地盘资源卡，不显示续租、借用、接上卡、临时指令/队列/本地盘选项卡
+  const hp = page(C, "#/host/colab-t4-01"); clean(hp, "ephemeral #/host/colab-t4-01");
+  has(hp, "inst-t4-01"); has(hp, "临时在线"); has(hp, "Google Drive"); has(hp, "Colab 本地盘");
+  has(hp, "colab_s1"); ok(!hp.includes("旧队列"), "临时主机任务不应标成旧队列");
+  ok(!hp.includes("续租"), "临时主机页不应出现续租");
+  ok(!hp.includes("借用详情"), "临时主机页不应出现借用详情");
+  ok(!hp.includes("临时指令"), "临时主机页记录卡不应出现临时指令选项卡");
+  ok(!hp.includes("接上原来的项目"), "临时主机页不应出现接上卡");
+  const hpLow = page(C, "#/host/colab-t4-02"); clean(hpLow, "ephemeral #/host/colab-t4-02");
+  has(hpLow, "低于 1 GiB");
+  const hpDown = page(C, "#/host/colab-l4-down"); clean(hpDown, "ephemeral #/host/colab-l4-down");
+  has(hpDown, "临时离线");
+  // 任务详情展示产物目录与临时实例来源
+  const det = run(C, '(() => { const h = D.hosts.find(x => x.id === "colab-t4-01"); return jobDetail({...h.status.running[0], h}); })()');
+  has(det, "产物目录"); has(det, "/content/drive/MyDrive/labmon/proj-a/runs/colab_s1"); has(det, "proj-a 的临时主机上报");
+  // 恶意字符串在临时主机字段里必须全部转义
+  const badSnap = JSON.parse(JSON.stringify(OVEPH));
+  const bh = badSnap.hosts.find(h => h.id === "colab-t4-01");
+  bh.label = "云" + BAD; bh.instance_id = "id" + BAD;
+  bh.storage[0].label = "盘" + BAD; bh.storage[0].path = "/drv/" + BAD;
+  bh.status.running[0].artifact_dir = "/art/" + BAD;
+  const BC = ovCtx(badSnap, RR);
+  clean(page(BC, "#/"), "ephemeral evil #/");
+  clean(page(BC, "#/host/colab-t4-01"), "ephemeral evil #/host/colab-t4-01");
+});
+t("project", "项目页临时主机与云盘存储（#213）：资源卡区隔实验室共享盘与云盘、云盘 < 1 GiB 标红、时间线与明细展示 artifact_dir 及三类告警", () => {
+  const C = pjCtx(PJEPH, EVN), h = app(C);
+  clean(h, "ephemeral project");
+  has(h, "Colab T4 #1"); has(h, "临时");
+  has(h, "/content/drive/MyDrive/labmon/proj-a/runs/colab_s1");
+  has(h, "临时主机 Colab L4 离线（colab-l4-down）心跳超时离线");
+  // 资源卡：第一台实验室主机（srv-a）仍展示共享盘，临时主机展示云盘与本地盘且 < 1 GiB 标红
+  const rc = run(C, "resourcesCard()"); clean(rc, "ephemeral resourcesCard");
+  has(rc, "Google Drive"); has(rc, "Colab 本地盘"); has(rc, "云盘"); has(rc, "余 0.6 GiB");
+  has(rc, 'style="color:var(--bad)">余 0.6 GiB</span>', "云盘低于 1 GiB 标红");
+  // 时间线渲染临时车道不报错
+  run(C, "drawTimeline()");
+  const tl = el(C, "tlbox").innerHTML; clean(tl, "ephemeral timeline");
+  has(tl, "colab_s1");
+  // 恶意字符串在项目页临时主机与 artifact_dir 中必须转义
+  const badPj = JSON.parse(JSON.stringify(PJEPH));
+  badPj.hosts.find(x => x.id === "colab-t4-01").mounts[0].label = "云" + BAD;
+  badPj.jobs.find(j => j.id === "colab_s1").artifact_dir = "/p/" + BAD;
+  clean(app(pjCtx(badPj, EVN)), "ephemeral evil project");
+});
+
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));

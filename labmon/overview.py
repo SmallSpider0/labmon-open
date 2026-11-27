@@ -28,6 +28,7 @@ from pathlib import Path
 
 from . import borrow as B
 from . import disk as DK
+from . import ephemeral as EP
 from . import fleet as F
 from . import fleetboot as FB
 from . import fleetops as FO
@@ -237,7 +238,13 @@ def _project_worker_state(host: dict) -> tuple[str | None, str | None]:
 
 def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict) -> None:
     """只核对与本项目相关的 worker 共享域（按 home_key 隔离）；快照提供线索，删除以本次读到的文件为准。
-    已归还的独立主机没有共享盘代办机：若最后快照已无本项目在跑任务与未移除登记，直接放行，不永久阻断项目删除。"""
+    已归还的独立主机没有共享盘代办机：若最后快照已无本项目在跑任务与未移除登记，直接放行，不永久阻断项目删除。
+    已离线临时主机没有 worker_home，显式放行；仅当项目仍有在线且含 running 任务的临时主机时阻断（#213）。"""
+    if live_eph := EP.running_for_project(pid):
+        ids = "、".join(r["host_id"] for r in live_eph)
+        raise ConfigError(f"临时主机 {ids} 仍有本项目在跑的任务，请先确认已收尾")
+    eph_ids = {h["id"] for h in [*(local.get("hosts") or []), *(glob.get("hosts") or [])] if h.get("ephemeral")}
+    eph_ids.update(r["host"] for r in local.get("lanes", []) if r.get("type") == "ephemeral" and r.get("host"))
     known = {h["id"]: h for h in all_hosts()}
     configured = {h["id"]: h for h in cfg.get("hosts", [])}
     active = [h for h in [*known.values(), *configured.values()] if not h.get("returned")]
@@ -247,7 +254,7 @@ def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict
     associated.update(r.get("host", r.get("reader")) for r in local.get("lanes", []))
     states = ("running", "waiting", "external")
     associated.update(h["id"] for h in glob.get("hosts", [])
-                      if any(j.get("project") == pid for key in (*states, "queues") for j in (h.get("status") or {}).get(key) or []))
+                      if not h.get("ephemeral") and any(j.get("project") == pid for key in (*states, "queues") for j in (h.get("status") or {}).get(key) or []))
     reg_by = {r["host"]: r for r in glob.get("regs", [])}
     snap_by = {h["id"]: h for h in glob.get("hosts", [])}
     related_keys: set[tuple] = {home_key(h) for h in configured.values() if not (h.get("returned") and is_standalone(h))}
@@ -261,6 +268,8 @@ def check_project_idle(pid: str, entry: dict, cfg: dict, local: dict, glob: dict
                 related_keys.add(("shared", reg["home"].rstrip("/")))
     active_ids = {h["id"] for h in active}
     for hid in associated - {None, ""}:
+        if hid in eph_ids or EP.is_ephemeral(hid):
+            continue
         h = known.get(hid) or configured.get(hid)
         if h and h.get("returned") and is_standalone(h):
             # 已归还独立主机无共享盘代办：按最后快照核实，仍有在跑进程或未撤登记才阻断
@@ -546,17 +555,19 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True, pool_tick=
         hosts.append(e)
     for p in projects:                                # 看板上的项目都有配色，还没跑过任务的也有（以前灰色，与“labmon 之外”分不开）
         pick_color(colors, p["id"])
+    eph_hosts = EP.overview_hosts(projects, prog, colors, t)
     save_json(sd / "colors.json", colors)
     per_host: dict[str, list[str]] = {}
     notices, wake, disk, fleet, fleet_cfg = _notices(hosts, hcfg, t, per_host)
     if lan["ok"]:
         RB.keep_offers(hosts, old, t)                 # 这一轮读失败的主机沿用上一轮的 offers（挪法建议不消失一轮再出现）
-    snap = {"generated": t, "hosts": hosts, "colors": colors, "notices": notices, "lan": lan, "wake": wake,
+    all_view_hosts = hosts + eph_hosts                # 临时主机（#213）：只进入快照主机表与时间线 occupancy，不碰 health/renew/borrow/disk/fleet/rebalance/sched_view/regs
+    snap = {"generated": t, "hosts": all_view_hosts, "colors": colors, "notices": notices, "lan": lan, "wake": wake,
             "host_notices": per_host,                 # 各主机这一轮的掉线、恢复（serve.Overview.once 另推给能用这台的人，#167）
             # 各项目的挪法建议（worker 的 offers 汇的；项目看板据此告警）；不在内网时沿用上一轮的，回来后不重复叫醒
             "rebalance": RB.suggest(hosts, old.get("rebalance"), t) if lan["ok"] else old.get("rebalance") or {},
             "event_kinds": EVENT_KINDS, "event_cats": EVENT_CATS,
-            "fleet": fleet, "disk": disk, "occ": occupancy(hosts, projects, t - KEEP_S), "sched": sched_view(hosts, projects, t, sw, people),
+            "fleet": fleet, "disk": disk, "occ": occupancy(all_view_hosts, projects, t - KEEP_S), "sched": sched_view(hosts, projects, t, sw, people),
             "regs": _regs(hosts, {k: v for k, v in by.items() if k in hcfg}, got, old, t, fleet_cfg),   # 登记的全局视图：项目「管理」抽屉的主机与队列
             # 各项目的摘要：页面要的字段只在 serve.Overview.proj_info 一处定，这里照带；running 只给 _to_worker 写 eta.json，不进快照（#139）
             "projects": [{k: v for k, v in p.items() if k != "running"} for p in projects],
@@ -594,6 +605,7 @@ def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | Non
     项目级的暂停另带 by（谁下的，config.pause_by；没记的为 None，当管理员下的，#16）；
     没有项目级的、只在几台单独下的（worker 状态 overrides 里不带 global 的）hosts 列出这几台，until 取最晚的；暂停另带 by：{主机: 谁下的}（不算 once，没记的为 None，#27）。
     项目取看板上的，另加此刻在跑、在等的别的项目名；没有 worker 状态带 share 时为 None。"""
+    hosts = [h for h in hosts if not h.get("ephemeral")]
     cluster = [h["status"] for h in hosts if not h.get("standalone") and (h.get("status") or {}).get("share")]
     sts = cluster or [h["status"] for h in hosts if (h.get("status") or {}).get("share")]
     if not sts:
@@ -733,7 +745,7 @@ def relaunch(snap: dict, start=None) -> list[str]:
     last = load_json(sd / "relaunch.json", {})
     out = []
     for h in snap["hosts"]:
-        if not h.get("auto") or h.get("error") or h.get("status_error") or h.get("stopped") or (h.get("status") and h.get("worker_up")):
+        if h.get("ephemeral") or not h.get("auto") or h.get("error") or h.get("status_error") or h.get("stopped") or (h.get("status") and h.get("worker_up")):
             continue
         if (h.get("borrow") or {}).get("pool") and not PO.relaunch_ok(h):   # 算力池借着的（#25）：探到还是借来时那个容器才拉起，换了的由 pool.tick 还掉
             continue

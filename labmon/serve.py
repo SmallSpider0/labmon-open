@@ -107,6 +107,7 @@ from . import borrow as B
 from . import collect as C
 from . import deploy as DP
 from . import disk as DK
+from . import ephemeral as EP
 from . import fleet as F
 from . import fleetboot as FB
 from . import fleetops as FO
@@ -674,6 +675,14 @@ class Handler(BaseHTTPRequestHandler):
             if size < 0 or size > 160 * 1024:
                 self._json(400 if size < 0 else 413, {"error": "报告请求体长度无效或太大"})
                 return False
+        if path == "/api/ephemeral/push":
+            try:
+                size = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                size = -1
+            if size < 0 or size > EP.PUSH_MAX_BYTES:
+                self._json(400 if size < 0 else 413, {"error": "临时主机上报请求体长度无效或超过 128 KiB 上限"})
+                return False
         try:
             ok = self._own(r, path, who)
         except U.Denied as x:
@@ -893,7 +902,7 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, got)
         if path == "/api/admin/deploy":
             return self._json(200, DP.status())
-        if path in ("/api/client/install.sh", "/api/client/wheel"):
+        if path in ("/api/client/install.sh", "/api/client/wheel", "/api/client/ephemeral.py"):
             return self._client(path.rsplit("/", 1)[-1])
         if path == "/api/hosts":
             got = A.hosts()
@@ -1172,9 +1181,19 @@ class Handler(BaseHTTPRequestHandler):
                 out = DP.apply(body.get("bundle"))
                 log(f"部署由 {who.name} 发起：{out['msg']}")
                 return self._json(200, out)
+            if act == "ephemeral/push":
+                res, wake = EP.push(body, who=who.name, who_role=who.role)
+                pid = res.pop("project", None)
+                if wake:
+                    if pid and (p := self.board.projects.get(pid)):
+                        p.wake.set()
+                    self.board.overview.wake.set()
+                return self._json(200, res)
             r = self._cli(act, body, who)
             if r is not None:
                 return self._json(*r)
+        except EP.EphemeralError as x:
+            return self._json(x.code, {"error": x.msg})
         except U.Denied as x:
             return self._json(x.code, {"error": x.msg})
         except PJ.Refused as x:
@@ -1263,6 +1282,9 @@ class Handler(BaseHTTPRequestHandler):
         """由看板发客户端（#167，dist.py）：install.sh?base=<看板根地址> 一个装好命令行的 sh 脚本（嵌着 wheel、填好地址的 client.toml、[server] ca_cert 的 CA），
         wheel 只要包（labmon update）。base 是页面自己的地址（含反代的路径前缀）：要是 http(s) 地址、主机在这个入口认的 Host 里，才写进 client.toml。"""
         try:
+            if what == "ephemeral.py":
+                data = (C.HERE / "labmon_ephemeral.py").read_bytes()
+                return self._send(200, data, "text/x-python; charset=utf-8", extra={"Content-Disposition": 'attachment; filename="labmon_ephemeral.py"'})
             if what == "wheel":
                 name, data, commit = DI.wheel(DP.RUNNING["commit"])
                 return self._send(200, data, "application/zip", extra={"Content-Disposition": f'attachment; filename="{name}"', "X-Labmon-Commit": commit})
@@ -1833,6 +1855,7 @@ ROUTES = [
     _R("POST", r"/api/users/public-ops", "admin", admin=True, lan=True),
     _R("GET", r"/api/reports", "reports", admin=True),
     _R("POST", r"/api/report", "project", own="report"),
+    _R("POST", r"/api/ephemeral/push", "project", own="body"),          # 推模式临时主机心跳上报（#213，ephemeral.py）
     _R("GET", r"/api/admin/deploy", "deploy", admin=True),             # 部署（#164）：在跑哪个提交、平台操作、日志里的 Traceback
     _R("GET", r"/api/admin/backup", "backup", admin=True, lan=True),   # 冷备（#163）：笔记本每天经内网入口来取一份（backup pull），不含秘密；公网入口不给（#17）
     _R("POST", r"/api/admin/deploy", "deploy", admin=True, lan=True),  # 收 git bundle 快进、重启：等于在这台上跑新代码，只在内网入口
@@ -1855,7 +1878,7 @@ ROUTES = [
     _R("GET", PROJECT_READ_PATH.pattern, "read", own="path"),         # labmon status|disk|records（#52）：只读，普通用户只看自己的项目
     _R("PUT", PROJECT_CONFIG_PATH.pattern, "project", own="new"),     # 推项目配置（#161）：第一次推的人是主人（#167）
     _R("POST", r"/api/(password|tokens/add|revoke|push|push/test)", U.ACCOUNT, own="self"),   # 自己的口令、令牌、推送（#167）：只认浏览器会话
-    _R("GET", r"/api/client/(install\.sh|wheel)", "read"),             # 由看板发客户端（#167，dist.py）：登录了就能取
+    _R("GET", r"/api/client/(install\.sh|wheel|ephemeral\.py)", "read"),   # 由看板发客户端（#167，dist.py）与临时主机上报脚本（#213）
     _R("GET", r"/api/users", "admin", admin=True, lan=True),          # 账号管理只在内网入口（#17）；自己的口令、令牌照常
     _R("POST", r"/api/users/(add|role|reset|revoke|remove|hosts)", "admin", admin=True, lan=True),
     _R("GET", r"/|/index\.html|/overview\.json|/records\.json", "read"),   # 普通用户只看到自己的（users.view、users.visible）
