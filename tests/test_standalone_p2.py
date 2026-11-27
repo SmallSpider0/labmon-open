@@ -246,6 +246,11 @@ class DiskGateWorkDiskCleanTest(unittest.TestCase):
             w.info = {"nproc": 16, "cpu_quota": 2.0, "mem": {"limit": 64.0, "anon": 1.0, "used": 1.0}, "gpus": []}
             snap_cq = w.snapshot({})
             self.assertEqual(snap_cq["cpu_cap"], 2)
+            # 回归：启动环境含 LABMON_CPU_QUOTA=2，看板下发 sched.json 显式清除 cpu_quota: null 后不再回退旧值
+            Path(w.p.sched).parent.mkdir(parents=True, exist_ok=True)
+            Path(w.p.sched).write_text(json.dumps({"standalone": True, "cpu_quota": None}), encoding="utf-8")
+            with mock.patch.dict(os.environ, {"LABMON_CPU_QUOTA": "2"}):
+                self.assertNotIn("cpu_quota", w.policy())
             w.disk_gate = {"on": True, "why": "本地盘空间不足：剩 8.0 GiB", "free_gb": 8.0, "stop_gb": 10.0, "recover_gb": 12.0}
             S = {"now": time.time(), "cards": [], "jobs": [{"name": "already_running", "project": "p1", "gpus": [], "vram": {}, "ram": 1.0, "cpu": 1.0, "excl": None, "tag": None, "hold": False}],
                  "room": 64.0, "margin": 8.0, "limit": 64.0, "cpu_room": 8.0, "cpu_cap": 8, "tags": {}, "holds": {}, "owner": set(), "who": "对方", "kept": False,
@@ -412,6 +417,28 @@ class DiskGateWorkDiskCleanTest(unittest.TestCase):
                 self.assertTrue(job_run.exists())       # worker 停止后，仍在跑的任务 scratch 绝不被误删
                 self.assertFalse(job_dead.exists())     # 已退出任务的 scratch 正常清理
 
+            # 3c. 回归：扫描阶段到删除阶段之间任务被新启动（写入 active_scratch.json）→ 锁内复核必须跳过、绝不误删
+            job_racy = local / "jobs" / "proj-a" / "racy_job"
+            job_racy.mkdir(parents=True, exist_ok=True)
+            (job_racy / "live.bin").write_bytes(b"r" * 1024)
+            Path(p_obj.status).write_text(json.dumps({"running": []}), encoding="utf-8")
+            Path(p_obj.active_scratch).unlink(missing_ok=True)
+            orig_scan = m.clean_local.__globals__["_D"].scan_unit
+
+            def _scan_and_launch(*args, **kwargs):
+                res = orig_scan(*args, **kwargs)
+                # 模拟扫描期间 Worker.start 放行了 racy_job（写入 active_scratch.json）
+                Path(p_obj.active_scratch).write_text(json.dumps({"proj-a/racy_job": os.getpid()}), encoding="utf-8")
+                return res
+
+            with mock.patch.object(m.clean_local.__globals__["_D"], "scan_unit", side_effect=_scan_and_launch):
+                buf4 = io.StringIO()
+                with contextlib.redirect_stdout(buf4):
+                    rc_racy = m.clean_local(p_obj, project="proj-a", scratch=True, yes=True)
+                self.assertEqual(rc_racy, 0)
+                self.assertTrue(job_racy.exists())      # 扫描期间新起任务的 scratch 必须受锁内复核保护
+                self.assertTrue((job_racy / "live.bin").exists())
+
 
 class ExternalHostDualEntrySecurityTest(unittest.TestCase):
     """外部主机 REST API + CLI 双入口、零私钥上传与多用户安全防线。"""
@@ -574,12 +601,30 @@ class ExternalHostDualEntrySecurityTest(unittest.TestCase):
         with self.assertRaises(U.Denied) as cm:
             EH.edit_external("ext-sys-amy", {"ssh": "u@203.0.113.90"}, self.amy)
         self.assertEqual(cm.exception.code, 403)
-        # 4. 回归：overview._to_worker 与 workerctl.worker_env 均下发 cpu_quota 到独立主机
+        # 4. 回归：overview._to_worker 与 workerctl.worker_env 均下发 cpu_quota 到独立主机，清空时显式传 null
         from labmon import workerctl as WC
         h_py = next(h for h in CF.all_hosts() if h["id"] == "ext-py")
         _, for_host = O._to_worker([], time.time(), {}, {})
         self.assertEqual(for_host(h_py)["sched.json"].get("cpu_quota"), 6)
         self.assertIn("LABMON_CPU_QUOTA=6", WC.worker_env(h_py))
+        # 清空 cpu_quota 后 sched.json 显式包含 cpu_quota: None
+        EH.edit_external("ext-py", {"cpu_quota": None}, self.boss)
+        h_py2 = next(h for h in CF.all_hosts() if h["id"] == "ext-py")
+        _, for_host2 = O._to_worker([], time.time(), {}, {})
+        self.assertIn("cpu_quota", for_host2(h_py2)["sched.json"])
+        self.assertIsNone(for_host2(h_py2)["sched.json"]["cpu_quota"])
+
+        # 5. 回归：管理员清空外部主机 owner="" 后归属归零且原用户失去可见性
+        EH.add_external({"id": "ext-own", "ssh": "u@203.0.113.91", "owner": "amy"}, self.boss)
+        self.assertIn("ext-own", U.access(self.amy, {}).allowed)
+        r_clr = EH.edit_external("ext-own", {"owner": ""}, self.boss)
+        self.assertIsNone(r_clr["host"]["owner"])
+        self.assertNotIn("ext-own", U.access(self.amy, {}).allowed)
+
+        # 6. 回归：切换外部主机 data_root 后 overview._SENT 缓存失效，新目录能完整收到 sched.json
+        O._SENT[("ext-py", "sched.json")] = {"standalone": True}
+        EH.edit_external("ext-py", {"data_root": str(self.root / "dr_new")}, self.boss)
+        self.assertNotIn(("ext-py", "sched.json"), O._SENT)
 
     def test_http_routes_and_standby_and_worker_clean_auth(self):
         """走真实 HTTP Server 验证 /api/hosts/external* 与 /api/worker/clean 路由、鉴权与备用拒写。"""

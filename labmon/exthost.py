@@ -307,7 +307,11 @@ def _norm_fields(data: dict, who: U.Ident, *, existing: dict | None = None) -> d
             else:
                 raise U.Denied(400, "users 要是账号名列表")
         elif existing:
-            users = existing.get("users")
+            # 管理员修改或清空 owner 且未显式传 users 时，按新 owner 同步重置授权（清空 owner 收回管理员名下后原用户不再可见）
+            if "owner" in data and (existing.get("owner") or "") != (owner or ""):
+                users = [owner] if owner else None
+            else:
+                users = existing.get("users")
         else:
             users = [owner] if owner else None
 
@@ -436,6 +440,7 @@ def edit_external(hid: str, data: dict, who: U.Ident) -> dict:
         old_managed = bool(old.get("ssh")) and host_ssh_key(old) == "managed"
         new_managed = bool(new.get("ssh")) and new.get("ssh_key") == "managed"
         conn_changed = (old.get("ssh") or "") != (new.get("ssh") or "") or int(old.get("port") or 22) != int(new.get("port") or 22)
+        dir_changed = (old.get("data_root") or "") != (new.get("data_root") or "") or (old.get("worker_home") or "") != (new.get("worker_home") or "")
         owner_changed = (old.get("owner") or "") != (new.get("owner") or "")
         key_info = None
         if new_managed:
@@ -448,6 +453,9 @@ def edit_external(hid: str, data: dict, who: U.Ident) -> dict:
             edit_host(hid, updates, f"{who.name} 修改了外部主机 {hid} 的配置")
         except ConfigError as e:
             raise U.Denied(409, str(e)) from e
+        if conn_changed or dir_changed:
+            from . import overview as OV
+            OV.clear_sent(hid)
         if conn_changed or owner_changed or (old_managed and not new_managed):
             lan.close_host_ssh(old, drop_known_hosts=conn_changed)
         if old_managed and (not new_managed or owner_changed):
@@ -488,6 +496,8 @@ def remove_external(hid: str, who: U.Ident, *, force: bool = False) -> dict:
             remove_host(hid, f"{who.name} 删除了外部主机 {hid}")
         except ConfigError as e:
             raise U.Denied(409, str(e)) from e
+        from . import overview as OV
+        OV.clear_sent(hid)
         lan.close_host_ssh(h, drop_known_hosts=True)
         key_removed = PF.del_ssh_key(h.get("owner"), hid) if host_ssh_key(h) == "managed" else False
     return {

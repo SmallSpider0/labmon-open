@@ -304,8 +304,6 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if os.path.exists(rcf):
                 os.remove(rcf)
             sd, cd = _Q.scratch_dir(q["project"], job["name"]), _Q.cache_dir(q["project"])
-            for d in (sd, cd):
-                os.makedirs(d, exist_ok=True)
             env = dict(os.environ, PYTHONUNBUFFERED="1", QUEUE_ROOT=q["root"], LABMON_SCRATCH=sd, LABMON_CACHE=cd)
             env.pop("PYTHONPATH", None)
             env["CUDA_VISIBLE_DEVICES"] = ",".join(c["uuid"] for c in gpus) if job["ngpu"] > 0 else ""
@@ -319,12 +317,17 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             script = ("echo %d > /proc/self/oom_score_adj 2>/dev/null; " % _C.GUEST_ADJ if self.guest() else "") \
                 + body + '; echo $? > "$3"'
             args = ["bash", "-c", script, "labmon-job:" + job["name"], q["env"] or "", job["cmd"], rcf]
-            with open(os.path.join(lg, job["name"] + ".log"), "a") as out:
-                out.write("===== %s labmon 开始（GPU %s）=====\n" % (_C.now_str(), ",".join(str(c["i"]) for c in gpus) or "无"))   # 分隔行，见 START_RE
-                out.flush()
-                pr = subprocess.Popen(args,
-                                      cwd=q["root"], env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                      start_new_session=True)
+            # 与 clean_local 共用 scratch_lock：建单格临时目录、起进程并写 active_scratch 原子互斥，防止 clean 扫描到删除窗口误删新起任务
+            with _C.flock(self.p.scratch_lock):
+                for d in (sd, cd):
+                    os.makedirs(d, exist_ok=True)
+                with open(os.path.join(lg, job["name"] + ".log"), "a") as out:
+                    out.write("===== %s labmon 开始（GPU %s）=====\n" % (_C.now_str(), ",".join(str(c["i"]) for c in gpus) or "无"))   # 分隔行，见 START_RE
+                    out.flush()
+                    pr = subprocess.Popen(args,
+                                          cwd=q["root"], env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                          start_new_session=True)
+                self._note_scratch(q["project"], job["name"], pr.pid)
             if nice_inc and not use_nice_cmd:
                 try:
                     cur_nice = os.getpriority(os.PRIO_PROCESS, pr.pid)
@@ -348,13 +351,41 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                    name=job["name"], project=q["project"], queue=q["jobs"])
         return None
 
+    def _note_scratch(self, project, name, pid):
+        """在 scratch_lock 锁内记下刚放行任务的 (project, name) -> pid，供 clean_local 删除前复核防竞态。"""
+        if not (project and name and isinstance(pid, int) and pid > 0):
+            return
+        try:
+            cur = json.loads(_C.read(self.p.active_scratch, "{}") or "{}")
+            if not isinstance(cur, dict):
+                cur = {}
+        except ValueError:
+            cur = {}
+        # 剔除已退出或不在 running 里的旧记录，防止 active_scratch.json 无限增长
+        live = {k: v for k, v in cur.items() if isinstance(v, int) and v > 0 and self._pid_alive_fast(v)}
+        key = "%s/%s" % (_C.NAME_RE.sub("_", project), _C.NAME_RE.sub("_", name))
+        live[key] = pid
+        _C.write(self.p.active_scratch, json.dumps(live, ensure_ascii=False))
+
+    @staticmethod
+    def _pid_alive_fast(pid):
+        try:
+            os.kill(pid, 0)
+            return True
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+
     def grant(self, r, gpus):
         """放行一次单元申请：写 .ok（含选中的卡），申请方据此设 CUDA_VISIBLE_DEVICES 后 exec 原命令。"""
         base = os.path.join(_C.SLOTS, r["id"])
         nice_inc = _S.cpu_only_nice(r["ngpu"], self.info.get("gpus") or (), _C.is_hold(r["name"]))
-        _C.write(base + ".ok", json.dumps({"gpus": [c["uuid"] for c in gpus], "t": _C.time.time(), "cpus": self.cpus_for(r),
-                                        **({"adj": _C.GUEST_ADJ} if self.guest() else {}),
-                                        **({"nice": nice_inc} if nice_inc else {})}))
+        with _C.flock(self.p.scratch_lock):
+            self._note_scratch(r.get("project"), r.get("name"), r.get("pid"))
+            _C.write(base + ".ok", json.dumps({"gpus": [c["uuid"] for c in gpus], "t": _C.time.time(), "cpus": self.cpus_for(r),
+                                            **({"adj": _C.GUEST_ADJ} if self.guest() else {}),
+                                            **({"nice": nice_inc} if nice_inc else {})}))
         if os.path.exists(base + ".why"):
             os.remove(base + ".why")
         self.running[r["key"]] = dict(r, t0=_C.time.time(), gpus=[c["uuid"] for c in gpus], use={}, pstart=_C.pstart(r["pid"]))

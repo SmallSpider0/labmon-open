@@ -347,6 +347,13 @@ _sig = lambda v: {k: x for k, x in v.items() if k != "t"}    # 比内容时不�
 _CLOCK: dict = {}                    # 主机 → 它的时钟比本机快多少秒（上一轮 fetch 的 date +%s 与本机比）；写给 worker 的时刻按它换算
 
 
+def clear_sent(hid: str) -> None:
+    """清除主机 hid 的已下发缓存与时钟差（外部主机修改 SSH 目标或 data_root/worker_home 或删机时调用，确保新位置收到完整 sched.json 等）。"""
+    for k in [k for k in _SENT if k[0] == hid]:
+        _SENT.pop(k, None)
+    _CLOCK.pop(hid, None)
+
+
 def _series(h: dict, st: dict, t: float) -> list[dict]:
     """主机曲线（series/<主机>.jsonl，7 天）记这一轮一行，返回近 SHOW_S 的全部行（页面上的点由 _thin 抽稀，gpu_busy 的 24 小时平均用全部行）。"""
     info = st["info"]
@@ -483,11 +490,15 @@ def _to_worker(projects: list[dict], t: float, sw: dict, snap: dict | None = Non
 
     def for_host(h: dict) -> dict:
         sh = dict(sw)
-        if is_standalone(h):
+        standalone = is_standalone(h)
+        if standalone:
             sh["standalone"] = True
-        for k in ("disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "cpu_quota"):
+        for k in ("disk_warn_gb", "disk_stop_gb", "disk_quota_gb"):
             if h.get(k) is not None:
                 sh[k] = h[k]
+        # 独立主机或配置了 cpu_quota 时显式下发 cpu_quota（清空为 null 也能覆盖启动环境变量 LABMON_CPU_QUOTA）
+        if standalone or h.get("cpu_quota") is not None:
+            sh["cpu_quota"] = h.get("cpu_quota")
         out = {"eta.json": {"t": round(t + _CLOCK.get(h["id"], 0)), "jobs": jobs, "prog": by_prog},
                "sched.json": sh, "returned.json": gone}
         hp = _hist_payload(h, projects, t, snap)

@@ -119,33 +119,55 @@ def _job_alive(pid):
     return False
 
 
+def _running_scratches(p):
+    """实时读取运行中的单格临时集合 {(proj_seg, job_seg)}（合并 status.json 与 active_scratch.json）：
+    - status.json 损毁时返回 None（调用方跳过 jobs/ 清理，绝不误删）；
+    - worker 活着时信任 status.running + external；worker 退出时按各任务自身进程/进程组是否存活判定；
+    - 同步合并 active_scratch.json 中仍存活的进程，覆盖 Worker.start() 刚起进程尚未 write_status 的窗口。"""
+    running = set()
+    raw_st = _C.read(p.status, "")
+    if raw_st:
+        try:
+            st = json.loads(raw_st)
+        except ValueError:
+            return None
+        w_alive = _C.alive(_C.read_pid(p.pid), ("labmon_worker",))
+        for j in (st.get("running") or []) + (st.get("external") or []):
+            if not (isinstance(j, dict) and j.get("project") and j.get("name")):
+                continue
+            jpid = j.get("pid")
+            if w_alive or jpid is None or _job_alive(jpid):
+                running.add((_C.NAME_RE.sub("_", j["project"]), _C.NAME_RE.sub("_", j["name"])))
+    raw_act = _C.read(p.active_scratch, "")
+    if raw_act:
+        try:
+            act = json.loads(raw_act)
+        except ValueError:
+            return None
+        if isinstance(act, dict):
+            for k, jpid in act.items():
+                if "/" in str(k) and _job_alive(jpid):
+                    a, b = str(k).split("/", 1)
+                    running.add((a, b))
+    return running
+
+
 def clean_local(p, project=None, cache=False, scratch=False, yes=False):
     """清理本机自管临时目录（<LABMON_LOCAL>/{cache,jobs}）：
     - 绝不触碰 projects/、datasets/、weights/、envs/ 或任何 <LABMON_LOCAL> 之外的路径（经 realpath 严格校验且不跟随符号链接）；
     - 默认仅预览（dry-run），显式传 yes=True 才执行删除；
-    - 清理 jobs/ 单格临时目录时按任务自身进程存活状态保护运行中任务（worker 退出但任务仍在跑时同样受保护）。"""
+    - 清理 jobs/ 单格临时目录时与 Worker.start/grant 共用 scratch_lock：扫描在锁外执行，删除每个单格目录前在锁内重新核实任务存活并原子移出后锁外删除，彻底避免扫描期间新起任务被误删。"""
     do_cache = cache or (not cache and not scratch)
     do_scratch = scratch or (not cache and not scratch)
     base = os.path.realpath(_C.LOCAL)
     running = set()
     if do_scratch:
-        raw_st = _C.read(p.status, "")
-        if raw_st:
-            try:
-                st = json.loads(raw_st)
-            except ValueError:
-                print("状态文件 %s 无法解析，为避免误删运行中任务的临时目录已跳过 jobs/ 清理" % p.status)
-                do_scratch = False
-                st = {}
-            if do_scratch:
-                w_alive = _C.alive(_C.read_pid(p.pid), ("labmon_worker",))
-                for j in (st.get("running") or []) + (st.get("external") or []):
-                    if not (isinstance(j, dict) and j.get("project") and j.get("name")):
-                        continue
-                    jpid = j.get("pid")
-                    # worker 活着时信任 status.running；worker 已退出时按任务自身进程/进程组是否存活判定（缺 pid 时保守跳过）
-                    if w_alive or jpid is None or _job_alive(jpid):
-                        running.add((_C.NAME_RE.sub("_", j["project"]), _C.NAME_RE.sub("_", j["name"])))
+        got = _running_scratches(p)
+        if got is None:
+            print("状态文件 %s 无法解析，为避免误删运行中任务的临时目录已跳过 jobs/ 清理" % p.status)
+            do_scratch = False
+        else:
+            running = got
     targets = []
     skipped = []
 
@@ -170,7 +192,7 @@ def clean_local(p, project=None, cache=False, scratch=False, yes=False):
                 rp = _safe_child(tpath)
                 if rp and os.path.exists(rp):
                     sz = _D.scan_unit(rp, _C.time.time(), _D.Pace(_D.LOCAL_IOPS))["b"] if os.path.isdir(rp) else os.lstat(rp).st_size
-                    targets.append(("cache", nm, rp, sz))
+                    targets.append(("cache", nm, rp, sz, None))
     if do_scratch:
         jdir = os.path.join(base, "jobs")
         if os.path.isdir(jdir) and not os.path.islink(jdir):
@@ -181,6 +203,8 @@ def clean_local(p, project=None, cache=False, scratch=False, yes=False):
                 if not (prp and os.path.isdir(prp)):
                     continue
                 for jnm in sorted(os.listdir(prp)):
+                    if jnm.startswith(".labmon_del_"):
+                        continue
                     if (pnm, jnm) in running:
                         skipped.append(os.path.join(prp, jnm))
                         continue
@@ -188,7 +212,7 @@ def clean_local(p, project=None, cache=False, scratch=False, yes=False):
                     jrp = _safe_child(jpath)
                     if jrp and os.path.exists(jrp):
                         sz = _D.scan_unit(jrp, _C.time.time(), _D.Pace(_D.LOCAL_IOPS))["b"] if os.path.isdir(jrp) else os.lstat(jrp).st_size
-                        targets.append(("scratch", "%s/%s" % (pnm, jnm), jrp, sz))
+                        targets.append(("scratch", "%s/%s" % (pnm, jnm), jrp, sz, (pnm, jnm)))
     if not targets:
         print("没有可清理的自管缓存或已结束单格临时目录（目录：%s）" % base)
         if skipped:
@@ -198,18 +222,31 @@ def clean_local(p, project=None, cache=False, scratch=False, yes=False):
     kind_zh = {"cache": "缓存", "scratch": "单格临时"}
     if not yes:
         print("可清理 %d 项，共 %s（目录：%s；预览模式未删除，加 --yes 确认清理；绝不触碰 projects/ 产物）：" % (len(targets), _fmt_bytes(tot), base))
-        for kind, label, rp, sz in targets:
+        for kind, label, rp, sz, _ in targets:
             print("  [%s] %s  %s  (%s)" % (kind_zh[kind], label, _fmt_bytes(sz), rp))
         if skipped:
             print("  已跳过 %d 个在跑任务的单格临时目录" % len(skipped))
         return 0
     freed, n = 0, 0
-    for kind, label, rp, sz in targets:
+    for idx, (kind, label, rp, sz, skey) in enumerate(targets):
         try:
-            if os.path.isdir(rp) and not os.path.islink(rp):
-                shutil.rmtree(rp)
+            del_path = rp
+            if kind == "scratch" and skey is not None:
+                # 在 scratch_lock 锁内重新核实任务状态，防扫描到删除期间 Worker.start/grant 新启任务被误删
+                with _C.flock(p.scratch_lock):
+                    cur_run = _running_scratches(p)
+                    if cur_run is None or skey in cur_run:
+                        skipped.append(rp)
+                        continue
+                    if not os.path.exists(rp):
+                        continue
+                    staged = os.path.join(os.path.dirname(rp), ".labmon_del_%d_%d" % (os.getpid(), idx))
+                    os.rename(rp, staged)
+                    del_path = staged
+            if os.path.isdir(del_path) and not os.path.islink(del_path):
+                shutil.rmtree(del_path)
             else:
-                os.unlink(rp)
+                os.unlink(del_path)
             freed += sz
             n += 1
             print("  已清理 [%s] %s（%s）" % (kind_zh[kind], label, _fmt_bytes(sz)))

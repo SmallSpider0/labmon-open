@@ -1216,12 +1216,16 @@ class SchedMixin:
             out["disk_warn_gb"] = _opt_num("disk_warn_gb", _C.DISK_WARN_GB if st else None)
             out["disk_stop_gb"] = _opt_num("disk_stop_gb", _C.DISK_STOP_GB if st else None)
             out["disk_quota_gb"] = _opt_num("disk_quota_gb", None)
-            cq = _opt_num("cpu_quota", None)
-            if cq is None and env_cq:
+            # 区分看板显式清除（"cpu_quota" in d 且为 null）与尚未收到下发（回退启动时的 LABMON_CPU_QUOTA）
+            if "cpu_quota" in d:
+                cq = _opt_num("cpu_quota", None)
+            elif env_cq:
                 try:
                     cq = float(env_cq)
                 except ValueError:
                     cq = None
+            else:
+                cq = None
             if cq is not None and cq > 0:
                 out["cpu_quota"] = cq
         return out

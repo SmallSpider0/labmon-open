@@ -430,6 +430,8 @@ class Paths:
         self.press = os.path.join(self.dir, "press.jsonl")         # 主机的 CPU 与 IO 压力每 5 分钟一行（Worker.press 写，留 14 天；共享盘延迟的基线 io_base 按它算）
         self.gang = os.path.join(self.dir, "gang.json")            # 本机成组成员此刻怎样（gang_publish 写，同组别的主机读；建了不删）
         self.hist_shared = os.path.join(self.dir, "hist_shared.json")  # 看板经 put 转送给独立主机的跨机同类历史（只供 estimate/duration，不进 share/dep_state/disk_ends）
+        self.scratch_lock = os.path.join(self.dir, "scratch.lock")     # Worker.start/grant 与 clean_local 互斥锁，防扫描到删除窗口误删新起任务
+        self.active_scratch = os.path.join(self.dir, "active_scratch.json")  # 锁内登记的运行中单格临时 {proj/job: pid}
 
 
 def project_dir(root):

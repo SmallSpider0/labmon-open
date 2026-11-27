@@ -278,7 +278,7 @@ async function extAct(act, d = {}) {
       port: f.port ? Number(f.port) : 22,
       platform_kind: f.platform_kind || "other",
       ssh_key: ME?.admin ? (f.ssh_key || "managed") : "managed",
-      ...(ME?.admin && f.owner.trim() ? {owner: f.owner.trim()} : {}),
+      ...(ME?.admin ? {owner: (f.owner || "").trim()} : {}),
       lease_until: (f.lease_until || "").trim() || null,
       data_root: (f.data_root || "").trim() || "~/.local/share/labmon/work",
       python: (f.python || "").trim() || "python3",
