@@ -82,19 +82,21 @@ details.rgrp[open] > summary::before { content: "▾"; }
 .seg button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11.5px; padding: 2px 9px; cursor: pointer; }
 .seg button.on { background: var(--soft); color: var(--fg); font-weight: 600; }
 .btn { border: 1px solid var(--line); background: var(--card); color: var(--fg); font: inherit; font-size: 11.5px; padding: 1px 9px; border-radius: 7px; cursor: pointer; }
+.btn.on { background: var(--soft); border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); font-weight: 600; }
 .btn:disabled { color: var(--muted); cursor: default; }
 svg { display: block; overflow: visible; }
 svg text { font-size: 11px; fill: var(--muted); }
 svg .lab { fill: var(--fg); font-size: 12px; }
 svg rect.j { cursor: pointer; }
-/* 依赖连线（depLines）：平时只显关键的；#tlbox.dh 时只显链上的、加深，链外的任务条淡出（#111） */
+/* 依赖连线（depLines）：平时只显关键的（极淡虚线，可经工具栏开关隐去）；#tlbox.dh 时无论开关状态只显链上的实线并加深，链外的任务条淡出（#111、#247） */
 #tlbox .dl { display: none; }
-#tlbox .dl path { fill: none; stroke: var(--fg); stroke-opacity: .35; }
-#tlbox .dl path.ar { fill: var(--fg); fill-opacity: .5; stroke: none; }
+#tlbox .dl path { fill: none; stroke: var(--fg); stroke-opacity: .14; stroke-dasharray: 2 2; }
+#tlbox .dl path.ar { fill: var(--fg); fill-opacity: .22; stroke: none; }
 #tlbox .dl.k { display: inline; }
+#tlbox.nodep:not(.dh) .dl.k { display: none; }
 #tlbox.dh .dl { display: none; }
 #tlbox.dh .dl.on { display: inline; }
-#tlbox.dh .dl.on path { stroke: var(--accent); stroke-opacity: .95; stroke-width: 1.6; }
+#tlbox.dh .dl.on path { stroke: var(--accent); stroke-opacity: .95; stroke-width: 1.6; stroke-dasharray: none; }
 #tlbox.dh .dl.on path.ar { fill: var(--accent); fill-opacity: 1; stroke: none; }
 #tlbox .jg { transition: opacity .12s; }
 #tlbox.dh .jg:not(.on) { opacity: .25; }
@@ -542,7 +544,7 @@ function tlItems(c) {
     ["failed", "失败", sw(jobBar("failed", false, 0, 1, 22, 10, "var(--bad)"))],
     ["killed", "被停下", sw(jobBar("failed", false, 0, 1, 22, 10, "var(--warn)"))],
     ["attempt", "失败尝试", sw(`<rect x="0" y="8" width="22" height="3" rx="1" fill="var(--bad)"/>` + attemptMark(11, 6, 1), 22), "失败的尝试（数字是挨在一起的次数）"],
-    ["dep", "依赖", sw(`<path d="M1 2H5V7H16V9" fill="none" stroke="var(--fg)" stroke-opacity=".5"/><path d="M13 8L16 12L19 8Z" fill="var(--fg)" fill-opacity=".6"/>`),
+    ["dep", "依赖", sw(`<path d="M1 2H5V7H16V9" fill="none" stroke="var(--fg)" stroke-opacity=".4" stroke-dasharray="2 2"/><path d="M13 8L16 12L19 8Z" fill="var(--fg)" fill-opacity=".5"/>`),
       "依赖（after=）：跨车道的从等的任务结束连到它开始，同车道的、能经别的依赖推出来的不画；悬停（触屏点一下）任务看它的整条上下游"],
     ["gap", "空档", sw(`<line x1="0" x2="22" y1="6" y2="6" stroke="var(--faint)" stroke-dasharray="2 3"/>`), "空档（标原因；往后的写推演里在等谁）"],
     ...occItems("var(--faint)", "他项"),
@@ -562,11 +564,43 @@ function timelineCard() {
     <div id="tlbox" style="margin-top:6px"></div><div id="tlkey" class="tlkey${TL.key ? " open" : ""}"></div></div>`;
 }
 let TLH = {};      // 时间线主机表头折线的悬停采样数据（hostRow 填充，tlHostHover 读）
+const OC_LAST = new Map(), OC_LK = new Map();     // 「别的项目」行拖动期间的分道锁（#247）：保留已见任务道号与最大道数，松手后按可见任务收紧
+const occKey = x => `${x.p}\0${x.lane || ""}\0${x.n}\0${x.t0}\0${x.t1}`;
+function ocPack(hid, visOc) {
+  if (!TL.lk) {
+    const n = visOc.length ? tlPack(visOc) : 1;
+    OC_LAST.set(hid, {n, ks: new Map(visOc.map(x => [occKey(x), {k: x.k, t0: x.t0, t1: x.t1}]))});
+    return tlRowLayout(n, OCC_OTHER_LAY);
+  }
+  let lk = OC_LK.get(hid);
+  if (!lk) {
+    const prev = OC_LAST.get(hid);
+    lk = prev ? {n: prev.n, ks: new Map(prev.ks)} : {n: 1, ks: new Map()};
+    OC_LK.set(hid, lk);
+  }
+  const taken = [...lk.ks.values()], fresh = [];
+  for (const x of visOc) {
+    const hit = lk.ks.get(occKey(x));
+    if (hit) x.k = hit.k; else fresh.push(x);
+  }
+  fresh.sort((a, b) => (a.t0 - b.t0) || (a.t1 - b.t1) || String(a.n ?? "").localeCompare(String(b.n ?? "")));
+  for (const x of fresh) {
+    let k = 0;
+    while (taken.some(a => a.k === k && a.t1 > x.t0 + 1 && x.t1 > a.t0 + 1)) k++;
+    const rec = {k, t0: x.t0, t1: x.t1};
+    x.k = k; lk.ks.set(occKey(x), rec); taken.push(rec);
+  }
+  lk.n = Math.max(lk.n, ...visOc.map(x => (x.k || 0) + 1));
+  return tlRowLayout(lk.n, OCC_OTHER_LAY);
+}
 function drawTimeline() {
   const box = document.getElementById("tlbox"); if (!box?.clientWidth) return;     // 嵌在看板里又被隐藏了：再显示时看板会调它重画
   TLH = {};
+  if (!TL.lk) OC_LK.clear();
   tlBind(box); tlFrame();
   DEPH.ch = depChain(DEPH.id); box.classList.toggle("dh", !!DEPH.ch);     // 悬停着的那格的上下游：重画时照样高亮（laneRow、depLines 读 DEPH.ch）
+  const depShow = LS.get("tldep", true);
+  box.classList.toggle("nodep", !depShow);
   const {t0, t1} = tlRange(), win = (a, b) => a != null && b != null && b > t0 && a < t1;
   const showAll = LS.get("tlall", false), rows = [], used = new Set();
   const foldDone = D.lanes.some(l => !l.done_lane && l.unfinished) || D.lanes.filter(l => l.done_lane).length > 6;   // 有未完成车道或已跑完超过 6 条时默认折起已跑完的无编号车道（#164）
@@ -595,13 +629,14 @@ function drawTimeline() {
   const packOf = l => { const k = (l.away || l.host) + "\0" + l.id; if (!pks.has(k)) pks.set(k, parPack(l, rowJobs(l, l.away || l.host))); return pks.get(k); };
   // 每台主机一组：表头一行（主机名、利用率、事件），同机别的项目占了卡时一行，下面是这台的车道
   for (const [h, vis] of shown) {
-    const hb = hostBands(h.id), allOc = (EV.occ?.[h.id] || []).map(x => ({...x}));     // 按全量稳定分道（#143），画时跳过视图外
-    const ocHas = tlLockFlag(`occ:${h.id}`, allOc.some(x => win(x.t0, x.t1)));
+    const hb = hostBands(h.id), allOc = (EV.occ?.[h.id] || []).map(x => ({...x}));
+    const visOc = allOc.filter(x => win(x.t0, x.t1));     // 按当前窗口可见任务重排分道与行高（#247），拖动中由 tlLockFlag/tlLockRow 防跳动
+    const ocHas = tlLockFlag(`occ:${h.id}`, visOc.length > 0);
     const ev = tlLockFlag(`ev:${h.id}`, hb.iv.some(x => win(x.t0, x.t1)) || hb.ticks.some(x => x.t >= t0 && x.t <= t1));     // 看的这段有事件：表头底边加一条色带
-    rows.push({key: `host:${h.id}`, h: ev ? 32 : 22, sep: true, draw: (y, hh, c) => hostRow(h, hb, ev, y, hh, c)});
+    rows.push({key: `host:${h.id}`, h: ev ? 36 : 22, sep: true, draw: (y, hh, c) => hostRow(h, hb, ev, y, hh, c)});
     if (ocHas) {
-      const ocLay = tlRowLayout(allOc.length ? tlPack(allOc) : 1, OCC_OTHER_LAY);
-      rows.push({key: `occ:${h.id}`, h: ocLay.h, draw: (y, hh, c) => othersRow(h, allOc, ocLay, y, hh, c)});
+      const ocLay = ocPack(h.id, visOc);
+      rows.push({key: `occ:${h.id}`, h: ocLay.h, draw: (y, hh, c) => othersRow(h, visOc, ocLay, y, hh, c, allOc)});
     }
     vis.forEach(l => {
       const pk = packOf(l);
@@ -617,7 +652,9 @@ function drawTimeline() {
   // 左栏要多宽（#108）：主机短名、车道名（从 x=18 起，右边留计划项圆点）都写得下；tlSvg 再按上限截
   const lw = Math.max(0, ...shown.flatMap(([h, vis]) => [textW(hostShort(h)) + 8,
     ...vis.map(l => 26 + 7 * Math.min(4, multi ? gsOf(l).length : 0) + textW(laneLabel(l) + laneTail(l, packOf(l).n > 1)))]));
-  tlShow(box, rows, {markers: D.markers, more, under: depLines, lw, items: () => tlItems(gcolor([...used][0]))});
+  const seen = tlShow(box, rows, {markers: D.markers, more, under: depLines, lw, items: () => tlItems(gcolor([...used][0]))});
+  const bar = document.getElementById("tlbar");
+  if (bar && seen.has("dep")) bar.innerHTML = `<button class="btn${depShow ? " on" : ""}" data-tldep aria-pressed="${depShow}" ${tip(depShow ? "已显示平时常驻的关键依赖虚线，点击隐藏（悬停任务条时仍高亮上下游）" : "已隐藏平时常驻的依赖线，点击显示（悬停任务条时仍高亮上下游）")}>依赖线</button>` + bar.innerHTML;
   const lg = document.getElementById("tllegend");
   if (lg) lg.innerHTML = D.groups.filter(g => used.has(g.id)).map(g => `<span class="nw"><span class="dot" style="background:${g.color}"></span> ${esc(g.label)}</span>`).join(" &nbsp;");   // 只列这段时间图上有的
 }
@@ -715,7 +752,7 @@ function hostRow(host, hb, ev, y, h, c) {
   const H = HIST(host.id), long = c.t1 - c.t0 > 36 * 3600;
   const gpuS = hostSeries(H.filter(p => p.busy), D.util_hourly?.[host.id], p => avg(p.busy), c, long);
   const cpuS = hostSeries(H.filter(p => p.cpu_pct != null), D.cpu_hourly?.[host.id], p => p.cpu_pct, c, long);
-  const ub = y + (ev ? h - 11 : h - 2), Y = v => ub - (ub - y - 3) * v / 100;     // 利用率的底边与高度（GPU 与 CPU 同轴 0–100%）
+  const ub = y + (ev ? h - 15 : h - 2), Y = v => ub - (ub - y - 3) * v / 100;     // 利用率的底边与高度（GPU 与 CPU 同轴 0–100%；ev 时底边事件带下方留 4px 呼吸间距，#247）
   const cv = cpuView(host);
   let s = `<text class="lab" x="0" y="${y + (ub - y) / 2 + 5}" style="font-weight:600" ${tip(`${host.label}`
     + (host.pool_label ? `\n所属共有算力池：${host.pool_label}` : "")
@@ -743,23 +780,24 @@ function hostRow(host, hb, ev, y, h, c) {
   let free = -Infinity;
   bs.forEach(({x, xa, w}, i) => {
     c.seen.add(["down", "nospan", "ret"].includes(x.k) ? x.k : "warn");
-    s += bandRect(x.k, xa, y + h - 9, w, 8, tip(x.text));
+    s += bandRect(x.k, xa, y + h - 13, w, 8, tip(x.text));
     const room = Math.min(w, (bs.slice(i + 1).find(b => b.xa > xa + 40)?.xa ?? Infinity) - xa);     // 挨得很近的后一条本来也写不下标签
     if (room <= 40 || xa < free) return;
     const t = fit(x.short, room - 8);
     free = xa + 4 + textW(t) + 4;
-    s += `<text x="${xa + 4}" y="${y + h - 2}" style="font-size:9.5px;pointer-events:none;fill:${x.k === "down" ? "#fff" : "var(--fg)"}">${esc(t)}</text>`;
+    s += `<text x="${xa + 4}" y="${y + h - 6}" style="font-size:9.5px;pointer-events:none;fill:${x.k === "down" ? "#fff" : "var(--fg)"}">${esc(t)}</text>`;
   });
+  const th = ev ? h - 4 : h;
   for (const x of hb.ticks) {
     if (x.t < c.t0 || x.t > c.t1) continue;
     c.seen.add("restart");
-    s += tickLine(c.X(x.t), y, h) + `<rect x="${c.X(x.t) - 4}" y="${y}" width="8" height="${h}" fill="transparent" ${tip(x.text)}/>`;
+    s += tickLine(c.X(x.t), y, th) + `<rect x="${c.X(x.t) - 4}" y="${y}" width="8" height="${th}" fill="transparent" ${tip(x.text)}/>`;
   }
   return s;
 }
 // 同机别的项目的占用情况（工作台 occupancy：已跑的、在跑的、worker 推演的排队，含 GPU 与纯 CPU 任务，#244），重叠的分道；本项目的车道空着时看这一行就知道资源被谁占着
-function othersRow(host, oc, lay, y, h, c) {
-  const vis = oc.filter(x => c.win(x.t0, x.t1)), who = [...new Set((vis.length ? vis : oc).map(x => x.p))];
+function othersRow(host, oc, lay, y, h, c, all = oc) {
+  const who = [...new Set((oc.length ? oc : all).map(x => x.p))];
   let s = `<text x="10" y="${y + h / 2 + 4}" style="font-size:10.5px" ${tip(`${host.label} 上别的项目占用情况（含 GPU 与纯 CPU 任务）：${who.join("、")}\n实色已跑，描边在跑，淡色是 worker 按同一套放行规则推演的排队；本项目车道上的“让位”就是在等它们`)}>${esc(fit("别的项目", c.L - 16))}</text>`;
   s += `<rect x="${c.L}" y="${y + h / 2 - .5}" width="${c.PW}" height="1" fill="var(--line)"/>`;
   return s + occBars(oc, y, h, c, {layout: lay, color: p => EV.colors?.[p] || "var(--faint)", label: x => x.n,
@@ -1197,12 +1235,13 @@ function redraw() {
 document.addEventListener("selectionchange", () => { if (PENDING) redraw(); });
 document.addEventListener("focusout", () => setTimeout(() => { if (PENDING) redraw(); }));
 document.addEventListener("click", e => {
-  const t = e.target.closest("[data-tl],[data-tz],[data-tlall],[data-rw],[data-rv],[data-f],[data-g],[data-more],[data-now],[data-tlkey],[data-gsq],rect.j");
+  const t = e.target.closest("[data-tl],[data-tz],[data-tlall],[data-tldep],[data-rw],[data-rv],[data-f],[data-g],[data-more],[data-now],[data-tlkey],[data-gsq],rect.j");
   if (!t) { if (e.target.closest?.("#tlbox")) depHover(null); return; }      // 点时间线空白处：取消依赖高亮（触屏）
   if (t.matches("[data-gsq]")) { e.preventDefault(); gsqClick(t.dataset.gsq); }      // 不让外面的 <details> 自己开合
   else if (t.matches("[data-now]")) collectNow();
   else if (t.matches("[data-tl],[data-tz],[data-tlkey]")) tlClick(t);
   else if (t.dataset.tlall) { LS.set("tlall", !LS.get("tlall", false)); drawTimeline(); }
+  else if (t.matches("[data-tldep]")) { LS.set("tldep", !LS.get("tldep", true)); drawTimeline(); }
   else if (t.dataset.rw) { LS.set("rw", +t.dataset.rw); rerender(); }
   else if (t.dataset.rv) { LS.set("runview", t.dataset.rv); rerender(); }
   else if (t.dataset.f) { LS.set("filter", t.dataset.f); rerender(); }
