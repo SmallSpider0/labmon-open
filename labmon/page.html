@@ -1023,7 +1023,9 @@ function resourcesCard() {
       const series = gp.map((g, k) => ({name: gp.length > 1 ? "GPU" + g.index : "", color: cols[k % cols.length], pts: H.filter(r => r.busy && r.busy[k] != null).map(r => [r.t, r.busy[k]])}));
       const U = utilText(utilAvg(gp.map(g => gpuBusy(h, g.index)), gp.map(g => g.util)));
       tiles.push(tile(`GPU 利用率${gp.length > 1 ? " · " + gp.length + " 卡" : ""}`, `${U.big}${U.span ? `<span class="mut" style="font-weight:400"> ${U.span}</span>` : ""}`, chart({series, t0, t1: NOW, ymax: 100, fmt: v => f1(v, 0) + "%"}),
-        U.tip + "\n曲线是各卡近 10 分钟平均\n\n" + gp.map(g => `GPU${g.index} ${g.name}  ${utilText(gpuBusy(h, g.index), g.util).big}  ${f1(g.temp, 0)}°C  ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n")));
+        U.tip + "\n曲线是各卡近 10 分钟平均\n\n" + gp.map(g => g.backend === "mps"
+          ? `GPU${g.index} ${g.name || "Apple Silicon (MPS)"}  MPS 逻辑卡（不采集利用率）`
+          : `GPU${g.index} ${g.name}  ${utilText(gpuBusy(h, g.index), g.util).big}  ${f1(g.temp, 0)}°C  ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n")));
       const tot = sum(gp.map(g => g.mem_total)) / 1024;     // 显存探针给的是 MiB
       const unacctG = gp.filter(g => g.unacct_paused || (g.unacct_mb || 0) >= 512);
       const anyPaused = unacctG.some(g => g.unacct_paused);
@@ -1032,10 +1034,14 @@ function resourcesCard() {
         : `GPU${g.index} 外部未归因显存约 ${f1(g.unacct_mb / 1024, 1)} GiB`).join("\n");
       const procTip = (h.gpu_procs || []).map(p => `PID ${p.pid}  ${f1(p.mem / 1024)} GiB  ${(p.cmd || "").slice(0, 60)}`).join("\n");
       const memVal = f1(sum(gp.map(g => g.mem_used)) / 1024, 1) + " GiB" + (anyPaused ? ` <span class="badge b-warn">外部占卡</span>` : "");
-      tiles.push(tile(`显存 · ${f1(tot, 0)} GiB`, memVal,
+      const mpsOnly = gp.every(g => g.backend === "mps");
+      tiles.push(tile(`${mpsOnly ? "MPS 显存" : "显存"} · ${f1(tot, 0)} GiB`, memVal,
         line(H.filter(r => r.mem).map(r => [r.t, sum(r.mem) / 1024]), tot, v => f1(v) + " GiB"),
-        [unacctTip, procTip || (unacctTip ? "" : "无 GPU 进程")].filter(Boolean).join("\n")));
-      for (const g of gp) chips.push(`<span class="chip">${gp.length > 1 ? "GPU" + g.index + " " : ""}${f1(g.temp, 0)}°C · ${f1(g.power, 0)} W</span>`);
+        [unacctTip, procTip || (mpsOnly ? "Apple Silicon 统一内存保守估算（默认单卡互斥）" : unacctTip ? "" : "无 GPU 进程")].filter(Boolean).join("\n")));
+      for (const g of gp) {
+        if (g.backend === "mps") chips.push(`<span class="chip">${esc(g.name || "Apple Silicon (MPS)")}</span>`);
+        else chips.push(`<span class="chip">${gp.length > 1 ? "GPU" + g.index + " " : ""}${f1(g.temp, 0)}°C · ${f1(g.power, 0)} W</span>`);
+      }
     }
     const cv = cpuView(h);
     if (cv.has) tiles.push(tile(cv.quota ? `CPU · ${Number.isInteger(cv.quota) ? cv.quota : f1(cv.quota, 1)} 核` : "CPU",

@@ -391,9 +391,11 @@ def _delta(b: float | None) -> str:
 
 
 def _card(g: dict) -> str:
-    """一张卡的一句：利用率、显存（MiB 换 GiB）；探针读不到的（nvidia-smi 回 N/A，记 None）写“?”。"""
+    """一张卡的一句：利用率、显存（MiB 换 GiB）；MPS 逻辑卡标 (MPS) 不显示“?%”；其余探针读不到的（nvidia-smi 回 N/A，记 None）写“?”。"""
     def v(x, f):
         return "?" if x is None else format(x / 1024, f)
+    if g.get("backend") == "mps":
+        return f"卡 {g['index']} (MPS) {v(g.get('mem_used'), '.1f')}/{v(g.get('mem_total'), '.1f')} GiB"
     u = g.get("util")
     return f"卡 {g['index']} {'?' if u is None else f'{u:g}'}% {v(g.get('mem_used'), '.1f')}/{v(g.get('mem_total'), '.0f')} GiB"
 

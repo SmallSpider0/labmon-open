@@ -400,15 +400,17 @@ class OffersMixin:
 
     def local_cards(self):
         """offers 的同机多开车道能往哪几张卡放（#43）：(卡号列表, None)，或 (None, 不出的原因)。与 fit 同一条规则（gpu_slack）：容器在限流不出；
-        近 10 分钟利用率不低于 UTIL_FULL 的卡（吃满了）、利用率低于 UTIL_LOW 而上面在跑的被 CPU 卡住的卡（先加核）不放；还没有利用率样本的卡照放。"""
+        近 10 分钟利用率不低于 UTIL_FULL 的卡（吃满了）、利用率低于 UTIL_LOW 而上面在跑的被 CPU 卡住的卡（先加核）与 Apple Silicon MPS 逻辑卡（默认单卡互斥）不放；还没有利用率样本的卡照放。"""
         now = _C.time.time()
         u10, gs = self.util10(now), self.info.get("gpus") or []
-        cards = [{"i": g["i"], "uuid": g["uuid"], "util": u10.get(g["uuid"])} for g in gs]
+        cards = [{"i": g["i"], "uuid": g["uuid"], "util": u10.get(g["uuid"]), "backend": g.get("backend")} for g in gs]
         sl = _S.gpu_slack(cards, list(self.running.values()), self.throttle(now), _M.cpu_cap(self.info.get("cpu_quota")))
         if sl["throttle"] is not None:
             return None, sl["throttle"] + "：先减线程，不在这台多开车道"
+        if cards and all(c.get("backend") == "mps" for c in cards):
+            return None, "Apple Silicon MPS 逻辑卡默认单卡互斥，不在这台多开车道"
         unacct_blocked = set() if self.allow_shared_gpu() else {u for u, v in (self.other.get("unacct") or {}).items() if v.get("busy")}
-        ok = [c["i"] for c in cards if (c["util"] is None or c["util"] < _C.UTIL_FULL) and c["uuid"] not in sl["bound"] and c["uuid"] not in unacct_blocked]
+        ok = [c["i"] for c in cards if c.get("backend") != "mps" and (c["util"] is None or c["util"] < _C.UTIL_FULL) and c["uuid"] not in sl["bound"] and c["uuid"] not in unacct_blocked]
         if ok or not cards:
             return ok or None, None
         if unacct_blocked and all(c["uuid"] in unacct_blocked for c in cards):

@@ -3438,4 +3438,57 @@ ta("auth", "已开账号的组员服务器自动接入调度、我的服务器�
   has(page(AC, "#/fleet/srv/srv-d"), "接入调度");
 });
 
+t("overview", "macOS Apple Silicon MPS 逻辑卡、统一内存与桌面留核渲染（#114 P4）", () => {
+  const S = JSON.parse(JSON.stringify(OV));
+  const mac = JSON.parse(JSON.stringify(OV.hosts[0]));
+  Object.assign(mac, {
+    id: "mac-m4", label: "MacBook-M4", platform: null, platform_kind: "none", share: "private", standalone: true,
+    owner: "amy", lw: null, work_disk: null, lease_end: null, renew: null, auto_res: null, lend: null, borrow: null,
+  });
+  mac.status = {
+    ...mac.status,
+    running: [], external: [], gpu_procs: [],
+    kafight: null, throttle: null, keepalive: {}, disk_gate: null, gate: null,
+    info: {
+      os: "darwin", nproc: 10, cpu_quota: 8.0, cpu_quota_src: "macos_default", cpu_used: 1.8, started: NOW - 86400,
+      mem: {limit: 16.0, used: 10.2, anon: 9.4, src: "vm_stat"},
+      gpus: [{i: 0, uuid: "mps-0", name: "Apple M4 (MPS)", backend: "mps", total: 10649.6, used: 3891.2, free: 6758.4, util: null}],
+      disk: [{path: "/Users/u/work", free: 180.0, total: 460.0, kind: "local"}],
+    },
+    room: {gpus: {"mps-0": 6758.4}, unacct: [], ram: 6.6, cpu: 8.0, cpu_cap: 8},
+    waiting: [],
+  };
+  S.hosts.push(mac);
+  const C = ovCtx(S, RR);
+  ok(run(C, 'alertsOf(D.hosts.find(h => h.id === "mac-m4"))').length === 0, "Apple Silicon MPS 主机不应触发 alertsOf 误报");
+  const home = page(C, "#/");
+  clean(home, "macOS MPS 总览");
+  has(home, "MacBook-M4");
+  has(home, "MPS");
+  const hp = page(C, "#/host/mac-m4");
+  clean(hp, "macOS MPS 主机页");
+  has(hp, "显存（MPS）");
+  has(hp, "MPS 不采集实时利用率");
+  has(hp, "内存（macOS）");
+  has(tips(hp), "默认留 2 核给桌面");
+  // 恶意芯片名必须转义
+  const SE = JSON.parse(JSON.stringify(S));
+  SE.hosts.find(x => x.id === "mac-m4").status.info.gpus[0].name = "Apple M4 " + BAD;
+  clean(page(ovCtx(SE, RR), "#/"), "macOS MPS 恶意芯片名总览");
+  clean(page(ovCtx(SE, RR), "#/host/mac-m4"), "macOS MPS 恶意芯片名主机页");
+  // 项目页 resourcesCard：MPS 卡显示芯片名 chip，不出现 "—°C · — W"
+  const PS = JSON.parse(JSON.stringify(PJ));
+  PS.hosts = [PS.hosts[0]];
+  PS.hosts[0].gpus = [{index: 0, name: "Apple M4 (MPS)", backend: "mps", util: null, mem_used: 3891.2, mem_total: 10649.6, temp: null, power: null, power_limit: null}];
+  PS.hosts[0].gpu_procs = [];
+  const ph = run(mkCtx(pgSrc, PS, {filename: "page.js"}), "resourcesCard()");
+  clean(ph, "项目页 macOS MPS resourcesCard");
+  has(ph, "MPS 显存");
+  has(ph, "Apple M4 (MPS)");
+  ok(!ph.includes("°C · "), "MPS 卡不应渲染温功耗 chip");
+  // 恶意芯片名在项目页 chip 里也必须转义
+  PS.hosts[0].gpus[0].name = "Apple M4 " + BAD;
+  clean(run(mkCtx(pgSrc, PS, {filename: "page.js"}), "resourcesCard()"), "项目页 MPS 恶意芯片名转义");
+});
+
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));

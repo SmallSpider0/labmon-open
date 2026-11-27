@@ -66,6 +66,8 @@ CPU 像内存一样记账（硬上限是配额的 100%，估计核数 `cpus=` �
 - **页面上能看、能改**（排位解释参考 Slurm 的 `sprio`，份额对比参考 YARN 的调度页，平均等待参考 ClearML）：等待表逐条解释为什么排在这里；调度卡上改权重与优先；手动插队暂不做。
 - **共有型算力池**（#212）：把实验室常驻的同共享盘主机编成 `[pools.<id>]`，用 `pool` / `pool:<id>` 统一入口提交清单（缺省 `exclusive = true` 禁止直投单台破坏均衡）；采用**即时落机 + Work-Stealing 空闲窃取**（按人公平份额排序 + 复用 `fit_head` 与 `other_load` 打分，全池忙时即刻落到预计最早空出的主机以获得 `plan` ETA，空闲机出现时在 10 分钟冷却防抖保护下自动窃取排队清单），遇到 `drain`、预备续租截止、连续失联满 10 分钟或归还时自动撤离，不干预实验会话的代码与环境准备。
 
+- **macOS 轻量 POSIX 与 Apple Silicon MPS（#114）**：无 `/proc` / cgroup / `nvidia-smi` 的 macOS 主机自动回退 `ps`（`ppid + pgid`）+ `vm_stat` + `sysctl` + `statvfs`，默认留 2 核给桌面（可经 `cpu_quota` 覆盖）并按小内存比例缩放内存余量；Apple Silicon 暴露单逻辑 MPS 卡（保守统一内存上限 `min(0.65×总内存, 总内存−4 GiB)`，可经 `mps_vram_gb` 覆盖，默认单卡互斥，导出 `CUDA_VISIBLE_DEVICES=""` 与 `LABMON_ACCEL=mps`）。
+
 以后：真需要时再做抢占（只停标了可续跑、已跑满最短时长的任务，先 SIGTERM 再等宽限期，Slurm `GraceTime` 的做法）；页面上的冲突与建议（如某项目长期被让位）等有了实际使用再看要什么。
 
 ## 分期

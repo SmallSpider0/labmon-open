@@ -1,12 +1,16 @@
-"""worker 主机与进程测量：/proc、cgroup、nvidia-smi、压力与限流、用量采样。"""
+"""worker 主机与进程测量：/proc、cgroup、nvidia-smi、macOS POSIX 回退与 Apple Silicon MPS、压力与限流、用量采样。"""
 import math
 import os
 import re
+import shutil
 import subprocess
+import sys
 
 from . import common as _C
 from . import queue as _Q
 from .pure import mem_unevictable, proc_tree
+
+_PROC_RSS = {}   # 无 /proc 时 scan_procs 顺带缓存的 {pid: rss_bytes}，供 mem_of 回退读取（不二次起 ps）
 
 def oom_of(j, rc):
     """一次失败的清单任务是不是 OOM（#62）：finish 记进用量行的 oom（estimate 据此抬高同类的估计），squeezed_by 据此判借来的主机上是不是被对方挤掉。
@@ -53,26 +57,229 @@ def num(s, default=None):
         return default
 
 
-def gpu_table():
-    """各卡：序号、UUID、型号、总/已用/空闲显存（MB）、利用率（%）。
-    测试时用 LABMON_GPUS="uuid:free_mb[:total_mb[:util]],…" 代替 nvidia-smi。"""
+def is_darwin():
+    """当前环境是否是 macOS（Darwin）；单测可用 LABMON_OS=darwin|linux 覆盖。"""
+    ov = os.environ.get("LABMON_OS")
+    return ov.lower() == "darwin" if ov else sys.platform == "darwin"
+
+
+def is_apple_silicon():
+    """当前环境是否是 Apple Silicon（macOS + arm64）；单测可用 LABMON_OS / LABMON_ARCH 覆盖。"""
+    if not is_darwin():
+        return False
+    arch = os.environ.get("LABMON_ARCH")
+    if not arch:
+        try:
+            arch = os.uname().machine
+        except AttributeError:
+            arch = ""
+    return (arch or "").lower() in ("arm64", "aarch64")
+
+
+def sysctl_val(key):
+    """读 macOS/BSD `sysctl -n <key>` 单值；失败返回 None。"""
+    try:
+        r = subprocess.run(["sysctl", "-n", key], capture_output=True, text=True, timeout=5)
+        return r.stdout.strip() if r.returncode == 0 else None
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def parse_ps_time(s):
+    """解析 POSIX/BSD `ps -o time=`（MM:SS.cc、HH:MM:SS、D-HH:MM:SS、MM:SS）为累计 CPU 秒；失败返回 0.0。"""
+    s = (s or "").strip()
+    if not s:
+        return 0.0
+    days = 0
+    if "-" in s:
+        d, s = s.split("-", 1)
+        try:
+            days = int(d)
+        except ValueError:
+            return 0.0
+    parts = s.split(":")
+    try:
+        if len(parts) == 2:
+            return days * 86400.0 + int(parts[0]) * 60.0 + float(parts[1])
+        if len(parts) == 3:
+            return days * 86400.0 + int(parts[0]) * 3600.0 + int(parts[1]) * 60.0 + float(parts[2])
+    except ValueError:
+        return 0.0
+    return 0.0
+
+
+def parse_ps_procs(text, clk_tck=None):
+    """解析 `ps -ax -o pid=,ppid=,pgid=,stat=,rss=,time=,comm=` 输出为与 scan_procs 同形的进程字典（#114）：
+    macOS `ps -o sess=` 恒为 0，这里显式置 sid=None，由 job_procs 仅按 ppid + pgid 归集；
+    rss（KiB）转字节存入 rss 字段供 mem_of 回退；time 转成与 /proc/<pid>/stat 同口径的 ticks。"""
+    if clk_tck is None:
+        try:
+            clk_tck = os.sysconf("SC_CLK_TCK")
+        except (AttributeError, ValueError, OSError):
+            clk_tck = 100
+    out = {}
+    for ln in (text or "").splitlines():
+        parts = ln.strip().split(None, 6)
+        if len(parts) < 7:
+            continue
+        try:
+            pid, ppid, pgid = int(parts[0]), int(parts[1]), int(parts[2])
+            rss_kb = int(parts[4])
+        except ValueError:
+            continue
+        st = parts[3][:1] if parts[3] else ""
+        ticks = int(round(parse_ps_time(parts[5]) * clk_tck))
+        comm = os.path.basename(parts[6].strip()) or parts[6].strip()
+        out[pid] = {"comm": comm, "state": st, "ppid": ppid, "pgid": pgid, "sid": None,
+                    "ticks": ticks, "hpid": None, "rss": max(0, rss_kb) * 1024}
+    return out
+
+
+def parse_vm_stat(text, total_bytes):
+    """解析 macOS `vm_stat` 输出 + 总内存字节（sysctl hw.memsize）→ host_info.mem 口径（#114）：
+    - anon（收不回的内存）= (Anonymous pages + Pages wired down + Pages occupied by compressor) × page_size；
+    - used（工作集）= max(anon, (Pages active + Pages wired down + Pages occupied by compressor) × page_size)，均封顶到 total_bytes；
+    - src 标记为 "vm_stat"。解析失败返回 None。"""
+    if not text or not total_bytes or total_bytes <= 0:
+        return None
+    m = re.search(r"page size of (\d+) bytes", text)
+    if m:
+        ps = int(m.group(1))
+    else:
+        try:
+            ps = os.sysconf("SC_PAGE_SIZE")
+        except (AttributeError, ValueError, OSError):
+            ps = 16384
+    vals = {}
+    for ln in text.splitlines():
+        if ":" not in ln:
+            continue
+        k, v = ln.split(":", 1)
+        v = v.strip().rstrip(".")
+        if v.isdigit():
+            vals[k.strip().lower()] = int(v)
+    if not vals:
+        return None
+    wired = vals.get("pages wired down", 0)
+    comp = vals.get("pages occupied by compressor", 0)
+    anon_pg = vals.get("anonymous pages", 0)
+    active_pg = vals.get("pages active", 0)
+    anon_b = min(total_bytes, (anon_pg + wired + comp) * ps)
+    used_b = min(total_bytes, max(anon_b, (active_pg + wired + comp) * ps))
+    return {"limit": total_bytes / _C.GIB, "used": used_b / _C.GIB, "anon": anon_b / _C.GIB, "src": "vm_stat"}
+
+
+def darwin_mem_info():
+    """读取本机 macOS 统一内存（sysctl hw.memsize + vm_stat）；读不到返回 None。"""
+    tot_s = sysctl_val("hw.memsize")
+    if not (tot_s and tot_s.isdigit()):
+        return None
+    try:
+        r = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=5)
+        if r.returncode != 0:
+            return None
+        return parse_vm_stat(r.stdout, int(tot_s))
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+
+
+def darwin_cpu_quota(nproc):
+    """macOS 默认 CPU 配额：留出 MACOS_RESERVE_CPUS（2）核给桌面，至少保留 1 核（#114）。"""
+    if not nproc or nproc <= 0:
+        return None
+    return float(max(1, int(nproc) - _C.MACOS_RESERVE_CPUS))
+
+
+def mps_gpu(mem=None, limit_gb=None, chip=None):
+    """构造 Apple Silicon 单逻辑 MPS 卡（唯一实现，#114）：
+    - 保守总容量：配置了 mps_vram_gb > 0 时取 min(mps_vram_gb, 总内存)，否则 min(0.65 × 总内存, max(1, 总内存 − 4 GiB))；
+    - 可用显存余量：按统一内存系统余量 avail = max(0, total − anon) 与 cap 取小，不与系统/桌面抢内存；
+    - backend="mps", uuid="mps-0", util=None（不采集 Metal 实时利用率）。"""
+    m = mem if isinstance(mem, dict) and mem.get("limit") else darwin_mem_info()
+    if not m or not m.get("limit"):
+        return None
+    total_gib = float(m["limit"])
+    anon_gib = float(m.get("anon") or 0.0)
+    if limit_gb is not None and limit_gb > 0:
+        cap_gib = min(float(limit_gb), total_gib)
+    else:
+        cap_gib = min(_C.MPS_MEM_FRAC * total_gib, max(1.0, total_gib - _C.MPS_MEM_RESERVE_GIB))
+    avail_gib = max(0.0, total_gib - anon_gib)
+    free_gib = min(cap_gib, avail_gib)
+    total_mb = round(cap_gib * 1024.0, 1)
+    free_mb = round(free_gib * 1024.0, 1)
+    used_mb = round(max(0.0, total_mb - free_mb), 1)
+    brand = (chip or sysctl_val("machdep.cpu.brand_string") or "Apple Silicon").strip()
+    name = brand if "(MPS)" in brand else "%s (MPS)" % brand
+    return {"i": 0, "uuid": "mps-0", "name": name, "backend": "mps",
+            "total": total_mb, "used": used_mb, "free": free_mb, "util": None}
+
+
+def accel_kind(gpus):
+    """根据放行的卡列表（卡字典或 UUID 字符串）判定加速后端（唯一实现，#114）："mps" | "cuda" | "cpu"。"""
+    if not gpus:
+        return "cpu"
+    for g in gpus:
+        if isinstance(g, dict):
+            if g.get("backend") == "mps" or str(g.get("uuid") or "").startswith("mps-"):
+                return "mps"
+        elif str(g).startswith("mps-"):
+            return "mps"
+    return "cuda"
+
+
+def accel_env(env, gpus, accel=None):
+    """开跑时导出加速卡环境变量（清单 Worker.start 与单元 slot_main 共用，唯一实现，#114）：
+    - Apple Silicon MPS：CUDA_VISIBLE_DEVICES="" + LABMON_ACCEL=mps；
+    - CUDA：CUDA_VISIBLE_DEVICES="<uuids>" + LABMON_ACCEL=cuda；
+    - 纯 CPU：CUDA_VISIBLE_DEVICES="" + LABMON_ACCEL=cpu。"""
+    kind = accel or accel_kind(gpus)
+    if kind == "cuda" and gpus:
+        uuids = [g["uuid"] if isinstance(g, dict) else str(g) for g in gpus]
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(uuids)
+        env["LABMON_ACCEL"] = "cuda"
+    elif kind == "mps":
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        env["LABMON_ACCEL"] = "mps"
+    else:
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        env["LABMON_ACCEL"] = "cpu"
+    return env
+
+
+def gpu_table(mps_vram_gb=None, mem=None):
+    """各卡：序号、UUID、型号、总/已用/空闲显存（MB）、利用率（%）、可选 backend（如 "mps"）。
+    测试时用 LABMON_GPUS="uuid:free_mb[:total_mb[:util[:backend]]],…" 代替 nvidia-smi。
+    无 nvidia-smi 且处于 Apple Silicon macOS POSIX 回退模式时，暴露单逻辑 MPS 卡（#114）。"""
     fake = os.environ.get("LABMON_GPUS")
     if fake is not None:
         out = []
         for i, x in enumerate(x for x in fake.split(",") if x):
-            p = x.split(":") + [None, None]
+            p = x.split(":") + [None, None, None]
             free, total = float(p[1]), num(p[2], float(p[1]))
-            out.append({"i": i, "uuid": p[0], "name": "fake", "total": total, "used": total - free, "free": free,
-                        "util": num(p[3], 0.0)})
+            backend = p[4] or ("mps" if p[0].startswith("mps-") else None)
+            u_raw = p[3]
+            util = None if (backend == "mps" and (u_raw is None or u_raw == "")) else num(u_raw, 0.0)
+            row = {"i": i, "uuid": p[0], "name": "Apple Silicon (MPS)" if backend == "mps" else "fake",
+                   "total": total, "used": max(0.0, total - free), "free": free, "util": util}
+            if backend:
+                row["backend"] = backend
+            out.append(row)
         return out
-    return [{"i": int(r[0]), "uuid": r[1], "name": r[2], "total": num(r[3], 0.0), "used": num(r[4], 0.0),
+    rows = [{"i": int(r[0]), "uuid": r[1], "name": r[2], "total": num(r[3], 0.0), "used": num(r[4], 0.0),
              "free": num(r[5], 0.0), "util": num(r[6])}
             for r in smi("gpu", "index,uuid,name,memory.total,memory.used,memory.free,utilization.gpu")]
+    if rows:
+        return rows
+    if os.environ.get("LABMON_NO_MPS") != "1" and _C.posix_fallback_ok() and is_apple_silicon():
+        g = mps_gpu(mem=mem, limit_gb=mps_vram_gb)
+        return [g] if g else []
+    return []
 
 
-def query_gpus():
+def query_gpus(mps_vram_gb=None):
     """[(序号, UUID, 空闲 MB)]。"""
-    return [(g["i"], g["uuid"], g["free"]) for g in gpu_table()]
+    return [(g["i"], g["uuid"], g["free"]) for g in gpu_table(mps_vram_gb=mps_vram_gb)]
 
 
 def gpu_procs(*, strict=False, with_ok=False):
@@ -84,6 +291,8 @@ def gpu_procs(*, strict=False, with_ok=False):
         rows = [(int(p[0]), num(p[1], 0.0), p[2]) for p in (x.split(":") + [None, None] for x in fake.split(",") if x)]
         return (rows, True) if with_ok else rows
     if not strict and os.environ.get("LABMON_GPUS") is not None:
+        return ([], True) if with_ok else []
+    if not strict and _C.posix_fallback_ok() and is_darwin() and not shutil.which("nvidia-smi"):
         return ([], True) if with_ok else []
     if with_ok:
         rows, ok = smi("compute-apps", "pid,used_memory,gpu_uuid", strict=strict, with_ok=True)
@@ -138,6 +347,8 @@ def unacct_vram(gpus, gp, running_cards=(), prev_busy=()):
             by_uuid.setdefault(uu, []).append(g)
     out = {}
     for c in gpus or ():
+        if c.get("backend") == "mps":             # Apple Silicon MPS 共享统一内存、无独立 compute-apps 列表，跳过未归因显存差额判定
+            continue
         uu = c.get("uuid")
         if not uu:
             continue
@@ -185,13 +396,24 @@ def unacct_lines(st):
     return out
 
 
-# ---- 用量统计（只读 /proc 与 cgroup；读不到就留空，不影响调度）----
+# ---- 用量统计（只读 /proc 与 cgroup；macOS 无 /proc 时经 ps/vm_stat/sysctl 回退；读不到就留空，不影响调度）----
 def scan_procs():
-    """容器里的进程：{pid: {comm, state, ppid, pgid, sid, ticks（含已回收子进程的 CPU 时间）, hpid（宿主机 PID）}}。没有 /proc 时为空。"""
+    """主机/容器里的进程：{pid: {comm, state, ppid, pgid, sid, ticks（含已回收子进程的 CPU 时间）, hpid（宿主机 PID）}}。
+    没有 /proc 且启用 POSIX 回退（macOS/BSD）时经 ps 采集并缓存 RSS；否则为空。"""
     out = {}
     try:
         names = os.listdir(_C.PROC)
     except OSError:
+        if _C.posix_fallback_ok():
+            try:
+                r = subprocess.run(["ps", "-ax", "-o", "pid=,ppid=,pgid=,stat=,rss=,time=,comm="],
+                                   capture_output=True, text=True, timeout=10)
+                if r.returncode == 0:
+                    out = parse_ps_procs(r.stdout)
+                    _PROC_RSS.clear()
+                    _PROC_RSS.update({pid: p["rss"] for pid, p in out.items() if "rss" in p})
+            except (OSError, subprocess.TimeoutExpired):
+                pass
         return out
     for n in names:
         if not n.isdigit():
@@ -213,8 +435,8 @@ def scan_procs():
     return out
 
 
-def mem_of(pid):
-    """进程占的内存（字节）：PSS（共享页按份摊，fork 出的 DataLoader 不会重复计），读不到时用 RSS。"""
+def mem_of(pid, procs=None):
+    """进程占的内存（字节）：优先 /proc PSS（共享页按份摊），次选 /proc statm RSS，无 /proc 时回退 ps 采集的 RSS。"""
     for name in ("smaps_rollup", "smaps"):
         try:
             with open(os.path.join(_C.PROC, str(pid), name)) as f:
@@ -225,7 +447,10 @@ def mem_of(pid):
         with open(os.path.join(_C.PROC, str(pid), "statm")) as f:
             return int(f.read().split()[1]) * os.sysconf("SC_PAGE_SIZE")
     except (OSError, ValueError, IndexError):
-        return 0
+        pass
+    if procs and pid in procs and "rss" in procs[pid]:
+        return int(procs[pid]["rss"])
+    return int(_PROC_RSS.get(pid, 0))
 
 
 def cg(*names):
@@ -415,6 +640,23 @@ def cpu_cap(quota):
     return max(1, int(quota)) if quota else None
 
 
+def host_cpu_ticks():
+    """Linux `/proc/stat` 首行 `cpu` 的全机非空闲累计 ticks（user+nice+system+irq+softirq+steal），读不到为 None。
+    无 cgroup CPU 计数时用于求全机 `cpu_used`，不受子进程退出被父进程回收导致的 `/proc/<pid>/stat` cutime/cstime 重复累计影响。"""
+    for ln in (_C.read(os.path.join(_C.PROC, "stat"), "") or "").splitlines():
+        if ln.startswith("cpu "):
+            cols = ints(ln.split()[1:])
+            if cols and len(cols) >= 4:
+                # 顺序：user nice system idle iowait irq softirq steal [guest guest_nice]
+                busy = cols[0] + cols[1] + cols[2]
+                for idx in (5, 6, 7):
+                    if idx < len(cols):
+                        busy += cols[idx]
+                return busy
+            break
+    return None
+
+
 def cpu_quota():
     """容器的 CPU 配额（核数，cgroup v1 / v2；没设上限或读不到为 None）。"""
     q, per = cg("cpu/cpu.cfs_quota_us"), cg("cpu/cpu.cfs_period_us")
@@ -441,7 +683,20 @@ def host_info(gpus, data_root):
         if mi.get("MemTotal"):
             h["mem"] = {"limit": mi["MemTotal"] / _C.GIB, "used": (mi["MemTotal"] - mi.get("MemAvailable", 0)) / _C.GIB,
                         "anon": (mi.get("AnonPages", 0) + mi.get("Shmem", 0)) / _C.GIB, "src": "meminfo"}
+        elif _C.posix_fallback_ok() and is_darwin():
+            dm = darwin_mem_info()
+            if dm:
+                h["mem"] = dm
     h["cpu_quota"] = cpu_quota()
+    if _C.posix_fallback_ok() and is_darwin():
+        h["os"] = "darwin"
+        if not h.get("nproc"):
+            nc = sysctl_val("hw.ncpu")
+            if nc and nc.isdigit():
+                h["nproc"] = int(nc)
+        if h["cpu_quota"] is None and h.get("nproc"):
+            h["cpu_quota"] = darwin_cpu_quota(h["nproc"])
+            h["cpu_quota_src"] = "macos_default"
     usage = cg("cpuacct/cpuacct.usage", "cpu,cpuacct/cpuacct.usage")
     if usage is None and cg("cpu.stat"):
         usage = str(int(kv(cg("cpu.stat")).get("usage_usec", 0)) * 1000)
@@ -681,14 +936,15 @@ class MeasureMixin:
                       **({"ka": self.bka[k]} if k in self.bka else {})}
         return out
 
-    def measure(self, j, pids, procs, gp, util, ovram, jobs, t, unacct=None):
+    def measure(self, j, pids, procs, gp, util, ovram, jobs, t, unacct=None, mps_cards=()):
         """量一个任务这一轮的用量（写进 j["use"]）：内存（PSS 之和）与峰值、核数与累计 CPU、读写（进程树 /proc/<pid>/io 之和：此刻 MiB/s、
         累计字节 rd_b / wr_b）、核数与读写的 1 分钟峰值（PEAK_WIN 秒一个窗口）、近 CPU_WARM_S 内各 1 分钟窗口的核数 pks [[窗口结束时刻, 核数]]
         与从何时起量它的 pk0（CPU 记账的回收按它们，cpu_warm、Worker.acct）、同卡并行数 conc、显存（按卡）与峰值、所用卡的平均利用率，
         以及运行期间同卡、同机还有谁（with_gpu、with_host）、所用的卡上有没有过 labmon 之外的进程（owner_gpu）。返回此刻所用的卡。
-        CPU（cpu_since）与读写都是累计计数求差：子进程被回收时并进父进程，求和不重不漏；回收者不在树里时那一轮差值为负，按 0 算。"""
+        CPU（cpu_since）与读写都是累计计数求差：子进程被回收时并进父进程，求和不重不漏；回收者不在树里时那一轮差值为负，按 0 算。
+        Apple Silicon MPS 无法采集单进程显存：仅用 MPS 卡且无 compute-apps 时 vram/vram_peak 保留 None，避免写成 0 覆盖历史估计。"""
         u = j.setdefault("use", {})
-        ram = sum(mem_of(p) for p in pids) / _C.GIB
+        ram = sum(mem_of(p, procs) for p in pids) / _C.GIB
         ticks = sum(procs[p]["ticks"] for p in pids)
         io = [proc_io(p) for p in pids]
         rd, wr = sum(x[0] for x in io), sum(x[1] for x in io)
@@ -699,6 +955,8 @@ class MeasureMixin:
         if j.get("ext") and vr:
             j["gpus"] = sorted(vb)
         on = set(j["gpus"]) | set(vb)
+        mps_set = set(mps_cards or ())
+        vram_unmeasured = bool(on) and not vr and all((x in mps_set or str(x).startswith("mps-")) for x in on)
         if any(ovram.get(x) for x in on):
             j["owner_gpu"] = True             # 运行期间所用的卡上有过 labmon 之外的进程（借来的主机上据此判断 CUDA OOM 是不是被挤的）
         stopped = any(procs[p].get("state") == "T" for p in pids)
@@ -734,7 +992,9 @@ class MeasureMixin:
         else:
             u.pop("sus_on", None)
         u.update(t=t, ticks=ticks, rchar=rd, wchar=wr, nproc=len(pids), ram=round(ram, 2), ram_peak=round(max(ram, u.get("ram_peak") or 0), 2),
-                 vram=vram, vram_peak=max(vram, u.get("vram_peak") or 0), vram_by=vb)
+                 vram=None if vram_unmeasured else vram,
+                 vram_peak=u.get("vram_peak") if vram_unmeasured else max(vram, u.get("vram_peak") or 0),
+                 vram_by=vb)
         card, host = (sum(_C.intruders(s, on, jobs, gp, None, j, unacct=unacct), []) for s in ("gpu", "host"))
         u["with_host"] = sorted(set(u.get("with_host", [])) | set(host))[:8]
         u["with_gpu"] = sorted(set(u.get("with_gpu", [])) | set(card))[:8]
@@ -755,16 +1015,20 @@ class MeasureMixin:
 
     def apply_cpu_quota(self, info, pol):
         """将主机配置的 cpu_quota 软配额接入有效 CPU 容量（#114）：
-        无 cgroup 限额的独立机按配置值启用 CPU 记账；已有更大 cgroup 配额时收紧到配置值（且不超过逻辑核数 nproc）。"""
+        - 无 cgroup 限额的独立机按配置值启用 CPU 记账；
+        - macOS 桌面默认留核（cpu_quota_src == "macos_default"）允许配置值覆盖（可调大到 nproc 或调小）；
+        - 已有 Linux cgroup 硬配额时收紧到配置值（且不超过逻辑核数 nproc）。"""
         cfg = (pol or {}).get("cpu_quota")
         if not (isinstance(info, dict) and cfg is not None and cfg > 0):
             return
         cands = [float(cfg)]
-        if info.get("cpu_quota"):
+        if info.get("cpu_quota") and info.get("cpu_quota_src") != "macos_default":
             cands.append(float(info["cpu_quota"]))
         if info.get("nproc"):
             cands.append(float(info["nproc"]))
         info["cpu_quota"] = min(cands)
+        if info.get("cpu_quota_src") == "macos_default":
+            info["cpu_quota_src"] = "config"
 
     def disk_events(self, info, pol):
         """本地盘低水位/软配额准入闸门（#114，复用内存闸门模式）：

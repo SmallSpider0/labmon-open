@@ -665,16 +665,35 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
             gp = [dict(g) for g in (p.get("gpu") or [])]
             we = w_hosts.get(h["id"])
             wst = we.get("status") if we and we.get("worker_up") else None
-            if wst and gp:
-                wgs = {g.get("i"): g for g in (wst.get("info") or {}).get("gpus") or []}
+            if wst:
+                wg_list = (wst.get("info") or {}).get("gpus") or []
                 ru = set((wst.get("room") or {}).get("unacct") or ())
-                for g in gp:
-                    wg = wgs.get(g.get("index"))
-                    if wg:
-                        if wg.get("unacct_mb"):
-                            g["unacct_mb"] = wg["unacct_mb"]
-                        if wg.get("uuid") in ru:
-                            g["unacct_paused"] = True
+                if not gp and wg_list:
+                    # 无 nvidia-smi 的主机（如 Apple Silicon MPS）：直接由 worker 状态补出逻辑 GPU 列表
+                    gp = [{
+                        "index": wg.get("i", idx),
+                        "name": wg.get("name") or "",
+                        "util": wg.get("util"),
+                        "mem_used": wg.get("used"),
+                        "mem_total": wg.get("total"),
+                        "temp": None,
+                        "power": None,
+                        "power_limit": None,
+                        **({"backend": wg["backend"]} if wg.get("backend") else {}),
+                        **({"unacct_mb": wg["unacct_mb"]} if wg.get("unacct_mb") else {}),
+                        **({"unacct_paused": True} if wg.get("uuid") in ru else {}),
+                    } for idx, wg in enumerate(wg_list)]
+                elif gp:
+                    wgs = {g.get("i"): g for g in wg_list}
+                    for g in gp:
+                        wg = wgs.get(g.get("index"))
+                        if wg:
+                            if wg.get("backend"):
+                                g["backend"] = wg["backend"]
+                            if wg.get("unacct_mb"):
+                                g["unacct_mb"] = wg["unacct_mb"]
+                            if wg.get("uuid") in ru:
+                                g["unacct_paused"] = True
             cg = p.get("cgroup") or {}
             hd.update(gpus=gp, gpu_procs=p.get("gpu_procs") or [], cgroup=cg, loadavg=p.get("loadavg"))
             bi = {b["i"]: b for b in busy.get(h["id"]) or []}
@@ -1034,9 +1053,10 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
         # 每次采样看各卡近 10 分钟的吃满程度（busy：只有保活时按 0，#51），不看瞬时值：数据加载的空档不会误报，保活也挡不住；
         # 没有 worker 的主机（采样里没有 busy）只有探针的瞬时值
         hs = hstate.setdefault(hd["id"], {})
-        # 外部活跃占卡默认整卡暂停放新任务（#114）：不报 gpu_idle 异常，免得反复叫醒 labmon wait
+        # 外部活跃占卡默认整卡暂停放新任务，或全为 MPS 逻辑卡（不采集实时利用率，util 为 None，#114）：不报 gpu_idle 异常，免得反复叫醒 labmon wait
         all_unacct = bool(hd.get("gpus")) and all(g.get("unacct_paused") for g in hd["gpus"])
-        idle_gpu = bool(unfinished and hd.get("gpus") and not all_unacct and recent and t - recent[0]["t"] >= win - 150 and
+        all_mps = bool(hd.get("gpus")) and all(g.get("backend") == "mps" for g in hd["gpus"])
+        idle_gpu = bool(unfinished and hd.get("gpus") and not all_unacct and not all_mps and recent and t - recent[0]["t"] >= win - 150 and
                         all(max([u or 0 for u in x.get("busy") or x.get("util") or [0]]) < al_cfg["gpu_idle_util"] for x in recent))
         used = bool(recent) and max([u or 0 for u in recent[-1].get("busy") or recent[-1].get("util") or [0]]) >= al_cfg["gpu_idle_util"]
         since = _idle_stretch(hs, idle_gpu, used, win, t)

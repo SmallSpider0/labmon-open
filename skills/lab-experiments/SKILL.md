@@ -84,7 +84,7 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 
 - **接入与密钥红线**：可用 `labmon host add <id> --ssh user@host` / `edit` / `test` / `key` / `rm` 协助用户管理外部主机；**只走零私钥上传路线**（看板生成专用 Ed25519 公钥与一行 `authorized_keys` 授权命令，由用户确认粘贴到目标机）。**严禁读取或上传用户本机 `~/.ssh/id_*` 个人私钥**。
 - **防开发仓污染（硬规）**：先跑 `labmon project init <主机> <项目>` 在 `<data_root>/projects/<项目>/` 下建目录，**严禁直接对正在编辑的源码仓执行 `worker add`**（默认拦截 `<data_root>` 之外的清单目录）：
-  - **本机 Mac（APFS）**：在 `<data_root>/projects/<项目>/code` 用 `git worktree add --detach` 或 APFS 零拷贝 `cp -cR` 隔离运行副本；
+  - **本机 Mac（APFS / Apple Silicon MPS）**：在 `<data_root>/projects/<项目>/code` 用 `git worktree add --detach` 或 APFS 零拷贝 `cp -cR` 隔离运行副本；macOS worker 自动走轻量 POSIX 采集并**默认留 2 核给桌面**（避免把笔记本 CPU 吃死，可在主机配置用 `cpu_quota` 调整）；Apple Silicon 自动暴露单逻辑 MPS 卡（默认单卡互斥、统一内存保守估算，可经 `mps_vram_gb` 覆盖），放行时导出 **`CUDA_VISIBLE_DEVICES=""`** 与 **`LABMON_ACCEL=mps`**（纯 CPU 导出 `LABMON_ACCEL=cpu`，CUDA 导出 `LABMON_ACCEL=cuda`），脚本应优先按 `$LABMON_ACCEL` 选择设备（如 `mps` / `cuda` / `cpu`）；Intel Mac 无 GPU 时仅支持 `gpus=0` 纯 CPU 任务；
   - **大数据集与权重**：统一放 `<data_root>/{datasets,weights}`，项目目录内**只读软链接**引用，不重复拷贝；
   - **WSL2**：`data_root` 必须落在 Linux ext4（如 `~/.local/share/labmon/work`），禁止放 `/mnt/c` 等 Windows 9p 盘（IO 极慢且锁语义不完整；`labmon check` / `worker status` / `host test` 命中 `/mnt/[a-z]/` 会提示风险）；当 Windows 宿主机在用 GPU 时，worker 通过未归因显存差额（`unacct_vram`）识别外部活跃占卡并**默认整卡暂停放新任务**（等待原因写「外部（如宿主机）占卡暂停放行」），**属于正常让路、不是异常**，不杀在跑任务、不报异常也不唤醒 `labmon wait`，宿主机释放后下一轮自动恢复；若用户明确希望按剩余显存共享，可在主机设置开 `allow_shared_gpu = true`（`labmon host edit <id> --allow-shared-gpu`）；
   - **产物与日志**：实验输出统一落 `<data_root>/projects/<项目>/runs/` 与 `logs/`，不写回源码仓。
