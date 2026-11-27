@@ -798,7 +798,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
   <!-- CPU 与读写 -->
   <div class="algo" id="a-io">
     <h3>CPU 与读写：测量与压力<span class="tag">measure · press · io_base</span></h3>
-    <p class="prose">worker 每轮把每个任务进程树的 CPU 时间与读写字节加起来，两轮相减得此刻的速率、按 1 分钟窗口留峰值。主机这边看共享盘每次读写要多久：超过这台自己的基线、且每秒不少于 2 次，就算“共享盘慢”，这时 worker 自己的扫盘与拷本地依赖先让路。CPU 被配额限流（近 1 分钟被限流的周期 ≥ 25%）持续 10 分钟时告警，并指出实测核数远超 <code>$LABMON_CPUS</code> 的任务。</p>
+    <p class="prose">worker 每轮把每个任务进程树的 CPU 时间与读写字节加起来，两轮相减得此刻的速率、按 1 分钟窗口留峰值。主机这边看共享盘每次读写要多久：超过这台自己的基线、且每秒不少于 2 次，就算“共享盘慢”，这时 worker 自己的扫盘与拷本地依赖先让路。CPU 被配额限流（近 1 分钟被限流的周期 ≥ 25%）持续 10 分钟，且有任务实测核数远超 <code>$LABMON_CPUS</code> 或 labmon 之外进程占 ≥ 1 核时，在工作台弹红框告警（无超核且无外部抢核时不报告警，主机表与资源卡上的限流比例仍标红显示）。</p>
     <figure>
       <div class="frame">
         <svg viewBox="0 0 760 250" role="img" aria-label="左边：任务会话下各进程的读写与 CPU 计数加总后两轮相减得速率；右边：共享盘每次读写的毫秒数柱状图，中间一段超过基线变红，这段时间推迟扫盘与拷贝">
@@ -859,7 +859,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
       <ul>
         <li><b>主机压力</b>（状态的 <code>info.press</code>，此刻取近 1 分钟的差值）：CPU 被配额限流的周期占比 <code>thr</code>；共享盘 READ、WRITE 每次平均执行时间（<code>/proc/self/mountstats</code>，含客户端排队）、每秒次数、MiB/s；本地盘忙碌占比与每次用时（<code>/proc/diskstats</code>）；有 <code>/proc/pressure</code> 的内核另记 PSI（部分旧内核不提供）。</li>
         <li><b>基线</b>（<code>io_base</code>）：每 5 分钟往 <code>press.jsonl</code> 记一行，留 14 天；取每秒不少于 2 次读写的样本的 95 分位、不低于 20 ms，样本不到 288 个（约一天）时取 20 ms。次数下限把 worker 自己每 10 秒一次的小写排除在外。</li>
-        <li><b>CPU 限流</b>（状态的 <code>throttle</code>）：<code>thr</code> ≥ 25% 起算一段，降到 10% 以下才结束（滞回）；持续满 10 分钟标 <code>alert</code>，工作台主机告警，项目里有超核任务的另报 <code>throttle:</code>。超核：最近 1 分钟窗口的核数 ≥ 给的核数 × 1.5 且多出至少 1 核，占位任务不算。门槛只在 worker，看板只读字段；worker 重启时找回起点。主机表与资源卡上的限流比例限流中琥珀、告警时红。</li>
+        <li><b>CPU 限流</b>（状态的 <code>throttle</code>）：<code>thr</code> ≥ 25% 起算一段，降到 10% 以下才结束（滞回）；持续满 10 分钟标 <code>alert</code>。主机表与资源卡上的限流比例在限流中标琥珀、<code>alert</code> 时标红；工作台总览/主机红框仅在 <code>alert</code> 且有超核任务或 labmon 之外进程占 ≥ 1 核时才报告警（无超核且无外部抢核时不弹冗余红框），项目里有超核任务的另报 <code>throttle:</code>。超核：最近 1 分钟窗口的核数 ≥ 给的核数 × 1.5 且多出至少 1 核，占位任务不算。门槛只在 worker，看板只读字段；worker 重启时找回起点。</li>
         <li><b>读写拥塞嫌疑</b>（事件 <code>io_suspect</code>）：在跑的非占位任务已跑过同类历史预计时长的 1.5 倍、此刻共享盘又慢，记一条，同一任务一次。只记录，不告警、不改准入。同一物理机的几个容器按共享盘客户端地址归并，计数不相加。</li>
         <li>这些计数都是同一物理机几个容器共用的，组里别人读写重也会变慢。主机页的“共享盘读写”一行把基线画成条一半处的竖线，慢时条变红。</li>
       </ul>

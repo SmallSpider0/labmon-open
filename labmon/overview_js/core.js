@@ -100,7 +100,8 @@ function alertsOf(h) {
   for (const w of (h.status?.waiting || []).filter(w => w.dep && w.dep !== "wait")) add("agent", `${h.label}：${pname(w.project)} 的 ${w.name} ${w.why}`);
   for (const w of (h.status?.waiting || []).filter(w => w.cpu_wait)) add("agent", `${h.label}：${pname(w.project)} 的 ${w.name} 因 CPU 被挡 ${dur(w.cpu_wait)}：${w.why}`);
   for (const w of h.borrow?.late || []) add("both", `${h.label}：${pname(w.project)} 的 ${laneName(laneOf(h, w), [h])} 还有 ${w.n} 个任务不会在这台放行：${w.why}；${h.borrow.late_say}`);   // borrow.late_jobs、late_say
-  if (h.status?.throttle?.alert) add("both", thrText(h));   // CPU 持续被配额限流（worker 判的，#39）
+  const th = h.status?.throttle;
+  if (th?.alert && (th.over?.length || th.other >= 1)) add("both", thrText(h));   // CPU 持续被配额限流且有超核任务或外部抢核（worker 判的，#39、#221）
   const kf = h.status?.kafight;            // worker 记的：要卡时停了的保活又被拉起来（近 1 小时）
   if (kf) add("user", `${h.label}：GPU 保活在任务运行中被拉起 ${kf.n} 次（1 小时内，最近 ${tsNear(kf.t)}），已停；${kf.who}`);
   const ks = h.status?.keepalive?.stuck;   // worker 判的：要卡时停保活一直没停成（#102），任务和它同卡分算力
@@ -116,7 +117,7 @@ const thrOver = th => th.over.map(o => `${pname(o.project)} 的 ${o.name} 实测
 function thrText(h) {
   const th = h.status.throttle;
   return `${h.label}：容器 CPU 被配额限流${th.thr != null ? ` ${g1(th.thr)}%` : ""}（已持续 ${dur(th.for)}），`
-    + (th.over.length ? `超核的任务：${thrOver(th)}，线程数、进程数按 $LABMON_CPUS 设就不再抢核` : th.other >= 1 ? `labmon 之外的进程占 ${g1(th.other)} 核` : "各任务都没超出给的核数，是配额本身不够");
+    + (th.over?.length ? `超核的任务：${thrOver(th)}，线程数、进程数按 $LABMON_CPUS 设就不再抢核` : `labmon 之外的进程占 ${g1(th.other)} 核`);
 }
 // 限流比例的小字：限流中琥珀、持续满（告警）标红；悬停写口径与超核的任务
 function thrTag(h, cls = "sm") {

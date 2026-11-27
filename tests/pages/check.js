@@ -372,12 +372,17 @@ t("overview", "CPU 被配额限流（#39）：工作台告警指出超核的任�
   has(home, 'style="color:var(--bad)"'); has(home, "限流 38.5%"); has(tips(home), "超核：Alpha 实验 的 alpha_train_s1 实测 9.2 核（给 4 核）");
   ok(!/限流 —|限流 null/.test(home), "没有限流计数的主机也写了");
   const a = page(O, "#/host/srv-a"); has(a, "限流 38.5%"); has(tips(a), "超核：给 4 核，1 分钟窗口实测 9.2 核"); has(tips(a), "持续限流 25 分钟");
-  // 还没持续满：不告警、琥珀色；没有超核的任务时说是 labmon 之外的还是配额本身不够；缓过来（throttle 为 null）只剩灰色小字
+  // 还没持续满：不告警、琥珀色；持续满但无超核且外部进程不足 1 核时不报告警，限流百分比与标红仍保留；外部进程 ≥ 1 核照常告警；缓过来（throttle 为 null）只剩灰色小字
   run(O, "D.hosts[0].status.throttle.alert = false");
   ok(!run(O, "allAlerts()").some(x => x.includes("限流")), "还没持续满也告警了"); has(page(O, "#/"), 'style="color:var(--warn)"');
-  run(O, "D.hosts[0].status.throttle.over = []");
-  ok(run(O, "thrText(D.hosts[0])").endsWith("各任务都没超出给的核数，是配额本身不够"));
+  run(O, "D.hosts[0].status.throttle.alert = true; D.hosts[0].status.throttle.over = []; D.hosts[0].status.throttle.other = 0.3");
+  ok(!run(O, "allAlerts()").some(x => x.includes("限流")), "无超核且无外部抢核仍报告警");
+  ok(!run(O, "alertsOf(D.hosts[0])").some(a => a.msg.includes("限流")), "主机告警里仍有无动作价值的限流提示");
+  const noOverHome = page(O, "#/"), noOverHost = page(O, "#/host/srv-a");
+  has(noOverHome, 'style="color:var(--bad)"'); has(noOverHome, "限流 38.5%"); has(tips(noOverHome), "持续限流 25 分钟");
+  has(noOverHost, 'style="color:var(--bad)"'); has(noOverHost, "限流 38.5%"); has(tips(noOverHost), "持续限流 25 分钟");
   run(O, "D.hosts[0].status.throttle.other = 3.24");
+  ok(run(O, "allAlerts()").some(x => x.endsWith("labmon 之外的进程占 3.2 核")), "外部抢核 ≥1 核时未告警");
   ok(run(O, "thrText(D.hosts[0])").endsWith("labmon 之外的进程占 3.2 核"));
   run(O, "D.hosts[0].status.throttle = null");
   has(page(O, "#/"), '<span class="sm mut" style="" ');
