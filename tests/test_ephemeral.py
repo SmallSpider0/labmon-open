@@ -3,8 +3,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -331,6 +333,64 @@ class EphemeralUnitTest(unittest.TestCase):
         self.assertFalse(EP._file("colab-2").exists())
         self.assertFalse(EP._file("colab-3").exists())
 
+    def test_codex_review_regressions(self):
+        """覆盖 PR #220 审查发现的 5 项服务端/采集边界（大小写冲突、重连修正 usage、终态重试幂等、乱序非 closing 忽略、离网保留临时日志告警）。"""
+        t0 = time.time() - 600.0
+        # 1) 大小写不敏感标识冲突：与 hosts.toml 重名（SRV-A）或与另一项目在线主机（Colab-A vs colab-a）均拒绝且不覆盖
+        with self.assertRaises(EP.EphemeralError) as cm:
+            EP.push(_sample_payload(host_id="SRV-A"), who="boss", t=t0)
+        self.assertEqual(cm.exception.code, 409)
+        EP.push(_sample_payload(host_id="Colab-A", instance_id="ia", project="proj-a", client_t=t0), who="boss", t=t0)
+        with self.assertRaises(EP.EphemeralError) as cm:
+            EP.push(_sample_payload(host_id="colab-a", instance_id="ib", project="proj-b", client_t=t0), who="bob", who_role="user", t=t0)
+        self.assertEqual(cm.exception.code, 409)
+        self.assertEqual(ST.load_json(EP._file("Colab-A"), {})["project"], "proj-a")
+
+        # 2) TTL 超时写入 failed usage 后，同一 instance_id 重连并最终 done → usage 应被修正为唯一 done 行
+        b_run = _sample_payload(host_id="colab-rec", instance_id="inst-r", ttl_s=180, client_t=t0)
+        b_run["jobs"][0]["start_ts"] = t0 - 100.0
+        EP.push(b_run, who="boss", t=t0)
+        EP.tick(t=t0 + 200.0)
+        u_after_timeout = ST.load_rows(ST.usage_file("colab-rec"))
+        self.assertEqual(len(u_after_timeout), 1)
+        self.assertEqual(u_after_timeout[0]["st"], "failed")
+        # 重连继续运行：应撤销超时误记的 failed 行
+        b_cont = _sample_payload(host_id="colab-rec", instance_id="inst-r", ttl_s=180, client_t=t0 + 210.0)
+        b_cont["jobs"][0]["start_ts"] = t0 - 100.0
+        EP.push(b_cont, who="boss", t=t0 + 210.0)
+        self.assertEqual(ST.load_rows(ST.usage_file("colab-rec")), [])
+        # 最终成功完成：写入唯一 done 行
+        b_done = _sample_payload(host_id="colab-rec", instance_id="inst-r", ttl_s=180, client_t=t0 + 250.0, closing=True)
+        b_done["jobs"][0].update(status="done", start_ts=t0 - 100.0, end_ts=t0 + 250.0, rc=0)
+        EP.push(b_done, who="boss", t=t0 + 250.0)
+        u_final = ST.load_rows(ST.usage_file("colab-rec"))
+        self.assertEqual(len(u_final), 1)
+        self.assertEqual(u_final[0]["st"], "done")
+
+        # 3) 终态 closing 重试（相同 payload 晚 2 秒重发）应保持时间戳稳定、不产生重复 usage 行
+        EP.push(b_done, who="boss", t=t0 + 252.0)
+        u_retry = ST.load_rows(ST.usage_file("colab-rec"))
+        self.assertEqual(len(u_retry), 1)
+        self.assertEqual(u_retry[0]["s"], u_final[0]["s"])
+        self.assertEqual(u_retry[0]["t"], u_final[0]["t"])
+
+        # 4) 已 closing=True 关闭的同实例收到乱序迟到的非 closing 心跳，不应被翻活为 online
+        EP.push(b_cont, who="boss", t=t0 + 255.0)
+        self.assertEqual(ST.load_json(EP._file("colab-rec"), {})["state"], "down")
+
+        # 5) 离开实验室内网（lan["ok"]=False）时，仍保留在线临时主机的 log_silent 告警
+        PJ.put_config("proj-off", 'id = "proj-off"\ntitle = "离网测试"\n[alerts]\nlog_silent_min = 1\n', {}, None, owner="boss")
+        b_sil = _sample_payload(host_id="colab-sil", instance_id="is", project="proj-off", client_t=t0 + 300.0)
+        b_sil["jobs"][0]["start_ts"] = t0 + 100.0
+        b_sil["jobs"][0]["log_mtime"] = t0 + 120.0
+        EP.push(b_sil, who="boss", t=t0 + 300.0)
+        cfg_off = PJ.load_cfg("proj-off")
+        with mock.patch.object(C.time, "time", return_value=t0 + 300.0), \
+                mock.patch.object(EP.time, "time", return_value=t0 + 300.0), \
+                mock.patch.object(C.L, "gather", return_value=({"ok": False, "since": t0, "checked": t0 + 300.0}, {})):
+            snap_off = C.collect(cfg_off)
+        self.assertTrue(any(a["key"].startswith("log_silent:colab_s1") for a in snap_off["alerts"]), snap_off["alerts"])
+
 
 class EphemeralServerApiTest(unittest.TestCase):
     """通过真实 HTTP 看板服务验证 POST /api/ephemeral/push 与 GET /api/client/ephemeral.py 的鉴权与限制。"""
@@ -492,6 +552,69 @@ class EphemeralClientTest(unittest.TestCase):
             self.assertEqual(sent[-1]["jobs"][0]["status"], "done")
             self.assertEqual(sent[-1]["jobs"][0]["progress"], [4, 8])
             self.assertTrue(sent[-1]["closing"])
+
+            # 1) 忽略 SIGTERM 且不关闭 stdout 的子进程：必须在 grace_s 到期时强杀退出并上报终态
+            sent.clear()
+            tr2 = LE.EphemeralTracker(
+                url="http://127.0.0.1:9", token="lm_test", project="proj-a",
+                host_id="colab-sig", job="sig_s1", interval=999, poster=fake_post,
+            )
+            t_start = time.monotonic()
+
+            def _send_term():
+                time.sleep(0.15)
+                os.kill(os.getpid(), signal.SIGTERM)
+
+            th = threading.Thread(target=_send_term, daemon=True)
+            th.start()
+            rc2 = LE.run_command_wrapped(
+                [sys.executable, "-c", "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready', flush=True); time.sleep(30)"],
+                tr2,
+                grace_s=0.15,
+            )
+            elapsed = time.monotonic() - t_start
+            self.assertLess(elapsed, 3.0, f"忽略 SIGTERM 的子进程未在宽限期被强杀：elapsed={elapsed:.2f}s")
+            self.assertNotEqual(rc2, 0)
+            self.assertTrue(sent[-1]["closing"])
+            self.assertEqual(sent[-1]["jobs"][0]["status"], "failed")
+
+    def test_finish_waits_for_inflight_heartbeat(self):
+        """在途普通心跳尚未返回时调用 finish()，必须等其结束后再发送 closing=True，绝不并发乱序。"""
+        order: list[tuple[bool, str]] = []
+        entered = threading.Event()
+        release = threading.Event()
+
+        def slow_post(url, token, body, timeout=15.0):
+            closing = bool(body.get("closing"))
+            if not closing and len(order) == 1:
+                entered.set()
+                release.wait(timeout=2.0)
+            order.append((closing, body["jobs"][0]["status"]))
+            return 200, {"ok": True, "warnings": []}
+
+        with mock.patch.object(LE, "collect_gpus", return_value=[]):
+            tr = LE.EphemeralTracker(
+                url="http://127.0.0.1:9", token="lm_test", project="proj-a",
+                host_id="colab-ser", job="ser_s1", interval=5.0, poster=slow_post,
+            )
+            tr.interval = 0.05
+            tr.start()
+            self.assertTrue(entered.wait(timeout=2.0), "后台普通心跳未进入在途状态")
+            fin_done = threading.Event()
+
+            def _do_finish():
+                tr.finish(ok=True, rc=0)
+                fin_done.set()
+
+            ft = threading.Thread(target=_do_finish)
+            ft.start()
+            time.sleep(0.1)
+            self.assertFalse(fin_done.is_set(), "在途普通心跳未返回前 finish() 不应抢发 closing=True")
+            release.set()
+            ft.join(timeout=2.0)
+            self.assertTrue(fin_done.is_set())
+            self.assertEqual(order[-1], (True, "done"))
+            self.assertEqual(order[-2], (False, "running"))
 
 
 if __name__ == "__main__":

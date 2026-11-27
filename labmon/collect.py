@@ -1533,8 +1533,21 @@ def collect(cfg: dict, out_dir: Path | None = None, use_ssh: bool = True) -> dic
     probes.update({h["id"]: (None, POOL_LABEL) for h in cfg["hosts"] if h.get("pool")})
     probes.update({h["id"]: EP.as_probe(h["id"], now) for h in cfg["hosts"] if h.get("ephemeral")})
     snap = build(cfg, probes, out_dir, lan, glob_snap)
-    if not lan["ok"]:                                  # 数据是离开内网前的：日志多久没更新、GPU 闲置这些按它算不准，不报
-        snap["alerts"] = [a for a in snap["alerts"] if a["key"].split(":")[0] not in ("ssh_fail", "log_silent", "noprogress", "gpu_idle")]
+    if not lan["ok"]:                                  # 数据是离开内网前的：仅过滤依赖内网旧探针的告警，保留在线临时主机的新鲜心跳告警（#213）
+        eph_online_hosts = {h["id"] for h in snap["hosts"] if h.get("ephemeral") and h.get("ok")}
+        lane_host = {ln["id"]: ln.get("host") for ln in snap["lanes"]}
+        eph_online_jobs = {j["id"] for j in snap["jobs"] if lane_host.get(j.get("lane")) in eph_online_hosts}
+
+        def _keep_offline(a: dict) -> bool:
+            parts = a["key"].split(":")
+            kind = parts[0]
+            if kind in ("log_silent", "noprogress"):
+                return len(parts) > 1 and parts[1] in eph_online_jobs
+            if kind == "gpu_idle":
+                return len(parts) > 1 and parts[1] in eph_online_hosts
+            return kind != "ssh_fail"
+
+        snap["alerts"] = [a for a in snap["alerts"] if _keep_offline(a)]
         snap["lan"] = lan
     save_json(out_dir / "snapshot.json", snap)
     render(snap, out_dir)

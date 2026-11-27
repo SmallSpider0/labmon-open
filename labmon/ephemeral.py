@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 import math
 import re
 import threading
@@ -23,7 +24,7 @@ from . import lease as LS
 from . import projects as PJ
 from .config import GIB, POOL, all_hosts, pick_color
 from .records import log_events
-from .state import load_json, save_json, state_dir
+from .state import load_json, load_rows, save_json, state_dir, usage_file, write_atomic
 from .worker.pure import overrun_left
 
 EPHEMERAL_QUEUE = "ephemeral"
@@ -232,13 +233,19 @@ def _norm_jobs(raw, prev_jobs: dict[str, dict], offset: float, t: float) -> list
         else:
             raise EphemeralError(400, f"任务 {jid} 的 gpus 须为非负整数列表")
         prev = prev_jobs.get(jid) or {}
-        start_ts = _cal_ts(j.get("start_ts"), offset, t)
-        if start_ts is None and j.get("elapsed_s") is not None:
-            el = _num(j.get("elapsed_s"), "elapsed_s", lo=0.0)
-            start_ts = t - el
-        if start_ts is None:
-            start_ts = prev.get("start_ts")
-        end_ts = _cal_ts(j.get("end_ts"), offset, t)
+        # 同一 instance_id 的同一任务：锚定已落盘的 start_ts（防重试或时钟抖动平移）；
+        # 若已落盘为相同终态，同时锚定 end_ts 保证终态重试完全幂等。
+        if prev.get("start_ts") is not None:
+            start_ts = float(prev["start_ts"])
+        else:
+            start_ts = _cal_ts(j.get("start_ts"), offset, t)
+            if start_ts is None and j.get("elapsed_s") is not None:
+                el = _num(j.get("elapsed_s"), "elapsed_s", lo=0.0)
+                start_ts = t - el
+        if st in ("done", "failed") and prev.get("status") == st and prev.get("end_ts") is not None and not prev.get("timeout_settled"):
+            end_ts = float(prev["end_ts"])
+        else:
+            end_ts = _cal_ts(j.get("end_ts"), offset, t)
         if st == "running":
             if start_ts is None:
                 start_ts = t
@@ -294,14 +301,30 @@ def _gpu_idx_map(rec: dict) -> tuple[dict[str, int], dict[int, str], dict[int, f
     return u2i, i2u, i2util
 
 
-def _record_usage(rec: dict, jobs: list[dict], t: float) -> None:
-    """将终态任务写入工作台 usage/<host_id>.jsonl，完全复用 overview._keep_usage。"""
+def _drop_usage_rows(hid: str, keys: set[tuple[int, str, str, str]]) -> None:
+    """从 usage/<host_id>.jsonl 中移除指定 (s, n, root, queue) 行，供超时误结转后重连修正或更新终态。"""
+    if not keys:
+        return
+    p = usage_file(hid)
+    if not p.is_file():
+        return
+    kept = [
+        r for r in load_rows(p)
+        if (round(float(r.get("s") or 0)), r.get("n"), r.get("root"), r.get("queue")) not in keys
+    ]
+    text = "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in kept)
+    write_atomic(p, text)
+
+
+def _record_usage(rec: dict, jobs: list[dict], t: float, *, replace: bool = False) -> None:
+    """将终态任务写入工作台 usage/<host_id>.jsonl，完全复用 overview._keep_usage；replace=True 时覆盖同 key 旧行。"""
     from . import overview as O
 
     hid, pid = rec["host_id"], rec["project"]
     u2i, i2u, i2util = _gpu_idx_map(rec)
     root = _root_for(hid)
     rows: list[dict] = []
+    rep_keys: set[tuple[int, str, str, str]] = set()
     for j in jobs:
         if j["status"] not in ("done", "failed"):
             continue
@@ -316,12 +339,16 @@ def _record_usage(rec: dict, jobs: list[dict], t: float) -> None:
             g_uuids.append(u)
         utils = [i2util[gi] for gi in j.get("gpus") or [] if gi in i2util]
         rc_str = "0" if j["status"] == "done" else str(j["rc"] if j.get("rc") is not None else 1)
+        t0_i = round(s0)
+        rep_keys.add((t0_i, j["id"], root, EPHEMERAL_QUEUE))
         rows.append({
-            "t0": round(s0), "t1": round(e1), "name": j["id"], "project": pid,
+            "t0": t0_i, "t1": round(e1), "name": j["id"], "project": pid,
             "root": root, "queue": EPHEMERAL_QUEUE, "gpus": g_uuids, "rc": rc_str,
             "wait": 0.0, "gpu_util": round(sum(utils) / len(utils), 1) if utils else None,
         })
     if rows:
+        if replace:
+            _drop_usage_rows(hid, rep_keys)
         O._keep_usage(state_dir(), hid, rows, t, u2i)
 
 
@@ -359,6 +386,7 @@ def _expire_unlocked(t: float) -> list[dict]:
                     for j in rec.get("jobs") or []:
                         if j.get("status") == "running":
                             fj = dict(j, status="failed", end_ts=round(t, 3), rc=-1,
+                                      timeout_settled=True,
                                       fail_reason="临时主机心跳超时（可能已失联或被回收）")
                             new_jobs.append(fj)
                             lost.append({"id": fj["id"], "artifact_dir": fj.get("artifact_dir")})
@@ -446,7 +474,7 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
     hid = _clean_text(body.get("host_id"), "host_id", 64, required=True)
     if not HOST_ID_RE.fullmatch(hid) or hid.lower() in RESERVED_HOSTS:
         raise EphemeralError(400, f"host_id {hid!r} 不合法：仅允许字母、数字及 _ . -，字母或数字开头，最长 64 字符且不能用保留名")
-    if any(str(h.get("id")) == hid for h in all_hosts()):
+    if any(str(h.get("id")).lower() == hid.lower() for h in all_hosts()):
         raise EphemeralError(409, f"host_id {hid} 与主机清单 hosts.toml 中的已有主机重名，请换一个临时主机标识")
 
     iid = _clean_text(body.get("instance_id"), "instance_id", 64, required=True)
@@ -472,7 +500,17 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
 
     with _locked():
         recs = _expire_unlocked(t)
-        old = next((r for r in recs if r["host_id"] == hid), None)
+        old = next((r for r in recs if r["host_id"].lower() == hid.lower()), None)
+        # 按大小写不敏感语义检查标识冲突（兼容 macOS 大小写不敏感状态卷，防跨项目覆盖）
+        if old and old["host_id"] != hid:
+            if old.get("project") != pid:
+                if old.get("state") == "online":
+                    raise EphemeralError(409, f"临时主机 {hid} 与项目 {old['project']} 在线主机 {old['host_id']} 标识冲突（大小写不同），不能重名上报")
+                if who_role != "admin":
+                    from . import users as U
+                    if U.owner_of(old["project"]) != who:
+                        raise EphemeralError(403, f"临时主机 {hid} 与他人项目 {old['project']} 的临时主机 {old['host_id']} 冲突")
+            raise EphemeralError(409, f"临时主机标识 {hid} 与已有主机 {old['host_id']} 仅大小写不同，请保持一致或换一个标识")
 
         # 防止跨项目抢占 host_id
         if old and old.get("project") != pid:
@@ -486,13 +524,26 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
             old = None
 
         # 单项目活跃临时主机配额（5 台）
-        active_same = [r for r in recs if r.get("project") == pid and r.get("state") == "online" and r["host_id"] != hid]
+        active_same = [r for r in recs if r.get("project") == pid and r.get("state") == "online" and r["host_id"].lower() != hid.lower()]
         if not closing and len(active_same) >= MAX_ACTIVE_PER_PROJECT:
             raise EphemeralError(429, f"项目 {pid} 活跃临时主机已达上限 {MAX_ACTIVE_PER_PROJECT} 台，请等待旧实例退出或离线后再接入")
 
         same_inst = bool(old and old.get("instance_id") == iid)
+        # 已优雅 closing=True 关闭的同一实例：忽略乱序迟到的非 closing 心跳，防止把已结束任务翻活
+        if same_inst and old.get("closing") and not closing:
+            return {
+                "ok": True,
+                "server_t": round(t, 3),
+                "host_id": hid,
+                "next_s": NEXT_HEARTBEAT_S,
+                "warnings": [],
+                "project": pid,
+            }, False
+
+        # 若为同一已关闭实例的 closing 重试，复用原 client_offset 保持时间戳完全幂等
+        eff_offset = float(old["client_offset"]) if (same_inst and old.get("closing") and closing and old.get("client_offset") is not None) else offset
         prev_jobs = {j["id"]: j for j in (old.get("jobs") or [])} if same_inst else {}
-        jobs = _norm_jobs(body.get("jobs"), prev_jobs, offset, t)
+        jobs = _norm_jobs(body.get("jobs"), prev_jobs, eff_offset, t)
 
         # 检查任务状态是否发生终态跃迁（终态跃迁与 closing 放行节流，避免短任务结束被 429 挡掉）
         terminal_changed = any(
@@ -510,10 +561,19 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
             if old_running:
                 finalized = [dict(j, status="failed", end_ts=round(t, 3), rc=-1,
                                   fail_reason="同名临时主机已被新实例接替") for j in old_running]
-                _record_usage(old, finalized, t)
+                _record_usage(old, finalized, t, replace=True)
 
-        # 超时转 down 后同一 instance_id 重连：允许在未 closing 时恢复 online 并清除断连告警
+        # 超时转 down 后同一 instance_id 重连：允许在未 closing 时恢复 online，并撤销此前超时误结转的 usage 记录
         reconnected = same_inst and old.get("state") == "down" and not closing
+        settled_to_drop: set[tuple[int, str, str, str]] = set()
+        if same_inst:
+            root = _root_for(hid)
+            for j in jobs:
+                pj = prev_jobs.get(j["id"]) or {}
+                if pj.get("timeout_settled") and pj.get("start_ts") is not None:
+                    settled_to_drop.add((round(float(pj["start_ts"])), j["id"], root, EPHEMERAL_QUEUE))
+        if settled_to_drop:
+            _drop_usage_rows(hid, settled_to_drop)
         if reconnected:
             wake = True
             log_events([{"kind": "host_up", "host": hid, "project": pid, "msg": f"临时主机 {label}（{iid}）恢复心跳"}], t)
@@ -524,7 +584,7 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
         state = "online"
         if closing:
             state = "down"
-            down_at = round(t, 3)
+            down_at = old.get("down_at") if (same_inst and old.get("closing") and old.get("down_at")) else round(t, 3)
             still_running = [j for j in jobs if j["status"] == "running"]
             if still_running:
                 down_reason = "临时主机退出时仍有任务未完成"
@@ -558,7 +618,7 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
             "first_seen": old.get("first_seen", round(t, 3)) if same_inst else round(t, 3),
             "last_seen": round(t, 3),
             "last_push_t": round(t, 3),
-            "client_offset": round(offset, 3),
+            "client_offset": round(eff_offset, 3),
             "gpus": gpus,
             "cpu_pct": round(cpu_pct, 1) if cpu_pct is not None else None,
             "cpu_count": int(cpu_count) if cpu_count is not None else None,
@@ -568,9 +628,9 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
             "pushed_by": who,
         }
         save_json(_file(hid), rec)
-        _record_usage(rec, jobs, t)
+        _record_usage(rec, jobs, t, replace=bool(settled_to_drop))
 
-        dups = _dup_running_unlocked([r for r in recs if r["host_id"] != hid], pid, iid, jobs) if state == "online" else []
+        dups = _dup_running_unlocked([r for r in recs if r["host_id"].lower() != hid.lower()], pid, iid, jobs) if state == "online" else []
         warnings = [f"duplicate_job:{jid}" for jid in dups]
 
     return {

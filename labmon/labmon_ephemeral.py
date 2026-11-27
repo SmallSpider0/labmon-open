@@ -353,7 +353,9 @@ class EphemeralTracker:
         self.local_paths = local_paths
 
         self._lock = threading.Lock()
+        self._push_lock = threading.Lock()
         self._stop = threading.Event()
+        self._finished = False
         self._thread: Optional[threading.Thread] = None
         self._start_ts = time.time()
         self._end_ts: Optional[float] = None
@@ -425,27 +427,33 @@ class EphemeralTracker:
         }
 
     def push_once(self, *, closing: bool = False) -> Tuple[int, Dict[str, Any]]:
-        payload = self.build_payload(closing=closing)
-        retries = 3 if closing else 1
-        code, body = 0, {}
-        for attempt in range(retries):
-            code, body = self._poster(self.url, self.token, payload)
-            if code == 200:
-                for w in body.get("warnings") or []:
-                    if w not in self._warned:
-                        self._warned.add(w)
-                        print("[labmon-ephemeral] 警告：{}".format(w), file=sys.stderr, flush=True)
-                return code, body
-            if code in (400, 401, 403, 404, 413):
-                print("[labmon-ephemeral] 上报被拒（HTTP {}）：{}".format(code, body.get("error") or body), file=sys.stderr, flush=True)
-                return code, body
-            if attempt + 1 < retries:
-                time.sleep(2.0 * (attempt + 1))
-        if code != 200:
-            print("[labmon-ephemeral] 上报未成功（HTTP {}）：{}".format(code, body.get("error") or body), file=sys.stderr, flush=True)
-        return code, body
+        with self._push_lock:
+            if not closing and self._finished:
+                return 0, {}
+            payload = self.build_payload(closing=closing)
+            retries = 3 if closing else 1
+            code, body = 0, {}
+            for attempt in range(retries):
+                if attempt > 0:
+                    payload["client_t"] = round(time.time(), 3)
+                code, body = self._poster(self.url, self.token, payload)
+                if code == 200:
+                    for w in body.get("warnings") or []:
+                        if w not in self._warned:
+                            self._warned.add(w)
+                            print("[labmon-ephemeral] 警告：{}".format(w), file=sys.stderr, flush=True)
+                    return code, body
+                if code in (400, 401, 403, 404, 413):
+                    print("[labmon-ephemeral] 上报被拒（HTTP {}）：{}".format(code, body.get("error") or body), file=sys.stderr, flush=True)
+                    return code, body
+                if attempt + 1 < retries:
+                    time.sleep(2.0 * (attempt + 1))
+            if code != 200:
+                print("[labmon-ephemeral] 上报未成功（HTTP {}）：{}".format(code, body.get("error") or body), file=sys.stderr, flush=True)
+            return code, body
 
     def start(self) -> None:
+        self._finished = False
         self.push_once(closing=False)
         self._stop.clear()
         self._thread = threading.Thread(target=self._loop, name="labmon-ephemeral-hb", daemon=True)
@@ -453,12 +461,13 @@ class EphemeralTracker:
 
     def _loop(self) -> None:
         while not self._stop.wait(self.interval):
+            if self._finished:
+                break
             self.push_once(closing=False)
 
     def finish(self, *, ok: bool, rc: int = 0, note: Optional[str] = None) -> None:
+        self._finished = True
         self._stop.set()
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=2.0)
         with self._lock:
             self._status = "done" if ok else "failed"
             self._rc = int(rc)
@@ -466,7 +475,10 @@ class EphemeralTracker:
             if note:
                 self._last_line = str(note)[:LAST_LINE_MAX]
                 self._log_mtime = self._end_ts
+        # _push_lock 保证等待任何在途普通心跳完全返回后，才发送最终 closing=True 状态
         self.push_once(closing=True)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=1.0)
 
 
 @contextlib.contextmanager
@@ -536,17 +548,44 @@ def run_command_wrapped(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        start_new_session=(os.name == "posix"),
     )
 
     sig_caught = [0]
+    grace_timer: List[Optional[threading.Timer]] = [None]
+
+    def _kill_proc() -> None:
+        if proc.poll() is not None:
+            return
+        try:
+            if os.name == "posix":
+                os.killpg(proc.pid, signal.SIGKILL)
+            else:
+                proc.kill()
+        except OSError:
+            try:
+                proc.kill()
+            except OSError:
+                pass
 
     def _on_signal(signum: int, _frame: Any) -> None:
         sig_caught[0] = signum
         if proc.poll() is None:
             try:
-                proc.terminate()
+                if os.name == "posix":
+                    os.killpg(proc.pid, signal.SIGTERM)
+                else:
+                    proc.terminate()
             except OSError:
-                pass
+                try:
+                    proc.terminate()
+                except OSError:
+                    pass
+            if grace_timer[0] is None:
+                tm = threading.Timer(max(0.05, float(grace_s)), _kill_proc)
+                tm.daemon = True
+                tm.start()
+                grace_timer[0] = tm
 
     prev_term = signal.getsignal(signal.SIGTERM)
     prev_int = signal.getsignal(signal.SIGINT)
@@ -566,9 +605,11 @@ def run_command_wrapped(
         try:
             rc = proc.wait(timeout=grace_s if sig_caught[0] else None)
         except subprocess.TimeoutExpired:
-            proc.kill()
+            _kill_proc()
             rc = proc.wait()
     finally:
+        if grace_timer[0] is not None:
+            grace_timer[0].cancel()
         if proc.stdout is not None:
             proc.stdout.close()
         if threading.current_thread() is threading.main_thread():
