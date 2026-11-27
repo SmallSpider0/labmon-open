@@ -196,7 +196,10 @@ def parse(raw: str | None) -> dict | None:
 def _run(h: dict, mode: str, me: str, timeout: float = TIMEOUT) -> dict | None:
     """在一台主机上单独跑一次租约（备用时读、释放、强制拿）：走它的长连接；没有 ssh 的（测试）在本机跑。"""
     remote = _cmd(h, mode, me)
-    cmd = L.host_ssh_argv(h) + [remote] if h.get("ssh") else ["bash", "-c", remote]
+    try:
+        cmd = L.host_ssh_argv(h) + [remote] if h.get("ssh") else ["bash", "-c", remote]
+    except ConfigError:
+        return None
     try:
         r = (L.ssh_run if h.get("ssh") else subprocess.run)(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:

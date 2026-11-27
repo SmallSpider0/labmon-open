@@ -52,7 +52,14 @@ def container_step(hs: dict, started: float | None, label: str) -> dict | None:
 def lease_due(ends: list[tuple[dict, float | None]], t: float, merge_s: float = 0) -> list[list[int]]:
     """租期提醒的判定：到期前 LEASE_WARN_H 小时各提醒一次，已进更近一档的不再补远的那档；
     同一轮里相近到期（merge_s 内）的合成一组。ends：各台的 (连通状态 hs, 到期时刻)，已发的档记在 hs["warned"]。
+    若该台到期时刻发生明显变化（如外平台原地续租改了 lease_until、容器未重启），重置 hs["warned"] 以重新计下一期提醒。
     返回要提醒的各组，每组是 ends 的下标（按到期先后）；文字由调用方写。"""
+    for hs, e in ends:
+        if e:
+            prev = hs.get("lease_end")
+            if prev is not None and abs(e - prev) > 60:
+                hs["warned"] = []
+            hs["lease_end"] = round(e)
     out = []
     for h in sorted(LEASE_WARN_H):
         cand = [(i, e) for i, (hs, e) in enumerate(ends) if e and t < e and h not in hs.setdefault("warned", [])]

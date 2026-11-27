@@ -261,7 +261,7 @@
 |---|---|
 | `overview/usage/<主机>.jsonl` | worker 用量记录的尾巴（30 天，按 开始\|任务\|目录 去重）：`{t 结束, s 开始（都是 epoch 秒，取 worker 行的 t1、t0）, n 任务名, p 项目, root, queue, g 用的卡 UUID, gi 记下时的卡序号（换容器后 UUID 全变了还能按序号画）, st done\|failed\|stop, wait 放行前等了几分钟, u 所用卡的平均利用率（worker 行的 gpu_util；11-17 前的行没有）}`；时间线的已跑占用、调度卡的平均等待、项目的平均利用率（`gpu_mine`）取它 |
 | `overview/series/<主机>.jsonl` | 主机曲线（7 天，每分钟一行）：`{t, mem, lim, cpu, thr, nfs, busy, gpu [[已用, 总量, 此刻利用率, 吃满程度 m10]]}`；`thr`、`nfs`、`busy` 取状态的 `info.press`（11-08 前的行没有）；卡的第 4 项是 `gpu_busy` 的 `m10`（#51，11-17 前的行没有，主机页的利用率小曲线与 24 小时平均只用有它的行） |
-| `overview/health.json` | 各主机的连通状态，只留 `fails`、`down`、`since`、`warned`、`started`、`miss` 这几个键（`HEALTH_KEYS`），别的键不再写 |
+| `overview/health.json` | 各主机的连通状态，只留 `fails`、`down`、`since`、`warned`、`started`、`miss`、`lease_end` 这几个键（`HEALTH_KEYS`），别的键不再写 |
 | `overview/events.jsonl` | 记录（一年）：`{t, kind, msg, host?, hosts?, who?, project?, target?, detail?}`；`relaunch`（自动拉起 worker）事件的 `detail` 是命令输出；`container_new`（换了新容器）带 `started`（容器启动时刻，epoch 秒），项目页的重启标记只画带它的 |
 | `overview/hostlog/<主机>.jsonl` | worker 事件续存（30 天，任务起止的不存） |
 | `overview/projects.json` | 已归档的项目 `{"archived": {id: {id, title, t, revision, by, regs, skipped}}}`（`projects.archive` 写、`restore` 和 `delete` 删；#161 之前归档的条目还带着 `config` 配置文件路径，不再读）；看板服务按它跳过与摘下项目，全局快照的 `archived[]` 取它 |

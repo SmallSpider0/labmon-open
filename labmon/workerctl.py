@@ -32,7 +32,7 @@ from pathlib import Path, PurePosixPath
 
 from . import lan as L
 from . import lease as LS
-from .config import POOL, ConfigError, active_hosts, all_hosts, home_host, host_defaults, hosts_file, is_standalone, pool_home, shell_path, user_hosts
+from .config import POOL, ConfigError, active_hosts, all_hosts, home_host, home_key, host_defaults, hosts_file, is_standalone, pool_home, shell_path, user_hosts
 
 from .worker import queue_stop_path
 
@@ -49,10 +49,11 @@ def host_conf(hid: str) -> dict:
     return h
 
 
-def via(hid: str, home: str | None = None) -> dict:
+def via(hid: str, home: str | tuple | None = None) -> dict:
     """在哪台上操作这台目录下的登记（worker rm）：在用的就是它自己；已归还的、主机清单里已没有的（home 是它的 worker_home，
-    全局快照 regs 里那一项的 home），经一台与它共用 worker_home 的在用主机代办（config.home_host，与 overview.collect 每轮代读登记挑的是同一台），
-    命令照样带 --host hid：改的是共享盘上我们自己 worker_home 里那台的登记文件，不连已归还的那台（借来还了的是别人的服务器）。找不到能代办的报 ConfigError。
+    全局快照 regs 里那一项的 home），经一台与它同共享域（config.home_key）的在用主机代办（config.home_host），
+    命令照样带 --host hid：改的是共享盘上我们自己 worker_home 里那台的登记文件，不连已归还的那台（借来还了的是别人的服务器）。
+    独立主机（无论是否显式传 home）已不在用时直接拒绝，绝不借同路径集群主机代办。
     算力池（hid 是 config.POOL，#24）没有 home 时取 config.pool_home：worker add|rm pool 都经这里。"""
     act = active_hosts()
     if any(str(h["id"]) == hid for h in act):
@@ -61,14 +62,14 @@ def via(hid: str, home: str | None = None) -> dict:
         home = pool_home()
         if home is None:
             raise ConfigError("主机清单里没有自用主机：算力池的登记没有地方放（池登记放在自用主机的 worker 目录下）")
-    if home is None:
-        old_h = next((h for h in all_hosts() if str(h["id"]) == hid), None)
-        if old_h and is_standalone(old_h):
-            raise ConfigError(f"{hid} 是独立主机且已不在用，没有共享盘代办主机：它的登记现在动不了")
-        home = old_h["worker_home"] if old_h else None
-    o = home_host(home, act) if home else None
+    old_h = next((h for h in all_hosts() if str(h["id"]) == str(hid)), None)
+    if old_h and is_standalone(old_h):
+        raise ConfigError(f"{hid} 是独立主机且已不在用，没有共享盘代办主机：它的登记现在动不了")
+    key = home_key(old_h) if old_h else (("shared", home.rstrip("/")) if isinstance(home, str) else home)
+    o = home_host(key, act) if key else None
     if o is None:
-        raise ConfigError(f"{hid} 已不在用，又没有与它共用 worker 目录（{home or '不知道在哪'}）的在用主机：它的登记现在动不了")
+        show = key[-1] if isinstance(key, tuple) else (key or "不知道在哪")
+        raise ConfigError(f"{hid} 已不在用，又没有与它共用 worker 目录（{show}）的在用主机：它的登记现在动不了")
     return host_conf(str(o["id"]))
 
 
@@ -110,7 +111,13 @@ def worker_bundle() -> tuple[str, list[str]]:
 
 def ssh(h: dict, remote: str, stdin: str = "", timeout: float | None = None) -> tuple[int, str]:
     """在主机上跑一条命令（stdin 是喂给它的文字），返回 (退出码, 输出)；输出里 stderr 接在 stdout 后面（ssh 连不上的原因也在里面）。"""
-    cmd = L.host_ssh_argv(h) + [remote] if h.get("ssh") else ["bash", "-c", remote]     # 没有 ssh：本机（测试用）
+    if h.get("ssh"):
+        try:
+            cmd = L.host_ssh_argv(h) + [remote]
+        except ConfigError as e:
+            return 255, str(e)
+    else:
+        cmd = ["bash", "-c", remote]     # 没有 ssh：本机（测试用）
     r = (L.ssh_run if h.get("ssh") else subprocess.run)(cmd, input=stdin, capture_output=True, text=True, timeout=timeout)
     return r.returncode, r.stdout + r.stderr
 

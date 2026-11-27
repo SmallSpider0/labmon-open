@@ -53,42 +53,55 @@ def ext_known_hosts(host_id: str) -> Path:
     return state_dir() / "known_hosts_ext" / s
 
 
-def ssh_argv(target: str, port, *extra: str, known_hosts=None, identity: str | None = None, ctl_tag: str | None = None) -> list[str]:
+def ssh_argv(target: str, port, *extra: str, known_hosts=None, identity: str | None = None, ctl_tag: str | None = None,
+             isolated: bool = False) -> list[str]:
     """连一台服务器的 ssh 命令（不含远端命令）：每个 sshd 只保持一条长连接，15 分钟不用才断，30 秒心跳（断网后约 90 秒失效）。
     主机密钥 accept-new：第一次连（续租后 fleet.forget 删掉旧条目，新容器就算第一次）自动记下，变了照样拒连。
     known_hosts：记在这个文件里（不给就是 ssh 缺省的 ~/.ssh/known_hosts；经 fleet.ssh 连的哪台记哪份由 fleet._ssh_cmd 定）。
-    identity：专用私钥路径；传入时强制 -i <identity> -o IdentitiesOnly=yes，禁止回退尝试看板宿主机 ~/.ssh/ 的默认密钥。
-    ctl_tag：按主机/归属隔离的 ControlPath 标签（防多用户或换钥复用旧长连接）。"""
+    identity：专用私钥路径；传入时强制 -F /dev/null -o IdentityAgent=none -i <identity> -o IdentitiesOnly=yes，
+    禁止读取宿主机 ~/.ssh/config、ssh-agent 或回退尝试维护者个人密钥。
+    ctl_tag：按主机/归属隔离的 ControlPath 标签（防多用户或换钥复用旧长连接）。
+    isolated：不带 identity 时（如切断控制套接字 -O exit）也加 -F /dev/null -o IdentityAgent=none。"""
     kh = ["-o", f"UserKnownHostsFile={known_hosts}"] if known_hosts else []
+    iso = ["-F", "/dev/null", "-o", "IdentityAgent=none"] if (identity or isolated) else []
     ident = ["-i", str(identity), "-o", "IdentitiesOnly=yes"] if identity else []
-    return ["ssh", "-o", "ControlMaster=auto", "-o", f"ControlPath={ctl_path(ctl_tag)}", "-o", "ControlPersist=15m",
+    return ["ssh", *iso, "-o", "ControlMaster=auto", "-o", f"ControlPath={ctl_path(ctl_tag)}", "-o", "ControlPersist=15m",
             "-o", "ConnectTimeout=20", "-o", "BatchMode=yes", "-o", "ServerAliveInterval=30", "-o", "LogLevel=ERROR",
             "-o", "StrictHostKeyChecking=accept-new", *ident, *kh, "-p", str(port), *extra, target]
 
 
-def host_ssh_argv(h: dict, *extra: str) -> list[str]:
+def host_ssh_argv(h: dict, *extra: str, allow_missing_key: bool = False) -> list[str]:
     """按主机配置拼 ssh_argv（唯一实现，overview / workerctl / collect / lease 共用）：
-    使用托管密钥（ssh_key=managed）或独立主机时，自动启用按机隔离的 ControlPath 与独立 known_hosts，
-    托管密钥额外强制 -i <key> -o IdentitiesOnly=yes；旧集群主机完全沿用原参数。"""
+    使用托管密钥（ssh_key=managed）时必须核实私钥文件实际存在，缺失时拒绝连接（抛 ConfigError），
+    避免 OpenSSH 在 -i 指向不存在文件时回退尝试宿主机 ~/.ssh/id_* 默认密钥；同时启用 -F /dev/null、
+    IdentityAgent=none、IdentitiesOnly=yes 与按机隔离的 ControlPath / known_hosts。
+    allow_missing_key 仅用于 close_host_ssh 发 -O exit 关控制套接字。"""
     from .platform import ssh_identity               # platform 在顶层 import config，延迟 import 避免循环
     managed = host_ssh_key(h) == "managed"
     standalone = is_standalone(h)
-    identity = ssh_identity(h) if managed else None
+    identity = None
+    if managed:
+        p_id = ssh_identity(h)
+        if not p_id or not Path(p_id).is_file():
+            if not allow_missing_key:
+                raise ConfigError(f"主机 {h['id']} 缺少托管 SSH 私钥（未生成或冷备恢复后未重建）：拒绝连接以避免回退宿主机密钥")
+        else:
+            identity = p_id
     kh = h.get("known_hosts")
     if not kh and (managed or standalone):
         p = ext_known_hosts(str(h["id"]))
         p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         kh = str(p)
     tag = f"{h.get('owner') or ''}:{h['id']}" if (managed or standalone) else None
-    return ssh_argv(h["ssh"], h["port"], *extra, known_hosts=kh, identity=identity, ctl_tag=tag)
+    return ssh_argv(h["ssh"], h["port"], *extra, known_hosts=kh, identity=identity, ctl_tag=tag, isolated=managed)
 
 
 def close_host_ssh(h: dict, *, drop_known_hosts: bool = False) -> None:
     """切断一台主机的 ControlMaster 复用连接；drop_known_hosts 为真时同步清理该机独立 known_hosts（绝不触碰宿主机 ~/.ssh/known_hosts）。"""
     if h.get("ssh"):
         try:
-            subprocess.run(host_ssh_argv(h, "-O", "exit"), capture_output=True, timeout=10)
-        except (OSError, subprocess.TimeoutExpired):
+            subprocess.run(host_ssh_argv(h, "-O", "exit", allow_missing_key=True), capture_output=True, timeout=10)
+        except (ConfigError, OSError, subprocess.TimeoutExpired):
             pass
     if drop_known_hosts and h.get("id") is not None:
         try:

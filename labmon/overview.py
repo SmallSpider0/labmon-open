@@ -75,7 +75,13 @@ def fetch(h: dict, timeout: int = 60) -> tuple[str | None, str | None]:
               f"echo {SEP}; tail -n {n} {d}/usage.jsonl 2>/dev/null; echo {SEP}; date +%s; "
               f"echo {SEP}; tail -n 100 {d}/events.jsonl 2>/dev/null; echo {SEP}; cat {d}/stopped 2>/dev/null; echo; "
               f"echo {SEP}; {ix_cmd}echo; echo {SEP}; {_reg_cmd(h)}echo {SEP}; echo \"$lease\"; echo {SEP}; echo \"$put\"")
-    cmd = L.host_ssh_argv(h) + [remote] if h.get("ssh") else ["bash", "-c", remote]
+    if h.get("ssh"):
+        try:
+            cmd = L.host_ssh_argv(h) + [remote]
+        except ConfigError as e:
+            return None, str(e)
+    else:
+        cmd = ["bash", "-c", remote]
     try:
         r = (L.ssh_run if h.get("ssh") else subprocess.run)(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
@@ -506,11 +512,10 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True, pool_tick=
     hcfg = {h["id"]: h for h in active_hosts()}
     homes = LS.homes(list(hcfg.values()))
     lease_ids = {h["id"] for g in homes.values() for h in g}
-    is_pri = LS.primary()
     by = {}
     for h in hcfg.values():
         in_lease = h["id"] in lease_ids
-        item = dict(h, put=put(h) if (in_lease or is_pri) else {}, **({"lease": "renew"} if in_lease else {}))
+        item = dict(h, put=put(h), **({"lease": "renew"} if in_lease else {}))
         if not use_ssh:
             item["ssh"] = None
         by[h["id"]] = item
@@ -519,11 +524,18 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True, pool_tick=
         by_key.setdefault(home_key(h), []).append(h)
     for hk, group in by_key.items():                        # 每个共享域（home_key）挑第一台顺带读同域主机目录里的登记（_regs）
         group[0]["regs"] = [group[0]["id"]] if hk[0] == "host" else list(by)
-    lan, got = L.gather(by, fetch, lambda k: bool(by[k].get("ssh")), t)
+    by_lease = {k: v for k, v in by.items() if k in lease_ids}
+    by_other = {k: v for k, v in by.items() if k not in lease_ids}
+    lan, got = L.gather(by_lease, fetch, lambda k: bool(by_lease[k].get("ssh")), t) if by_lease else ({"ok": True, "since": None}, {})
     readings = {home: [lease_part(got[h["id"]][0]) for h in g] for home, g in homes.items()}
-    if LS.decide(readings, list(homes), t) != "primary":   # 租约在别人手里（#163）：这一轮到此为止，不动指令、不续租不借用、不写快照、不通知
+    if LS.decide(readings, list(homes), t) != "primary":   # 租约在别人手里（#163）：这一轮到此为止，先确认主租约再碰不参与仲裁的独立主机
         reset_sent()
         return None
+    if by_other:                                           # 已确认本轮持主租约后，再采集并向不参与仲裁的独立主机下发 put（#114）
+        lan2, got2 = L.gather(by_other, fetch, lambda k: bool(by_other[k].get("ssh")), t)
+        got.update(got2)
+        if not by_lease or (lan["ok"] and not lan2["ok"]):
+            lan = lan2
     _expire(t)
     old = snapshot()                                  # 上一轮的全局快照：不在内网时沿用各台的状态；挪法建议的滞回
     prev = {} if lan["ok"] else {x["id"]: x for x in old.get("hosts", [])}
@@ -706,7 +718,7 @@ def health(hosts: list[dict], cfg: dict, t: float, probe=platform_ok, per_host: 
     return out
 
 
-HEALTH_KEYS = ("fails", "down", "since", "warned", "started", "miss")
+HEALTH_KEYS = ("fails", "down", "since", "warned", "started", "miss", "lease_end")
 RELAUNCH_GAP = 600
 
 

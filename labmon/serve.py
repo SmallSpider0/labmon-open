@@ -1719,6 +1719,9 @@ def reg_rm(hid: str, items: list, home: str | None = None, project: str | None =
     qs = [(str(it.get("root") or ""), str(it.get("jobs") or "")) for it in items or []]
     if not hid or not qs or not all(r and j for r, j in qs):
         raise ConfigError("没说是哪台主机的哪几条登记")
+    reg_row = next((x for x in (snapshot().get("regs") or []) if x.get("host") == hid), None)
+    if reg_row and reg_row.get("standalone") and reg_row.get("state") != "active":
+        raise ConfigError(f"{hid} 是独立主机且已不在用，没有共享盘代办主机：它的登记现在动不了")
     run = [n for r, j in qs for n in _running(hid, r, j)]
     if run:
         raise ConfigError(f"{hid} 上 {'、'.join(run)} 正在跑：先暂停或等跑完再移除")

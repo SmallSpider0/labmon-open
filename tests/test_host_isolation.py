@@ -153,6 +153,30 @@ class DomainIsolationTest(unittest.TestCase):
         self.assertEqual(len(only), 2)
         self.assertEqual({g[0]["id"] for g in only.values()}, {"e1", "e2"})
 
+    def test_collect_does_not_write_standalone_put_when_shared_lease_lost(self):
+        """共享盘与独立机并存：旧主本机仍标 primary=True，但共享盘租约已被另一台接管时，
+        collect 须先确认共享盘租约，绝不能在降为备用前先向独立主机下发 sched.json 等输入。"""
+        wh_shared = self.d / "shared_wh"
+        wh_ext = self.d / "ext_wh"
+        (wh_shared / "hosts" / "c1").mkdir(parents=True)
+        (wh_ext / "hosts" / "e1").mkdir(parents=True)
+        self.hf.write_text(
+            f'[[hosts]]\nid = "c1"\nplatform_job = "A"\nworker_home = "{wh_shared}"\npython = "{sys.executable}"\n\n'
+            f'[[hosts]]\nid = "e1"\nplatform_kind = "none"\nworker_home = "{wh_ext}"\npython = "{sys.executable}"\n'
+        )
+        # 本机曾是主（primary=True），但共享盘租约当前在另一台活跃实例手里
+        LS.set_marker(True, "测试原主")
+        now = int(os.stat(wh_shared).st_mtime) + 10
+        (wh_shared / LS.FILE).write_text(json.dumps({"holder": "other-primary-1", "renew": now, "ttl": LS.TTL}))
+        O.reset_sent()
+        res = O.collect([], use_ssh=False)
+        self.assertIsNone(res)
+        self.assertFalse(LS.primary())
+        # 独立主机目录下不得被旧主写入任何输入文件
+        self.assertFalse((wh_ext / "hosts" / "e1" / "sched.json").exists())
+        self.assertFalse((wh_ext / "hosts" / "e1" / "eta.json").exists())
+        self.assertFalse((wh_ext / "hosts" / "e1" / "returned.json").exists())
+
     def test_sched_view_prefers_cluster_over_newer_standalone(self):
         t = 1_790_000_000.0
         sh_cluster = {"wait_cap_min": 30.0, "half_life_h": 24.0, "weight": {}, "use": {"p1": 12.5, "p2": 3.0}, "run": []}
@@ -227,6 +251,18 @@ class DomainIsolationTest(unittest.TestCase):
         self.assertEqual(len(msgs), 1)
         self.assertIn("外平台手动续租", msgs[0])
         self.assertNotIn("预备续租", msgs[0])
+        # 同一期进入 6 小时档再提醒一次，之后不重复提醒
+        msgs_6h = O.health([e], other_cfg, end_abs - 3 * 3600)
+        self.assertEqual(len(msgs_6h), 1)
+        self.assertEqual(O.health([e], other_cfg, end_abs - 2 * 3600), [])
+        # 外平台原地续租（容器未重启、started 不变，只延后 lease_until 一周）：新一期的 24h / 6h 提醒必须重置并再次发出
+        end_next = C.parse_time("2026-12-08 20:00")
+        other_cfg_next = {"ext1": C.host_defaults({"id": "ext1", "ssh": "u@203.0.113.1", "platform_kind": "other", "lease_until": "2026-12-08 20:00"})}
+        msgs_next_24 = O.health([e], other_cfg_next, end_next - 18 * 3600)
+        self.assertEqual(len(msgs_next_24), 1)
+        self.assertEqual(e["lease_end"], end_next)
+        msgs_next_6 = O.health([e], other_cfg_next, end_next - 3 * 3600)
+        self.assertEqual(len(msgs_next_6), 1)
 
         # renew.check：非 SCM（other/none）即使配了 platform 与临近 lease_end 也不触发自动预备
         called = []
@@ -347,12 +383,15 @@ class WorkerPathAndInitTest(unittest.TestCase):
 
     def test_via_refuses_returned_standalone_host(self):
         self.hf.write_text(
+            '[[hosts]]\nid = "c1"\nplatform_job = "A"\ndata_root = "/data/labmon"\n\n'
             '[[hosts]]\nid = "e1"\nplatform_kind = "other"\ndata_root = "/data/labmon"\nreturned = "2026-11-20 10:00"\n\n'
             '[[hosts]]\nid = "e2"\nplatform_kind = "other"\ndata_root = "/data/labmon"\n'
         )
-        with self.assertRaises(C.ConfigError) as e:
-            W.via("e1")
-        self.assertIn("独立主机", str(e.exception))
+        # 无论是否显式传 home（页面 reg_rm 会传 x.home），都绝不能借同路径的集群主机 c1 代办
+        for home in (None, "/data/labmon/labmon"):
+            with self.assertRaises(C.ConfigError, msg=str(home)) as e:
+                W.via("e1", home=home)
+            self.assertIn("独立主机", str(e.exception))
 
 
 class SshKeyIsolationTest(unittest.TestCase):
@@ -404,15 +443,20 @@ class SshKeyIsolationTest(unittest.TestCase):
 
     def test_ssh_argv_and_host_ssh_argv_identities_only(self):
         P.ensure_ssh_key("alice", "ext-1")
+        P.ensure_ssh_key("bob", "ext-2")
         h_ext = C.host_defaults({"id": "ext-1", "ssh": "u@203.0.113.1", "port": 2222, "owner": "alice", "ssh_key": "managed"})
         h_ext2 = C.host_defaults({"id": "ext-2", "ssh": "u@203.0.113.1", "port": 2222, "owner": "bob", "ssh_key": "managed"})
+        h_missing = C.host_defaults({"id": "ext-miss", "ssh": "u@203.0.113.9", "port": 2222, "owner": "alice", "ssh_key": "managed"})
         h_scm = C.host_defaults({"id": "29", "ssh": "root@198.51.100.29", "port": 15155, "platform_job": "ME"})
 
         argv1 = L.host_ssh_argv(h_ext)
         argv2 = L.host_ssh_argv(h_ext2)
         argv_scm = L.host_ssh_argv(h_scm)
 
-        # 托管密钥强制 -i <key> -o IdentitiesOnly=yes，且 ControlPath 与 known_hosts 按机隔离
+        # 托管密钥强制 -F /dev/null、IdentityAgent=none、-i <key>、IdentitiesOnly=yes，且 ControlPath 与 known_hosts 按机隔离
+        self.assertIn("-F", argv1)
+        self.assertIn("/dev/null", argv1)
+        self.assertIn("IdentityAgent=none", argv1)
         self.assertIn("-i", argv1)
         self.assertIn(str(P.ssh_key_path("alice", "ext-1")), argv1)
         self.assertIn("IdentitiesOnly=yes", argv1)
@@ -425,19 +469,31 @@ class SshKeyIsolationTest(unittest.TestCase):
         self.assertEqual(ctl_scm, f"ControlPath={L.CTL}")
         # 旧 SCM 集群主机保持原参数不变，不强加 IdentitiesOnly
         self.assertNotIn("IdentitiesOnly=yes", argv_scm)
+        self.assertNotIn("IdentityAgent=none", argv_scm)
 
-        # 即使私钥文件尚未生成，ssh_key=managed 仍传 -i + IdentitiesOnly=yes，绝不回退宿主机默认密钥
-        self.assertIn("-i", argv2)
-        self.assertIn("IdentitiesOnly=yes", argv2)
+        # 托管私钥缺失时必须拒绝连接（抛 ConfigError），overview.fetch / workerctl.ssh 均不启动 ssh 进程，避免回退宿主机密钥
+        with self.assertRaises(C.ConfigError) as e_miss:
+            L.host_ssh_argv(h_missing)
+        self.assertIn("缺少托管 SSH 私钥", str(e_miss.exception))
+        with mock.patch.object(L, "ssh_run") as run_mock:
+            raw, err = O.fetch(h_missing)
+            self.assertIsNone(raw)
+            self.assertIn("缺少托管 SSH 私钥", err)
+            rc, out = W.ssh(h_missing, "true")
+            self.assertEqual(rc, 255)
+            self.assertIn("缺少托管 SSH 私钥", out)
+            run_mock.assert_not_called()
 
-        # close_host_ssh 清理独立 known_hosts 并尝试 -O exit
+        # close_host_ssh 在私钥已删后仍可发 -O exit 并清理独立 known_hosts
         kh1 = L.ext_known_hosts("ext-1")
         kh1.write_text("203.0.113.1 ssh-ed25519 AAAA\n")
+        P.del_ssh_key("alice", "ext-1")
         with mock.patch.object(L.subprocess, "run") as run:
             L.close_host_ssh(h_ext, drop_known_hosts=True)
         run.assert_called_once()
         self.assertIn("-O", run.call_args.args[0])
         self.assertIn("exit", run.call_args.args[0])
+        self.assertNotIn("-i", run.call_args.args[0])
         self.assertFalse(kh1.exists())
 
     def test_private_key_never_enters_backup_or_api_hosts(self):
