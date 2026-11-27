@@ -108,6 +108,13 @@ def job_ngpu(j):
     return 1
 
 
+def snap_ngpus(S):
+    """快照对应主机的实际 GPU 卡数（#225）：优先读 S["ngpus"]（即使本轮全纯 CPU 请求未查显存使 S["cards"] 为空，仍保留主机 GPU 数），
+    未写时回退 len(S["cards"])。"""
+    n = S.get("ngpus")
+    return len(S.get("cards") or ()) if n is None else int(n)
+
+
 def gpu_cpu_reserve(cards, cap):
     """有 GPU 的主机为 GPU 任务预留的保底 CPU 核数（真放行、推演、fit、offers、开跑导出与记账共用，#225）：
     无 CPU 配额或无 GPU（cards 为空或 0）为 0；有卡为 min(max(2, 卡数 × 2), cap // 4)。"""
@@ -148,7 +155,7 @@ def cpu_room_for(x, S):
         return None
     if job_ngpu(x) > 0:
         return S["cpu_room"]
-    return S["cpu_room"] - gpu_cpu_reserve(S["cards"], S["cpu_cap"])
+    return S["cpu_room"] - gpu_cpu_reserve(snap_ngpus(S), S["cpu_cap"])
 
 
 def cpu_free_for(x, S):
@@ -161,7 +168,7 @@ def cpu_free_for(x, S):
         return None, 0.0
     if job_ngpu(x) > 0:
         return cores, 0.0
-    rsv = gpu_cpu_reserve(S["cards"], S["cpu_cap"])
+    rsv = gpu_cpu_reserve(snap_ngpus(S), S["cpu_cap"])
     if rsv <= 0:
         return cores, 0.0
     gpu_used = sum(j["cpu"] for j in S["jobs"] if not j["hold"] and job_ngpu(j) > 0)
@@ -175,19 +182,23 @@ def gpu_cpu_flex(x, S, n, blocked=()):
     返回 (可用空闲卡 UUID 集合, 原因说明)，不满足为 (None, None)。硬护栏：
     - 仅限非占位、非整机独占的 GPU 任务（ngpu > 0, n > 0），且主机有配额与保底核（rsv > 0）；
     - 确实存在纯 CPU 任务挤占 GPU 保底区（cpu_only_used > max(0, cpu_room - rsv)）；
-    - 在跑与新放行 GPU 任务总记账核数不超过保底核（gpu_used + n <= rsv，防无限超卖），且不超过 cpu_room（不挤占外部进程或借来主机预留）；
+    - 按启动后实际分配并记账的核数（cpu_give）校验：在跑与新放行 GPU 任务总记账核数不超过保底核（gpu_used + need <= rsv，防无限超卖），
+      且不超过 cpu_room（不挤占外部进程或借来主机预留，也避免 cpu_need 封顶后的 n 把高核 GPU 任务误当低核任务放行）；
     - 至少有 ngpu 张真正空闲且显存够的卡（无非占位 labmon 任务、无旧 gpu_queue.sh、无外部 GPU 进程、不在 owner/blocked 中）。"""
-    if job_ngpu(x) <= 0 or x.get("excl") == "host" or n <= 0:
+    ngpu = job_ngpu(x)
+    if ngpu <= 0 or x.get("excl") == "host" or n <= 0:
         return None, None
     cap, room = S["cpu_cap"], S["cpu_room"]
-    rsv = gpu_cpu_reserve(S["cards"], cap)
+    ngpus = snap_ngpus(S)
+    rsv = gpu_cpu_reserve(ngpus, cap)
     if cap is None or room is None or rsv <= 0:
         return None, None
     gpu_used = sum(j["cpu"] for j in S["jobs"] if not j["hold"] and job_ngpu(j) > 0)
     cpu_only_used = sum(j["cpu"] for j in S["jobs"] if not j["hold"] and job_ngpu(j) == 0)
     if cpu_only_used <= max(0.0, room - rsv) + 1e-6:
         return None, None
-    if gpu_used + n > rsv + 1e-6 or gpu_used + n > room + 1e-6:
+    need = max(float(n), float(cpu_give(x["cpus"], cap, ngpu, ngpus)))
+    if gpu_used + need > rsv + 1e-6 or gpu_used + need > room + 1e-6:
         return None, None
     busy = ({u for j in S["jobs"] if not j["hold"] for u in j["gpus"]}
             | {u for j in S["ext"] for u in j.get("gpus") or []}
@@ -201,7 +212,7 @@ def gpu_cpu_flex(x, S, n, blocked=()):
             and free.get(c["uuid"], 0.0) >= card_need(x, c)}
     if len(idle) < x["ngpu"]:
         return None, None
-    note = "纯 CPU 实测占 %.1f 核挤满配额，GPU 空闲：按保底 %d 核弹性放行（GPU 共 %g/%d 核）" % (cpu_only_used, rsv, round(gpu_used + n, 1), rsv)
+    note = "纯 CPU 实测占 %.1f 核挤满配额，GPU 空闲：按保底 %d 核弹性放行（GPU 共 %g/%d 核）" % (cpu_only_used, rsv, round(gpu_used + need, 1), rsv)
     return idle, note
 
 
@@ -214,9 +225,9 @@ def cpu_need(x, S):
     n, src = x["cpus"], x["cpu_src"]
     if n <= 0 or S["cpu_room"] is None:
         return n, src
-    ngpu, cap = job_ngpu(x), S["cpu_cap"]
-    rsv = 0 if ngpu > 0 else gpu_cpu_reserve(S["cards"], cap)
-    lim = cpu_limit(cap, ngpu, S["cards"])
+    ngpu, cap, ngpus = job_ngpu(x), S["cpu_cap"], snap_ngpus(S)
+    rsv = 0 if ngpu > 0 else gpu_cpu_reserve(ngpus, cap)
+    lim = cpu_limit(cap, ngpu, ngpus)
     if src == "提示值":
         if rsv > 0 and lim is not None and cap is not None and lim < n <= cap:
             return lim, "%s；声明 %d 核，为 GPU 保底留 %d 核，封顶为 %d 核" % (src, n, rsv, lim)
@@ -361,7 +372,7 @@ def nofit(x, S):
     room_cpu = cpu_room_for(x, S)
     n, src = cpu_need(x, S) if room_cpu is not None else (0, None)
     if n > 0 and n > room_cpu + 1e-6:           # 要的比配额还多才是真放不下；没超配额、只是 labmon 之外、预留或 GPU 保底核占着的另说（cpu_other：等它们退下）
-        rsv = 0 if job_ngpu(x) > 0 else gpu_cpu_reserve(S["cards"], S["cpu_cap"])
+        rsv = 0 if job_ngpu(x) > 0 else gpu_cpu_reserve(snap_ngpus(S), S["cpu_cap"])
         return why_of(S, "nofit_cpu" if n > S["cpu_cap"] else "cpu_other", cpus=n, src=src, cap=S["cpu_cap"],
                       busy=S["cpu_cap"] - S["cpu_room"], note="，另为 GPU 保底留 %d 核" % rsv if rsv > 0 else "")
     return None
@@ -414,7 +425,7 @@ def place(x, S, t, pre=None):
         return None, why_of(S, "gang_unk", gang=x["gang"]), False
     gh[x["key"]] = {"key": x["key"], "gang": gk, "name": x["name"], "x": x, "cards": cs, "until": until, "seen": t,
                     "t": mine["t"] if mine and mine["name"] == x["name"] else t,
-                    "job": acct_job(x, cs, t, until + x["dur"] * 60 if x["dur"] is not None else None, S["cpu_cap"], S["cards"])}
+                    "job": acct_job(x, cs, t, until + x["dur"] * 60 if x["dur"] is not None else None, S["cpu_cap"], snap_ngpus(S))}
     return None, why_of(S, "gang_hold", gang=x["gang"], at=_C.now_str(until)[5:16]), False
 
 
@@ -1020,7 +1031,7 @@ class SchedMixin:
         cards = [{"i": i, "uuid": u, "total": (info.get(u) or {}).get("total") or 0.0, "keep": self.keep_left(i, u),
                   "other": self.other["vram"].get(u, 0.0) + stuck.get(u, 0.0), "free": f - self.keep_left(i, u) + seen.get(u, 0.0), "ka": bool(self.other["ka"].get(u))}
                  for i, u, f in gpus]
-        return {"cards": cards, "limit": m.get("limit"), "room": self.mem_room(), "margin": ram_margin(m["limit"]) if m.get("limit") else None,
+        return {"cards": cards, "ngpus": max(len(info), len(cards)), "limit": m.get("limit"), "room": self.mem_room(), "margin": ram_margin(m["limit"]) if m.get("limit") else None,
                 "cpu_cap": _M.cpu_cap(self.info.get("cpu_quota")), "cpu_room": self.cpu_room(),
                 "jobs": jobs, "ext": list(self.ext.values()), "gp": list(gp), "cpu": self.other["cpu"] if self.cpu_n >= 2 else None,
                 "holds": self.excl_hold, "tags": limits.get("tags") or {}, "owner": {u for u in self.back_last if u not in ("ram", "cpu")},
@@ -1347,7 +1358,7 @@ class SchedMixin:
         fit 开车道（gpu_slack）要的是此刻的样子，照旧现算，不用这份。"""
         for j in self.running.values():
             if not j.get("cpu_fit"):
-                j["cpu_fit"] = cpu_fit(j, S["cpu_cap"], util, cpu_budget(S, j), S["cards"])
+                j["cpu_fit"] = cpu_fit(j, S["cpu_cap"], util, cpu_budget(S, j), snap_ngpus(S))
 
     def io_suspect(self, now):
         """读写拥塞嫌疑（只记录、不拦，#4 维护者定）：在跑的任务已跑过同类历史预计时长（duration 的 same）的 SLOW_RATIO 倍，

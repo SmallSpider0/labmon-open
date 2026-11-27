@@ -47,7 +47,7 @@ def fit_snapshot(st):
           if g.get("owner") != "keepalive"]                     # worker 停得了的保活放任务前先停（卡的空闲已加回），停不了的是 other、照算
     cards = [{"i": g["i"], "uuid": g["uuid"], "total": g.get("total") or 0.0, "keep": (room.get("keep") or {}).get(g["uuid"], 0.0), "other": 0.0, "ka": False,
               "free": (room.get("gpus") or {}).get(g["uuid"], g.get("free") or 0.0) + ka.get(g["uuid"], 0.0)} for g in info.get("gpus") or []]
-    return {"cards": cards, "limit": (info.get("mem") or {}).get("limit"),
+    return {"cards": cards, "ngpus": len(cards), "limit": (info.get("mem") or {}).get("limit"),
             "room": None if room.get("ram") is None else room["ram"] + sum(j["ram"] for j in jobs), "margin": room.get("margin") or 0,
             "cpu_cap": room.get("cpu_cap"), "cpu_room": None if room.get("cpu") is None else room["cpu"] + sum(j["cpu"] for j in jobs),
             "jobs": jobs, "ext": st.get("external") or [], "gp": gp, "cpu": room.get("other_cpu"), "holds": {}, "tags": (st.get("limits") or {}).get("tags") or {},
@@ -198,7 +198,7 @@ class FitHost:
                 "；它单跑时利用率约 %d%%" % e["util"] if e["util"] is not None else "", "；同卡 %d 条时约要 %.0f 分钟（%s）" % (k, d["min"], d["src"]) if d else "")
         else:
             say = "不用 GPU，内存要 %.0f GiB（%s）、%d 核（%s）" % (rneed, rsrc, need, csrc)
-        S["jobs"].append(_S.acct_job(x, cs, t, None, S["cpu_cap"], S["cards"]))
+        S["jobs"].append(_S.acct_job(x, cs, t, None, S["cpu_cap"], _S.snap_ngpus(S)))
         self.lanes.append((r["name"], [y["i"] for y in cs]))
         if hint:                                          # 没有实测的不与别的同卡（同一次 fit 后面分的也算）
             self.solo.update({y["uuid"]: r["name"] for y in cs})

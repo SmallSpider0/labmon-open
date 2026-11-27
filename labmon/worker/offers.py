@@ -442,6 +442,6 @@ class OffersMixin:
             cs, _, _ = _S.place(y, S, now)
             if cs is None:
                 break
-            S["jobs"].append(_S.acct_job(y, cs, now, None, S["cpu_cap"], S["cards"]))
+            S["jobs"].append(_S.acct_job(y, cs, now, None, S["cpu_cap"], _S.snap_ngpus(S)))
             n += 1
         return {"busy": busy, "lanes": n}

@@ -9118,6 +9118,49 @@ class GpuCpuReserveTest(unittest.TestCase):
         # 借来主机/外部进程占满（cpu_room=0.5 < n=1）：不弹性放行，绝不挤占外部或对方预留
         S_ext = self.snap([self.card(0)], [self.ran("c_over", [], cpu=16.0, ngpu=0)], cpu_cap=17, cpu_room=0.5)
         self.assertIsNone(self.m.place(self.job("g1", ngpu=1, cpus=1), S_ext, self.now)[0])
+        # cpu_room 很小时（1 核），历史估计 10 核的 GPU 任务会被 cpu_need 封顶为 1 核，
+        # 但启动后实际导出与记账仍为 10 核，gpu_cpu_flex 必须按实际记账核数校验、拒绝弹性放行；真正 1 核 GPU 任务照常放行
+        S_small = self.snap([self.card(0)], [self.ran("c1", [], cpu=1.0, ngpu=0)], cpu_cap=17, cpu_room=1.0)
+        g10 = self.job("g10", ngpu=1, cpus=10, cpu_src="同名")
+        self.assertEqual(self.m.cpu_need(g10, S_small)[0], 1)
+        self.assertIsNone(self.m.place(g10, S_small, self.now)[0])
+        self.assertIsNone(S_small["flex"])
+        g1_real = self.job("g1_real", ngpu=1, cpus=1, cpu_src="同名")
+        self.assertEqual([c["uuid"] for c in self.m.place(g1_real, S_small, self.now)[0]], ["GPU-a"])
+        self.assertIn("1/2 核", S_small["flex"])
+
+    def test_cpu_only_tick_snapshot_keeps_host_gpu_reserve(self):
+        # 回归测试：当一轮只有纯 CPU 请求时，gpu_state() 返回 gpus=[] 传入 snapshot(limits, [], [])，
+        # S["cards"] 为空，但 S["ngpus"] 仍保留主机实际 GPU 卡数，保底 2 核不失效：
+        # 17 核 1 卡机上 c16(cpus=16) 封顶 15 核放行并导出 LABMON_CPUS=15，同轮 c2(cpus=2) 被挡住，不侵占 GPU 保底核。
+        w = self.m.Worker("t")
+        os.makedirs(w.p.dir, exist_ok=True)
+        w.info = {"gpus": [{"i": 0, "uuid": "GPU-a", "name": "fake", "total": 46068.0, "free": 45000.0}],
+                  "cpu_quota": 17.0, "mem": {"limit": 100.0, "anon": 5.0}}
+        S = w.snapshot({}, gpus=[], gp=[])
+        self.assertEqual(S["cards"], [])
+        self.assertEqual(S["ngpus"], 1)
+        self.assertEqual(self.m.snap_ngpus(S), 1)
+        c16 = self.job("c16", ngpu=0, cpus=16, cpu_src="提示值")
+        self.assertEqual(self.m.cpu_need(c16, S)[0], 15)
+        cs1, why1, _ = self.m.place(c16, S, self.now)
+        self.assertEqual(cs1, [])
+        self.assertIsNone(why1)
+        # 记账后 c16 占 15 核（与 Worker.acct 一致），剩余 2 核为 GPU 保底，第二个纯 CPU 2 核（乃至 1 核）都应被挡住
+        w.running["q1"] = {"key": "q1", "name": "c16", "ngpu": 0, "gpus": [], "t0": self.now,
+                           "est": {"ram": 1.0, "vram": 0.0, "cpus": 16, "cpu_src": "提示值"}, "use": {}}
+        S2 = w.snapshot({}, gpus=[], gp=[])
+        self.assertEqual(S2["jobs"][0]["cpu"], 15.0)
+        self.assertEqual(self.m.cpu_free_for(self.job("c2", ngpu=0, cpus=2, cpu_src="提示值"), S2), (0.0, 2.0))
+        cs2, why2, res2 = self.m.place(self.job("c2", ngpu=0, cpus=2, cpu_src="提示值"), S2, self.now)
+        self.assertIsNone(cs2)
+        self.assertTrue(res2)
+        self.assertIn("为 GPU 预留 2 核", why2)
+        # 此时来一个 2 核 GPU 任务（带查卡列表）照常秒进
+        S3 = w.snapshot({}, gpus=[(0, "GPU-a", 45000.0)], gp=[])
+        cs3, why3, _ = self.m.place(self.job("g2", ngpu=1, cpus=2, cpu_src="提示值"), S3, self.now)
+        self.assertEqual([c["uuid"] for c in cs3], ["GPU-a"])
+        self.assertIsNone(why3)
 
     def test_simulate_fit_and_offers_consistent_with_place(self):
         # 推演（simulate）、fit（FitHost.open）与真放行（place）共用同一套纯函数，结论一致
