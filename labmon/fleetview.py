@@ -15,7 +15,7 @@ from . import lease as LS
 from . import users as U
 from .config import POOL_LABEL, ConfigError, _read_toml, active_hosts, fmt_time, hosts_file, member_manage_state, parse_time
 from .service import notify
-from .state import file_sig, load_rows
+from .state import file_sig, load_json, load_rows, state_dir
 
 _CACHE: dict[str, tuple[tuple | None, list]] = {}
 
@@ -124,6 +124,9 @@ def view(hosts: list[dict] | None = None, t: float | None = None, cfg: dict | No
     hf = hosts_file()
     hosts_raw = [dict(h) for h in (_read_toml(hf).get("hosts") or [])] if hf.exists() else []
     links = U.people_of()
+    relaunch_map = load_json(state_dir() / "relaunch.json", {})
+    if not isinstance(relaunch_map, dict):
+        relaunch_map = {}
     who = DK.whose(cfg, active_hosts())
     h0 = int(t // 3600 * 3600) - 167 * 3600
     snap = {e["id"]: e for e in hosts or []}
@@ -134,7 +137,7 @@ def view(hosts: list[dict] | None = None, t: float | None = None, cfg: dict | No
         strip, idle_h = _strip(rows, h0)
         o = off.get(s["id"])
         snap_e = snap.get(s["id"])
-        ms = member_manage_state(s, hosts_raw, links=links, off=off, snap_e=snap_e)
+        ms = member_manage_state(s, hosts_raw, links=links, off=off, snap_e=snap_e, relaunch_rec=relaunch_map.get(s["id"]))
         # 借用中或已自动接入调度且 worker 状态新鲜（与自用主机同一门槛 fleet.worker_fresh，#174、#224）：实时 sample 改用 worker 状态，避免滞后最多 10 分钟；
         # worker 过期、不在内网或掉线时回退探测样本。小时使用记录（hours/ 的 bw）仍由探针统一记，保持同一小时采样密度一致。
         e = snap_e if not o and (F.borrowed(s) or ms["on"]) else None

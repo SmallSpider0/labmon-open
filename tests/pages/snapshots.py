@@ -241,7 +241,7 @@ def _server(sid: str, holder: str, state: str | None, **kw) -> dict:
             "last": NOW - 300, "error": None, "down": None, "fails": 0, "since": None, "started": NOW - 3 * 86400, "lease_end": NOW + 4 * 86400, "off": None,
             "last_job": NOW - 100, "state": state, "sample": sample, "strip": _strip(state or "idle"), "h0": int(NOW // 3600 * 3600) - 167 * 3600, "idle_h": 0,
             "s7": _stats(0.2, 0.7), "s30": _stats(0.3, 0.6), "guard": {"on": False, "status": "off", "since": None}, "borrow": None, "using": "",
-            "manage": {"on": False, "auto": False, "opt_out": False, "hosted": False, "account": None, "can_toggle": False, "worker_up": False, "why": "未开通看板账号，保持只读"},
+            "manage": {"on": False, "auto": False, "opt_out": False, "hosted": False, "account": None, "can_toggle": False, "worker_up": False, "state": "no_account", "blocked": False, "why": "未开通看板账号，保持只读"},
             "reserve": {"vram": 2.0, "ram": 6.6, "cpu": 1.0, "peak": {"vram": 7.5, "ram": 9.2, "cpu": 1.5}, "n": 208, "bump": 1.0}}
     base.update(kw)
     base["lease_cut"] = base["lease_end"] - H if base["lease_end"] else None     # 对方租期截止（borrow.cutoff：到期前 1 小时）
@@ -261,18 +261,18 @@ def _fleet(mine_host: dict) -> dict:
     servers = [
         _server("srv-b", "OWNER", "job", lease_end=NOW + 6 * 86400 + H, guard={"on": False, "status": "borrowed"},
                 borrow={"since": NOW - 16 * H, "until": UNTIL, "for": ["proj-b"], "by": "ME", "away": UNTIL, "returned": None}, reserve=None,
-                manage={"on": False, "auto": False, "opt_out": False, "hosted": False, "account": "owner", "can_toggle": False, "worker_up": True, "why": "当前处于借用中，归还后按本人设置恢复"},
+                manage={"on": False, "auto": False, "opt_out": False, "hosted": False, "account": "owner", "can_toggle": False, "worker_up": True, "state": "borrowed", "blocked": False, "why": "当前处于借用中，归还后按本人设置恢复"},
                 strip=[["job", 0.0, ["ME"]] if k >= 152 else ["keepalive", 0.8] for k in range(168)]),
         # 本地盘开机以来写了 6.2 GiB（过门槛）：探针扫出的各目录
         _server("srv-d", "PERSON3", "keepalive", idle_h=15, lease_end=NOW + 20 * H, using="VS Code 远程连着", root_gb=6.2,
                 wrote={"since": NOW - 3 * 86400, "t": NOW - 1800, "b": 6.0e9, "n": 812, "partial": False, "pending": 0, "err": None, "more": [5, 2e8],
                        "top": [["/root/data/out/run1", 4.0e9, NOW - 5 * H], ["/root/.vscode-server", 1.2e9, NOW - 2 * H], ["/home/u/.cache/pip", 6e8, NOW - 50 * H]]},
-                manage={"on": False, "auto": False, "opt_out": True, "hosted": False, "account": "person3", "can_toggle": True, "worker_up": False, "why": "已切为仅监控（不自动拉起 worker）"},
+                manage={"on": False, "auto": False, "opt_out": True, "hosted": False, "account": "person3", "can_toggle": True, "worker_up": False, "state": "opt_out", "blocked": False, "why": "已切为仅监控（不自动拉起 worker）"},
                 guard={"on": True, "status": "ours", "since": NOW - 2 * H, "t": NOW - H, "until": NOW + 5 * 60, "by": "看板", "at": NOW - H}),
         _server("srv-e", "PERSON4", "down", down="连不上：timeout", since=NOW - H, last=NOW - H, fails=3, lease_end=NOW + 2 * 86400, strip=[None] * 168,
                 guard={"on": True, "status": "fail", "fail": {"msg": "ssh 失败"}, "at": NOW + 600, "since": NOW - H}, reserve=None),
         _server("srv-f", "PERSON5", "off", off={"t": NOW - 86400, "holder": "PERSON5"}, lease_end=None, guard={"on": False, "status": "off", "since": None}, reserve=None, idle_h=0, strip=[None] * 168,
-                manage={"on": False, "auto": False, "opt_out": False, "hosted": False, "account": None, "can_toggle": False, "worker_up": False, "why": "已关机"}),
+                manage={"on": False, "auto": False, "opt_out": False, "hosted": False, "account": None, "can_toggle": False, "worker_up": False, "state": "off", "blocked": False, "why": "已关机"}),
         _server("srv-g", "PERSON6", "idle", pool="pool-private", public=False, guard={"on": True, "status": "wait", "since": NOW - 30 * 60, "at": NOW + 30 * 60}),
         _server("srv-h", "PERSON7", "job", guard={"on": False, "status": "off", "since": None}, reserve=None)]
     # 自用主机（#58）：字段与组内服务器同名，sample 与探针的 analyze 同形（fleet.from_worker 由 worker 状态换出：按任务归组、不带 pid、没有保活进程树单独的量）

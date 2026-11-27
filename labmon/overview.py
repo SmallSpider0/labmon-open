@@ -41,7 +41,7 @@ from . import renew as R
 from . import users as U
 from .projects import archived_rows, registered
 from .collect import eta_by_progress, write_page
-from .config import POOL, POOL_LABEL, STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, home_key, host_platform, host_pool, host_share, is_pool_id, is_standalone, parse_time, pause_by, pick_color, pool_id_of, pools, sched, shell_path, user_hosts
+from .config import POOL, POOL_LABEL, STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, home_key, host_platform, host_pool, host_share, is_pool_id, is_standalone, member_owner, parse_time, pause_by, pick_color, pool_id_of, pools, relaunch_state, sched, shell_path, stopped_blocks_relaunch, user_hosts
 from .health import container_step, lease_due, lease_end, link_step
 from .records import EVENT_CATS, EVENT_KINDS, log_events, told
 from .state import append_row, load_json, load_rows, parse_rows, save_json, snapshot, state_dir, usage_file, usage_hosts, write_atomic
@@ -555,8 +555,10 @@ def _host_entry(h: dict, raw: str | None, err: str | None, lan_off: bool, prev: 
     error 是连不上（进掉线判定）；status_error 是连上了但 status.json 读不出（半行、坏文件），页面另标，不算掉线；
     lan_off 是这轮没连（远程主机、本机不在内网），error 里是给页面看的那句话，状态沿用上一次采到的 prev。"""
     pk, standalone = host_platform(h), is_standalone(h)
+    is_ma = bool(h.get("member_auto"))
     e = {"id": h["id"], "label": h.get("label", h["id"]), "error": err, "status_error": None, "status": None, "log": [], "done": [],
-         "lan_off": lan_off, "auto": h.get("worker") == "auto", "member_auto": bool(h.get("member_auto")),
+         "lan_off": lan_off, "auto": h.get("worker") == "auto", "member_auto": is_ma,
+         "member_account": member_owner(h), "member_holder": h.get("member_holder"),
          "platform_kind": pk, "share": host_share(h), "standalone": standalone,
          "owner": h.get("owner"), "data_root": h.get("data_root"),
          "disk_warn_gb": h.get("disk_warn_gb"), "disk_stop_gb": h.get("disk_stop_gb"), "disk_quota_gb": h.get("disk_quota_gb"),
@@ -564,6 +566,7 @@ def _host_entry(h: dict, raw: str | None, err: str | None, lan_off: bool, prev: 
     if lan_off and prev:
         e.update({k: v for k, v in prev.items() if k in ("status", "log", "done", "clock", "stopped", "series")})
     if raw is None:
+        e["stopped_blocks"] = stopped_blocks_relaunch(e.get("stopped"), member_auto=is_ma)
         return e
     parts = raw.split(SEP + "\n")
     try:
@@ -576,7 +579,8 @@ def _host_entry(h: dict, raw: str | None, err: str | None, lan_off: bool, prev: 
     e["clock"] = int(clock) if clock.isdigit() else None
     if e["clock"]:
         _CLOCK[h["id"]] = e["clock"] - round(t)
-    e["stopped"] = (parts[5] if len(parts) > 5 else "").strip() or None   # 手动 labmon worker stop 过：不自动拉起
+    e["stopped"] = (parts[5] if len(parts) > 5 else "").strip() or None   # 停用标记：是否阻断自动拉起统一由 stopped_blocks_relaunch 判定
+    e["stopped_blocks"] = stopped_blocks_relaunch(e["stopped"], member_auto=is_ma)
     if len(parts) > 6 and not standalone:
         DK.absorb(parts[6], t)
     _keep_log(sd, h["id"], parse_rows(parts[4] if len(parts) > 4 else ""), t)    # worker 的事件进记录（页面经 records 读）
@@ -689,9 +693,10 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
     for h in by.values():
         by_key.setdefault(home_key(h), []).append(h)
     reg_pick: dict[tuple, dict] = {}
-    for hk, group in by_key.items():                        # 每个共享域（home_key）挑一台（优先上一轮无错的）顺带读同域主机目录里的登记（_regs）
+    for hk, group in by_key.items():                        # 每个共享域（home_key）挑一台（优先非 member_auto 且上一轮无错的）顺带读同域主机目录里的登记（_regs）
         pick = (group[0] if hk[0] == "host" else
-                min(group, key=lambda x: 0 if (old_hosts.get(x["id"]) and not old_hosts[x["id"]].get("error")) else 1))
+                min(group, key=lambda x: (1 if x.get("member_auto") else 0,
+                                          0 if (old_hosts.get(x["id"]) and not old_hosts[x["id"]].get("error")) else 1)))
         pick["regs"] = [pick["id"]] if hk[0] == "host" else list(by)
         reg_pick[hk] = pick
     by_lease = {k: v for k, v in by.items() if k in lease_ids}
@@ -713,7 +718,8 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
             pick = reg_pick[hk]
             if got.get(pick["id"], (None,))[0] is not None:
                 continue
-            alt = next((x for x in group if x["id"] != pick["id"] and got.get(x["id"], (None,))[0] is not None), None)
+            alt = next((x for x in sorted(group, key=lambda z: 1 if z.get("member_auto") else 0)
+                        if x["id"] != pick["id"] and got.get(x["id"], (None,))[0] is not None), None)
             if alt is not None:
                 r2 = fetch(dict(alt, regs=list(by), put=None, lease=None))
                 if r2[0] is not None:
@@ -902,7 +908,10 @@ def health(hosts: list[dict], cfg: dict, t: float, probe=platform_ok, per_host: 
             if n not in hs.setdefault("miss", []):
                 msg = f"{label} 的 {n} {why}"
                 evs.append({"host": e["id"], "kind": "missing", "msg": msg})
-                out.append(msg)
+                if not c.get("member_auto"):
+                    out.append(msg)
+                elif per_host is not None:
+                    per_host.setdefault(e["id"], []).append(msg)
         if e.get("status") is not None:
             hs["miss"] = list(miss)
     log_events(evs, t)
@@ -923,31 +932,40 @@ def clear_relaunch(hid: str) -> None:
         save_json(f, last)
 
 
+def _relaunch_err(text: str) -> str:
+    lines = [ln.strip() for ln in (text or "").splitlines() if ln.strip() and not ln.strip().startswith("----")]
+    return (lines[-1][:120] if lines else "")
+
+
 def relaunch(snap: dict, start=None) -> list[str]:
     """主机清单里标了 worker = "auto" 的主机：能连上而 worker 不在（多半是容器重启），就拉起 worker（10 分钟内最多一次）。
-    手动 labmon worker stop 过的不拉，status.json 读不出的也不拉（worker 多半还在）。
-    对自动接入的组员服务器（member_auto，#224）：
-    - 生命周期停机留下的 auto:* 标记（切仅监控/删账号/借用归还）在重新成为合法 member_auto 后自动允许拉起，管理员手动 stop 仍不拉；
-    - 默认走 deploy="if_missing"：共享盘已有 worker 代码时绝不覆盖代码或 --replace 运行中 worker。
-    拉起记在本机 events.jsonl（输出放 detail），工作台的事件里能看到；返回的消息带上输出，调用方记进服务日志。start(主机) 返回 (退出码, 输出)。"""
+    是否允许拉起与 config.member_manage_state 共用唯一判定 config.relaunch_state：
+    - 手动 labmon worker stop 写下的 manual:* 标记不自动拉起，status.json 读不出的也不拉（worker 多半还在）；
+    - 对自动接入的组员服务器（member_auto，#224/#236）：auto:* 生命周期停机与旧版历史纯时间戳 stopped 均自动放行，
+      且默认走 deploy="if_missing"：共享盘已有 worker 代码时绝不覆盖代码或 --replace 运行中 worker。
+    拉起记在本机 events.jsonl（输出放 detail），最近一次结果 {t, rc, err} 写入 relaunch.json 供 manage.why 展示；
+    返回的消息带上输出，调用方记进服务日志。start(主机) 返回 (退出码, 输出)。"""
     sd = state_dir()
     sd.mkdir(parents=True, exist_ok=True)
     last = load_json(sd / "relaunch.json", {})
+    if not isinstance(last, dict):
+        last = {}
     out = []
     for h in snap["hosts"]:
-        stopped = h.get("stopped")
-        manual_stopped = bool(stopped) and not (h.get("member_auto") and str(stopped).startswith("auto:"))
-        if h.get("ephemeral") or not h.get("auto") or h.get("error") or h.get("status_error") or manual_stopped or (h.get("status") and h.get("worker_up")):
+        if not relaunch_state(h)["can_relaunch"]:
             continue
-        if time.time() - last.get(h["id"], 0) < RELAUNCH_GAP:
+        rec = last.get(h["id"])
+        # 兼容 2026-11-27 #236 前旧版 relaunch.json 的纯浮点时间戳，下次拉起或清冷却即覆盖为 dict，2026-12-28 后可删
+        prev_t = rec.get("t", 0) if isinstance(rec, dict) else (rec or 0)
+        if time.time() - prev_t < RELAUNCH_GAP:
             continue
-        last[h["id"]] = time.time()
         if start is not None:
             rc, text = start(h["id"])
         elif h.get("member_auto"):
             rc, text = run_out("start", h["id"], [], deploy="if_missing")
         else:
             rc, text = run_out("start", h["id"], [])
+        last[h["id"]] = {"t": round(time.time()), "rc": rc, "err": "" if rc == 0 else _relaunch_err(text)}
         msg = (f"{h['label']}：worker 不在" + (f"（状态停在 {fmt_time(h['status']['t'])}）" if h.get("status") else "")
                + ("，已重新拉起" if rc == 0 else f"，拉起失败（退出码 {rc}）"))
         log_events([{"kind": "relaunch", "host": h["id"], "msg": msg, "detail": text.strip()[-400:]}])

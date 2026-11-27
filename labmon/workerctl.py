@@ -309,7 +309,7 @@ def _clear_queues_cmd(home: str, hid: str, *, keep_projects: set[str] | None = N
 def stop_managed_worker(h: dict, reason: str, *, ssh_fn=None, timeout: float | None = 15) -> tuple[int, str]:
     """停止组员自动接入服务器（member_auto）的 worker，并写入带 auto:<reason> 前缀的 stopped 标记（#224）：
     - 仅停进程、绝不上传或替换 worker 代码；
-    - 与管理员手动 labmon worker stop 留下的纯时间 stopped 区分开：重新开通账号或切回接入调度后，
+    - 与管理员手动 labmon worker stop 留下的 manual:<ts> 标记区分开：重新开通账号或切回接入调度后，
       overview.relaunch 会自动识别 auto:* 并恢复拉起，而手动 stop 仍保持不自动拉起；
     - peer worker 仍见 hosts/<id>/stopped 存在，停机期间不会误当在用 peer。"""
     LS.need(f"停用受管 worker（{reason}）")
@@ -325,42 +325,79 @@ def stop_managed_worker(h: dict, reason: str, *, ssh_fn=None, timeout: float | N
     return run(hc, cmd, timeout=timeout) if ssh_fn is None else run(hc, cmd)
 
 
+def _cleanup_candidates(hid: str, *, home: str | None = None, skip=(), target: dict | None = None) -> tuple[list[dict], str | None, str | None]:
+    """清理共享盘或本机 hosts/<hid>/ 下文件时的代办主机候选与 worker_home 唯一选择逻辑（clear_stopped 与 clear_overrides 共用，#236）：
+    - target 给了直接返回该主机；
+    - 独立主机只允许自身执行（不跨共享域代办）；
+    - 共享盘主机优先目标机自身，再经 config.home_host 依次追加同 worker_home 在用主机（排除 skip）。
+    返回 (cands, home, err)；无可用候选或未知目录时 cands 为空且 err 给出原因。"""
+    if target is not None:
+        h = host_defaults(dict(target))
+        return [h], (home or h["worker_home"]), None
+    skip_ids = {str(x) for x in skip}
+    act = [h for h in active_hosts() if str(h["id"]) not in skip_ids]
+    known_h = next((h for h in all_hosts() if str(h["id"]) == str(hid)), None)
+    if known_h and is_standalone(known_h):
+        me = next((h for h in act if str(h["id"]) == str(hid)), None)
+        wh = home or known_h["worker_home"]
+        cands = [me] if me is not None else []
+        return cands, wh, (None if cands else f"没有与 {hid} 共用 worker 目录（{wh}）的在用主机")
+    if home is None:
+        home = known_h["worker_home"] if known_h else None
+    if not home:
+        return [], None, f"不知道 {hid} 的 worker 目录"
+    cands, rest = [], list(act)
+    me = next((h for h in rest if str(h["id"]) == str(hid) and home_host(home, [h])), None)
+    if me is not None:
+        cands.append(me)
+        rest.remove(me)
+    while (o := home_host(home, rest)) is not None:
+        cands.append(o)
+        rest.remove(o)
+    if not cands:
+        return [], home, f"没有与 {hid} 共用 worker 目录（{home}）的在用主机"
+    return cands, home, None
+
+
+def clear_stopped(hid: str, *, home: str | None = None, skip=(), ssh_fn=None, target: dict | None = None,
+                  timeout: float | None = 15) -> tuple[bool, str]:
+    """清除远端/共享盘上 hosts/<hid>/stopped 停用标记（#236，切换接入调度/恢复拉起时调用）：
+    - 绝不推送或替换 worker 代码，仅执行单条轻量 rm -f；
+    - 代办候选统一经 _cleanup_candidates 选择（目标主机优先，连不上时共享盘主机回退同 worker_home 在用主机，独立机严格只连自身）；
+    - 返回 (是否清理成功, 说明或原因)，不抛错阻塞开启。"""
+    LS.need("清除停用标记")
+    run = ssh_fn or ssh
+    cands, home, err = _cleanup_candidates(hid, home=home, skip=skip, target=target)
+    if err or not home:
+        return False, err or f"不知道 {hid} 的 worker 目录"
+    sf = shell_path(f"{home.rstrip('/')}/hosts/{hid}/stopped")
+    cmd = f"rm -f {sf}"
+    last_err = ""
+    for cand in cands:
+        try:
+            rc, out = run(cand, cmd, timeout=timeout) if ssh_fn is None else run(cand, cmd)
+        except (OSError, subprocess.TimeoutExpired) as e:
+            last_err = f"{cand['id']}：{e}"
+            continue
+        if rc == 0:
+            return True, f"已清除 {hid} 的停用标记"
+        last_err = f"{cand['id']}：{((out or '').strip().splitlines() or [f'退出码 {rc}'])[-1][:120]}"
+        if rc != 255:
+            return False, last_err
+    return False, last_err or "无可达主机"
+
+
 def clear_overrides(hid: str, *, home: str | None = None, borrow_only: bool = False, skip=(),
                     ssh_fn=None, target: dict | None = None, clear_queues: dict | None = None) -> tuple[bool, str]:
     """清理共享盘上 hosts/<hid>/overrides.json：借用归还连不上目标机时删整份（borrow_only=False）；
     换人或开机接成自用主机时只清遗留借用指令 guest 与 target=borrow 的 deadline（borrow_only=True，保留其它主机级指令）。
     clear_queues 非空时在同一条 ssh 中顺带清理 hosts/<hid>/queues 遗留登记与旧 sched.json（#224，一条连接不加额外 ssh）。
-    target 给了就在该主机上直接执行；否则经 config.home_host 从在用主机（排除 skip）里依次挑共用 worker_home 的代办，
-    连不上（rc == 255）顺延试下一台。返回 (是否清理成功, 说明或原因)，不抛错阻塞归还与开机。"""
+    代办候选统一经 _cleanup_candidates 选择，连不上（rc == 255）顺延试下一台。返回 (是否清理成功, 说明或原因)，不抛错阻塞归还与开机。"""
     LS.need("清理临时指令")
     run = ssh_fn or ssh
-    skip_ids = {str(x) for x in skip}
-    if target is not None:
-        h = host_defaults(dict(target))
-        home = home or h["worker_home"]
-        cands = [h]
-    else:
-        act = [h for h in active_hosts() if str(h["id"]) not in skip_ids]
-        known_h = next((h for h in all_hosts() if str(h["id"]) == str(hid)), None)
-        if known_h and is_standalone(known_h):
-            me = next((h for h in act if str(h["id"]) == str(hid)), None)
-            cands = [me] if me is not None else []
-            home = home or known_h["worker_home"]
-        else:
-            if home is None:
-                home = known_h["worker_home"] if known_h else None
-            if not home:
-                return False, f"不知道 {hid} 的 worker 目录"
-            cands, rest = [], list(act)
-            me = next((h for h in rest if str(h["id"]) == str(hid) and home_host(home, [h])), None)
-            if me is not None:
-                cands.append(me)
-                rest.remove(me)
-            while (o := home_host(home, rest)) is not None:
-                cands.append(o)
-                rest.remove(o)
-    if not cands:
-        return False, f"没有与 {hid} 共用 worker 目录（{home}）的在用主机"
+    cands, home, err = _cleanup_candidates(hid, home=home, skip=skip, target=target)
+    if err or not home:
+        return False, err or f"不知道 {hid} 的 worker 目录"
     ovr = f"{home.rstrip('/')}/hosts/{hid}/overrides.json"
     q_extra = ""
     if clear_queues is not None:
@@ -521,7 +558,14 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
     extra += "".join(f" --{k.replace('_', '-')} {shlex.quote(str(v))}" for k, v in opts.items() if v)
     rc, out = 255, ""
     for cand in cands:
-        rc, out = ssh(cand, f"{_wcmd(cand)} {'ls' if sub == 'status' else sub} {extra} --host {hq}")   # 位置参数要在 --host 前
+        if sub == "stop":
+            # 经看板执行手动 labmon worker stop：兼容远端未升级的旧版 worker，停完统一写入 manual:<ts>（#236）
+            sf = shell_path(f"{cand['worker_home'].rstrip('/')}/hosts/{hid}/stopped")
+            hd = shell_path(f"{cand['worker_home'].rstrip('/')}/hosts/{hid}")
+            cmd = f"{_wcmd(cand)} stop {extra} --host {hq}; rc=$?; if [ $rc -eq 0 ]; then mkdir -p {hd} && printf 'manual:%s\\n' \"$(date '+%F %T')\" > {sf}; fi; exit $rc"
+        else:
+            cmd = f"{_wcmd(cand)} {'ls' if sub == 'status' else sub} {extra} --host {hq}"   # 位置参数要在 --host 前
+        rc, out = ssh(cand, cmd)
         if rc != 255:
             break
     if opts.get("expect_project") and rc != 0 and "unrecognized arguments: --expect-project" in out:

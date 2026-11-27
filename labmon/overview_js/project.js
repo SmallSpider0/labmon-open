@@ -57,12 +57,14 @@ const regMine = (hid, pid) => { const x = (D.regs || []).find(y => y.host === hi
 const freeCards = h => { const gs = h?.status?.info?.gpus || [], busy = new Set(jobsOf(h).flatMap(j => j.gpus || [])); return gs.length ? `空 ${gs.filter(g => !busy.has(g.uuid)).length}/${gs.length} 张卡` : ""; };
 // 能换去的主机：worker 目录相同（同一块共享盘，换过去时才删得掉原来那份）的别的在用主机；借来的只给别的项目用的置灰（worker 也会拒），drain、worker 没在跑的写在后面；
 // info 是给人挑的：空着几张卡、租期
+// 他人自动接入的组员服务器（#236）：前端双保险，不出现在 regTo / adoptCard / assignCard
+const isOtherMemberAuto = h => !!(h?.member_auto && (h.member_account ? h.member_account.toLowerCase() !== String(ME?.name || "").toLowerCase() : (!LIVE || !!ME?.admin)));
 function regTo(x, pid) {
   if (x.standalone) return [];
   return (D.regs || []).filter(y => {
     if (y.state !== "active" || y.standalone || y.host === x.host || !canUseHost(y.host) || nrm(y.home) !== nrm(x.home)) return false;
     const h = D.hosts.find(e => e.id === y.host);
-    return !h?.pool_exclusive;       // 独占共有算力池内的单台主机不能手动搬过去（请改用池入口）
+    return !h?.pool_exclusive && !isOtherMemberAuto(h);       // 独占共有算力池与他人 member_auto 不能手动搬过去
   }).map(y => {        // 独立主机不列：不共享 worker 目录
     const h = D.hosts.find(e => e.id === y.host), b = h?.borrow, ov = h?.status?.overrides || [];
     const no = b?.for?.length && !b.for.includes(pid) ? `借来的，只给 ${b.for.join("、")} 用` : "";
@@ -130,7 +132,7 @@ const regMsg = () => RMSG ? `<div class="rn-state">${esc(RMSG)}</div>` : "";
 // 借来的主机只能勾“只给谁用”里的项目。勾选记在 ADOPT（换了主机就重来）
 let ADOPT = null;                                         // {host, sel: {登记 id: 勾没勾}, busy, err}
 function adoptSrc(h) {
-  if (h.ephemeral || h.pool_exclusive) return null;
+  if (h.ephemeral || h.pool_exclusive || isOtherMemberAuto(h)) return null;
   const me = (D.regs || []).find(x => x.host === h.id);
   if (!canWrite() || !me || me.standalone || h.standalone || me.state !== "active" || me.stale || !Array.isArray(me.queues) || me.queues.length || !h.status) return null;
   const src = D.regs.filter(x => !x.standalone && (x.state === "returned" || x.state === "unlisted") && nrm(x.home) === nrm(me.home) && (x.queues || []).some(q => q.project));
@@ -186,7 +188,7 @@ async function adoptGo(hid) {
 // 单项目用短确认浮窗（popConfirm）；多项目用右侧抽屉（#/host/<id>/assign，窄屏底部升起，底部固定操作栏，AGENTS.md「页面二级操作」）。
 let AMSG = null, APICK = null;                            // AMSG：{host, msg}（一分钟后收起）；APICK：{host, to, busy, err}（抽屉内选择状态）
 function assignSrc(h) {
-  if (h.ephemeral || h.pool_exclusive || !LIVE || !canUseHost(h.id) || (h.borrow && !h.borrow.swap) || !h.status) return null;
+  if (h.ephemeral || h.pool_exclusive || isOtherMemberAuto(h) || !LIVE || !canUseHost(h.id) || (h.borrow && !h.borrow.swap) || !h.status) return null;
   if ((h.status.queues || []).length) return null;
   const me = (D.regs || []).find(x => x.host === h.id);
   if (me && (me.state !== "active" || me.stale || (me.queues || []).length)) return null;

@@ -37,7 +37,7 @@ from pathlib import Path
 
 from . import disk as DK
 from . import projects as PJ
-from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, active_hosts, host_users, is_pool_id, pause_by, remove_pool_member, resolve_pool, sched, set_host_users, share_host, user_hosts
+from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, active_hosts, host_users, is_other_member_auto, is_pool_id, pause_by, remove_pool_member, resolve_pool, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
 from .state import file_sig, snapshot, state_root, write_atomic
 from .worker.pure import pool_id_of, same_list  # noqa: F401 — 与 worker 共用唯一实现
@@ -1192,7 +1192,10 @@ def _self_fleet(fl: dict | None, person: str | None, snap: dict, acc: Access) ->
 
 
 def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
-    """看的人能看到的全局快照。管理员原样。普通用户按白名单取（#17、#211）：VIEW_KEYS 原样；主机只留给他看的（他能用的、他的项目有车道的），
+    """看的人能看到的全局快照。管理员默认排除他人自动接入的组员服务器（is_other_member_auto，#236）：
+    从 hosts、occ、regs（active）中移除，避免混入管理员自用主机与项目视图；fleet 全量保留（含实时样本与 manage），
+    若管理员本人恰好是某台 member_auto 的归属人则照常保留。
+    普通用户按白名单取（#17、#211）：VIEW_KEYS 原样；主机只留给他看的（他能用的、他的项目有车道的），
     整项照给（同一台上别人任务的命令行与日志末尾也在里面：一台主机开给谁，谁就看得到这台上的所有任务，docs/api.md「普通用户看到的」）；
     项目、已归档的、挪法建议、配色只留他的，登记只留那些主机上他项目的清单（#167）；
     共享盘经 disk.person_storage 仅保留总盘概况与本人目录/告警（叠加可见 scanner 与本人项目的 ours）；
@@ -1201,8 +1204,19 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     主备只给 role 与一句通用的话；提醒（notices）、给实验会话的消息（wake）、看板服务所在机的体检（hostcheck，#166）给空值，记录的分类去掉组内的那几类。
     调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上），别人项目的暂停去掉谁下的（by），主人名去掉、只留分组用的 pk（#23）；
     主机状态里别人项目的临时指令同样去掉 by（_ovr_by，#27）。"""
-    if who.role == "admin" or not snap:
+    if not snap:
         return snap
+    if who.role == "admin":
+        hidden = {str(h.get("id")) for h in snap.get("hosts") or [] if is_other_member_auto(h, who)}
+        if not hidden:
+            return snap
+        out = dict(snap)
+        out["hosts"] = [h for h in snap.get("hosts") or [] if str(h.get("id")) not in hidden]
+        if isinstance(snap.get("occ"), dict):
+            out["occ"] = {k: v for k, v in snap["occ"].items() if str(k) not in hidden}
+        if isinstance(snap.get("regs"), list):
+            out["regs"] = [x for x in snap["regs"] if not (x.get("state") == "active" and str(x.get("host")) in hidden)]
+        return out
     acc = acc or access(who, snap)
     person, _ = person_of(who.name)
     from . import pool as PO

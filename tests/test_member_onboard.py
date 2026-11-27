@@ -175,12 +175,17 @@ class MemberAutoOnboardTest(unittest.TestCase):
         self.assertNotIn("srv-alice", {h["id"] for h in C.active_hosts()})
         self.assertIn("manage = false", Path(os.environ["LABMON_HOSTS"]).read_text())
 
-        # 重新接入调度：绝不调用 W.run_out("start", ...) 推送代码，仅改状态并清 relaunch 冷却交由后台主服务拉起
-        save_json(state_dir() / "relaunch.json", {"srv-alice": time.time()})
+        # 重新接入调度：绝不调用 W.run_out("start", ...) 推送代码，仅改状态、清 relaunch 冷却并清远端 stopped 交由后台主服务拉起
+        save_json(state_dir() / "relaunch.json", {"srv-alice": {"t": time.time(), "rc": 3, "err": "上次失败"}})
+        cleared = []
         with mock.patch.object(W, "run_out", side_effect=AssertionError("切开关绝不该调用 run_out 推送代码")):
-            res_on = F.set_member_manage("srv-alice", True, "alice")
+            res_on = F.set_member_manage(
+                "srv-alice", True, "alice",
+                clear_stopped_fn=lambda hid: (cleared.append(hid) or (True, "ok")),
+            )
         self.assertTrue(res_on["on"])
         self.assertTrue(res_on["manage"]["on"])
+        self.assertEqual(cleared, ["srv-alice"])
         self.assertIn("srv-alice", {h["id"] for h in C.active_hosts()})
         self.assertNotIn("manage =", Path(os.environ["LABMON_HOSTS"]).read_text())
         self.assertNotIn("srv-alice", load_json(state_dir() / "relaunch.json", {}))
@@ -222,14 +227,50 @@ class MemberAutoOnboardTest(unittest.TestCase):
         O.relaunch(snap, start=lambda hid: (calls.append(hid) or (0, "worker：运行中")))
         self.assertEqual(calls, ["srv-alice"])
 
-        # 手动 labmon worker stop 留下的纯时间 stopped 仍阻止自动拉起
+        # 历史借用归还/旧版停机留下的纯时间戳 stopped 不再锁死 member_auto（但对普通自用主机仍阻断兼容旧版 worker stop）
         O.clear_relaunch("srv-alice")
         calls.clear()
-        snap_manual = {"hosts": [{**snap["hosts"][0], "stopped": "2026-11-27 12:00:00"}]}
+        snap_legacy = {"hosts": [
+            {**snap["hosts"][0], "stopped": "2026-11-27 06:31:36"},
+            {"id": "fixed-a", "label": "固定机 A", "auto": True, "member_auto": False,
+             "error": None, "status_error": None, "stopped": "2026-11-27 06:31:36", "status": None, "worker_up": False},
+        ]}
+        O.relaunch(snap_legacy, start=lambda hid: (calls.append(hid) or (0, "worker：运行中")))
+        self.assertEqual(calls, ["srv-alice"])
+
+        # 显式手动 labmon worker stop 写下的 manual:<ts> 仍阻止 member_auto 自动拉起
+        O.clear_relaunch("srv-alice")
+        calls.clear()
+        snap_manual = {"hosts": [{**snap["hosts"][0], "stopped": "manual:2026-11-27 12:00:00"}]}
         O.relaunch(snap_manual, start=lambda hid: (calls.append(hid) or (0, "worker：运行中")))
         self.assertEqual(calls, [])
 
+        # 拉起失败（非 0 退出码）时，relaunch.json 记录失败原因，member_manage_state / fleetview.view 精确反馈而非死写“等待自动拉起”
+        O.clear_relaunch("srv-alice")
+        O.relaunch(snap, start=lambda hid: (3, "worker 未运行\n---- worker.log 末尾\nPermissionError: /data"))
+        v_fail = FV.view(hosts=[{**snap["hosts"][0], "stopped": None}])
+        m_fail = next(s["manage"] for s in v_fail["servers"] if s["id"] == "srv-alice")
+        self.assertEqual(m_fail["state"], "relaunch_failed")
+        self.assertIn("退出码 3", m_fail["why"])
+        self.assertIn("PermissionError", m_fail["why"])
+
+        # 手动停用（manual:）或 SSH 连不上时，manage.why 与 relaunch_state 一致反馈真实阻断原因
+        v_man = FV.view(hosts=[{**snap["hosts"][0], "stopped": "manual:2026-11-27 12:00:00"}])
+        m_man = next(s["manage"] for s in v_man["servers"] if s["id"] == "srv-alice")
+        self.assertEqual(m_man["state"], "manual_stopped")
+        self.assertTrue(m_man["blocked"])
+        self.assertIn("手动停用", m_man["why"])
+        self.assertNotIn("等待自动拉起", m_man["why"])
+
+        v_err = FV.view(hosts=[{**snap["hosts"][0], "error": "ssh 超时"}])
+        m_err = next(s["manage"] for s in v_err["servers"] if s["id"] == "srv-alice")
+        self.assertEqual(m_err["state"], "ssh_error")
+        self.assertTrue(m_err["blocked"])
+        self.assertIn("ssh 超时", m_err["why"])
+
         # 生命周期停机（auto:account_removed / auto:monitor / auto:borrow_return）在重新接入后允许自动拉起
+        O.clear_relaunch("srv-alice")
+        calls.clear()
         snap_auto = {"hosts": [{**snap["hosts"][0], "stopped": "auto:account_removed 2026-11-27 12:00:00"}]}
         O.relaunch(snap_auto, start=lambda hid: (calls.append(hid) or (0, "worker：运行中")))
         self.assertEqual(calls, ["srv-alice"])
@@ -381,13 +422,14 @@ class MemberAutoOnboardTest(unittest.TestCase):
 
         try:
             with mock.patch.object(W, "stop_managed_worker", return_value=(0, "ok")) as m_stop, \
+                 mock.patch.object(W, "clear_stopped", return_value=(True, "ok")) as m_clear, \
                  mock.patch.object(W, "run_out", side_effect=AssertionError("POST /api/fleet/manage 绝不能调用 run_out 推送代码")):
                 # 1. 非持有人 bob 越权切 srv-alice → 403
                 op_bob = bearer_opener(self.bob_tok)
                 code, data = _post(f"{lan_url}/api/fleet/manage", {"id": "srv-alice", "on": False}, op_bob)
                 self.assertEqual(code, 403)
 
-                # 2. 持有人 alice 本人可切换退出与重接 → 200（且重接绝不触发 run_out 代码部署）
+                # 2. 持有人 alice 本人可切换退出与重接 → 200（且重接调用 clear_stopped、绝不触发 run_out 代码部署）
                 op_alice = bearer_opener(self.alice_tok)
                 code, data = _post(f"{lan_url}/api/fleet/manage", {"id": "srv-alice", "on": False}, op_alice)
                 self.assertEqual(code, 200)
@@ -398,6 +440,7 @@ class MemberAutoOnboardTest(unittest.TestCase):
                 code, data = _post(f"{lan_url}/api/fleet/manage", {"id": "srv-alice", "on": True}, op_alice)
                 self.assertEqual(code, 200)
                 self.assertTrue(data["on"])
+                self.assertEqual(m_clear.call_count, 1)
                 self.assertIn("srv-alice", {h["id"] for h in C.active_hosts()})
 
                 # 3. 管理员从公网无 public_ops 许可 → 403；开启 public_ops 后公网允许（仍不触发代码部署）；内网管理员 → 200
@@ -530,11 +573,263 @@ class WorkerNoKeepaliveGuardTest(unittest.TestCase):
                 self.assertEqual([q["project"] for q in qs], ["p-alice"])
                 self.assertIsNone(w.override_hit({"project": "p-alice", "name": "s2", "kind": "slot"}))
                 self.assertEqual(w.override_hit({"project": "p-admin", "name": "s1", "kind": "slot"})[0], "owner")
+
+                # 3. worker.offers() 同样硬过滤非本人项目，绝不为他人项目生成挪法建议或 why（#236）
+                peer_dir = home / "hosts" / "fixed-a"
+                peer_dir.mkdir(parents=True)
+                now = time.time()
+                (peer_dir / "status.json").write_text(json.dumps({
+                    "t": now, "running": [], "waiting": [], "queues": [],
+                    "todo": [{"project": "p-admin", "root": str(root / "b"), "queue": "jobs.txt", "jobs": ["j1"]}],
+                    "plan": {"lanes": [{"kind": "queue", "project": "p-admin", "root": str(root / "b"), "queue": "jobs.txt",
+                                        "jobs": [{"name": "j1", "t0": now + 100, "t1": now + 7200}]}]},
+                }))
+                w.peers(now)
+                offs = w.offers([], {"cards": [], "ngpus": 0, "limit": 64.0, "room": 50.0, "margin": 8.0, "cpu_cap": 8, "cpu_room": 8.0,
+                                     "jobs": [], "ext": [], "gp": [], "cpu": 0.0, "holds": {}, "tags": {}, "owner": set(),
+                                     "who": "labmon 之外的进程", "kept": False, "cut": None, "brief": False,
+                                     "gholds": {}, "gangs": {}, "gfirst": {}}, now, w.policy(), set(), {}, {})
+                self.assertEqual([o["project"] for o in offs], [])
             finally:
                 if old_rp is None:
                     os.environ.pop("LABMON_RESTRICT_PROJECTS", None)
                 else:
                     os.environ["LABMON_RESTRICT_PROJECTS"] = old_rp
+
+
+class MemberAutoIsolationAndStoppedTest(unittest.TestCase):
+    """Issue #236：彻底隔离他人 member_auto 主机（视图/HTTP/API/CLI/rebalance/assign/reg_move）及历史 stopped 清理回归测试。"""
+
+    def setUp(self):
+        no_git_env()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        self.old_env = {k: os.environ.get(k) for k in ("LABMON_STATE", "LABMON_HOSTS", "LABMON_LAN")}
+        os.environ["LABMON_STATE"] = str(self.root / "state")
+        os.environ["LABMON_HOSTS"] = str(self.root / "hosts.toml")
+        os.environ["LABMON_LAN"] = "on"
+        self.fake_home = self.root / "shared_home"
+        self.fake_home.mkdir()
+        extra_admin_srv = """
+[[fleet.servers]]
+id = "srv-admin-ma"
+holder = "ADMIN"
+ssh = "root@192.0.2.12"
+port = 15112
+pool = "pool-public"
+"""
+        Path(os.environ["LABMON_HOSTS"]).write_text(
+            HOSTS_TOML.strip().replace('worker_home = "/data/labmon/labmon"', f'worker_home = "{self.fake_home}"')
+            + "\n" + extra_admin_srv.strip() + "\n"
+        )
+        F.edit_state("people.json", lambda d: d.update({"ADMIN": {}, "ALICE": {}, "BOB": {}}))
+        U.add("admin", "admin", "cli", person="ADMIN")
+        self.adm_tok = U.token_add("admin", "t-adm", ["admin"])[0]
+        U.add("alice", "user", "admin", person="ALICE")
+        self.alice_tok = U.token_add("alice", "t-alice", ["read", "project"])[0]
+        U.add("bob", "user", "admin", person="BOB")
+        LS.set_marker(True, "测试主")
+        from labmon import projects as PJ
+        for pid, own in (("p-admin", "admin"), ("p-alice", "alice")):
+            pdir = PJ.root() / pid
+            pdir.mkdir(parents=True, exist_ok=True)
+            (pdir / "monitor.toml").write_text(f'id = "{pid}"\ntitle = "{pid}"\n')
+            save_json(pdir / "meta.json", {"owner": own, "since": 1})
+        self.admin_id = U.Ident("admin", "admin", frozenset({"admin", "read", "project"}), "token", "k-adm")
+        self.alice_id = U.Ident("alice", "user", frozenset({"read", "project"}), "token", "k-alice")
+
+    def tearDown(self):
+        for k, v in self.old_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        self.tmp.cleanup()
+
+    def test_admin_isolation_across_config_view_api_assign_reg_move_rebalance(self):
+        """管理员默认隔离他人 member_auto（srv-alice），保留管理员本人 member_auto（srv-admin-ma）与自用机（fixed-a）；组员本人照常可见可用。"""
+        from labmon import api as A
+        from labmon import rebalance as RB
+
+        # 1. config 唯一判定：member_owner / is_other_member_auto / own_hosts / home_host 优先非 member_auto
+        hs = {h["id"]: h for h in C.active_hosts()}
+        self.assertEqual(C.member_owner(hs["srv-alice"]), "alice")
+        self.assertEqual(C.member_owner(hs["srv-admin-ma"]), "admin")
+        self.assertIsNone(C.member_owner(hs["fixed-a"]))
+        self.assertTrue(C.is_other_member_auto(hs["srv-alice"], self.admin_id))
+        self.assertFalse(C.is_other_member_auto(hs["srv-admin-ma"], self.admin_id))
+        self.assertFalse(C.is_other_member_auto(hs["srv-alice"], self.alice_id))
+        self.assertTrue(C.is_other_member_auto(hs["srv-admin-ma"], None))
+        self.assertEqual([h["id"] for h in C.own_hosts(self.admin_id)], ["fixed-a", "srv-admin-ma"])
+        self.assertEqual([h["id"] for h in C.own_hosts(None)], ["fixed-a"])
+        # home_host 即使把 member_auto 排前面，也优先选非 member_auto 代办
+        self.assertEqual(C.home_host(str(self.fake_home), [hs["srv-alice"], hs["fixed-a"]])["id"], "fixed-a")
+
+        # 2. users.view：管理员快照 hosts/occ/regs 排除 srv-alice，保留 fixed-a/srv-admin-ma 及全量 fleet；alice 本人仍看到 srv-alice
+        snap = {
+            "generated": time.time(), "lan": {"ok": True},
+            "hosts": [
+                {"id": "fixed-a", "label": "固定机 A", "member_auto": False, "member_account": None, "worker_up": True, "status": {"t": time.time()}},
+                {"id": "srv-alice", "label": "10（ALICE）", "member_auto": True, "member_account": "alice", "worker_up": True, "status": {"t": time.time()}},
+                {"id": "srv-admin-ma", "label": "12（ADMIN）", "member_auto": True, "member_account": "admin", "worker_up": True, "status": {"t": time.time()}},
+            ],
+            "occ": {"fixed-a": [{"n": "j1"}], "srv-alice": [{"n": "ja"}], "srv-admin-ma": [{"n": "jm"}]},
+            "regs": [
+                {"host": "fixed-a", "state": "active", "queues": []},
+                {"host": "srv-alice", "state": "active", "queues": []},
+                {"host": "srv-admin-ma", "state": "active", "queues": []},
+            ],
+            "projects": [{"id": "p-admin"}, {"id": "p-alice"}],
+            "fleet": FV.view(hosts=[{"id": "srv-alice", "worker_up": True, "status": {"t": time.time()}}]),
+        }
+        av = U.view(self.admin_id, snap)
+        self.assertEqual([h["id"] for h in av["hosts"]], ["fixed-a", "srv-admin-ma"])
+        self.assertEqual(sorted(av["occ"]), ["fixed-a", "srv-admin-ma"])
+        self.assertEqual([r["host"] for r in av["regs"]], ["fixed-a", "srv-admin-ma"])
+        self.assertIn("srv-alice", {s["id"] for s in av["fleet"]["servers"]})
+
+        uv = U.view(self.alice_id, snap)
+        self.assertEqual([h["id"] for h in uv["hosts"]], ["srv-alice"])
+        self.assertEqual(sorted(uv["occ"]), ["srv-alice"])
+
+        # 3. api.hosts / home_text / fit --list / worker add / override / host_assign / reg_move
+        ah = A.hosts(who=self.admin_id)
+        self.assertEqual([h["id"] for h in ah["hosts"]], ["fixed-a", "srv-admin-ma"])
+        self.assertNotIn("srv-alice", next(h["home_with"] for h in ah["hosts"] if h["id"] == "fixed-a"))
+        self.assertNotIn("srv-alice", A.home_text("fixed-a", who=self.admin_id))
+
+        with mock.patch.object(W, "run_out", return_value=(0, "ok")) as m_fit:
+            A.worker("fit", "fixed-a", ["/tmp", "jobs.txt"], project="p-admin", lst=True, who=self.admin_id)
+        self.assertNotIn("srv-alice", m_fit.call_args.kwargs["hosts"])
+        self.assertIn("srv-admin-ma", m_fit.call_args.kwargs["hosts"])
+
+        # 管理员不能往他人 member_auto 执行 worker add / host_assign / reg_move
+        r_add = A.worker("add", "srv-alice", ["/tmp", "jobs.txt"], project="p-admin", who=self.admin_id)
+        self.assertEqual(r_add["rc"], 2)
+        self.assertIn("个人服务器", r_add["err"])
+        with self.assertRaises(C.ConfigError):
+            S.host_assign("srv-alice", "p-admin", who=self.admin_id)
+        with self.assertRaises(C.ConfigError):
+            S.reg_move("srv-alice", [{"root": "/tmp", "jobs": "jobs.txt", "project": "p-admin", "host": "fixed-a"}], who=self.admin_id)
+
+        # 组员本人给自己的 srv-alice 执行 host_assign 照常放行
+        ok_msg = S.host_assign("srv-alice", "p-alice", who=self.alice_id)
+        self.assertIn("已通知 p-alice", ok_msg)
+
+        # 管理员不带 --host 的 pause --now 不连他人 member_auto
+        with mock.patch.object(W, "override_each", return_value=[]) as m_ovr:
+            A.override("pause", "p-admin", None, None, True, by="admin", who=self.admin_id)
+        self.assertNotIn("srv-alice", m_ovr.call_args.args[3])
+
+        # 4. rebalance.suggest 过滤他人 member_auto 的 offers，绝不把 srv-alice 推荐给 p-admin
+        now = time.time()
+        rb_hosts = [
+            {"id": "srv-alice", "label": "10（ALICE）", "member_auto": True, "member_account": "alice", "worker_up": True,
+             "lan_off": False, "stopped": None, "status": {"offers": [
+                 {"project": "p-admin", "lane": None, "free": now, "ends": {"fixed-a|/r|q": now + 7200},
+                  "jobs": [{"host": "fixed-a", "root": "/r", "queue": "q", "name": "j1", "there": now + 7200, "rest": now + 100, "end": now + 600, "own": now}],
+                  "why": None, "stop": None, "idle": True},
+                 {"project": "p-alice", "lane": None, "free": now, "ends": {"fixed-a|/r|q2": now + 7200},
+                  "jobs": [{"host": "fixed-a", "root": "/r", "queue": "q2", "name": "ja", "there": now + 7200, "rest": now + 100, "end": now + 600, "own": now}],
+                  "why": None, "stop": None, "idle": True},
+             ]}},
+        ]
+        sug = RB.suggest(rb_hosts, {}, now)
+        self.assertNotIn("p-admin", sug)
+        self.assertIn("p-alice", sug)
+
+    def test_http_endpoints_isolate_other_member_auto_and_clear_stopped_on_manage(self):
+        """HTTP GET /、/overview.json、/api/hosts、POST /collect 对管理员排除他人 member_auto；workerctl stop 写 manual: 且 clear_stopped 实际删文件。"""
+        import subprocess
+        from labmon import collect as CO
+
+        # 构造真实磁盘快照与 index.html（含 srv-alice）
+        now = time.time()
+        snap = {
+            "generated": now, "lan": {"ok": True}, "notices": [], "wake": [], "event_kinds": {}, "event_cats": [],
+            "hosts": [
+                {"id": "fixed-a", "label": "固定机 A", "member_auto": False, "member_account": None, "worker_up": True, "status": {"t": now, "running": [], "waiting": [], "external": []}},
+                {"id": "srv-alice", "label": "10（ALICE）", "member_auto": True, "member_account": "alice", "worker_up": True, "status": {"t": now, "running": [], "waiting": [], "external": []}},
+            ],
+            "occ": {"fixed-a": [], "srv-alice": []},
+            "regs": [{"host": "fixed-a", "state": "active", "queues": []}, {"host": "srv-alice", "state": "active", "queues": []}],
+            "projects": [], "archived": [], "colors": {}, "rebalance": {}, "fleet": FV.view(), "disk": {}, "pool": None, "sched": None, "server": {"role": "primary"},
+        }
+        save_json(state_dir() / "snapshot.json", snap)
+        CO.write_page("overview.html", snap, state_dir() / "index.html")
+
+        srv = S.Server(("127.0.0.1", 0))
+        t1 = threading.Thread(target=srv.serve_forever, daemon=True)
+        t1.start()
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        op_adm = bearer_opener(self.adm_tok)
+        op_alice = bearer_opener(self.alice_tok)
+        try:
+            with op_adm.open(f"{base}/overview.json") as r:
+                d_adm = json.loads(r.read().decode("utf-8"))
+            self.assertEqual([h["id"] for h in d_adm["hosts"]], ["fixed-a"])
+
+            with op_adm.open(f"{base}/") as r:
+                html_adm = r.read().decode("utf-8")
+            self.assertNotIn('"id": "srv-alice", "label": "10（ALICE）"', html_adm)
+
+            with op_adm.open(f"{base}/api/hosts") as r:
+                h_adm = json.loads(r.read().decode("utf-8"))
+            self.assertNotIn("srv-alice", [h["id"] for h in h_adm["hosts"]])
+            self.assertIn("srv-admin-ma", [h["id"] for h in h_adm["hosts"]])
+
+            with op_alice.open(f"{base}/api/hosts") as r:
+                h_alice = json.loads(r.read().decode("utf-8"))
+            self.assertEqual([h["id"] for h in h_alice["hosts"]], ["srv-alice"])
+
+            with mock.patch.object(srv.overview, "collect_now", return_value=True):
+                with op_adm.open(post_req(f"{base}/collect", b"{}")) as r:
+                    d_col = json.loads(r.read().decode("utf-8"))
+            self.assertEqual([h["id"] for h in d_col["hosts"]], ["fixed-a"])
+        finally:
+            srv.shutdown()
+            srv.server_close()
+
+        # 实测 workerctl.run_out("stop", ...) 写 manual:<ts> 且 workerctl.clear_stopped 删掉它
+        sf = self.fake_home / "hosts" / "srv-alice" / "stopped"
+        def _local_run(h, cmd, stdin="", timeout=None):
+            # 跳过真实 labmon_worker.py stop 调用，测试后续写入 manual: 与 rm -f 子句
+            patched = cmd.replace("stop  --host 'srv-alice'", "true").replace("stop --host 'srv-alice'", "true")
+            if "labmon_worker.py" in patched:
+                patched = "true; " + patched.split("; ", 1)[1]
+            r = subprocess.run(["bash", "-c", patched], capture_output=True, text=True)
+            return r.returncode, r.stdout + r.stderr
+        with mock.patch.object(W, "ssh", side_effect=_local_run):
+            rc, _ = W.run_out("stop", "srv-alice", [])
+        self.assertEqual(rc, 0)
+        self.assertTrue(sf.read_text().strip().startswith("manual:"))
+        self.assertTrue(C.stopped_blocks_relaunch(sf.read_text().strip(), member_auto=True))
+
+        ok, _ = W.clear_stopped("srv-alice", ssh_fn=lambda h, cmd: (
+            subprocess.run(["bash", "-c", cmd], capture_output=True, text=True).returncode, ""
+        ))
+        self.assertTrue(ok)
+        self.assertFalse(sf.exists())
+
+        # _cleanup_candidates 唯一复用：目标机优先、支持 skip 过滤与连不上(rc=255)回退同共享域代办机
+        sf.write_text("manual:2026-11-27 12:00:00\n")
+        cands, wh, err = W._cleanup_candidates("srv-alice")
+        self.assertIsNone(err)
+        self.assertEqual(wh, str(self.fake_home))
+        self.assertEqual([c["id"] for c in cands][:2], ["srv-alice", "fixed-a"])
+        tried = []
+        def _fallback_ssh(h, cmd):
+            tried.append(h["id"])
+            if h["id"] == "srv-alice":
+                return 255, "ssh refused"
+            return subprocess.run(["bash", "-c", cmd], capture_output=True, text=True).returncode, ""
+        ok_fb, _ = W.clear_stopped("srv-alice", ssh_fn=_fallback_ssh)
+        self.assertTrue(ok_fb)
+        self.assertEqual(tried, ["srv-alice", "fixed-a"])
+        self.assertFalse(sf.exists())
+        # skip 参数与 clear_overrides 共用同一份 _cleanup_candidates
+        cands_skip, _, _ = W._cleanup_candidates("srv-alice", skip={"srv-alice"})
+        self.assertEqual(cands_skip[0]["id"], "fixed-a")
 
 
 if __name__ == "__main__":

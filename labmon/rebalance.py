@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 
-from .config import STALE_S, fmt_dur, fmt_time
+from .config import STALE_S, fmt_dur, fmt_time, member_owner
 
 GAIN_S = 3600          # 整批完工至少提前这么多秒才建议（剩余时间短的批按 GAIN_SHORT_FRAC 放宽，不低于 GAIN_MIN_S）
 GAIN_MIN_S = 900
@@ -190,13 +190,31 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
     late = {f"{e['id']}|{x.get('root')}|{x.get('queue')}" for e in hosts for x in (e.get("borrow") or {}).get("late") or []}
     offs: dict = {}
     live = _live(hosts)
+    has_ma = any(e.get("member_auto") for e in hosts)
+    owner_fn = acc_fn = None
+    if has_ma:
+        from . import users as U
+        owner_fn, acc_fn = U.owner_of, U.account
     for e in hosts:
         st = e.get("status") or {}
         if e.get("worker_up") and not e.get("lan_off") and not e.get("stopped"):
             got = st.get("offers") or []
         else:
             got = (e.get("offers_kept") or {}).get("offers") or []
+        ma_owner = member_owner(e) if e.get("member_auto") else None
+        ma_acc = acc_fn(ma_owner) if (ma_owner and acc_fn) else None
+        ma_admin = bool(ma_acc and ma_acc.get("role") == "admin")
         for o in got:
+            if e.get("member_auto"):
+                # 组员自动接入服务器（member_auto，#236）绝不向非归属人项目产出挪法建议或 why
+                if not ma_owner:
+                    continue
+                po = (owner_fn(o["project"]) or "").lower() if owner_fn else ""
+                if ma_admin:
+                    if po and po != ma_owner:
+                        continue
+                elif po != ma_owner:
+                    continue
             offs.setdefault(o["project"], []).append((e["id"], _fresh(o, live)))
     out = {}
     for proj, xs in sorted(offs.items()):

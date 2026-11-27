@@ -130,7 +130,7 @@ from . import client as CL
 from .config import CLIENT_HEADER, server as server_conf
 from . import dist as DI
 from . import service as S
-from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, cfg_spec, check_future, home_key, host_pair, host_users, hosts_file, is_pool_id, is_standalone, pool_home, resolve_pool, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
+from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, cfg_spec, check_future, home_key, host_pair, host_users, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pool_home, resolve_pool, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
     stale_limit, user_hosts, STALE_PAD_S, STALE_RUNS
 from .records import ReportQuota, cat_of, log_events, project_mine, records, report, report_headers, schedule_project, tell
 from .service import log, notify, rotate_log
@@ -934,7 +934,7 @@ class Handler(BaseHTTPRequestHandler):
         if path in ("/api/client/install.sh", "/api/client/wheel", "/api/client/ephemeral.py"):
             return self._client(path.rsplit("/", 1)[-1])
         if path == "/api/hosts":
-            got = A.hosts()
+            got = A.hosts(who=who)
             if who.role != "admin":                    # 普通用户只列开给他的主机与所属共有池（#167、#212）
                 acc = U.access(who)
                 ok = acc.allowed | PO.user_pool_hosts(who)
@@ -963,8 +963,9 @@ class Handler(BaseHTTPRequestHandler):
                 f = state_dir() / "index.html"
                 snap = snapshot()
                 archived = PJ.archived_rows()
-                if snap and snap.get("archived", []) != archived:
-                    html = C.render_page("overview.html", {**snap, "archived": archived})
+                has_other_ma = any(is_other_member_auto(h, who) for h in (snap or {}).get("hosts") or [])
+                if snap and (has_other_ma or snap.get("archived", []) != archived):
+                    html = C.render_page("overview.html", U.view(who, {**snap, "archived": archived}))
                 else:
                     html = f.read_bytes() if f.exists() else None
             else:                                      # 磁盘上的 index.html 带全量数据：普通用户现渲染去掉组内部分的；备用时现渲染带上此刻的主备（#163）
@@ -1090,13 +1091,15 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/collect":
             done = self.board.overview.collect_now(fresh="fresh" in parse_qs(urlsplit(self.path).query, keep_blank_values=True))
             snap = snapshot() or None
+            if snap is not None:
+                snap = U.view(who, snap)
         else:
             done = proj.collect_now()
             snap = proj.snapshot()
         if not done or snap is None:
             return self._json(504, {"error": "采集超时"})
         if done == "cached":                                   # 离上一轮不到 MIN_GAP 秒：没采，回的是现有快照，页面据此提示
-            snap["cached"] = True
+            snap = {**snap, "cached": True}
         return self._json(200, snap)
 
     def do_PUT(self):
@@ -1337,11 +1340,11 @@ class Handler(BaseHTTPRequestHandler):
             hosts = _strings(body, "hosts")
             allowed = None
             if who.role != "admin" and verb == "pause" and now and not hosts:
-                allowed = [str(h["id"]) for h in active_hosts()]
+                allowed = [str(h["id"]) for h in own_hosts(who)]
                 for hid in allowed:
                     U.need_host(who, hid)
             r, what = A.override(verb, s("target"), hosts or None, num("until"), now, immediate_hosts=allowed,
-                                 by=who.name, check=self.guard, own=who.role != "admin"), f"{verb} {s('target')}"
+                                 by=who.name, check=self.guard, own=who.role != "admin", who=who), f"{verb} {s('target')}"
         elif act == "project/init":
             name = body.get("name") or None
             if name is not None and (not isinstance(name, str) or "/" in name or name in (".", "..") or "\x00" in name):
@@ -1616,7 +1619,7 @@ class Handler(BaseHTTPRequestHandler):
         try:
             items = _reg_items(body, move=act == "move")
             own = who.role != "admin"
-            msg = reg_move(str(body.get("to") or ""), items, own=own) if act == "move" else \
+            msg = reg_move(str(body.get("to") or ""), items, own=own, who=who) if act == "move" else \
                 reg_rm(str(body.get("host") or ""), items, body.get("home") or None, body.get("project") or None, own=own)
         except U.Denied as x:
             return self._json(x.code, {"error": x.msg})
@@ -1632,7 +1635,7 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             hid, pid = _assign_args(body)
-            msg = host_assign(hid, pid)
+            msg = host_assign(hid, pid, who=who)
         except U.Denied as x:
             return self._json(x.code, {"error": x.msg})
         except ConfigError as x:
@@ -1716,15 +1719,23 @@ def _assign_args(body: dict) -> tuple[str, str]:
     return out[0], out[1]
 
 
-def host_assign(hid: str, pid: str) -> str:
-    """通知项目 pid 的实验会话可以使用自用主机 hid（#173）：仅主服务可写（lease.need），不改登记、不替会话挑清单，
-    复用 records.tell(pid, "host", …) 让会话在下一轮 labmon wait 收到，并记一条配置改动事件。"""
+def host_assign(hid: str, pid: str, *, who: U.Ident | None = None) -> str:
+    """通知项目 pid 的实验会话可以使用自用主机 hid（#173、#236）：仅主服务可写（lease.need），不改登记、不替会话挑清单，
+    复用 records.tell(pid, "host", …) 让会话在下一轮 labmon wait 收到，并记一条配置改动事件。
+    他人的自动接入组员服务器（member_auto）禁止由他人通知给项目，且仅允许通知给归属人本人名下的项目。"""
     LS.need("通知实验会话使用这台主机")
     h = next((x for x in active_hosts() if str(x.get("id")) == hid), None)
     if h is None:
         raise ConfigError(f"没有在用主机 {hid}")
     if h.get("borrow") and not h["borrow"].get("swap"):
         raise ConfigError(f"{hid} 是借来的组内服务器，不是自用主机")
+    if h.get("member_auto"):
+        if is_other_member_auto(h, who):
+            holder = h.get("member_holder") or member_owner(h) or "他人"
+            raise ConfigError(f"{hid} 是 {holder} 自动接入的个人服务器，不能给他人项目使用")
+        allowed = O._host_allowed_projects(h)
+        if allowed is not None and pid not in allowed:
+            raise ConfigError(f"{hid} 仅限持有人本人名下的项目使用，不能通知给项目 {pid}")
     if ep := PO.exclusive_pool(hid):
         raise ConfigError(f"{hid} 属于独占共有算力池「{ep['label']}」（{ep['host_id']}），请改用 {ep['host_id']} 提交，不要单台直投")
     with PJ._reg_locked():
@@ -1764,7 +1775,7 @@ def _qlist(qs: list[str]) -> str:
     return "、".join(qs[:3]) + (f" 等 {len(qs)} 条" if len(qs) > 3 else "")
 
 
-def reg_move(to: str, items: list, own: bool = False, pool: str | None = None, pool_reason: str | None = None) -> str:
+def reg_move(to: str, items: list, own: bool = False, pool: str | None = None, pool_reason: str | None = None, *, who: U.Ident | None = None) -> str:
     """把几条登记搬到在用主机 to（项目抽屉的「整台搬到…」、主机页的接上卡）：逐条 workerctl.run_out("add")，带登记的 project 与 stop，不带 --gpus（原主机的卡号）。
     原主机上的那份由 worker add 删掉（原主机手上在跑的跑完后 to 接着放；别处刚登记了更晚的退出码 2，原样报错）。一条失败就停，前面搬成的照样记；
     搬成的按项目各告诉一次实验会话（records.tell，中途失败也告诉已搬的）。返回给页面的一句话。
@@ -1791,12 +1802,20 @@ def reg_move(to: str, items: list, own: bool = False, pool: str | None = None, p
         return home_key(h) if h else None
     to_dom = _domain(to)
     to_h = known.get(to)
+    to_ma_allowed = None
+    if to_h and to_h.get("member_auto"):
+        if pool is None and is_other_member_auto(to_h, who):
+            holder = to_h.get("member_holder") or member_owner(to_h) or "他人"
+            raise ConfigError(f"{to} 是 {holder} 自动接入的个人服务器，不能把他人项目的登记搬过去")
+        to_ma_allowed = O._host_allowed_projects(to_h)
     done, moved = [], {}
     try:
         for it in items:
             root, jobs, pid, frm = str(it.get("root") or ""), str(it.get("jobs") or ""), str(it.get("project") or ""), str(it.get("host") or "")
             if not (root and jobs and pid):
                 raise ConfigError("登记缺目录、清单或项目")
+            if to_ma_allowed is not None and pid not in to_ma_allowed:
+                raise ConfigError(f"{to} 仅限持有人本人名下的项目使用，不能把项目 {pid} 搬过去")
             if frm and frm != to:
                 frm_h = known.get(frm)
                 frm_dom = _domain(frm)

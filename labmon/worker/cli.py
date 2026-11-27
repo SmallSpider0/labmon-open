@@ -493,7 +493,7 @@ def main(argv=None):
     pid = _C.read_pid(p.pid)
     up = _C.alive(pid, ("labmon_worker",))
     if a.cmd == "stop":
-        _C.write(p.stopped, _C.now_str())               # 本机看板见到它就不自动拉起
+        _C.write(p.stopped, "manual:" + _C.now_str())   # 手动停的标记（#236）：本机看板见到它就不自动拉起
         if up:
             os.kill(pid, signal.SIGTERM)
             print("已通知 worker（PID %d）退出；运行中的任务继续跑" % pid)

@@ -3436,6 +3436,38 @@ ta("auth", "已开账号的组员服务器自动接入调度、我的服务器�
   clean(page(AC, "#/fleet"), "#224 管理员组内页转义");
   clean(page(AC, "#/fleet/srv/srv-d"), "#224 管理员抽屉转义");
   has(page(AC, "#/fleet/srv/srv-d"), "接入调度");
+  // 7. #236：manage 受阻（manual_stopped）与拉起失败（relaunch_failed）徽标、恢复拉起弹窗，以及他人 member_auto 不进管理员 assignCard/adoptCard/regTo
+  const S4 = JSON.parse(JSON.stringify(OV));
+  S4.fleet.servers.find(x => x.id === "srv-d").manage = {
+    on: true, auto: true, opt_out: false, hosted: false, account: "person3", can_toggle: true, worker_up: false,
+    state: "manual_stopped", blocked: true, why: "已接入本人调度，但已手动停用 worker（2026-11-27 12:00:00），不自动拉起",
+  };
+  S4.fleet.servers.find(x => x.id === "srv-g").manage = {
+    on: true, auto: true, opt_out: false, hosted: false, account: "person6", can_toggle: true, worker_up: false,
+    state: "relaunch_failed", blocked: false, why: "已接入本人调度，但上次自动拉起失败（退出码 3）：PermissionError，10 分钟后重试",
+  };
+  const maOther = {...JSON.parse(JSON.stringify(OV.hosts[0])), id: "srv-other-ma", label: "node9（ALICE）", member_auto: true, member_account: "alice", status: {...JSON.parse(JSON.stringify(OV.hosts[0].status)), queues: []}};
+  S4.hosts.push(maOther);
+  S4.regs.push({host: "srv-other-ma", label: "node9（ALICE）", state: "active", home: S4.regs[0].home, standalone: false, stale: false, queues: []});
+  const AC4 = accCtx(S4, ADMIN_ME);
+  const fl4 = page(AC4, "#/fleet"); clean(fl4, "#236 组内页受阻与拉起失败徽标");
+  has(fl4, "接入受阻"); has(fl4, "拉起失败");
+  const drw4 = page(AC4, "#/fleet/srv/srv-d"); clean(drw4, "#236 手动停用抽屉含恢复拉起");
+  has(drw4, "已手动停用 worker"); has(drw4, "恢复拉起");
+  run(AC4, `POSTED = []; fetch = (u, o) => { POSTED.push([u, o?.body]); return Promise.resolve({ok: true, json: async () => ({id: "srv-d", on: true, msg: "已重新接入", manage: {on: true, auto: true, opt_out: false, hosted: false, account: "person3", can_toggle: true, worker_up: false, state: "pending", blocked: false, why: "已接入本人调度（等待自动拉起 worker）"}})}); }; collectNow = () => {};`);
+  await run(AC4, 'manageAct("pick", {id: "srv-d", where: "drw", k: "fman-drw-res"})');
+  has(page(AC4, "#/fleet/srv/srv-d"), "确认恢复拉起");
+  await run(AC4, 'manageAct("go", {id: "srv-d", on: "1", where: "drw"})');
+  ok(run(AC4, 'POSTED.length === 1 && POSTED[0][0] === "api/fleet/manage" && JSON.parse(POSTED[0][1]).on === true'), "#236 恢复拉起未提交 on:true");
+  // 前端双保险：他人 member_auto 不出现 assignCard、adoptCard、也不进 regTo
+  ok(run(AC4, 'assignSrc(D.hosts.find(h => h.id === "srv-other-ma")) === null'), "#236 他人 member_auto 不应出现 assignCard");
+  ok(run(AC4, 'adoptSrc(D.hosts.find(h => h.id === "srv-other-ma")) === null'), "#236 他人 member_auto 不应出现 adoptCard");
+  ok(!run(AC4, 'regTo(D.regs[0], "proj-a").some(t => t.id === "srv-other-ma")'), "#236 他人 member_auto 不应出现在 regTo");
+  // alertsOf 对 stopped_blocks=false（历史纯时间戳）提示将自动拉起，对 stopped_blocks=true（manual:）提示已手动停用
+  const alLegacy = run(AC4, 'alertsOf({id:"m1",label:"M1",auto:true,member_auto:true,error:null,status_error:null,lan_off:false,status:{t:1},worker_up:false,stopped:"2026-11-27 06:31:36",stopped_blocks:false}).map(x=>x.msg).join("\\n")');
+  has(alLegacy, "看板会自动拉起");
+  const alMan = run(AC4, 'alertsOf({id:"m1",label:"M1",auto:true,member_auto:true,error:null,status_error:null,lan_off:false,status:{t:1},worker_up:false,stopped:"manual:2026-11-27 12:00:00",stopped_blocks:true}).map(x=>x.msg).join("\\n")');
+  has(alMan, "已手动停用"); ok(!alMan.includes("看板会自动拉起"), "手动停用不应提示自动拉起");
 });
 
 t("overview", "macOS Apple Silicon MPS 逻辑卡、统一内存与桌面留核渲染（#114 P4）", () => {
