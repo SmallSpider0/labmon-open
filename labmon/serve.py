@@ -130,7 +130,7 @@ from . import client as CL
 from .config import CLIENT_HEADER, server as server_conf
 from . import dist as DI
 from . import service as S
-from .config import ALERT_KEYS, HOSTS_LOCK, POOL, ConfigError, active_hosts, all_hosts, cfg_spec, check_future, home_key, host_pair, host_users, hosts_file, is_standalone, pool_home, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
+from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, cfg_spec, check_future, home_key, host_pair, host_users, hosts_file, is_pool_id, is_standalone, pool_home, resolve_pool, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
     stale_limit, user_hosts, STALE_PAD_S, STALE_RUNS
 from .records import ReportQuota, cat_of, log_events, project_mine, records, report, report_headers, schedule_project, tell
 from .service import log, notify, rotate_log
@@ -764,12 +764,22 @@ class Handler(BaseHTTPRequestHandler):
         elif r.own == "worker":
             sub = path.rsplit("/", 1)[-1]
             args = _worker_args(sub, body)
-            U.need_host(who, s("host"))
+            hid = s("host")
+            p = None
+            if is_pool_id(hid) or hid.startswith("pool:"):
+                try:
+                    p = resolve_pool(hid)
+                except ConfigError as e:
+                    raise U.Denied(400, str(e)) from e
+                U.need_host(who, p["host_id"] if p else hid)
+            else:
+                U.need_host(who, hid)
             if sub == "add":
                 U.need_project(who, s("project"))
                 U.need_list(who, *args, s("project"))
-            elif sub == "rm":                          # 池（#24）：按清单此刻登记在哪核（池里，或已放到借给池的主机上；api.worker 同样经 pool.locate）
-                body["project"] = U.need_reg(who, PO.locate(*args) if s("host") == POOL and len(args) == 2 else s("host"), *args)
+            elif sub == "rm":                          # 共有池（#24、#212）：按清单此刻登记在哪核（池待放或已落机的池主机；api.worker 同经 pool.locate）
+                target_h = PO.locate(*args, pid=p["id"] if p else None) if (is_pool_id(hid) and len(args) == 2) else hid
+                body["project"] = U.need_reg(who, target_h, *args)
             elif sub == "clean":
                 if not body.get("project"):
                     raise U.Denied(403, "普通用户运行 worker clean 必须通过 --project 指定自己的项目")
@@ -915,9 +925,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._client(path.rsplit("/", 1)[-1])
         if path == "/api/hosts":
             got = A.hosts()
-            if who.role != "admin":                    # 普通用户只列开给他的主机（#167）
-                ok = U.access(who).allowed
+            if who.role != "admin":                    # 普通用户只列开给他的主机与所属共有池（#167、#212）
+                acc = U.access(who)
+                ok = acc.allowed | PO.user_pool_hosts(who)
+                my_pids = set(PO.user_pools(who))
                 got["hosts"] = [dict(h, home_with=[x for x in h["home_with"] if x in ok]) for h in got["hosts"] if str(h.get("id")) in ok]
+                got["pools"] = [p for p in got.get("pools") or [] if p.get("id") in my_pids]
             return self._json(200, got)
         if path == "/api/disk":
             return self._json(200, A.my_disk(who, snapshot()))
@@ -1295,7 +1308,7 @@ class Handler(BaseHTTPRequestHandler):
             args = _worker_args(sub, body)
             r = A.worker(sub, s("host"), args, body.get("gpus") or None, project=body.get("project") or None,
                          stop=body.get("stop") or None, own=who.role != "admin", lst=bool(body.get("list")),
-                         may=None if who.role == "admin" else lambda hid: U.may_host(who, hid),
+                         may=None if who.role == "admin" else lambda hid: U.may_host(who, hid), who=who,
                          cache=bool(body.get("cache")), scratch=bool(body.get("scratch")),
                          dry_run=bool(body.get("dry_run")), yes=bool(body.get("yes")))
             what = f"worker {sub} {s('host')} {' '.join(args)}"
@@ -1695,6 +1708,8 @@ def host_assign(hid: str, pid: str) -> str:
         raise ConfigError(f"没有在用主机 {hid}")
     if h.get("borrow") and not h["borrow"].get("swap"):
         raise ConfigError(f"{hid} 是借来的组内服务器，不是自用主机")
+    if ep := PO.exclusive_pool(hid):
+        raise ConfigError(f"{hid} 属于独占共有算力池「{ep['label']}」（{ep['host_id']}），请改用 {ep['host_id']} 提交，不要单台直投")
     with PJ._reg_locked():
         if reason := A.unknown_project(pid, require=True):
             raise ConfigError(reason)
@@ -1732,18 +1747,22 @@ def _qlist(qs: list[str]) -> str:
     return "、".join(qs[:3]) + (f" 等 {len(qs)} 条" if len(qs) > 3 else "")
 
 
-def reg_move(to: str, items: list, own: bool = False, pool: str | None = None) -> str:
+def reg_move(to: str, items: list, own: bool = False, pool: str | None = None, pool_reason: str | None = None) -> str:
     """把几条登记搬到在用主机 to（项目抽屉的「整台搬到…」、主机页的接上卡）：逐条 workerctl.run_out("add")，带登记的 project 与 stop，不带 --gpus（原主机的卡号）。
     原主机上的那份由 worker add 删掉（原主机手上在跑的跑完后 to 接着放；别处刚登记了更晚的退出码 2，原样报错）。一条失败就停，前面搬成的照样记；
     搬成的按项目各告诉一次实验会话（records.tell，中途失败也告诉已搬的）。返回给页面的一句话。
-    pool：算力池放、搬的（值是为什么搬，可为空）：to 可以是 POOL（回池里待放）。只记事件、不告诉会话（#88：会话不用动手，
+    人工搬移（pool is None）禁止搬往独占共有池内的单台常驻主机（exclusive=true，引导改用池入口）。
+    pool：共有池引擎（#212）落机/搬移的池 id 字符串（to 可以是 pool / pool:<id> 退回待放）。记 kind="pool" 事件、不告诉会话（#88：会话不用动手，
     wait --job 按快照车道认任务，去向在 kind=pool 的事件里，labmon records 与项目页时间线看得到；要会话动手的有 pool_wait: 兜着）。"""
     if not to or not items:
         raise ConfigError("没说搬到哪台、搬哪几条")
+    if pool is None and not is_pool_id(to):
+        if ep := PO.exclusive_pool(to):
+            raise ConfigError(f"主机 {to} 属于独占共有算力池「{ep['label']}」（{ep['host_id']}），不能手动搬到单台；请改用 {ep['host_id']}")
     known = {str(h["id"]): h for h in all_hosts()}
     def _domain(hid: str) -> tuple | None:
-        if hid == POOL:
-            ph = pool_home()
+        if is_pool_id(hid):
+            ph = pool_home(hid)
             return ("shared", ph.rstrip("/")) if ph else None
         h = known.get(hid)
         return home_key(h) if h else None
@@ -1767,12 +1786,16 @@ def reg_move(to: str, items: list, own: bool = False, pool: str | None = None) -
                     raise ConfigError(reason)
                 rc, out = W.run_out("add", to, [root, jobs], project=pid, stop=it.get("stop") or None, **({"expect_project": pid} if own else {}),
                                     **({"expect_from": frm} if pool is not None and frm and frm != to else {}),   # 算力池按上一轮快照搬：worker 在锁里核对原来那台还登记着（#25）
-                                    **({"pool": True} if pool is not None and to != POOL else {}))   # 池放过去的登记带标记（#79：自用主机上与主人自己的清单分开）
+                                    **({"pool": pool} if pool is not None and not is_pool_id(to) else {}))        # 池放过去的登记带显式池 id（#212）
             text = " ".join(out.strip().splitlines()[-2:])
             if rc != 0:
                 raise ConfigError(f"{_qname(root, jobs)} 没搬到 {to}：{text}" + (f"（已搬 {len(done)} 条）" if done else ""))
             what = f"{_qname(root, jobs)}" + (f" 从 {frm}" if frm and frm != to else "") + f" 搬到 {to}"
-            log_events([{"kind": "config", "hosts": sorted({to, frm} - {""}), "project": pid, "msg": f"看板把队列登记 {what}", "detail": text}])
+            if pool is not None:
+                log_events([{"kind": "pool", "hosts": sorted({to, frm} - {""}), "project": pid,
+                             "msg": f"算力池（{pool}）把 {what}" + (f"：{pool_reason}" if pool_reason else ""), "detail": text}])
+            else:
+                log_events([{"kind": "config", "hosts": sorted({to, frm} - {""}), "project": pid, "msg": f"看板把队列登记 {what}", "detail": text}])
             done.append(text)
             m = moved.setdefault(pid, {"from": [], "qs": []})
             if frm and frm != to and frm not in m["from"]:

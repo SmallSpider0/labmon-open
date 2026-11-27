@@ -1190,7 +1190,7 @@ class AdmissionUnitTest(UnitBase):
         self.assertEqual((r["need"]["ngpu"], round(r["need"]["vram"]), r["need"]["cpus"], r["need"]["src"]), (1, 21, 1, "同名 近 1 次峰值 ×1.1"))
         self.assertTrue(r["hosts"]["t"]["ok"], r)
         self.assertIn("可用", r["hosts"]["t"]["why"])
-        self.assertEqual(r["hosts"]["old"], {"ok": False, "why": "old 的 worker 没在跑（状态 15 分钟没更新）"})
+        self.assertEqual(r["hosts"]["old"], {"ok": False, "why": "old 的 worker 没在跑（状态 15 分钟没更新）", "nofit": False, "skip": True})
         self.assertNotIn(self.m.POOL, r["hosts"])
         self.assertEqual(ask(())["need"]["ngpu"], 1)                           # 没有候选主机也给 need（池据此挑服务器来借）
         Path(q["state"], "j_s2.done").write_text("")
@@ -3006,17 +3006,21 @@ class PoolListTest(UnitBase):
     def regs(self):
         return [json.loads(f.read_text()) for f in (self.hosts.home / "hosts" / "pool" / "queues").glob("*.json")]
 
-    def test_add_pool_defaults_to_term(self):
+    def test_add_pool_keeps_stop_and_allows_boundary_hold(self):
+        # #87、#212：共有型算力池不再强改 --stop term，允许默认 boundary 与占位任务 hold_*
         rc, out = self.add()
         self.assertEqual(rc, 0, out)
         reg, = self.regs()
-        self.assertEqual((reg["project"], reg["stop"]), ("pa", "term"))
+        self.assertEqual((reg["project"], reg.get("stop")), ("pa", None))
         self.assertIsNone(reg.get("gpus"))
+        rc, out = self.add("--stop", "boundary")
+        self.assertEqual(rc, 0, out)
+        Path(self.q["jobs_path"]).write_text("hold_wait|sleep 1\n")
+        rc, out = self.add()
+        self.assertEqual(rc, 0, out)
 
     def test_add_pool_refuses(self):
-        rc, out = self.add("--stop", "boundary")
-        self.assertEqual(rc, 2)
-        self.assertIn("--stop boundary", out)
+        # #212：共有型算力池仍拒绝 --gpus 与成组起跑 gang=
         rc, out = self.add("--gpus", "0")
         self.assertEqual(rc, 2)
         self.assertIn("--gpus", out)
@@ -3024,10 +3028,6 @@ class PoolListTest(UnitBase):
         rc, out = self.add()
         self.assertEqual(rc, 2)
         self.assertIn("成组", out)
-        Path(self.q["jobs_path"]).write_text("hold_wait|sleep 1\n")
-        rc, out = self.add()
-        self.assertEqual(rc, 2)
-        self.assertIn("占位任务", out)
         self.assertEqual(self.regs(), [])
 
     def test_after_pool_row_waits_not_missing(self):
@@ -3060,7 +3060,7 @@ class PoolListTest(UnitBase):
                           todo=[{"project": "pa", "root": qx["root"], "queue": "jobs/q.txt", "jobs": ["X"], "deps": {}, "held": None}])
         self.w.tick([], True)
         st = json.loads(Path(self.w.p.status).read_text())
-        k = "%s|jobs/q.txt" % os.path.normpath(self.q["root"])
+        k = "pool|%s|jobs/q.txt" % os.path.normpath(self.q["root"])
         h = st["pool_heads"][k]
         self.assertEqual((h["head"], h["n"], h["held"]), ("A", 2, None))
         self.assertEqual(h["dep"][0], "wait")
@@ -3082,7 +3082,7 @@ class PoolListTest(UnitBase):
         rc, out = self.add()
         self.assertEqual(rc, 0, out)
         self.w.tick([], True)
-        k = "%s|jobs/q.txt" % os.path.normpath(self.q["root"])
+        k = "pool|%s|jobs/q.txt" % os.path.normpath(self.q["root"])
         h = json.loads(Path(self.w.p.status).read_text())["pool_heads"][k]
         self.assertEqual((h["head"], h["n"], h["dep"]), ("B", 2, None))
 
@@ -3104,7 +3104,7 @@ class SelfPoolTest(UnitBase):
         rc, out = self.add(pooled, "--pool")
         self.assertEqual(rc, 0, out)
         regs = {json.loads(f.read_text())["project"]: json.loads(f.read_text()) for f in (self.hosts.home / "hosts" / "t" / "queues").glob("*.json")}
-        self.assertEqual((regs["a"].get("pool"), regs["c"].get("pool")), (None, 1))
+        self.assertEqual((regs["a"].get("pool"), regs["c"].get("pool")), (None, "pool"))
         # 主人 amy 的 a 与池里 bob 的 c 同在 t、卡上一次只放得下一个：amy 在别的主机上正用着卡，按人比先放 bob 的池清单
         now = time.time()
         self.hosts.status("o", share={"run": [["b", 1.0, now - 3600, now + 3600]]})
@@ -3112,13 +3112,13 @@ class SelfPoolTest(UnitBase):
         os.environ["LABMON_GPUS"] = "GPU-aaa:40000:40000"
         try:
             qs = self.w.registry()
-            self.assertEqual({q["project"]: q["pool"] for q in qs}, {"a": False, "c": True})
+            self.assertEqual({q["project"]: q["pool"] for q in qs}, {"a": None, "c": "pool"})
             self.w.tick(qs, True)
             st = json.loads(Path(self.w.p.status).read_text())
             self.assertEqual([j["name"] for j in st["running"]], ["c1"])
             self.assertEqual(st["waiting"][0]["name"], "a1")
-            self.assertEqual({q["project"]: q.get("pool") for q in st["queues"]}, {"a": None, "c": True})
-            self.assertEqual({ln["project"]: ln.get("pool") for ln in st["todo"]}, {"a": None, "c": 1})
+            self.assertEqual({q["project"]: q.get("pool") for q in st["queues"]}, {"a": None, "c": "pool"})
+            self.assertEqual({ln["project"]: ln.get("pool") for ln in st["todo"]}, {"a": None, "c": "pool"})
             lanes = self.w.proj_lanes("t", st["todo"], st["plan"], {})
             self.assertEqual([x["project"] for x in lanes], ["a"])            # 池放的不进挪法建议
         finally:
@@ -3472,7 +3472,7 @@ jobs = "jobs/q.txt"
         qb, = self.hosts.queues({"b": ["B|true   # gpus=0 after=j1"]}, "pa")
         self.w.tick([qb], True)
         st = json.loads(Path(self.w.p.status).read_text())
-        k = "%s|jobs/q.txt" % os.path.normpath(self.q["root"])
+        k = "pool|%s|jobs/q.txt" % os.path.normpath(self.q["root"])
         h = st["pool_heads"][k]
         self.assertEqual((h["head"], h["n"], h.get("elsewhere"), h["dep"]), ("j2", 1, ["o", "j1"], None))
         (x,) = [x for x in st["waiting"] if x["name"] == "B"]

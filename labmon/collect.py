@@ -27,7 +27,7 @@ from . import lan as L
 from . import lease as LS
 from . import pool as PO
 from . import projects as PJ
-from .config import AUTO_GROUP_RE, GIB, POOL, POOL_LABEL, STALE_S, ConfigError, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
+from .config import AUTO_GROUP_RE, GIB, POOL_LABEL, STALE_S, ConfigError, fmt_dur, fmt_time, is_pool_id, parse_time, pick_color, stale_limit, with_queues
 from .fleet import worker_fresh
 from .health import link_step
 from .state import load_json, load_rows, save_json, snapshot, usage_file, usage_hosts, write_atomic
@@ -52,10 +52,10 @@ def probe_spec(cfg: dict, host: dict) -> dict:
             "checks": [{k: c[k] for k in ("id", "if", "cmd", "detail", "timeout") if k in c} for c in host["checks"]],
             # 本机的队列，以及已归还主机上由本机经共享盘代读的队列（readonly：只读文件，PID 属于别的机器，不查进程；已确认全跑完的带 done_sig 短路，#164）；
             # 算力池里的（pool，#78）同样代读，但清单是刚从别处搬回池里的：那边手上在跑的还在跑，current 里放行的主机不是这台的照 #95 按在跑算
-            "queues": [{k: v for k, v in q.items() if k not in ("label", "host", "read_via", "reg", "reg_t", "reg_live", "reg_sleeping", "reg_stop", "done_sig", "done_act")}
+            "queues": [{k: v for k, v in q.items() if k not in ("label", "host", "read_via", "reg", "reg_t", "reg_live", "reg_sleeping", "reg_stop", "reg_pool", "done_sig", "done_act")}
                        | ({"sleep_skip": True} if q.get("reg") else {})
                        | ({"readonly": True, **({"done_sig": q["done_sig"], "done_act": q.get("done_act")} if q.get("done_sig") else {})} if q["read_via"] else {})
-                       | ({"pool": True} if q["host"] == POOL else {})
+                       | ({"pool": True} if is_pool_id(q["host"]) else {})
                        for q in cfg["queues"] if (q["read_via"] or q["host"]) == host["id"]],
             # 所有主机上显式登记的清单：共享盘上别的主机登记过的，自动发现时也要跳过
             "explicit_jobs": sorted({os.path.join(q["root"], q["jobs"]) for q in cfg["queues"] if not q["discover"]}),
@@ -93,7 +93,8 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
         # done_sig 仅对同一台仍处于已归还状态且同一份登记的清单有效；主机恢复使用（active）或重新登记后立即失效（#164）
         keep_done = st == "returned" and om.get("host") == hid and om.get("done_sig") is not None and om.get("reg_added") == q.get("added")
         new[k] = {"id": om.get("id"), "host": hid, "root": q["root"], "jobs": q["jobs"], "first": om.get("first", t), "seen": t,
-                  "reg_t": q.get("added_t"), "reg_added": q.get("added"), "reg_stop": q.get("stop"), "sleeping": bool(q.get("sleeping")),
+                  "reg_t": q.get("added_t"), "reg_added": q.get("added"), "reg_stop": q.get("stop"), "reg_pool": q.get("pool"),
+                  "sleeping": bool(q.get("sleeping")),
                   **({"done_sig": om["done_sig"], "done_act": om.get("done_act")} if keep_done else {})}
     new.update({k: m for k, m in mem.items() if k not in new and t - m.get("seen", 0) <= REG_KEEP_S})
     unread = {x.get("host") for x in regs or [] if x.get("queues") is None}
@@ -101,7 +102,7 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
     for q in cfg["queues"]:
         k = None if q["discover"] else list_path(q.get("root"), q.get("jobs"))
         used.add(k)
-        out.append(dict(q, host=new[k]["host"], reg_stop=new[k].get("reg_stop")) if k in new else q)
+        out.append(dict(q, host=new[k]["host"], reg_stop=new[k].get("reg_stop"), reg_pool=new[k].get("reg_pool")) if k in new else q)
     extra = sorted((k for k in new if k not in used), key=lambda k: (new[k]["first"], k))
     # 车道 id 定下来就记在 mem 里一直沿用（撞名的那条先没了，后一条也不改名：进度采样、挂起累计按 车道/任务 记）
     ids = {q["id"] for q in cfg["queues"]} | {new[k]["id"] for k in extra if new[k].get("id")}
@@ -117,7 +118,7 @@ def reg_queues(cfg: dict, regs: list | None, mem: dict, t: float) -> tuple[list[
         # 全局快照缺 regs 或该主机没读到时不误标为已摘）；reg_sleeping：worker 已将该登记转休眠
         live = k in found or regs is None or m["host"] in unread
         out.append({"id": m["id"], "host": m["host"], "root": m["root"], "jobs": m["jobs"], "reg": True, "reg_t": m.get("reg_t"), "reg_live": live,
-                    "reg_sleeping": bool(m.get("sleeping")) if k in found else False, "reg_stop": m.get("reg_stop"),
+                    "reg_sleeping": bool(m.get("sleeping")) if k in found else False, "reg_stop": m.get("reg_stop"), "reg_pool": m.get("reg_pool"),
                     **({"done_sig": m["done_sig"], "done_act": m.get("done_act")} if m.get("done_sig") else {})})
     return out, new
 
@@ -278,7 +279,7 @@ def _last_act(q: dict, raw: dict) -> float:
 def _sleeping_of(q: dict, raw: dict | None, pool: dict | None = None) -> bool:
     """这条队列此刻是不是已休眠（#164）：在用主机有探针现场结果时只认现场（raw.sleeping / raw.worker.sleeping），
     不因 worker 状态过期（raw.worker 为 None）误回退旧快照的 reg_sleeping；算力池看 pool.lists[].sleeping；其余才退回 reg_sleeping。"""
-    if q.get("host") == POOL:
+    if is_pool_id(q.get("host")):
         if pool and (pool.get(PO.key(q.get("root"), q.get("jobs"))) or {}).get("sleeping"):
             return True
         return bool(raw.get("sleeping")) if raw is not None else bool(q.get("reg_sleeping"))
@@ -801,15 +802,15 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
                 eta_ts=max(ends) if unfinished and None not in ends and not lane.get("paused") else None)   # 有推演不出的（stuck）就不写
     snap["lanes"].append(lane)
     pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {} if lane.get("pool") else {}
-    if pv.get("since") and unfinished and not pv.get("done") and not lane.get("paused") and t - pv["since"] >= PO.POOL_TELL_S:
-        # 池里待放满 2 小时：一条清单一条，只给会话（池里排队是常态，不标红）。key 带车道不带起点：别的清单等满另报，回池重新计时不变（REWAKE_S 内不再叫醒）
+    if pv.get("since") and unfinished and not pv.get("done") and not lane.get("paused") and (pv.get("nofit") or t - pv["since"] >= PO.POOL_TELL_S):
+        # 池里待放满 2 小时，或全池所有健康主机均放不下（nofit）立即报：一条清单一条，只给会话（池里排队是常态，不标红）。
         nofit = bool(pv.get("nofit"))
         alerts.append(alert(f"pool_wait:{cfg['id']}:{q['id']}" + (":nofit" if nofit else ""), "agent",
-                            f"{q.get('jobs')} 在算力池里等了 {fmt_dur(t - pv['since'])}（{pv.get('why') or '还没放到哪台'}）。"
+                            f"{q.get('jobs')} 在{hcfg[q['host']]['label']}里等了 {fmt_dur(t - pv['since'])}（{pv.get('why') or '还没放到哪台'}）。"
                             + ("池里此刻放不下它：要早点跑就登记到自己能用的主机" if nofit else "不急就接着等；要早点跑可以登记到自己能用的主机")
                             + "（labmon worker add <主机> ROOT JOBS --project <项目>，一条清单只归一台，它就出了池）"))
     if returned:
-        if unfinished:
+        if unfinished and not q.get("reg_pool"):
             left = f"{hcfg[q['host']]['label']} 已归还，{q['name']} 还有 {unfinished} 个任务没跑完"
             # key 带主机与归还时刻（#129）：搬到别的主机、那台又还掉是新的一件；归还期间不变
             alerts.append(alert(f"returned_unfinished:{q['id']}:{q['host']}:{int(returned)}", "both",

@@ -278,6 +278,8 @@ function hostStrip(h) {
   if (h.standalone) s += it("server", `${h.platform_kind === "other" ? "外平台独立主机" : "独立主机"} <span class="mut">不共享集群盘${h.owner ? ` · 归属 ${esc(h.owner)}` : ""}</span>`,
     "不共享集群 worker_home：仅自用，不支持借用、算力池与跨主机搬登记");
   if (h.status?.disk_gate?.on) s += it("db", `<b style="color:var(--bad)">磁盘闸门已触发</b> <span class="mut">${esc(h.status.disk_gate.why || "已暂停放新任务")}</span>`);
+  if (h.pool_id) s += it("zap", `共有算力池 <a href="#/pool">${esc(h.pool_label || h.pool_id)}</a> <span class="mut">${h.pool_exclusive ? "独占 · 请经池入口提交" : "开放 · 允许直投单台"}</span>`,
+    h.pool_exclusive ? "这台主机归属独占共有算力池，请经池入口（labmon worker add pool …）统一提交" : "这台主机归属开放共有算力池，既可经池入口提交也可直投单台");
   if (h.borrow) s += it("users", `${esc(borrowText(h.borrow, D.generated))}${!h.borrow.swap && LIVE && srvById(h.id) ? ` <a href="${DH.srv(h.id)}">借用详情</a>` : ""}`
       + (BMSG?.id === h.id ? `<span class="mut">（${esc(BMSG.msg)}）</span>` : ""),
     h.borrow.swap ? "改约定：labmon borrow " + h.id + " --until …（none 去掉）" : "");

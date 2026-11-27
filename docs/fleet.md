@@ -529,9 +529,37 @@ labmon 之外的按目录一段段斜纹，过门槛变紫），下面「本地�
 
 ## 算力池
 
-旧“借用推广型”算力池（`lend`/`lend_hours` 入池开关、`borrow_pool` 自动借还与 `reclaim` 收回）已随 Issue #212 阶段 1 移除，借卡回归纯粹的手动借用（[`labmon/borrow.py`](../labmon/borrow.py)）；若 `hosts.toml` 残留旧的 `lend`/`lend_hours`/`borrow_pool` 字段，`config.user_hosts` 与 `fleet.conf` 共用的配置校验会直接报错并提示移除（`config.check_legacy_pool`）。
+labmon 提供基于常驻共有主机组的**共有型算力池**（#212，[`labmon/pool.py`](../labmon/pool.py)）。旧“借用推广型”算力池（`lend`/`lend_hours` 入池开关、`borrow_pool` 自动借还与 `reclaim` 收回）已移除，借卡回归纯粹的手动借用（[`labmon/borrow.py`](../labmon/borrow.py)）；若 `hosts.toml` 残留旧的 `lend`/`lend_hours`/`borrow_pool` 字段，配置校验会直接报错提示移除（`config.check_legacy_pool`）。
 
-当前仅保留算力池基础设施（[`labmon/pool.py`](../labmon/pool.py) 保留主机 id `pool`、池成员判定 `pool.member`、撤回定位 `pool.locate`，以及项目页池待放车道与 worker 的 `pool_refuse`/`pool_todo`/`pool_heads`），供阶段 2 接入基于共有主机组的共有池使用。
+### 配置与强校验（`hosts.toml`）
+
+在 `~/.config/labmon/hosts.toml` 中用 `[pools.<id>]` 声明一个或多个共有池（热读取，改完无需重启）：
+
+```toml
+[pools.a100]
+label = "A100 共有池"
+hosts = ["srv-a1", "srv-a2"]
+members = ["alice", "bob"]     # 账号名列表（不区分大小写），写 ["*"] 表示全体登录用户
+exclusive = true               # 缺省 true：禁止直投单台，须经池入口提交；显式 false 才允许直投单台
+```
+
+强校验规则（`config.pools`）：
+- 池 id 仅允许小写字母、数字、`-`、`_`，不得与任何 `[[hosts]]` 或 `[[fleet.servers]]` 重名；`[[hosts]]` 与 `[[fleet.servers]]` 同样禁止以 `pool` 或 `pool:*` 命名。
+- 池内主机必须是已在 `[[hosts]]` 声明的常驻远端主机（非本机/回环、非 `standalone` 独立主机、非借用机），且同一池内全部主机必须共用同一个 `worker_home`（同一块共享盘）。
+- **单机单池互斥**：一台主机至多属于一个共有池。
+- **池入口解析（`config.resolve_pool`）**：`[pools.pool]` 的入口是 `pool`，命名池 `[pools.<id>]` 的入口是 `pool:<id>`；当全配置只有一个池时，`pool` 自动指向该池；多池且未配 `[pools.pool]` 时，使用 `pool` 会报错列出各 `pool:<id>`。
+
+### 单一入口与调度机制
+
+- **命令入口**：支持 `labmon worker add|rm|status|fit --list <pool|pool:<id>> ...`；`labmon host list` 一并列出各主机所属池及所有可用共有池。
+- **独占保护（`exclusive = true`）**：默认禁止任何人（含管理员）绕过池入口向池内单台主机直接 `worker add`、页面「换到其他主机」或「给项目用」通知；如需允许单台直投，显式设置 `exclusive = false`。
+- **入池清单限制**：仅拒绝 `--gpus`（具体卡号由目标机决定）与成组起跑 `gang=`；默认停法 `boundary` 与占位任务 `hold_*` 均可入池（#87），不再强改 `--stop term`。
+- **即时落机 + Work-Stealing 空闲窃取**：
+  - 看板主服务每轮（`pool.tick`，受服务租约 `lease.primary` 门控）先合并各在线池主机回报的 `pool_heads`（读得到优先于读失败，避免因个别节点读盘报错误标 `done`，#99）。
+  - 队首等依赖（#98）或尚在原机收尾（`elsewhere`）的清单暂留待放目录；其余待放清单按人公平份额（`fair_key` + `person_use`）排序，结合 `fit_head` 与 `other_load` 打分**即时落机**：有立刻能放行的空闲机优先落空卡多/同项目亲和/负载轻的主机，全池忙时直接落到预计最早空出的主机以立即获得 `plan` ETA，同时本轮每机至多落 1 条并在内存扣减估算卡·时防止单人连续霸占多台。
+  - 池内出现空闲主机时，自动从未在跑且正在繁忙机排队的池清单中窃取到空闲机（受 `POOL_MOVE_COOL_S = 600` 秒冷却防抖保护，避免短时间来回乒乓）。
+  - 池内主机出现 `drain`、预备续租 `deadline`、连续离线/worker 失联满 10 分钟（`POOL_DOWN_S`）、标记 `returned` 或移出池配置时，自动经 `reg_move` 撤离到同池其他健康主机（无健康机时退回池待放目录），记 `kind="pool"`（归入 `sched` 分类），不打扰实验会话；全池所有健康主机均放不下队首时立即报 `pool_wait:<项目>:<车道>:nofit`。
+- **权限与视图**：管理员在侧栏「算力池」（`#/pool`）与总览卡片看到所有池、成员列表、主机与待放清单；普通池成员仅见所属池聚合概况与本人待放清单（剥离 `members` 与他人清单），同时获准只读查看所属池内主机；非池成员不可见池入口与池概况。
 
 ## 平台会话
 

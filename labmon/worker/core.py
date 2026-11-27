@@ -1315,7 +1315,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                      "cpu": _S.cpu_free(S), "cpu_cap": S["cpu_cap"], "other_cpu": S["cpu"],   # other_cpu：认得准的 labmon 之外的核数（fit 判整机独占，同 intruders）
                      "keep": {c["uuid"]: round(c["keep"]) for c in S["cards"] if c["keep"]},   # 各卡给对方留着的 MB（keep_left）：fit 的整卡封顶 card_need 照它
                      "owner": sorted(S["owner"])},        # 不放的卡（对方超出预留或刚回落、有停不了的保活）：fit 的快照照它（fit_snapshot）
-            "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"], **({"pool": True} if q.get("pool") else {}),
+            "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"], **({"pool": q["pool"]} if q.get("pool") else {}),
                         "empty": q.get("empty", False), "sleeping": bool(q.get("sleeping")), "empty_since": q.get("empty_since"),
                         "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {}),
                         "par": q.get("par") or 1} for q in queues],   # 清单声明的并行数（list_par，#147）：看板车道写“并行 k/N”

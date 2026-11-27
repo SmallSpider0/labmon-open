@@ -16,6 +16,7 @@ function route(h = location.hash) {
   if (h === "#/archived") return {kind: "home", drw: {k: "arch", id: ""}};
   const ext = h.match(/^#\/ext\/([^/]+)$/);
   if (ext) return {kind: "home", drw: {k: "ext", id: ext[1] === "new" ? "" : dec(ext[1])}};
+  if (h === "#/pool") return {kind: "pool"};
   const account = h.match(/^#\/me(?:\/(security|tokens|push))?$/);
   if (account) return {kind: "me", tab: account[1] || "overview"};
   const user = h.match(/^#\/admin\/users(?:\/([^/]+)(?:\/(usage))?)?$/);
@@ -232,13 +233,20 @@ function navModel(r) {
   const hal = h => forUser(alertsOf(h)).length;
   const hostState = h => h.ephemeral ? (h.worker_up ? "临时在线" : "临时离线") : h.lan_off ? "本机不在内网" : h.error ? "连不上" : !h.status || !h.worker_up ? "worker 不在" : hal(h) ? "有告警" : "正常";
   const top = [{k: "home", href: "#/", ico: icon("dash"), label: "总览", on: r.kind === "home", bad: n, full: n ? `总览：${n} 条告警` : "总览"}];
+  if (D.pool?.pools?.length || D.pool?.error) {
+    const ps = D.pool.pools || [], pbad = (D.pool.error ? 1 : 0) + Object.values(D.pool.lists || {}).filter(x => x.nofit).length;
+    const pPend = ps.reduce((a, p) => a + (p.pending || 0), 0), pFree = ps.reduce((a, p) => a + (p.free_gpus || 0), 0), pGpus = ps.reduce((a, p) => a + (p.gpus || 0), 0);
+    top.push({k: "pool", href: "#/pool", ico: icon("zap"), label: "算力池", ab: "算力池", on: r.kind === "pool", bad: pbad,
+      full: D.pool.error ? `算力池：配置有误` : `共有算力池 ${ps.length} 个：空 ${pFree}/${pGpus} 张卡，待放 ${pPend} 条`,
+      sub: D.pool.error ? "配置有误" : `${ps.length} 个池 · 空 ${pFree}/${pGpus} 卡 · 待放 ${pPend}`});
+  }
   if (LIVE) top.push({k: "log", href: "#/log", ico: icon("clock"), label: "记录", on: r.kind === "log", full: "记录：事件、平台操作、配置改动", sub: "事件、平台操作、配置改动"});
   const secs = [
     {id: "host", name: "主机", ct: D.hosts.length, empty: "没有在用的主机", items: D.hosts.map(h => ({href: `#/host/${encodeURIComponent(h.id)}`, on: r.kind === "host" && r.id === h.id,
       ico: `<span class="hico">${icon(h.ephemeral ? "cloud" : "server")}<span class="cdot" style="background:${hostDot(h)}"></span></span>`, label: h.label, bad: hal(h), ab: short(h.label),
       full: `${h.label}（${hostState(h)}）：运行 ${jobsOf(h).length}，等待 ${(h.status?.waiting || []).length}${hal(h) ? `，${hal(h)} 条告警` : ""}`,
       sub: `${hostState(h)} · 运行 ${jobsOf(h).length} · 等待 ${(h.status?.waiting || []).length}`}))},
-    {id: "proj", name: "项目", ct: D.projects.length, items: D.projects.map(p => ({href: `#/p/${encodeURIComponent(p.id)}`, on: r.kind === "p" && r.id === p.id,
+    {id: "proj", name: "项目", ct: D.projects.length, empty: "没有项目", items: D.projects.map(p => ({href: `#/p/${encodeURIComponent(p.id)}`, on: r.kind === "p" && r.id === p.id,
       ico: `<span class="av" style="background:${color(p.id)};color:${inkOn(D.colors[p.id])}">${esc(abbr(p.id))}</span>`, label: p.title || p.id, bad: p.alerts || 0,
       full: `${p.title || p.id}${p.alerts ? `：${p.alerts} 条告警` : ""}${p.no_work_since ? `（${NO_WORK}）` : ""}`,
       sub: p.no_work_since ? NO_WORK : p.generated ? `${ts(p.generated)} 更新` : ""})).concat(archItem(r))},
@@ -300,7 +308,7 @@ function side(r) {
 let MORE = false;
 function tabbar(r) {
   const {top, secs, me} = navModel(r), fsec = secs.find(g => g.id === "fleet" || g.id === "myres"), fleet = fsec?.items[0];
-  const rest = secs.filter(g => g !== fsec).flatMap(g => g.items).concat(fsec?.items.slice(1) || []);
+  const rest = top.filter(x => x.k !== "home" && x.k !== "log").concat(secs.filter(g => g !== fsec).flatMap(g => g.items), fsec?.items.slice(1) || []);
   const tab = (x, attr = `href="${x.href}"`) => `<a class="tb${x.on ? " on" : ""}" ${attr} ${x.on ? 'aria-current="page"' : ""}>
     <span class="tbi">${x.ico}${x.bad ? `<span class="tbb">${x.bad > 99 ? "99+" : x.bad}</span>` : x.dot ? `<span class="tbb dot"></span>` : ""}</span><span>${esc(x.label)}</span></a>`;
   const tabs = [top[0], fleet && {...fleet, label: fsec.id === "myres" ? "资源" : "组内"}, top.find(x => x.k === "log")].filter(Boolean)
@@ -326,6 +334,8 @@ function topbar(r) {
   if (r.kind === "host") {
     const h = D.hosts.find(x => x.id === r.id);
     title = h ? h.label : r.id; crumb = "主机"; extra = h ? workerBadge(h) : "";
+  } else if (r.kind === "pool") {
+    title = "算力池"; crumb = "调度";
   } else if (r.kind === "log") {
     title = "记录"; crumb = ""; extra = LIVE ? logTabs(r.f) : "";
   } else if (r.kind === "fleet") {

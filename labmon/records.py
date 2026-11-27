@@ -14,7 +14,7 @@ from .state import append_row, load_rows, state_dir
 EVENT_KEEP_S = 365 * 86400
 # 记录里每种事件的中文名、色调与分类（页面上的标签与筛选都按这张表）
 EVENT_CATS = [("link", "连接"), ("op", "平台操作"), ("config", "配置改动"), ("lease", "租期"), ("borrow", "借用"), ("keepalive", "保活"), ("disk", "共享盘"),
-              ("queue", "队列"), ("board", "看板"), ("report", "问题报告")]
+              ("queue", "队列"), ("sched", "调度"), ("board", "看板"), ("report", "问题报告")]
 EVENT_KINDS = {
     "report": ("问题报告", "mute", "report"),
     "host_down": ("掉线", "bad", "link"), "host_up": ("恢复", "ok", "link"), "container_new": ("新容器", "warn", "link"),
@@ -30,7 +30,7 @@ EVENT_KINDS = {
     "borrow": ("借用", "warn", "borrow"), "borrow_due": ("约定时间", "warn", "borrow"), "borrow_back": ("对方在用", "warn", "borrow"),
     "borrow_return": ("归还", "ok", "borrow"), "borrow_hit": ("挤到对方", "bad", "borrow"), "guest": ("对方超出预留", "warn", "borrow"),
     "owner_oom": ("挤到对方", "bad", "borrow"),
-    "pool": ("算力池", "mute", "borrow"),            # 算力池事件（保留事件种类供历史记录与共有池使用）
+    "pool": ("算力池", "mute", "sched"),             # 共有型算力池落机、空闲窃取与撤离事件（归入 sched 供池成员按项目查看，#212）
     "guard_restart": ("重开保活", "ok", "keepalive"), "guard_delay": ("延后保活", "mute", "keepalive"),
     "guard_start": ("开保活", "ok", "keepalive"), "guard_adopt": ("登记保活", "ok", "keepalive"), "guard_yield": ("让出", "mute", "keepalive"), "guard_fail": ("没开成", "bad", "keepalive"),
     "ka_fight": ("保活被拉起", "warn", "keepalive"), "watchdog": ("看门狗", "warn", "keepalive"),

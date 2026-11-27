@@ -1084,15 +1084,15 @@ class AuthTest(unittest.TestCase):
             self.assertIsNone(run.call_args.kwargs.get("expect_from"))
 
     def test_reg_move_pool_no_tell(self):
-        # #88：算力池放、搬、回池只记事件，不写 tell.jsonl（不叫醒会话；旧代码每搬一次写一条 page:pool:…）；页面上的搬照旧告诉
+        # #88、#212：算力池放、搬、回池只记 sched 分类下的 pool 事件，不写 tell.jsonl（不叫醒会话）；页面上的搬照旧告诉
         PJ.put_config("exp", 'id = "exp"\n')
         it = {"host": "pool", "project": "exp", "root": "/root", "jobs": "q.txt", "stop": "term"}
-        n0 = len(records(cat="config"))
+        n0 = len(records(cat="sched"))
         with mock.patch.object(S.W, "run_out", return_value=(0, "完成")):
-            S.reg_move("g", [it], pool="")
-            S.reg_move("pool", [dict(it, host="g")], pool="g 已还")
+            S.reg_move("g", [it], pool="pool")
+            S.reg_move("pool", [dict(it, host="g")], pool="pool", pool_reason="g 已还")
             self.assertEqual(told(), [])
-            self.assertEqual(len(records(cat="config")) - n0, 2)          # 事件照记
+            self.assertEqual(len(records(cat="sched")) - n0, 2)          # 事件照记并归入调度分类
             S.reg_move("g", [it])
         self.assertEqual([x["key"].split(":")[1] for x in told()], ["move"])
 

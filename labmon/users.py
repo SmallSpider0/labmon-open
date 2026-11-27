@@ -37,7 +37,7 @@ from pathlib import Path
 
 from . import disk as DK
 from . import projects as PJ
-from .config import CLIENT_HEADER, COMMIT_RE, POOL, ConfigError, active_hosts, host_users, pause_by, sched, set_host_users, share_host, user_hosts
+from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, active_hosts, host_users, is_pool_id, pause_by, resolve_pool, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
 from .state import file_sig, snapshot, state_root, write_atomic
 from .worker.pure import same_list  # noqa: F401 — 与 worker 共用唯一实现
@@ -428,8 +428,14 @@ def me(who: Ident, entry: str) -> dict:
     if who.role != "admin":                           # 普通用户：自己的项目与能用的主机（#167；页面上按项目判能不能改，canWrite(pid)）
         acc = access(who)
         out["own"], out["hosts"] = sorted(acc.projects), sorted(acc.allowed)
-    from .pool import member                          # pool 在顶层 import 本模块
-    out["pool_member"] = member(who)
+    from .pool import member, user_pools             # pool 在顶层 import 本模块
+    try:
+        my_pools = [p["host_id"] for p in user_pools(who).values() if p.get("hosts")]
+        out["pools"] = my_pools
+        out["pool_member"] = member(who) if who.role == "admin" else bool(my_pools)
+    except ConfigError:
+        out["pools"] = []
+        out["pool_member"] = who.role == "admin"
     if out["account"]:
         out["sessions"] = sorted(({**_sess_view(k, r), "this": k == who.key} for k, r in d["sessions"].items() if r.get("user") == who.name),
                                  key=lambda x: -(x["seen"] or 0))
@@ -834,14 +840,24 @@ def owns(who: Ident, pid: str) -> bool:
 
 
 def may_host(who: Ident, hid: str) -> bool:
-    """能不能用这台主机（worker add、status、fit、project init，只给某几台的暂停与优先）：管理员都能；普通用户要主机清单里这台的 users 列着他；
-    保留主机 pool（算力池）问 pool.member。"""
+    """能不能用这台主机（worker add、status、fit、project init，只给某几台的暂停与优先）：管理员都能；普通用户要主机清单里这台的 users 列着他，
+    或是该主机所属共有型算力池的成员（只读查看/status/fit/rm；独占池直投 add 由 api.worker/reg_move 统一拦截）；
+    保留池入口 pool / pool:<id> 按 pool.member(who, pid) 判定。"""
     if who.role == "admin":
         return True
-    if str(hid) == POOL:
-        from .pool import member                      # pool 在顶层 import 本模块
-        return member(who)
-    return any(str(h.get("id")) == str(hid) and who.name.lower() in host_users(h) for h in user_hosts())
+    from .pool import member, user_pool_hosts         # pool 在顶层 import 本模块
+    if is_pool_id(str(hid)):
+        try:
+            p = resolve_pool(str(hid))
+        except ConfigError:
+            return False
+        return bool(p) and member(who, p["id"])
+    if any(str(h.get("id")) == str(hid) and who.name.lower() in host_users(h) for h in user_hosts()):
+        return True
+    try:
+        return str(hid) in user_pool_hosts(who)
+    except ConfigError:
+        return False
 
 
 def need_holder(who: Ident, sid: str, cfg: dict | None = None) -> dict:
@@ -870,14 +886,20 @@ class Access:
 
 
 def access(who: Ident, snap: dict | None = None) -> Access:
-    """普通用户的 Access（管理员不用它：调用方先看 role）。snap：全局快照（缺省现读），取他的项目有车道的主机。"""
+    """普通用户的 Access（管理员不用它：调用方先看 role）。snap：全局快照（缺省现读），取他的项目有车道的主机；
+    另并入其所属共有型算力池内的主机（供只读查看主机状态与队列）。"""
+    from .pool import user_pool_hosts                 # pool 在顶层 import 本模块
     me, users = who.name.lower(), _read()["users"]
     projects = {pid for pid in PJ.registered() if owner_of(pid, users) == who.name}
     allowed = {str(h["id"]) for h in user_hosts() if "id" in h and me in host_users(h)}
+    try:
+        pool_hosts = user_pool_hosts(who)
+    except ConfigError:
+        pool_hosts = set()
     snap = snapshot() if snap is None else snap
     lanes = {str(ln.get("host")) for p in (snap or {}).get("projects") or [] if p.get("id") in projects for ln in p.get("lanes") or [] if ln.get("host")}
     ephs = {str(h["id"]) for h in (snap or {}).get("hosts") or [] if h.get("ephemeral") and h.get("project") in projects}
-    return Access(projects, allowed, allowed | lanes | ephs)
+    return Access(projects, allowed, allowed | pool_hosts | lanes | ephs)
 
 
 def need_project(who: Ident, pid: str, new_ok: bool = False) -> None:
@@ -986,7 +1008,10 @@ def need_reg(who: Ident, hid: str, root: str, jobs: str, pid: str | None = None,
 
 # ---------- 普通用户看到的（#160 去掉组内，#167 只留自己的主机与项目） ----------
 def _related(e: dict, acc: Access) -> bool:
-    """一条记录与他有没有关系：主机（host、hosts）是给他看的主机，或项目（project、projects、暂停与优先的 target）是他的。"""
+    """一条记录与他有没有关系：共有池事件（kind=pool）严格按 project 归属本人项目过滤，绝不经池主机泄露他人迁移；
+    其余记录按主机（host、hosts）或项目（project、projects、暂停与优先的 target）判定。"""
+    if e.get("kind") == "pool":
+        return e.get("project") in acc.projects
     hs = [e.get("host")] + list(e.get("hosts") or [])
     ps = [e.get("project"), schedule_project(e)] + list(e.get("projects") or [])
     return any(h in acc.hosts for h in hs if h) or any(p in acc.projects for p in ps if p)
@@ -1116,7 +1141,7 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     项目、已归档的、挪法建议、配色只留他的，登记只留那些主机上他项目的清单（#167）；
     共享盘经 disk.person_storage 仅保留总盘概况与本人目录/告警（叠加可见 scanner 与本人项目的 ours）；
     服务器经 _self_fleet 仅保留持有人是本人的服务器（scope="self"，借用中脱敏对方进程并保留借用人名）；
-    算力池在 PR 1 清理旧借用池后暂为 None（PR 2 接入共有池聚合概况）；
+    共有型算力池经 pool.summary 仅保留所属池聚合概况与本人待放清单（非成员为 None，#212）；
     主备只给 role 与一句通用的话；提醒（notices）、给实验会话的消息（wake）、看板服务所在机的体检（hostcheck，#166）给空值，记录的分类去掉组内的那几类。
     调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上），别人项目的暂停去掉谁下的（by），主人名去掉、只留分组用的 pk（#23）；
     主机状态里别人项目的临时指令同样去掉 by（_ovr_by，#27）。"""
@@ -1124,10 +1149,16 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
         return snap
     acc = acc or access(who, snap)
     person, _ = person_of(who.name)
+    from . import pool as PO
+    try:
+        my_pools = sorted(p["host_id"] for p in PO.user_pools(who).values() if p.get("hosts"))
+        pool_view = PO.summary(snap.get("pool"), who, acc)
+    except ConfigError:
+        my_pools, pool_view = [], None
     out = {k: snap[k] for k in VIEW_KEYS if k in snap}
     out.update(notices=[], wake=[], hostcheck=None,
                event_cats=[c for c in snap.get("event_cats") or EVENT_CATS if c[0] not in FLEET_CATS and c[0] != "report"],
-               access={"own": sorted(acc.projects), "hosts": sorted(acc.allowed)})
+               access={"own": sorted(acc.projects), "hosts": sorted(acc.allowed), "pools": my_pools})
     out["hosts"] = [_ovr_by(h, acc.projects) for h in snap.get("hosts") or [] if h.get("id") in acc.hosts]
     out["projects"] = [p for p in snap.get("projects") or [] if p.get("id") in acc.projects]
     out["archived"] = [a for a in snap.get("archived") or [] if a.get("id") in acc.projects]
@@ -1154,5 +1185,5 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
             out["disk"]["ours"] = {"dirs": [x for x in dk["ours"].get("dirs") or [] if x.get("p") in acc.projects],
                                    "projects": {k: v for k, v in (dk["ours"].get("projects") or {}).items() if k in acc.projects}}
     out["fleet"] = _self_fleet(snap.get("fleet"), person, snap, acc)
-    out["pool"] = None
+    out["pool"] = pool_view
     return out

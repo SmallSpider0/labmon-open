@@ -114,7 +114,7 @@ class DepsMixin:
             cur = [j["name"] for j in run]
             ms, left = _Q.rows_left(q["state"], c[1], cur)
             ms = ms or set()
-            ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": list(cur), "deps": {}, "gang": {}, **({"pool": 1} if q.get("pool") else {}),
+            ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": list(cur), "deps": {}, "gang": {}, **({"pool": q["pool"]} if q.get("pool") else {}),
                   **({"par": q["par"]} if (q.get("par") or 1) > 1 else {}),
                   "held": "paused" if "paused" in ms else (self.override_hit({"project": q["project"]}, ("pause",))
                                                            or self.override_hit({"project": q["project"]}, ("drain",)) or [None])[0]}
@@ -197,24 +197,35 @@ class DepsMixin:
         self.dep_miss = {k: t for k, t in self.dep_miss.items() if k in want and k not in idx}
 
     def pool_view(self, now):
-        """算力池里待放的各清单还要跑的（#25）：{"目录|清单": {head 队首（并行清单取窗口里第一行依赖满足的，#147）, n 还要跑几行, dep 队首的依赖没满足时 [状态, 原因]（dep_block），held 清单暂停,
+        """共有型算力池里待放的各清单还要跑的（#25、#212）：{"<pool_host_id>|目录|清单": {pool, pool_id, head 队首（并行清单取窗口里第一行依赖满足的，#147）,
+        n 还要跑几行, dep 队首的依赖没满足时 [状态, 原因]（dep_block）, dep_end 预计依赖满足时刻（可省）, held 清单暂停,
         elsewhere 交给池之前在别的主机放行、还没收尾的那一格 [主机, 任务]（不算在 head、n 里，#80）}}；
         池里登记着的每条都列（#86）：都跑完了的 head 为 null、n 为 0；这台读不到清单文件的另带 err（一句原因，head 为 null）。
         池目录没有 worker：同一 worker_home 下各台的 worker 都按自己的 dep_state 算一份写进状态的 pool_heads，看板（pool._heads）逐条取最新的那份
-        （读得到的优先）：哪一份里都没有的是还没有 worker 读到，不当成跑完了；有行要跑、依赖满足、没暂停、没有 elsewhere 的才放、才为它借。"""
+        （读得到的优先）：哪一份里都没有的是还没有 worker 读到，不当成跑完了；有行要跑、依赖满足、没暂停、没有 elsewhere 的才落机。"""
+        ends = getattr(self, "ends", None)
+        if not isinstance(ends, dict):
+            ends = self.dep_base_ends()
+
         def head(r):                              # 并行清单（#147）取窗口里第一行依赖满足的；都没满足报第一行的
-            blk = None
+            blk, b_req = None, None
             for n, h in r.get("win") or [(r["name"], r)]:
-                b = self.dep_block(dict(r, name=n, deps=h.get("deps"), deps_any=h.get("deps_any")), now)
+                req = dict(r, name=n, deps=h.get("deps"), deps_any=h.get("deps_any"))
+                b = self.dep_block(req, now)
                 if not b:
-                    return n, None
-                blk = blk or b
-            return r["name"], list(blk)
+                    return n, None, None
+                if blk is None:
+                    blk, b_req = b, req
+            de = dep_end(dep_keys(b_req), now, ends, self.dead) if blk and blk[0] == "wait" and b_req else None
+            return r["name"], list(blk), (round(de) if de and de > 0 else None)
         out = {}
         for r in self.pool_heads:
-            n, dep = head(r) if r["name"] else (None, None)
-            out["%s|%s" % (os.path.normpath(r["root"]), r["queue"])] = dict(
-                {"head": n, "n": r["n"], "held": r["held"], "elsewhere": r["elsewhere"], "dep": dep},
+            phid = r.get("pool_host") or _P.POOL
+            pid = r.get("pool_id") or _P.POOL
+            n, dep, de = head(r) if r["name"] else (None, None, None)
+            out["%s|%s|%s" % (phid, os.path.normpath(r["root"]), r["queue"])] = dict(
+                {"pool": phid, "pool_id": pid, "head": n, "n": r["n"], "held": r["held"], "elsewhere": r["elsewhere"], "dep": dep},
+                **({"dep_end": de} if de is not None else {}),
                 **({"err": r["err"]} if r.get("err") else {}),
                 **({"sleeping": True} if r.get("sleeping") else {}))
         return out

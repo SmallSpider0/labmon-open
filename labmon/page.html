@@ -275,8 +275,11 @@ function topline() {
   const age = Date.now() / 1000 - NOW, stale = age > (D.thresholds?.stale_s ?? 420);   // 与 labmon wait 的 collector_stale 同一门槛（config.stale_limit，缺省配置是 7 分钟）
   const gone = D.hosts.filter(h => h.returned && !retShown(h));
   const pl = poolLanes().filter(l => l.unfinished);
-  const hosts = D.hosts.filter(h => !gone.includes(h) && (!h.pool || pl.length || !h.ok)).map(h => {
-    if (h.pool) return `<span class="nw ${h.ok ? "mut" : ""}" style="${h.ok ? "" : "color:var(--bad)"}" ${tip("交给算力池、还没放到哪台的清单：看板挑一台算力池服务器放过去\n" + (pl.map(l => `${laneName(l, D.hosts)}：${laneState(l)}`).join("\n") || "") + (h.ok ? "" : "\n" + (h.error || "这一轮没读到池里的清单")))}>算力池里待放 ${pl.length} 条清单</span>`;
+  const hosts = D.hosts.filter(h => !gone.includes(h) && (!h.pool || pl.some(l => l.host === h.id) || !h.ok)).map(h => {
+    if (h.pool) {
+      const ph = pl.filter(l => l.host === h.id);
+      return `<span class="nw ${h.ok ? "mut" : ""}" style="${h.ok ? "" : "color:var(--bad)"}" ${tip("交给算力池、还没放到哪台的清单：看板挑一台算力池服务器放过去\n" + (ph.map(l => `${laneName(l, D.hosts)}：${laneState(l)}`).join("\n") || "") + (h.ok ? "" : "\n" + (h.error || "这一轮没读到池里的清单")))}>${esc(h.label || "算力池")}里待放 ${ph.length} 条清单</span>`;
+    }
     if (h.returned) return `<span class="nw mut" ${tip(`已归还（${ts(h.returned)}），不再连接；还有任务没跑完`)}><span class="cdot" style="background:var(--faint)"></span> ${esc(h.label)} · 已归还</span>`;
     if (h.ephemeral) {
       const cv = h.ok ? cpuView(h) : null;

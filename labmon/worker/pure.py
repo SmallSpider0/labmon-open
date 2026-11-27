@@ -13,7 +13,33 @@ import time
 GIB = 2 ** 30                  # 容量单位（字节 → GiB）
 STALE_S = 180                  # status.json 这么久没更新（按里面的 t）就算那台 worker 不在
 IDLE_REG_S = 2 * 86400         # 跑空的登记满这么久自动休眠（只看清单 file_sig，不再读状态目录与 .env；#164）
-POOL = "pool"                  # 算力池的保留主机 id：池里待放的清单登记在 hosts/pool/queues/
+POOL = "pool"                  # 算力池的保留主机 id：默认池待放清单登记在 hosts/pool/queues/
+POOL_PREFIX = "pool:"          # 命名共有池的伪主机 id 前缀：pool:<id> 对应 hosts/pool:<id>/queues/
+POOL_ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_-]{0,31}$")
+
+
+def pool_host_id(pid):
+    """共有池 id → 伪主机 id（唯一实现）：默认池 "pool" → "pool"，命名池 "a100" → "pool:a100"。"""
+    pid = str(pid or "").strip()
+    if not POOL_ID_RE.fullmatch(pid):
+        raise ValueError("算力池 id 不合法：%r（需字母开头，含字母/数字/_/-，最多 32 位）" % (pid,))
+    return POOL if pid == POOL else POOL_PREFIX + pid
+
+
+def is_pool_id(hid):
+    """主机 id 是否为共有池伪主机 id（"pool" 或合法的 "pool:<id>"，唯一实现）。"""
+    if not isinstance(hid, str):
+        return False
+    if hid == POOL:
+        return True
+    return hid.startswith(POOL_PREFIX) and bool(POOL_ID_RE.fullmatch(hid[len(POOL_PREFIX):]))
+
+
+def pool_id_of(hid):
+    """伪主机 id → 共有池 id（唯一实现）："pool" → "pool"，"pool:a100" → "a100"，非池返回 None。"""
+    if not is_pool_id(hid):
+        return None
+    return POOL if hid == POOL else hid[len(POOL_PREFIX):]
 
 # 占位任务（清单里插的“等条件再放行”的 hold / pause）：按词认，不占卡、不独占、不进估时比值与等待统计
 HOLD_RE = re.compile(r"(?i)(?:^|[_.\-\d])(?:hold|pause)(?:$|[_.\-\d])")

@@ -19,7 +19,7 @@ from . import pool as P
 from . import projects as PJ
 from . import users as U
 from . import workerctl as W
-from .config import GIB, HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, host_platform, host_share, host_ssh_key, hosts_file, is_standalone, set_returned, set_sched_ovr, user_hosts
+from .config import GIB, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, host_platform, host_pool, host_share, host_ssh_key, hosts_file, is_pool_id, is_standalone, pools, resolve_pool, set_returned, set_sched_ovr, user_hosts
 from .worker import cpu_line, ka_lines
 from .worker.pure import other_load, other_load_text
 from .records import EVENT_KINDS, project_rows
@@ -76,9 +76,13 @@ def hosts() -> dict:
     同时返回分类字段与托管公钥指纹（绝不返回私钥路径或原文）。"""
     hf = hosts_file()
     if not hf.exists():
-        return {"missing": str(hf), "hosts": []}
+        return {"missing": str(hf), "hosts": [], "pools": []}
     keys = ("id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until", "python", "cpu_quota", "mps_vram_gb")
     act, full = active_hosts(), {str(h["id"]): h for h in all_hosts()}
+    try:
+        pm = pools()
+    except ConfigError:
+        pm = {}
     out = []
     for raw in user_hosts():
         hid = str(raw.get("id"))
@@ -91,6 +95,7 @@ def hosts() -> dict:
                 fp = info.get("fingerprint") if info else None
             except PF.PlatformError:
                 fp = None
+        hp = host_pool(hid, pm)
         out.append({
             **{k: raw.get(k) for k in keys},
             "worker_home": h.get("worker_home"),
@@ -105,8 +110,14 @@ def hosts() -> dict:
             "ssh_key_mode": sk,
             "ssh_key_fp": fp,
             "home_with": [x for x in home_peers(hid, act) if x != hid],
+            "pool_id": hp["id"] if hp else None,
+            "pool_host_id": hp["host_id"] if hp else None,
+            "pool_exclusive": bool(hp["exclusive"]) if hp else False,
         })
-    return {"missing": None, "hosts": out}
+    p_out = [{"id": p["id"], "host_id": p["host_id"], "label": p["label"], "hosts": p["hosts"],
+              "active_hosts": p["active_hosts"], "exclusive": p["exclusive"], "worker_home": p["worker_home"]}
+             for p in pm.values()]
+    return {"missing": None, "hosts": out, "pools": p_out}
 
 
 def host(sub: str, target: str, at: float | None = None, now: bool = False) -> dict:
@@ -196,19 +207,50 @@ def override(verb: str, target: str, host_ids: list[str] | None, until: float | 
 
 
 def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project: str | None = None, stop: str | None = None, own: bool = False,
-           lst: bool = False, may=None, *, cache: bool = False, scratch: bool = False, dry_run: bool = False, yes: bool = False) -> dict:
+           lst: bool = False, may=None, who: U.Ident | None = None, *,
+           cache: bool = False, scratch: bool = False, dry_run: bool = False, yes: bool = False) -> dict:
     """labmon worker start|stop|status|add|rm|limit|fit|clean：经 workerctl.run_out 一次 ssh；输出是 worker 打印的原文。
     status 成功时末尾补一行与这台共用 worker 目录的在用主机（home_text，#35 A）；may：普通用户能用哪台（None 不限），只列他能用的。
-    hid 是 pool（算力池）时只认 add、rm；rm 在清单此刻登记的地方撤（pool.locate）。
-    fit --list（lst）：看与这台共用 worker 目录的在用主机（config.home_peers；may 是普通用户能用哪台，None 不限），在这台上读它们的状态（#35 B）。
+    hid 是共有池入口（pool 或 pool:<id>，#212）时支持 add、rm、status、fit --list（单池时 pool 自动指向该池）；
+    rm 在清单此刻登记的地方撤（pool.locate）；独占共有池（exclusive=true）内的单台常驻主机禁止直接 worker add。
+    fit --list（lst）：看与这台共用 worker 目录的在用主机（config.home_peers；池入口展开池内在用主机），在这台上读它们的状态（#35 B）。
     clean（#114）：仅清理 <LABMON_LOCAL>/{cache,jobs} 自管缓存与已结束单格临时，默认 --dry-run，显式 --yes 才删，绝不触碰 projects/ 产物。"""
     if sub not in WORKER_ACTS or not hid:
         return usage(f"不认识的 worker 动作 {sub}")
-    if hid == POOL and sub not in ("add", "rm"):         # 算力池只收清单、撤清单：没有 worker，状态看项目页
-        return usage(f"算力池只能 worker add pool、worker rm pool：池里的清单在项目页看（{POOL_LABEL}那一栏），放到哪台由看板定")
-    if hid == POOL and sub == "rm" and len(rest) == 2:   # 撤回：清单此刻登记在哪就在哪撤
-        hid = P.locate(rest[0], rest[1])
     try:
+        if is_pool_id(hid) or hid.startswith("pool:"):
+            if sub not in ("add", "rm", "status", "fit"):
+                return usage(f"算力池入口只支持 worker add / rm / status / fit --list（不支持 worker {sub}）")
+            pcfg = resolve_pool(hid)
+            if pcfg is None:
+                if sub == "rm" and len(rest) == 2:
+                    hid = P.locate(rest[0], rest[1])
+                else:
+                    return {"rc": 3, "out": "", "err": "[labmon] 主机清单（hosts.toml）尚未配置共有型算力池（[pools.<id>]）\n"}
+            else:
+                if sub == "status":
+                    projs = U.access(who).projects if own and who else None
+                    return {"rc": 0, "out": P.status_text(pcfg, snapshot(), own=own, projects=projs), "err": ""}
+                if sub == "fit":
+                    if not lst:
+                        return usage(f"算力池评估请用：labmon worker fit {pcfg['host_id']} ROOT JOBS --list --project <项目>")
+                    if not pcfg["active_hosts"]:
+                        return {"rc": 3, "out": "", "err": f"[labmon] 算力池「{pcfg['label']}」（{pcfg['host_id']}）目前没有在用主机\n"}
+                    if project and (reason := unknown_project(project, require=False)):
+                        return usage(reason)
+                    rc, out = W.run_out("fit", pcfg["active_hosts"][0], rest, project=project, list=True,
+                                        hosts=",".join(pcfg["active_hosts"]))
+                    return {"rc": rc, "out": out, "err": ""}
+                if sub == "rm" and len(rest) == 2:
+                    hid = P.locate(rest[0], rest[1], pid=pcfg["id"])
+                else:
+                    hid = pcfg["host_id"]
+        elif sub == "add":
+            if ep := P.exclusive_pool(hid):
+                return {"rc": 2, "out": "",
+                        "err": f"[labmon] 主机 {hid} 属于独占共有算力池「{ep['label']}」（{ep['host_id']}），禁止直接登记到单台；"
+                               f"请改用：labmon worker add {ep['host_id']} ROOT JOBS --project <项目>"
+                               "（如需允许直投，在 hosts.toml 对应池下设 exclusive = false）\n"}
         with PJ._reg_locked() if sub == "add" else nullcontext():
             if project and sub not in ("rm", "clean") and (reason := unknown_project(project, require=sub == "add")):
                 return usage(reason)

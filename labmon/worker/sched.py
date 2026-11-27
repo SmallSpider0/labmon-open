@@ -1310,80 +1310,103 @@ class SchedMixin:
         return self.peer
 
     def pool_todo(self, now):
-        """算力池里待放的清单还会跑的行（#24）：peers 一起读，按别的主机的 todo 的样子 [("pool", 0, now, 清单项)] 记进 peer_todo，
-        别处 after= 等它时算还会跑（不报找不到，dep_note 写在池里等）。池目录没有 worker、没有状态，按登记与清单的状态目录现读（清单按修改时间缓存）。
+        """共有型算力池里待放的清单还会跑的行（#24、#212）：peers 一起读同 worker_home 下全部池待放目录（hosts/pool/queues 与 hosts/pool:*/queues），
+        按别的主机的 todo 的样子 [(pool_host_id, 0, now, 清单项)] 记进 peer_todo，别处 after= 等它时算还会跑（不报找不到，dep_note 写在池里等）。
+        池目录没有 worker、没有状态，按登记与清单的状态目录现读（清单按修改时间缓存）。
+        读 .env、清单正文或已存在的状态目录失败时明确报 err、不进休眠也不误判为 done（#99 PR #93）。
         交给池之前在别的主机上放行、还没收尾的那一格（状态目录的 current，run_elsewhere 认：放它的主机没归还）不算池里的：它在那台跑着
         （那台状态 todo 里列着），这条清单在它跑完之前放到哪台都一行开不了，队首取它后面那行、记 elsewhere [主机, 任务]，看板等它跑完再放（#80）。
         跑空满 IDLE_REG_S（2 天，#164）的池清单同样自动休眠：之后每轮只用 file_sig 看清单文件变没变，不读 .env 与状态目录，文件一变自动醒来。"""
         out, self.pool_heads = [], []
         if not hasattr(self, "pool_idle"):
             self.pool_idle, self.pool_reg_cache, self.opars = {}, {}, {}
-        qdir = os.path.join(_C.HOME, "hosts", _C.POOL, "queues")
+        qdirs = [(os.path.basename(os.path.dirname(d)), d)
+                 for d in sorted(glob.glob(os.path.join(_C.HOME, "hosts", "*", "queues")))
+                 if _P.is_pool_id(os.path.basename(os.path.dirname(d)))]
         seen_k = set()
-        for f, reg, _rsig, _mtime, changed in _Q.regs(qdir, cache=self.pool_reg_cache, with_meta=True):
-            if isinstance(reg, Exception) or not (reg.get("root") and reg.get("jobs") and reg.get("project")):
-                continue
-            key, root, jobs = reg["_slug"], reg["root"], reg["jobs"]
-            seen_k.add(key)
-            if changed:
-                self.pool_idle.pop(key, None)
-            idle = self.pool_idle.get(key)
-            jpath = os.path.join(root, jobs)
-            if idle and idle.get("sleep"):
-                if _P.file_sig(jpath) == idle.get("sig"):
-                    self.pool_heads.append({"project": reg["project"], "root": root, "queue": jobs, "name": None, "n": 0,
-                                            "held": None, "elsewhere": None, "sleeping": True})
+        for phid, qdir in qdirs:
+            pid = _P.pool_id_of(phid)
+            for f, reg, _rsig, _mtime, changed in _Q.regs(qdir, cache=self.pool_reg_cache, with_meta=True):
+                if isinstance(reg, Exception) or not (reg.get("root") and reg.get("jobs") and reg.get("project")):
                     continue
-                self.pool_idle.pop(key, None)
-            try:
-                q = _Q.load_queue(reg)
-            except (OSError, ValueError, KeyError, TypeError, AttributeError):
-                continue
-            jsig0 = _P.file_sig(q["jobs_path"])             # 读清单前的签名：进休眠前复核一致，避免读后追加的新行被吞（#164）
-            rows = self.list_of(q["jobs_path"])
-            if rows is None:                                # 这台读不到清单文件：照样列出来（带原因），看板取读得到的那台的（#86）
-                self.pool_idle.pop(key, None)
-                self.pool_heads.append({"project": q["project"], "root": q["root"], "queue": q["jobs"], "name": None, "n": 0, "held": None,
-                                        "elsewhere": None, "err": "%s 上读不到清单 %s" % (self.host, q["jobs_path"])})
-                continue
-            away = [(c, h) for c in _Q.read_current(q["state"]) for h in [_Q.run_elsewhere(_C.POOL, q, c, self.gone)] if h]   # 并行清单可能有几行（#147）
-            cur, other = away[0] if away else (None, None)
-            ms, left = _Q.rows_left(q["state"], rows, {c[0] for c, _ in away})
-            n, h = left[0] if left else (None, {})          # 队首：看板放之前看它还有没有、依赖满足没有（pool_view）；都跑完了的也列（n 为 0）
-            jsig = _P.file_sig(q["jobs_path"])
-            cp = self.opars.get(q["jobs_path"])
-            par_ok = True
-            if cp and cp[0] == jsig:
-                par = cp[1]
-            else:
-                ptxt = _C.read(q["jobs_path"], None)
-                par_ok = ptxt is not None
-                par = _Q.list_par(ptxt or "")   # 并行清单（#147）：窗口里前 par 行哪一行依赖满足都能放
-                if par_ok and jsig is not None and _P.file_sig(q["jobs_path"]) == jsig:
-                    self.opars[q["jobs_path"]] = (jsig, par)
-            paused = "paused" if ms and "paused" in ms else None
-            sleeping = False
-            if not left and not away and not paused:
-                ent = self.pool_idle.get(key)
-                if ent is None:
-                    since = self._idle_start(q, now, False) if hasattr(self, "_idle_start") else now
-                    ent = self.pool_idle[key] = {"since": since, "sig": None, "sleep": False}
-                if now - ent["since"] >= _P.IDLE_REG_S and par_ok and q.get("_env_ok", True) and (ms is not None or not os.path.exists(q["state"])) and jsig0 is not None and jsig == jsig0:
-                    ent["sig"] = jsig0
-                    ent["sleep"] = True
-                    sleeping = True
-            else:
-                self.pool_idle.pop(key, None)
-            self.pool_heads.append({"project": q["project"], "root": q["root"], "queue": q["jobs"], "name": n, "n": len(left),
-                                    "deps": h.get("deps"), "deps_any": h.get("deps_any"), "held": paused,
-                                    "elsewhere": [other, cur[0]] if other else None, "win": left[:par] if par > 1 else None,
-                                    **({"sleeping": True} if sleeping else {})})
-            if not left:
-                continue
-            ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [n for n, _ in left], "gang": {},
-                  "deps": {n: [[p, x] for p, x, _ in d] for n, h in left for d in [_DP.dep_keys(dict(h, project=q["project"]))] if d},
-                  "held": paused, **({"par": par} if par > 1 else {})}
-            out.append((_C.POOL, 0.0, now, ln))
+                key, root, jobs = (phid, reg["_slug"]), reg["root"], reg["jobs"]
+                seen_k.add(key)
+                if changed:
+                    self.pool_idle.pop(key, None)
+                idle = self.pool_idle.get(key)
+                jpath = os.path.join(root, jobs)
+                if idle and idle.get("sleep"):
+                    if _P.file_sig(jpath) == idle.get("sig"):
+                        self.pool_heads.append({"pool_host": phid, "pool_id": pid, "project": reg["project"], "root": root, "queue": jobs,
+                                                "name": None, "n": 0, "held": None, "elsewhere": None, "sleeping": True})
+                        continue
+                    self.pool_idle.pop(key, None)
+                try:
+                    q = _Q.load_queue(reg)
+                except (OSError, ValueError, KeyError, TypeError, AttributeError) as e:
+                    self.pool_idle.pop(key, None)
+                    self.pool_heads.append({"pool_host": phid, "pool_id": pid, "project": reg["project"], "root": root, "queue": jobs,
+                                            "name": None, "n": 0, "held": None, "elsewhere": None,
+                                            "err": "%s 上读不到登记配置：%s" % (self.host, e)})
+                    continue
+                if not q.get("_env_ok", True):
+                    self.pool_idle.pop(key, None)
+                    self.pool_heads.append({"pool_host": phid, "pool_id": pid, "project": q["project"], "root": q["root"], "queue": q["jobs"],
+                                            "name": None, "n": 0, "held": None, "elsewhere": None,
+                                            "err": "%s 上读不到环境文件 %s" % (self.host, _Q.env_path(q["root"], q["jobs"]))})
+                    continue
+                jsig0 = _P.file_sig(q["jobs_path"])             # 读清单前的签名：进休眠前复核一致，避免读后追加的新行被吞（#164）
+                rows = self.list_of(q["jobs_path"])
+                if rows is None:                                # 这台读不到清单文件：照样列出来（带原因），看板取读得到的那台的（#86、#99）
+                    self.pool_idle.pop(key, None)
+                    self.pool_heads.append({"pool_host": phid, "pool_id": pid, "project": q["project"], "root": q["root"], "queue": q["jobs"],
+                                            "name": None, "n": 0, "held": None, "elsewhere": None,
+                                            "err": "%s 上读不到清单 %s" % (self.host, q["jobs_path"])})
+                    continue
+                away = [(c, h) for c in _Q.read_current(q["state"]) for h in [_Q.run_elsewhere(phid, q, c, self.gone)] if h]   # 并行清单可能有几行（#147）
+                cur, other = away[0] if away else (None, None)
+                ms, left = _Q.rows_left(q["state"], rows, {c[0] for c, _ in away})
+                if ms is None and os.path.exists(q["state"]):
+                    self.pool_idle.pop(key, None)
+                    self.pool_heads.append({"pool_host": phid, "pool_id": pid, "project": q["project"], "root": q["root"], "queue": q["jobs"],
+                                            "name": None, "n": 0, "held": None, "elsewhere": None,
+                                            "err": "%s 上读不到状态目录 %s" % (self.host, q["state"])})
+                    continue
+                n, h = left[0] if left else (None, {})          # 队首：看板放之前看它还有没有、依赖满足没有（pool_view）；都跑完了的也列（n 为 0）
+                jsig = _P.file_sig(q["jobs_path"])
+                cp = self.opars.get(q["jobs_path"])
+                par_ok = True
+                if cp and cp[0] == jsig:
+                    par = cp[1]
+                else:
+                    ptxt = _C.read(q["jobs_path"], None)
+                    par_ok = ptxt is not None
+                    par = _Q.list_par(ptxt or "")   # 并行清单（#147）：窗口里前 par 行哪一行依赖满足都能放
+                    if par_ok and jsig is not None and _P.file_sig(q["jobs_path"]) == jsig:
+                        self.opars[q["jobs_path"]] = (jsig, par)
+                paused = "paused" if ms and "paused" in ms else None
+                sleeping = False
+                if not left and not away and not paused:
+                    ent = self.pool_idle.get(key)
+                    if ent is None:
+                        since = self._idle_start(q, now, False) if hasattr(self, "_idle_start") else now
+                        ent = self.pool_idle[key] = {"since": since, "sig": None, "sleep": False}
+                    if now - ent["since"] >= _P.IDLE_REG_S and par_ok and q.get("_env_ok", True) and (ms is not None or not os.path.exists(q["state"])) and jsig0 is not None and jsig == jsig0:
+                        ent["sig"] = jsig0
+                        ent["sleep"] = True
+                        sleeping = True
+                else:
+                    self.pool_idle.pop(key, None)
+                self.pool_heads.append({"pool_host": phid, "pool_id": pid, "project": q["project"], "root": q["root"], "queue": q["jobs"],
+                                        "name": n, "n": len(left), "deps": h.get("deps"), "deps_any": h.get("deps_any"), "held": paused,
+                                        "elsewhere": [other, cur[0]] if other else None, "win": left[:par] if par > 1 else None,
+                                        **({"sleeping": True} if sleeping else {})})
+                if not left:
+                    continue
+                ln = {"project": q["project"], "root": q["root"], "queue": q["jobs"], "jobs": [x for x, _ in left], "gang": {},
+                      "deps": {x: [[p, y] for p, y, _ in d] for x, h_ in left for d in [_DP.dep_keys(dict(h_, project=q["project"]))] if d},
+                      "held": paused, **({"par": par} if par > 1 else {})}
+                out.append((phid, 0.0, now, ln))
         self.pool_idle = {k: v for k, v in self.pool_idle.items() if k in seen_k}
         return out
 

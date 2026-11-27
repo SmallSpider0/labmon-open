@@ -32,7 +32,7 @@ from pathlib import Path, PurePosixPath
 
 from . import lan as L
 from . import lease as LS
-from .config import POOL, ConfigError, active_hosts, all_hosts, home_host, home_key, host_defaults, hosts_file, is_standalone, pool_home, shell_path, user_hosts
+from .config import POOL, ConfigError, active_hosts, all_hosts, home_host, home_key, host_defaults, hosts_file, is_pool_id, is_standalone, pool_home, shell_path, user_hosts
 
 from .worker import queue_stop_path
 
@@ -58,10 +58,10 @@ def via(hid: str, home: str | tuple | None = None) -> dict:
     act = active_hosts()
     if any(str(h["id"]) == hid for h in act):
         return host_conf(hid)
-    if hid == POOL and home is None:                 # 算力池（#24）：登记在 pool_home 下，同样经共用这个 worker_home 的在用主机代办
-        home = pool_home()
+    if is_pool_id(hid) and home is None:                 # 共有型算力池（#24、#212）：登记在对应池的 worker_home 下，经共用该目录的在用主机代办
+        home = pool_home(hid)
         if home is None:
-            raise ConfigError("主机清单里没有自用主机：算力池的登记没有地方放（池登记放在自用主机的 worker 目录下）")
+            raise ConfigError("主机清单里没有可用主机：算力池的登记没有地方放")
     old_h = next((h for h in all_hosts() if str(h["id"]) == str(hid)), None)
     if old_h and is_standalone(old_h):
         raise ConfigError(f"{hid} 是独立主机且已不在用，没有共享盘代办主机：它的登记现在动不了")
@@ -309,8 +309,8 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
             return 2, str(e)
     if sub in CHANGE or (sub == "clean" and opts.get("yes")):
         LS.need(f"worker {sub}")
-    h = via(hid, home) if sub == "rm" or hid == POOL else host_conf(hid)
-    if sub == "add" and hid != POOL and args:
+    h = via(hid, home) if sub == "rm" or is_pool_id(hid) else host_conf(hid)
+    if sub == "add" and not is_pool_id(hid) and args:
         if bad := _check_standalone_root(h, args[0]):
             return 2, bad
     home, py = h["worker_home"], h["python"]
@@ -354,12 +354,15 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
     extra = " ".join(shlex.quote(a) for a in args) + (f" --gpus {shlex.quote(gpus)}" if gpus else "")
     extra += " --idle" if opts.pop("idle", False) else ""
     extra += " --list" if opts.pop("list", False) else ""    # fit --list（#35 B）：位置参数是 ROOT JOBS，hosts 是看哪几台
-    extra += " --pool" if opts.pop("pool", False) else ""    # add：算力池放过去的（#79），登记里记 pool
+    extra += " --json" if opts.pop("json", False) else ""    # fit --list --json（#25、#212）：共有池单连接评估队首
+    pool_opt = opts.pop("pool", None)
+    if pool_opt:                                             # add：共有池落机标记池 id（#212）
+        extra += f" --pool {shlex.quote(pool_opt if isinstance(pool_opt, str) else POOL)}"
     extra += " --cache" if opts.pop("cache", False) else ""
     extra += " --scratch" if opts.pop("scratch", False) else ""
     extra += " --dry-run" if opts.pop("dry_run", False) else ""
     extra += " --yes" if opts.pop("yes", False) else ""
-    extra += "".join(f" --{k.replace('_', '-')} {shlex.quote(v)}" for k, v in opts.items() if v)
+    extra += "".join(f" --{k.replace('_', '-')} {shlex.quote(str(v))}" for k, v in opts.items() if v)
     rc, out = ssh(h, f"{w} {'ls' if sub == 'status' else sub} {extra} --host {hq}")   # 位置参数要在 --host 前
     if opts.get("expect_project") and rc != 0 and "unrecognized arguments: --expect-project" in out:
         return rc, "这台主机的 worker 还不支持按项目核对登记，请让管理员更新 worker 后再试"

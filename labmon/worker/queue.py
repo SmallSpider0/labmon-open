@@ -162,7 +162,7 @@ def load_queue(reg, *, read_env=True):
             "env": ev, "_env_ok": env_ok, "gpus": reg.get("gpus"),
             # 项目 id 就是登记时写的 --project（add 必写）
             "project": project, "stop": reg.get("stop") or "boundary",
-            "pool": bool(reg.get("pool")),        # 算力池放过来的（#79，worker add --pool）：看板认哪些清单是池放的（自用主机上与主人的清单分开），offers 不叫会话挪它
+            "pool": reg.get("pool") if isinstance(reg.get("pool"), str) and reg.get("pool") else (_P.POOL if reg.get("pool") else None),        # 算力池放过来的（#212 存池 id 字符串；兼容旧 1/True）：看板精确认归属，offers 不叫会话挪它
             "added_t": reg_added(reg),            # 登记时刻（epoch 秒）：状态里带出去，看板在同一清单登记在两台在用主机上时取晚的（collect.reg_queues）
             "state": st, "logs": lg}
 
@@ -451,17 +451,12 @@ def job_cmd(q, name, rows=None):
 
 
 def pool_refuse(path, stop, gpus):
-    """worker add --host pool（交给算力池，#24）不收的清单：返回原因；收为 None。池里的清单会放到借来的服务器上跑，主人回来或收回时要停下重排：
-    停法不能是 boundary（等当前任务跑完，收回停不下来），不能限卡（--gpus：各台卡号不同），不能有成组（gang=：借来的随时要还，跨台成组太脆）与占位任务。"""
-    if stop == "boundary":
-        return "交给算力池的清单不能用 --stop boundary：收回时要停得下来，用 --stop term（缺省）或 --stop file:<相对 ROOT 的路径>"
+    """worker add --host pool[:<id>]（交给共有型算力池，#212）不收的清单：返回原因；收为 None。
+    共有池无收回强杀，放行缺省 --stop boundary 与占位任务（#87）；仅禁止 --gpus（各台卡号不同）与成组 gang=（跨机成组需固定落点）。"""
     if gpus:
         return "交给算力池的清单不能写 --gpus：放到哪台、用哪几张卡由看板定"
     rows = parse_jobs(_C.read(path, "") or "")
     gang = [n for n, c in rows if hints(c).get("gang")]
-    hold = [n for n, _ in rows if _C.is_hold(n)]
     if gang:
-        return "交给算力池的清单不能有成组的行（gang=）：%s。成组的放到自己的主机上跑" % "、".join(gang[:3])
-    if hold:
-        return "交给算力池的清单不能有占位任务：%s。要等别的任务就写 after=" % "、".join(hold[:3])
+        return "交给算力池的清单不能有成组的行（gang=）：%s。成组的放到固定主机上跑" % "、".join(gang[:3])
     return None
