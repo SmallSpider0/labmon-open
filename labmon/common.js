@@ -267,15 +267,13 @@ function borrowText(b, now) {
   const fg = (b.back?.length ? `；${who} 用得比预留多（${b.back.slice(0, 2).join("；")}），这部分不再放新任务` : "")
     + (b.tight ? `；快撞上限（${b.tight}），正在跑的照常跑完，要停和 ${who} 商量后点「现在停」` : "");
   if (b.swap) return (b.cutoff && now >= b.cutoff ? `到了约定时间：不再放新任务，跑完后在组内页「换人」换回给 ${who}` : `换给自己借来的，${cut}到时换回给 ${who}`) + fg;
-  if (b.pool) return b.returning ? `算力池要还给 ${who}：不再放新任务，在跑的跑完就还，还完开保活`      // 算力池借来的（#25）：持有人开了入池，看板自动借还
-    : `算力池借 ${who} 的（${who} 开了入池），跑池里组里交上来的清单；${b.cutoff ? `${tsNear(b.cutoff)} 前跑得完的才放行（${b.why}）；` : ""}${who} 回来用、关了入池、出了时段或没活了就还`;
   if (b.returning) return `要还给 ${who}：不再放新任务，${b.overdue ? "过了约定时间，" : ""}正在跑的跑完就还，还完开保活` + fg;
   return `借 ${who} 的，${cut}到点不停正在跑的，跑完自动还` + (b.for ? `；只给 ${b.for.join("、")} 用` : "") + (b.keep ? `；${keepText(b.keep)}` : "") + fg;
 }
 // 借用的小标签：对方在用、过了约定时间标红；悬停是 borrowText。pre、post：标签前后另加的字
 function borrowBadge(b, now, pre = "", post = "") {
   const due = b.returning || (b.cutoff && now >= b.cutoff), bad = b.back?.length || b.overdue;
-  const t = b.back?.length ? `${b.holder} 在用` : b.overdue ? "过了约定时间" : due ? (b.swap ? "到了约定时间" : "跑完就还") : b.pool ? "算力池借着" : b.cutoff ? `到 ${tsNear(b.cutoff)}` : "没约定时间";
+  const t = b.back?.length ? `${b.holder} 在用` : b.overdue ? "过了约定时间" : due ? (b.swap ? "到了约定时间" : "跑完就还") : b.cutoff ? `到 ${tsNear(b.cutoff)}` : "没约定时间";
   return `<span class="badge ${bad ? "b-bad" : "b-warn"}" ${tip(borrowText(b, now))}>${esc(pre + t + post)}</span>`;
 }
 // 项目暂时没实验（快照的 no_work_since，collect 算）：两个页面同一个标记、同一句说明
@@ -340,8 +338,8 @@ function alertBox(al, open = false) {
 }
 // 主机的名字只有三种写法：短名 hostShort（表格的主机列、小图与时间线的行名、车道名、KPI 的注；直接借来的叫「借 EVA」，其余用 id）；
 // 全名 h.label（主机清单里写的，借来的是「节点（借 EVA）」：告警、标题、悬停里的整句话）；组内服务器 fName「使用人（id）」（overview.html）
-// pool：项目快照里的算力池（#24）；ephemeral：推模式临时主机（#213）；borrow.pool：算力池借来的主机（#25）
-const hostShort = h => h.pool ? h.label || "算力池" : h.ephemeral ? `临时 ${h.id}` : h.borrow?.pool ? `池 ${h.borrow.holder}` : h.borrow && !h.borrow.swap ? `借 ${h.borrow.holder}` : h.id;
+// pool：项目快照里的算力池；ephemeral：推模式临时主机（#213）
+const hostShort = h => h.pool ? h.label || "算力池" : h.ephemeral ? `临时 ${h.id}` : h.borrow && !h.borrow.swap ? `借 ${h.borrow.holder}` : h.id;
 // 车道名：车道的 label（采集时按主机编号的“车道 N”，接可选的用途），后面接清单名（清单文件名去掉扩展名，#47：登记多了好认），
 // 页面上有几台真主机时前面加主机短名。lane {host: 主机 id, label, queue?: 清单路径}，hosts 是页面上的主机表；laneLabel 不带主机（时间线行挂在主机表头下面）。
 // 算力池（#89）不是主机、不算进“几台”：池里待放的车道总写「算力池」在前，免得和真主机的“车道 1”混在一起

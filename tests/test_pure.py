@@ -10,7 +10,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from labmon import collect, config, fleet, overview, pool, state, users, waits, worker
+from labmon import collect, config, fleet, overview, state, users, waits, worker
 from labmon.worker import pure as P
 
 
@@ -124,7 +124,6 @@ class SingleSourceIdentityTest(unittest.TestCase):
         self.assertIs(users.same_list, P.same_list)
         self.assertIs(waits.job_key, P.job_key)
         self.assertIs(overview.person_use, P.person_use)
-        self.assertIs(pool.person_use, P.person_use)
         self.assertIs(fleet.mem_unevictable, P.mem_unevictable)
         self.assertIs(fleet.proc_tree, P.proc_tree)
         self.assertIs(fleet.script_arg, P.script_arg)

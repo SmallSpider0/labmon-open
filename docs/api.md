@@ -50,7 +50,7 @@ public_hosts = ["203.0.113.7"]            # 公网入口另认的 Host：nginx �
 | 角色 | 能做的 |
 |---|---|
 | 管理员 | 全部：项目的写操作、调度权重、组内服务器的一切（数据与平台操作，平台操作按账号允许公网）、账号管理（只在内网入口） |
-| 普通用户 | 看自己的项目、获准使用的主机及自己项目所在的主机；能管理自己的项目与登记；可查看本人共享盘用量、自己持有的服务器状态/曲线与入池设置，以及所属算力池的聚合概况（非池成员不可见）；他人服务器、人员管理、全组明细与平台操作回 403 |
+| 普通用户 | 看自己的项目、获准使用的主机及自己项目所在的主机；能管理自己的项目与登记；可查看本人共享盘用量、自己持有的服务器状态与曲线；他人服务器、人员管理、全组明细与平台操作回 403 |
 
 - 账号存在状态根目录下的 `users.json`（权限 600）：口令只存 PBKDF2-SHA256 加盐的哈希（`pbkdf2_sha256$轮数$盐$哈希`，60 万轮，比对用常数时间），设置码、会话、令牌只存 SHA-256。原文不落盘、不打印、不进日志与记录。
 - 名字：字母开头，只用字母、数字与 `_ . -`，最多 32 个；不分大小写认。口令至少 8 个字符。
@@ -96,7 +96,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 |---|---|
 | `GET /login`、`GET /healthz`、`POST /api/login`、`/api/setup`、`/api/logout` | 不要登录 |
 | `GET /`、`/overview.json`、`/records.json`、`/p/…`、`/api/me`、`/api/disk`、`/api/project/<id>/config` | `read`（`/api/disk` 返回总盘概况与本人共享盘目录，#211） |
-| `GET /fleet/<id>.json`（单台服务器 7 天曲线，#211） | `read`；管理员全部可读，普通用户仅本人持有的服务器可读（`own="fleet_srv"`，核 `pool.need_holder`；他人或不存在统一 403） |
+| `GET /fleet/<id>.json`（单台服务器 7 天曲线，#211） | `read`；管理员全部可读，普通用户仅本人持有的服务器可读（`own="fleet_srv"`，核 `users.need_holder`；他人或不存在统一 403） |
 | `GET /fleet/(op\|plan).json`、`GET /fleet/person/….json` 与其余 `GET /fleet/…` | `read`，只给管理员 |
 | `POST /fleet/op/…`、`/fleet/probe/…`、`/renew/…`（平台操作） | `admin`，只给管理员；公网须开启账号许可 |
 | `POST /sched/(weight\|focus\|unfocus)`、`/api/override/(focus\|unfocus)`（调度权重与优先，#16） | `project`，只给管理员 |
@@ -110,8 +110,6 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `GET /api/project/<id>/(status\|disk\|records)`（实验会话的只读命令，#52） | `read`；普通用户只看自己的项目（`users.need_project`） |
 | `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
 | `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit)`、`/api/override/(pause\|resume)`（[命令行](#命令行162)） | `project`；普通用户只改自己下的暂停，项目级的与带 `--host` 的同一条（`users.need_pause`，#16、#27） |
-| `POST /api/pool/lend`（入池开关，#24） | `project`；持有人本人改自己的服务器，管理员代别人改要能做平台操作（`users.can_ops`）、开时勾「已和这人说好」（`pool.need_holder`、`pool.set_lend`） |
-| `POST /api/pool/reclaim`（收回，#25） | `project`；持有人本人收回自己的服务器，管理员代别人收回要能做平台操作（`pool.reclaim`） |
 | `POST /api/worker/(stop\|limit)`、`/api/override/(drain\|undrain)` | `admin`，只给管理员 |
 | `POST /api/borrow`、`/api/host/(return\|restore)` | `admin`，只给管理员；公网须开启账号许可 |
 | `POST /api/password`、`/api/tokens/add`、`POST /api/revoke`、`/api/push`、`/api/push/test` | 浏览器会话（`account`） |
@@ -126,8 +124,8 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 
 - `/` 与 `/overview.json`：按白名单取（`users.view`，#17、#211），快照以后新加的字段默认不给普通用户。原样给 `generated`、`lan`、`event_kinds`、`sched`；`hosts`、`projects`、`archived`、`rebalance`、`regs`、`occ` 按可见范围过滤；`colors` 只留自己的项目；`server` 只给 `role` 和一句通用的备用提示；
   - `disk`（`disk.person_storage`）：保留总盘概况、历史、提醒线、扫描进度与总盘告警（`low`、`soon`），并补充本人名下目录（`owners`）、本人颜色与本人告警（`burst:<人>`、`over:<人>`）；`ours` 只留自己项目的目录与按项目的汇总（`ours.projects`，#53），扫盘的主机可见时才给 `scanner`；屏蔽他人目录、公共目录明细、全组名单 `names`、归属表 `owners_set` 与正在扫的路径 `now`；
-  - `fleet`（`users._self_fleet`）：账号绑定了组内人员且名下持有服务器时，下发 `scope = "self"`、仅含本人持有的 `servers` 与 `mine`，`ops = None`、`holders = []`、`quota = None`；借出期间保留借用人名（`borrow.by`）或「算力池」及时间，屏蔽对方项目（`borrow.for`）、`away`、`reserve`、`using`、`lease_cut`，并脱敏借用方/池任务的进程命令行、路径与 PID；未绑人或名下无服务器时为 `null`；
-  - `pool`（`pool.summary`）：仅当账号是算力池成员（`pool.member`）时下发全池聚合概况 `summary`（入池/借着/自用台数、总卡数、忙碌卡数、在跑池任务数、待放清单数）及脱敏后的本人项目池清单 `my_lists`（不含他人服务器 ID、他人持有人名与他人清单）；非池成员为 `null`；
+  - `fleet`（`users._self_fleet`）：账号绑定了组内人员且名下持有服务器时，下发 `scope = "self"`、仅含本人持有的 `servers` 与 `mine`，`ops = None`、`holders = []`、`quota = None`；借出期间保留借用人名（`borrow.by`）及时间，屏蔽对方项目（`borrow.for`）、`away`、`reserve`、`using`、`lease_cut`，并脱敏借用方任务的进程命令行、路径与 PID；未绑人或名下无服务器时为 `null`；
+  - `pool`：当前恒为 `null`（旧借用推广型算力池已移除，待新共有池接入）；
   - `notices`（给系统通知的提醒）、`wake`（给实验会话的消息）、`hostcheck`（看板服务所在机的体检，#166）给空值。`/` 现渲染（`collect.render_page`），不发磁盘上带全量数据的 `index.html`。
 - 可见主机的主机项整项照给，包括这台上别人任务的命令行、日志末尾与资源用量。同一台主机上的任务用共享的系统账号跑，能在这台上跑任务的人本来就能看到这些；所以开一台主机给谁，就等于让谁看到这台上所有任务的命令行与日志。不想让人看到的任务，不要放在开给这人的主机上。
 - `/records.json`：去掉平台操作、保活、借用、共享盘、账号、看板服务体检这几类，组内服务器的掉线与恢复，以及与组内某人有关（`who`）的（`users.visible`）。
@@ -138,7 +136,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 
 - 第一次推一个新项目时成为项目主人。已登记项目的读取、推送、等待、立即采集、项目级暂停与优先、配置、归档和恢复都要核对主人。没有有效主人账号的项目归管理员。管理员改主人后，下一次请求按新主人核对。
 - 主机清单的自用主机项可写 `users = ["账号名"]`，按账号名授权。带主机的调度指令及 `worker status`、`fit`、`project init` 都要通过主机权限核对。只能开放经 SSH 访问的远端主机。本机执行型主机和回环 SSH 主机仅供管理员使用。同一台远端主机上的任务以共享的系统账号运行，只给可以相互信任的人开这台主机。获准的已归还主机可通过代办移除该账号自己项目的登记。
-- 主机 `pool`（算力池，#24）按成员核对：管理员，或这人有一台开了入池的组内服务器或自用主机（`pool.member`，[fleet.md「算力池」](fleet.md#算力池)）。
+- 主机 `pool`（算力池保留 id）按池成员核对（`pool.member`，当前仅管理员，[fleet.md「算力池」](fleet.md#算力池)）。
 - 增加、搬动登记还要核对项目主人、目标主机及清单是否已登记在别的项目名下。移除登记要能在看板上查到这条登记属于自己的项目。刚登记的清单还未采集到时，等下一轮再试。普通用户增加、移除、搬动登记或归档时，远端 worker 也要核对登记归属。旧版 worker 会拒绝这些操作，请管理员更新。
 - 整台主机或全局的操作仍由管理员执行。
 
@@ -151,7 +149,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/login {"name", "password"}` | 种会话 Cookie，`{"name", "msg"}` |
 | `POST /api/setup {"name", "code", "password"}` | 用设置码设口令并登录，同上 |
 | `POST /api/logout` | 删掉这个会话、清 Cookie |
-| `GET /api/me` | `{"name", "role", "role_name", "scopes", "via", "entry", "entry_name", "admin", "ops", "write", "account", "fleet_person"（本账号绑定的组内人员名，#211）, "commit"（在跑的代码是哪个提交，#164）, "started"（服务启动时刻）}`；普通用户另有 `own`（项目 id）和 `hosts`（获准使用的主机 id）；`servers`（这个账号对应的人持有的组内服务器、自用主机（带 `mine: true`，#79）与各台的入池 `lend`：`{on, hours, open, say}`，`pool.my_servers`）与 `pool_member`（能不能往算力池交清单，#24）；浏览器会话另有 `sessions`、`tokens`、`token_scopes`、`scope_info`、`push`（打码的推送摘要） |
+| `GET /api/me` | `{"name", "role", "role_name", "scopes", "via", "entry", "entry_name", "admin", "ops", "write", "account", "fleet_person"（本账号绑定的组内人员名，#211）, "commit"（在跑的代码是哪个提交，#164）, "started"（服务启动时刻）}`；普通用户另有 `own`（项目 id）和 `hosts`（获准使用的主机 id）；`pool_member`（是否为算力池成员）；浏览器会话另有 `sessions`、`tokens`、`token_scopes`、`scope_info`、`push`（打码的推送摘要） |
 | `POST /api/password {"old", "new"}` | 改口令：别的浏览器都要重新登录，这个不用；令牌不受影响 |
 | `POST /api/tokens/add {"name", "scopes": [...]}` | `{"token"（原文，只这一次）, "id", "name", "scopes", "until", "msg", "commit"}` |
 | `POST /api/revoke {"id"}` | 吊销自己的一个会话或令牌（`id` 是列表里给的前 12 位） |
@@ -165,8 +163,6 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /project/owner {"project", "owner"}` | 换项目主人；`owner` 为空时归管理员 |
 | `POST /api/push {"push", "bark" 或 "ntfy"}` | 保存自己的推送，回 `{msg, push}`；`push` 为空时移除。Bark 段填 `key`，可选 `server`、`encrypt_key`；ntfy 段填 `topic`，可选 `server`、`token`；服务地址限于渠道的官方地址或管理员在 `notify.toml` 配置的同渠道地址 |
 | `POST /api/push/test {}` | 用自己的推送配置试发一条，回 `{msg}` |
-| `POST /api/pool/lend {"id", "on", "hours", "ok"}` | 开、关这台组内服务器或自用主机（#79；看板本机、worker 目录与池不同的自用主机 409）的入池，`hours` 是 `HH:MM-HH:MM`（空是全天），`ok` 是代开时勾的「已和这人说好」；回 `{msg, servers}`（`servers` 同 `/api/me`）。认不出时段 400、不是自己的 403、代开没勾说好 409 |
-| `POST /api/pool/reclaim {"id"}` | 收回借给算力池的这台（#25，[fleet.md「自动借、放、还」](fleet.md#自动借放还25)）：按各清单的停法停下池任务、清单登记回池里，下一轮放到别处，这台休息 3 小时；入池的自用主机（#79）只停、只搬池放上来的清单。回 `{msg, servers}`。不是自己的 403、没借给算力池（自用主机：上面没有池放的清单）409 |
 
 ## 客户端分发
 

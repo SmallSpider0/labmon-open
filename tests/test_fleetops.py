@@ -1181,7 +1181,7 @@ class FleetOpsTest(unittest.TestCase):
     def test_mine_host_keeps_access_only_for_same_holder(self):
         hf = Path(os.environ["LABMON_HOSTS"])
         hf.write_text('[[hosts]]\nid = "old"\nssh = "root@h"\nport = 15151\nplatform_pool = "p"\n'
-                      'platform_job = "ALICE"\nusers = ["amy"]\nlend = true\nreturned = "2026-11-09 20:00"\n'
+                      'platform_job = "ALICE"\nusers = ["amy"]\nreturned = "2026-11-09 20:00"\n'
                       '[fleet]\nme = "ALICE"\n')
         c = F.conf()
         self.assertEqual(FB.back_port(c, "p", "ALICE"), 15151)
@@ -1193,19 +1193,6 @@ class FleetOpsTest(unittest.TestCase):
         self.assertEqual({h["holder"] for h in FB.mine(c)}, {"EE"})
         self.assertNotIn("users", hs[new])
         self.assertNotIn("users", hs[old])
-        self.assertNotIn("lend", hs[new])                                   # 入池（#79）：开出来的自用主机一律不入池（维护者 11-18 定）
-        self.assertNotIn("lend", hs[old])
-
-    def test_reopened_mine_host_not_in_pool(self):
-        # 同一人关了又开回同一台（同 ssh 与端口、恢复那一块）：入池同样不带，要入池由持有人再手动开（维护者 11-18 定，#79）
-        hf = Path(os.environ["LABMON_HOSTS"])
-        hf.write_text('[[hosts]]\nid = "old"\nssh = "root@h"\nport = 15151\nplatform_pool = "p"\nplatform_holder = "ALICE"\n'
-                      'platform_job = "ALICE"\nusers = ["amy"]\nlend = true\nlend_hours = "22:00-09:00"\nreturned = "2026-11-09 20:00"\n')
-        _, hid = C.add_mine_host("x", "ALICE", "root@h", 15151, "p", holder="ALICE")
-        h = next(h for h in C.all_hosts() if h["id"] == hid)
-        self.assertEqual((hid, h.get("users")), ("old", ["amy"]))            # 同一人：开给谁用照旧
-        self.assertNotIn("lend", h)
-        self.assertNotIn("lend_hours", h)
 
     def test_reopening_last_legacy_host_keeps_old_borrower(self):
         hf = Path(os.environ["LABMON_HOSTS"])
@@ -1402,15 +1389,15 @@ class FleetOpsTest(unittest.TestCase):
         self.assertIsNone(op["error"], op)
         self.assertEqual(self.paths(n), [("/workManage/stop", "j2"), ("/submitWork/addWorkTask", "DD")])
 
-    def test_move_server_changes_id_port_and_drops_lend(self):
-        """组内服务器同池换节点：先停后开换规格，主机清单新加删旧、不带原 lend，原端口空闲时沿用、目标节点被占时改挑空闲端口，给新连接命令。"""
+    def test_move_server_changes_id_port(self):
+        """组内服务器同池换节点：先停后开换规格，主机清单新加删旧，原端口空闲时沿用、目标节点被占时改挑空闲端口，给新连接命令。"""
         hf = Path(os.environ["LABMON_HOSTS"])
         hf.write_text(
             f'[[hosts]]\nid = "29"\nssh = "root@198.51.100.29"\nport = 15155\nplatform_job = "ALICE"\nplatform_pool = "{PRIV}"\n\n'
             f'[fleet]\nprivate_pools = ["{PRIV}"]\npublic_max = 4\nplatform = "{self.plat.url}"\nplatform_user = "u"\n'
             f'keepalive_cmd = "KA_CALLER=labmon-fleet bash /x/ka.sh"\n\n'
             f'[[fleet.servers]]\nid = "a"\nholder = "AA"\nssh = "root@198.51.100.29"\nport = 15001\npool = "{PRIV}"\n\n'
-            f'[[fleet.servers]]\nid = "27-15002"\nholder = "BB"\nssh = "root@198.51.100.27"\nport = 15002\npool = "{PUB}"\nlend = true\nlend_hours = "22:00-09:00"\n'
+            f'[[fleet.servers]]\nid = "27-15002"\nholder = "BB"\nssh = "root@198.51.100.27"\nport = 15002\npool = "{PUB}"\n'
         )
         self._multi_spec_pub(avail_a=1, avail_b=2)
         c = F.conf()
@@ -1421,7 +1408,7 @@ class FleetOpsTest(unittest.TestCase):
             if t.name == "fleet-sync":
                 t.join(10)
         self.assertIsNone(FO.op()["error"])
-        # 第一次换节点：27-15002 → sB（28），原端口 15002 在 28 空闲 → 28-15002，lend 不带过去
+        # 第一次换节点：27-15002 → sB（28），原端口 15002 在 28 空闲 → 28-15002
         self.remote = Remote()
         n = len(self.plat.calls)
         FO.start("move", F.conf(), None, ids=["27-15002"], spec="sB", ack=[], probe=self.remote.probe, ssh_fn=self.remote.ssh,
@@ -1437,8 +1424,8 @@ class FleetOpsTest(unittest.TestCase):
         srvs = {s["id"]: s for s in F.conf()["servers"]}
         self.assertNotIn("27-15002", srvs)
         self.assertIn("28-15002", srvs)
-        self.assertEqual((srvs["28-15002"]["holder"], srvs["28-15002"]["ssh"], srvs["28-15002"]["port"], srvs["28-15002"].get("lend")),
-                         ("BB", "root@198.51.100.28", 15002, None))
+        self.assertEqual((srvs["28-15002"]["holder"], srvs["28-15002"]["ssh"], srvs["28-15002"]["port"]),
+                         ("BB", "root@198.51.100.28", 15002))
         self.assertNotIn("27-15002", FO.boot())
         self.assertEqual((FO.boot()["28-15002"]["src"], FO.view()["boot"]["28-15002"]["spec"]), ("换节点", "sB"))
         self.assertEqual((op["conn"]["sid"], op["conn"]["cmd"], op["conn"]["spec"]), ("28-15002", "ssh -p 15002 root@198.51.100.28", "nodeB-1GPU"))
@@ -1460,12 +1447,12 @@ class FleetOpsTest(unittest.TestCase):
         self.assertIn("27-15151", srvs)
         self.assertEqual(op["conn"]["cmd"], "ssh -p 15151 root@198.51.100.27")
 
-    def test_move_mine_host_by_other_admin_keeps_mine_and_drops_lend(self):
-        """自用主机换节点（哪怕由另一管理员操作）：仍保持原持有人的自用主机；旧台标归还、新台不自动入池、last_mine 指向旧台；worker 在跑时拒绝。"""
+    def test_move_mine_host_by_other_admin_keeps_mine(self):
+        """自用主机换节点（哪怕由另一管理员操作）：仍保持原持有人的自用主机；旧台标归还、last_mine 指向旧台；worker 在跑时拒绝。"""
         hf = Path(os.environ["LABMON_HOSTS"])
         hf.write_text(
             f'[[hosts]]\nid = "27-15155"\nssh = "root@198.51.100.27"\nport = 15155\nworker = "auto"\n'
-            f'platform_holder = "ALICE"\nplatform_job = "ALICE"\nplatform_pool = "{PUB}"\nlend = true\nlend_hours = "22:00-09:00"\n\n'
+            f'platform_holder = "ALICE"\nplatform_job = "ALICE"\nplatform_pool = "{PUB}"\n\n'
             f'[fleet]\nprivate_pools = ["{PRIV}"]\npublic_max = 4\nplatform = "{self.plat.url}"\nplatform_user = "u"\n'
             f'keepalive_cmd = "KA_CALLER=labmon-fleet bash /x/ka.sh"\n\n'
             f'[[fleet.servers]]\nid = "b"\nholder = "BB"\nssh = "root@198.51.100.27"\nport = 15002\npool = "{PUB}"\n'
@@ -1493,7 +1480,7 @@ class FleetOpsTest(unittest.TestCase):
             if t.name == "fleet-move":
                 t.join(10)
         self.assertIn("先在主机页暂停队列", FO.op()["error"])
-        # 空闲时由 bob 触发换节点：旧 27-15155 标归还，新 28-15155 仍归 ALICE 为自用主机、不带 lend，last_mine 指向 27-15155
+        # 空闲时由 bob 触发换节点：旧 27-15155 标归还，新 28-15155 仍归 ALICE 为自用主机，last_mine 指向 27-15155
         n = len(self.plat.calls)
         FO.start("move", F.conf(), None, ids=["27-15155"], spec="sB", ack=[], account=bob,
                  probe_mine=lambda h: ("keepalive", ""), ssh_fn=self.remote.ssh, forget_fn=self.remote.forget,
@@ -1508,8 +1495,8 @@ class FleetOpsTest(unittest.TestCase):
         hs = {h["id"]: h for h in C.all_hosts()}
         self.assertTrue(hs["27-15155"].get("returned"))
         self.assertFalse(hs["28-15155"].get("returned"))
-        self.assertEqual((hs["28-15155"]["platform_holder"], hs["28-15155"]["ssh"], hs["28-15155"]["port"], hs["28-15155"].get("lend")),
-                         ("ALICE", "root@198.51.100.28", 15155, None))
+        self.assertEqual((hs["28-15155"]["platform_holder"], hs["28-15155"]["ssh"], hs["28-15155"]["port"]),
+                         ("ALICE", "root@198.51.100.28", 15155))
         self.assertEqual(FB.last_mine(PUB, skip="28-15155", cfg=F.conf(), holder="ALICE")["id"], "27-15155")
         self.assertTrue(op["conn"]["mine"])
         self.assertEqual(op["conn"]["cmd"], "ssh -p 15155 root@198.51.100.28")

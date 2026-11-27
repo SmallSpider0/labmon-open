@@ -679,7 +679,7 @@ class KeepaliveMixin:
         连着两轮都在才算对方回来了（end_away），这一轮起按普通规则；新起的 ka.sh 停不了的保活不算回来，只挡它那张卡（#37）。勾上前已记的超出（back_last 里早于这次开始的，卡也算）这一轮起不挡。
         基线在这次第一轮读到 GPU 表时取；到点、作废、指令不带 away 时清掉，下次重新取（约定时间相同也一样）。worker 重启后以重启时对方已有的进程为准。"""
         if not self.guest():
-            self.back, self.back_last, self.tight, self.cpu_hot, self.away_base, self.owner = {}, {}, None, 0, None, []
+            self.back, self.back_last, self.tight, self.cpu_hot, self.away_base = {}, {}, None, 0, None
             return
         k, o, over = self.keep(), self.other, {}
         new = set()                                    # 说好不用开始以后新出现对方 GPU 进程的卡
@@ -714,12 +714,6 @@ class KeepaliveMixin:
         self.back_last = {key: v for key, v in self.back_last.items() if key in over or t - v < _C.GUEST_QUIET_S}
         if away and self.away_base:                    # 说好不用：开始以前的超出（卡、内存、CPU）不再挡（guest_block 与快照的 owner 都看 back_last），这一轮起就放行
             self.back_last = {key: v for key, v in self.back_last.items() if key in over or v > self.away_base["t0"]}
-        # 主人回来（#25）：超出的几项里去掉只因 ka.sh 停不了的保活超出的卡（那张卡上对方的进程都是它：保活只占位、不算主人干活，#37）
-        gid = o.get("gid") or {}
-        self.owner = [v for key, v in over.items() if key in ("ram", "cpu") or not (gid.get(key) and gid[key] <= set(o["ka"].get(key) or ()))]
-        if (k or {}).get("pool"):                      # 算力池只在 GPU 上除保活外没有进程时借：之后卡上有了对方的 GPU 进程（停不了的保活除外）就算回来，预留以内也算
-            self.owner += ["卡 %d：有了对方的 GPU 进程（PID %s）" % (g["i"], "、".join(map(str, sorted(gid[g["uuid"]] - set(o["ka"].get(g["uuid"]) or ())))))
-                           for g in self.info.get("gpus") or [] if g["uuid"] not in over and gid.get(g["uuid"], set()) - set(o["ka"].get(g["uuid"]) or ())]
         if bool(over) != bool(self.back):
             self.event("guest", "借来的主机上对方用得比预留多（%s）：这部分不再放新任务" % "；".join(over.values()) if over else
                        "对方说好 %s 前不用：不再按预留挡，照常放行" % _C.now_str(away)[5:16] if away else
@@ -727,10 +721,7 @@ class KeepaliveMixin:
         self.back = over
 
     def guest_block(self):
-        """借来的主机上整台不放新任务的原因（对方的内存或 CPU 超出预留、或回到预留以内还不到 GUEST_QUIET_S；
-        算力池借来的（guest 指令的 keep.pool，#25）主人回来了（owner）也整台不放：看板同一轮要还）；没有为 None。"""
-        if (self.keep() or {}).get("pool") and self.owner:
-            return "算力池借来的主机：主人回来了（%s），整台不放新任务，在跑的跑完就还" % "；".join(self.owner[:3])
+        """借来的主机上整台不放新任务的原因（对方的内存或 CPU 超出预留、或回到预留以内还不到 GUEST_QUIET_S）；没有为 None。"""
         hit = [k for k in ("ram", "cpu") if k in self.back_last]
         if not hit:
             return None

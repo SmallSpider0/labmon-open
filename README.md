@@ -92,7 +92,7 @@ labmon wait    -c monitor.toml --take   # 一个项目只让一个会话等：�
 
 labmon worker start 29                 # 服务器端 worker：部署 main 上已提交的版本并拉起（已在跑则无缝替换；start、stop、limit 要 admin 令牌）
 labmon worker add 29 ROOT JOBS --project <id>   # 登记一条队列；之后改清单即可
-labmon worker add pool ROOT JOBS --project <id>  # 交给算力池（池成员；入池在「我的账号 → 我的服务器」）：看板自动借入池的服务器、或直接放到入池的自用主机上跑，主人回来或收回就停下重排（docs/fleet.md「算力池」）
+labmon worker add pool ROOT JOBS --project <id>  # 交给算力池（保留主机 id，docs/fleet.md「算力池」）
 labmon worker status 29 | fit 29 任务名… | fit 29 ROOT JOBS --list --project P | limit 29 heavy=2 | rm 29 ROOT JOBS | stop 29   # 看板项目「管理」里能按主机把清单换到别的主机、不用一台，新主机页能接上上一台的
 labmon pause <项目> [--until 11-10] [--now] [--host 29] | resume | focus <项目> --until … | unfocus | drain 29 | undrain 29   # 临时指令（项目的缺省所有主机；--until：11-10、11-10 18:30、明天 9:00、+30m、+3h）
 labmon project init 29 [项目]           # 按共享盘目录规范建目录
@@ -128,7 +128,7 @@ labmon/page.html        项目页的单文件页面模板，只读快照
 labmon/overview.py      工作台的数据：读各主机 worker 的状态、连通与租期（health）、调度卡 sched_view、各卡被谁占着 occupancy；
                         写给各主机 worker 的 eta.json、sched.json 与 returned.json；渲染 overview.html
 labmon/overview.html    工作台的单文件页面模板（HTML、样式与脚本内联壳，渲染时内联 common.js 与 overview_js/*.js）
-labmon/overview_js/     工作台脚本模块（渲染时按序内联进 overview.html）：core（路由/告警/租期/导航）/ account（我的账号与算力池入池）/ home（记录/总览/表格/主机资源卡）/ sched（临时指令/调度卡/记录卡/自用续租）/ storage（共享盘/本地盘/主机页）/ fleet（组内卡片墙/算力池抽屉/借用/弹窗与时刻选择）/ fleetops（平台操作/批量续租/人员）/ project（项目管理抽屉/登记搬移/项目配置/归档）/ app（顶层渲染/保活守护抽屉/抽屉分发/全局事件与轮询）
+labmon/overview_js/     工作台脚本模块（渲染时按序内联进 overview.html）：core（路由/告警/租期/导航）/ account（我的账号）/ home（记录/总览/表格/主机资源卡）/ sched（临时指令/调度卡/记录卡/自用续租）/ storage（共享盘/本地盘/主机页）/ fleet（组内卡片墙/借用/弹窗与时刻选择）/ fleetops（平台操作/批量续租/人员）/ project（项目管理抽屉/登记搬移/项目配置/归档）/ app（顶层渲染/保活守护抽屉/抽屉分发/全局事件与轮询）
 labmon/common.js        页面共用的脚本（转义、悬停提示、本机存的设置、时刻与时长的文字、借用的说明与小标签、主机短名与车道名、时间线引擎与占用条），渲染时内联进页面
 labmon/serve.py         看板服务：各项目、工作台、组内服务器的采集线程与 HTTP（路由全表见文件头部注释）；内网与公网两个入口，路由表 ROUTES 定每条要的权限（docs/api.md）；
                         只认 JSON 类型与同源的 POST、校验 Host（防跨站，docs/workbench.md「防跨站请求」）
@@ -152,7 +152,7 @@ labmon/workerctl.py     在看板服务那台上部署、拉起、停止 worker�
 labmon/renew.py         自用主机的预备续租，以及续租后拉起 worker、放行；运行中任务的预计结束 eta_of（续租与借用的截止判断共用）
 labmon/rebalance.py     多主机负载均衡的提示：把各主机 worker 算的 offers 汇成每个项目一条挪法建议（rebalance: 告警），不改清单与放行
 labmon/borrow.py        借用组内服务器：借来拉起 worker、按对方历史用量推荐给这人留的量、约定时间准入、跑完自动归还；给 labmon wait 的全局消息
-labmon/pool.py          算力池：入池开关（我的服务器，组内服务器与自用主机）、池成员、池清单撤回时在哪撤；每轮自动借、放、还（tick）与收回（docs/fleet.md「算力池」）
+labmon/pool.py          算力池基础：池成员判定、池清单撤回定位（旧借用推广型算力池已移除，待接入共有池，docs/fleet.md「算力池」）
 labmon/fleet.py         组内服务器的探测、归类、保活守护（fleet_guard.sh）与状态文件
 labmon/fleetview.py     组内服务器页面的数据（概览、详情曲线、按人）与命令行 labmon fleet status
 labmon/fleetops.py      平台操作：核对、续租（自用主机与组内服务器共用）、开保活、关机、换人、开机、借来用的后台执行与进度

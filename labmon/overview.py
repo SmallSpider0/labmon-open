@@ -22,7 +22,6 @@ import re
 import shlex
 import subprocess
 import time
-import traceback
 import urllib.request
 from pathlib import Path
 
@@ -36,7 +35,6 @@ from . import fleetview as FV
 from . import hostcheck as HC
 from . import lan as L
 from . import lease as LS
-from . import pool as PO
 from . import rebalance as RB
 from . import renew as R
 from .projects import archived_rows, registered
@@ -498,12 +496,11 @@ def _notices(hosts: list[dict], hcfg: dict, t: float, per_host: dict | None = No
     return notices, wake + _voided(hosts, t) + told(t), disk, fleet, cfg     # told：页面上的改动（搬、移除登记，恢复、暂停项目；#121）
 
 
-def collect(projects: list[dict] | None = None, use_ssh: bool = True, pool_tick=None) -> dict | None:
+def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | None:
     """工作台的一轮采集：各台并行 fetch（本机不在内网：不连、不算连不上，页面沿用上一次采到的；顺带续服务租约）→ 按读回的租约定主备（lease.decide，#163），
     不是主就停在这里、返回 None（不写快照）→ 到期的暂停、优先（_expire）→ 拆读回的几段（_host_entry）→ 补页面要的（_annotate）→ 判定与提醒（_notices）→ 快照与页面。
     projects：看板里各项目的摘要（serve.Overview.proj_info：id、title、告警、车道、里程碑、计划项、cfg 等），用来把任务链到项目页、给车道起名，
-    除 running（运行中任务的进度，写 eta.json）外原样进快照的 projects，页面（项目「管理」抽屉等）读。
-    pool_tick(snap, sw)：算力池的自动借还（pool.tick，#25；serve 传进来，带上 reg_move）：判定与提醒之后、快照写盘之前跑，结果进快照的 pool。"""
+    除 running（运行中任务的进度，写 eta.json）外原样进快照的 projects，页面（项目「管理」抽屉等）读。"""
     t = time.time()
     projects = projects or []
     sd = state_dir()
@@ -574,18 +571,6 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True, pool_tick=
             "archived": archived_rows(),     # 已归档的项目（projects.json，新的在前）：侧栏「已归档」与它的抽屉
             "hostcheck": HC.view(t),                  # 看板服务所在机的体检（#166）：总览的「看板服务」小卡；不是 WSL 时 None
             "server": LS.view(t)}                     # 服务租约（#163）：这台是主还是备用；备用时不写快照，看板服务发页面时现填
-    if pool_tick:
-        try:
-            snap["pool"] = pool_tick(snap, sw)        # 算力池（#25）：还、放、借；各待放清单为什么还没放（项目车道与 pool_wait 告警取它）
-        except Exception:  # noqa: BLE001 — 池出错不挡这一轮的快照（只记服务日志，不弹通知：每轮都会再来）
-            snap["pool"] = old.get("pool") or {}
-            log(f"算力池这一轮出错\n{traceback.format_exc()}")
-    if isinstance(snap.get("pool"), dict) and "summary" not in snap["pool"]:
-        from . import pool as PO
-        snap["pool"] = {**snap["pool"], "summary": PO.summary(snap, cfg=fleet_cfg)}
-    elif "pool" not in snap and isinstance(fleet, dict) and not fleet.get("error"):
-        from . import pool as PO
-        snap["pool"] = {"lists": {}, "gone": [], "summary": PO.summary(snap, cfg=fleet_cfg)}
     save_json(sd / "snapshot.json", snap)
     write_page("overview.html", snap, sd / "index.html")
     return snap
@@ -746,8 +731,6 @@ def relaunch(snap: dict, start=None) -> list[str]:
     out = []
     for h in snap["hosts"]:
         if h.get("ephemeral") or not h.get("auto") or h.get("error") or h.get("status_error") or h.get("stopped") or (h.get("status") and h.get("worker_up")):
-            continue
-        if (h.get("borrow") or {}).get("pool") and not PO.relaunch_ok(h):   # 算力池借着的（#25）：探到还是借来时那个容器才拉起，换了的由 pool.tick 还掉
             continue
         if time.time() - last.get(h["id"], 0) < RELAUNCH_GAP:
             continue

@@ -2104,40 +2104,6 @@ class GuestTest(UnitBase):
         self.w.guest_scan(t + 7 + self.m.GUEST_QUIET_S)
         self.assertEqual((self.w.back, self.w.back_last, self.w.tight), ({}, {}, None))
 
-    def test_pool_owner_back_blocks_host(self):
-        # #25：主人回来（状态的 guest.owner）不含只因 ka.sh 停不了的保活超出的卡；算力池借来的（keep.pool）主人回来整台不放，
-        # 手动借的照旧只挡那张卡（旧代码没有 owner，keep.pool 也不挡整台）
-        t = time.time()
-        self.cards(40000, 40000)
-        self.guest(dict(self.KEEP, hold=False, pool=1))
-        self.w.other = {"vram": {"GPU-b": 6000.0}, "ram": 1.0, "cpu": 0.5, "ka": {"GPU-b": [5300]}, "gid": {"GPU-b": {5300}}, "ka_cpu": 0.0}
-        self.w.guest_scan(t)
-        self.assertEqual((list(self.w.back), self.w.owner, self.w.guest_block()), (["GPU-b"], [], None))   # 只有停不了的保活：不算回来
-        self.w.other = dict(self.w.other, vram={"GPU-a": 3000.0, "GPU-b": 6000.0}, gid={"GPU-a": {7100}, "GPU-b": {5300}})
-        self.w.guest_scan(t + 1)
-        self.assertEqual(self.w.owner, ["卡 0：对方用 2.9 GiB 显存，借来时对方空着"])
-        self.assertIn("算力池借来的主机：主人回来了（卡 0：", self.w.guest_block())
-        self.assertIn("整台不放新任务", self.w.guest_block())
-        self.guest(dict(self.KEEP, hold=False))                                         # 手动借的：只挡那张卡
-        self.w.guest_scan(t + 2)
-        self.assertIsNone(self.w.guest_block())
-        self.assertEqual(len(self.w.owner), 1)
-
-    def test_pool_owner_new_gpu_proc_within_reserve(self):
-        # 算力池借来时主人在轻用（VS Code、终端：hold 为真、按预留留着），之后主人在卡上起了新的 GPU 进程、显存还在预留以内：
-        # 池借只许 GPU 空着时借，所以有了这样的进程就算主人回来（Codex 审查 #75）；手动借的照旧按预留判
-        t = time.time()
-        self.cards(40000, 40000)
-        self.guest(dict(self.KEEP, hold=True, pool=1))
-        self.w.other = {"vram": {"GPU-a": 1024.0}, "ram": 0.5, "cpu": 0.2, "ka": {}, "gid": {"GPU-a": {7100}}, "ka_cpu": 0.0}
-        self.w.guest_scan(t)
-        self.assertEqual(len(self.w.owner), 1)
-        self.assertIn("卡 0", self.w.owner[0])
-        self.assertIn("主人回来了", self.w.guest_block())
-        self.guest(dict(self.KEEP, hold=True))                                          # 手动借的：在预留以内不挡
-        self.w.guest_scan(t + 1)
-        self.assertIsNone(self.w.guest_block())
-
     def test_unstoppable_keepalive_card_in_plan(self):
         # #45：两卡借来的主机，卡 0 上的单元还要 30 分钟，卡 1 上有对方另起、ka.sh 停不了的保活（只占 6 GiB）：真放行不放卡 1，推演也不放，
         # 等着的单元排在 30 分钟后的卡 0（旧推演清空了 owner，排在马上、卡 1）。保活没了：推演当轮重推（不等 FORECAST_EVERY）、排到马上的卡 1；
@@ -4019,13 +3985,6 @@ class OffersTest(UnitBase):
 
     def rel(self, t):
         return None if t is None else round((t - self.now) / self.H, 2)
-
-    def test_pool_borrowed_host_gives_no_offers(self):
-        # #25：算力池借来的主机（guest 指令的 keep.pool）不给挪法建议：池里的清单放到哪台由看板定（旧代码照常算，同 test_offer_numbers_and_suggestion）
-        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
-        self.assertIn("pa", self.offer())
-        self.w.ovr = [{"kind": "guest", "target": None, "t": 0, "keep": {"vram": 8, "ram": 16, "cpu": 4, "hold": False, "pool": 1}}]
-        self.assertEqual(self.offer(), {})
 
     def test_offer_numbers_and_suggestion(self):
         # o：a0 在跑还要 1 小时，a1–a5 各 2 小时，排到 11 小时后；t 空着。从 o 的队尾往前挑 a5、a4…，挪前 k 行后 t 在 2k 小时后跑完、

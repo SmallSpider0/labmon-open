@@ -128,7 +128,7 @@ function srvBtns(x) {
   if (!canOps()) return opsNote();
   const dis = fops().op?.active ? "disabled" : "", specs = poolSpecs(x.pool);
   const swap = `<button class="btn" data-fop="wiz" data-kind="swap" data-id="${esc(x.id)}" ${dis} ${tip(x.mine ? "停掉这台的作业后立刻开新的：同一个池、沿用端口（可选换规格）；旧自用主机标成已归还\nworker 有任务在跑时不让换，先在主机页暂停队列" : "停掉这台的作业后立刻给别人开（也可以换给自己、可选换规格）：同一个池、沿用端口，空档只有十几秒，这台不会被别人占走")}>${icon("users")}换人</button>`;
-  const move = specs.length === 1 ? "" : `<button class="btn" data-fop="wiz" data-kind="move" data-id="${esc(x.id)}" ${dis || !specs.length ? "disabled" : ""} ${tip(!specs.length ? "还没读到这个池的规格列表：先点「与平台核对」" : x.mine ? "同人同池停旧后立刻按新规格（物理节点）开新的，旧自用主机标成已归还，新台不自动入池\nworker 有任务在跑时不让换，先在主机页暂停队列" : "同人同池停旧后立刻按新规格（物理节点）开新的，空档十几秒；新节点重新登记并给出新连接命令")}>${icon("server")}换节点</button>`;
+  const move = specs.length === 1 ? "" : `<button class="btn" data-fop="wiz" data-kind="move" data-id="${esc(x.id)}" ${dis || !specs.length ? "disabled" : ""} ${tip(!specs.length ? "还没读到这个池的规格列表：先点「与平台核对」" : x.mine ? "同人同池停旧后立刻按新规格（物理节点）开新的，旧自用主机标成已归还\nworker 有任务在跑时不让换，先在主机页暂停队列" : "同人同池停旧后立刻按新规格（物理节点）开新的，空档十几秒；新节点重新登记并给出新连接命令")}>${icon("server")}换节点</button>`;
   const off = `<span class="vsep"></span>` + opPop("off", x, `<button class="btn danger" data-fop="offpick" data-id="${esc(x.id)}" ${dis} ${tip(x.mine ? "在平台上停掉你这台的作业，自用主机标成已归还（看板不再连它）。点了先出确认" : "在平台上停掉这台的作业；之后不探、不提醒租期、不算配额。点了先出确认")}>${icon("power")}关机</button>`,
     () => offAsk(x), () => offGo(x));
   if (x.mine) { const h = D.hosts.find(e => e.id === x.id); return (h ? renewBtns(h) : "") + (x.state === "down" ? "" : swap + move) + off; }
@@ -179,16 +179,14 @@ function fleetCard(x) {
   const now = D.generated, op = fops().op, d = route().drw, a = x.sample || {}, tags = [];
   const gs = a.gpus || [], vr = [a.vram_real, a.vram_total];
   const selfView = D.fleet?.scope === "self";
-  if (x.mine) { tags.push(`<span class="chip" ${tip("worker 管任务与保活；续租、换人、关机在这台的详情里，任务与队列在主机页")}>${myFleetHost(x) ? "我的自用主机" : "自用"}</span>`);
-    if (x.lend?.on) tags.push(lendTag(x.lend)); }
+  if (x.mine) { tags.push(`<span class="chip" ${tip("worker 管任务与保活；续租、换人、关机在这台的详情里，任务与队列在主机页")}>${myFleetHost(x) ? "我的自用主机" : "自用"}</span>`); }
   else if (borrowOf(x)) { const b = hostBorrow(x);
-    if (selfView && !b.pool) {
+    if (selfView) {
       const by = b.by ? `借给 ${b.by}` : "已借出", til = b.until ? ` · 到 ${tsNear(b.until)}` : "";
       const tt = `${by}（${ts(b.since)} 起）${b.until ? `，约定 ${tsNear(b.until)} 还` : ""}${b.returning ? "，跑完就还" : ""}`;
       tags.push(`<span class="badge b-warn" ${tip(tt)}>${esc(b.returning ? `${by} · 跑完就还` : by + til)}</span>`);
-    } else tags.push(borrowBadge(b, now, b.pool ? "" : "借用中 · ", b.for ? " · " + b.for.join("、") : "")); }
+    } else tags.push(borrowBadge(b, now, "借用中 · ", b.for ? " · " + b.for.join("、") : "")); }
   else {
-    if (x.lend?.on) tags.push(lendTag(x.lend));
     if (fShare(x)) tags.push(fShare(x));
     if (x.idle_h >= FREE_H) tags.push(`<span class="badge b-ok" ${tip(selfView ? `最近连着 ${x.idle_h} 小时只有保活或空闲` : `最近连着 ${x.idle_h} 小时只有保活或空闲：可以问问 ${x.holder} 还用不用，不用就换给别人`)}>闲置 · ${x.idle_h >= 48 ? Math.floor(x.idle_h / 24) + " 天" : x.idle_h + " 小时"}</span>`);
     if (x.error && !x.down) tags.push(`<span class="sm" style="color:var(--warn)" ${tip(x.error)}>上次没连上</span>`);
@@ -229,8 +227,7 @@ function fleetPage() {
   if (LIVE && ME && !ME.admin) {
     if (tab === "people") return '<div class="card empty">组内人员与账号管理只有管理员看得到。</div>';
     if (tab === "disk") return (F && !F.error ? fleetAlertBox(fleetAlerts(), false, true) : "") + diskTab();
-    if (!F || F.error) return (D.pool ? `<div class="fsum">${poolStat()}</div>` : "")
-      + `<div class="card empty">你名下当前没有持有的服务器。${D.disk?.df ? ' <a href="#/fleet/disk">查看共享盘</a>' : ""}</div>`;
+    if (!F || F.error) return `<div class="card empty">你名下当前没有持有的服务器。${D.disk?.df ? ' <a href="#/fleet/disk">查看共享盘</a>' : ""}</div>`;
     const all = [...F.servers, ...F.mine], al = fleetAlerts(), cnt = k => all.filter(x => x.state === k).length;
     const due = fleetDue(), dueIds = new Set(due.map(x => x.id));
     const lease = all.filter(x => x.lease_end && !x.off && !dueIds.has(x.id)).sort((a, b) => a.lease_end - b.lease_end)[0];
@@ -238,11 +235,10 @@ function fleetPage() {
     const pools = fPools();
     let s = `<div class="fsum">${[
       it("我的服务器", `${cnt("job")} / ${all.length} 台在跑`, other || "其余没有异常"),
-      D.pool ? poolStat() : "",
       D.disk?.df ? it("共享盘剩", `${GB(D.disk.df.free)} GiB${D.disk.eta != null ? ` · 约 ${D.disk.eta} 天满` : ""}`,
         `已用 ${GB(D.disk.df.used)} / ${GB(D.disk.df.total)} GiB（${D.disk.root}）${D.disk.eta != null ? `\n按近 24 小时的速度约 ${D.disk.eta} 天满` : ""}`, D.disk.df.free < D.disk.warn_gb * GIB) : "",
       it(due.length ? "下一个到期" : "最早到期", lease ? `${leaseHtml(lease.lease_end)} · ${esc(lease.id)}` : "—", lease ? `${lease.id} ${ts(lease.lease_end)} 到期` : due.length ? "其余都没有租期" : "还没探到容器启动时间")].join("")}</div>` + fleetAlertBox(al, false);
-    s += `<div class="card"><div class="chd wrap"><b>我的服务器</b><span class="sm mut">按资源池分组，约 ${Math.round((F.interval || 600) / 60)} 分钟只读探一次；点卡片看详情、曲线与入池设置</span></div>
+    s += `<div class="card"><div class="chd wrap"><b>我的服务器</b><span class="sm mut">按资源池分组，约 ${Math.round((F.interval || 600) / 60)} 分钟只读探一次；点卡片看详情与曲线</span></div>
       ${pools.map(poolGroup).join("") || `<div class="empty">你名下当前没有持有的服务器。</div>`}${fLegend()}</div>`;
     if (F.unknown?.length) s += `<div class="card"><div class="chd"><b>未识别的 GPU 进程</b><span class="sm mut">显卡上有这些进程，但在这台的容器里找不到</span></div><div class="scroll"><table>
       <tr><th>服务器</th><th>负载</th><th class="r">显存</th><th>目录</th></tr>${F.unknown.map(w => `<tr class="link" tabindex="0" data-drw="${esc(DH.srv(w.id))}"><td class="nw"><b>${esc(w.holder)}</b> <span class="mut sm">${esc(w.id)}</span></td>
@@ -269,7 +265,6 @@ function fleetPage() {
     it("专用池", `${q.private} / ${q.private_max ?? "—"} 台`, (q.private_pools || []).join("\n")),
     it("公用池", `${q.public} / ${q.public_max ?? "—"} 台${pubFull && q.public <= q.public_max ? " · 已满" : ""}`, q.public_max == null ? "没写上限" : q.public > q.public_max ? "超过全组上限，可能被强制关机" : pubFull ? "到全组上限了，再开会被警告" : `全组还能开 ${q.public_max - q.public} 台`, q.public_max != null && q.public > q.public_max),
     it("在跑实验", `${cnt("job")} / ${all.length} 台`, other || "其余没有异常"),
-    poolStat(),
     it("可共享 · 闲置", `${sh.length} · ${free.length} 台`, `可共享：${sh.map(x => x.holder).join("、") || "—"}\n闲置：${free.map(x => x.holder).join("、") || "—"}\n\n可共享：除保活外显存 < ${100 * F.share.vram}%、利用率 < ${F.share.util}%、CPU < ${100 * F.share.cpu}% 配额、内存 < ${100 * F.share.mem}% 上限\n闲置：最近连着 ${FREE_H} 小时以上只有保活或空闲`),
     D.disk?.df ? it("共享盘剩", `${GB(D.disk.df.free)} GiB${D.disk.eta != null ? ` · 约 ${D.disk.eta} 天满` : ""}`,
       `已用 ${GB(D.disk.df.used)} / ${GB(D.disk.df.total)} GiB（${D.disk.root}）${D.disk.eta != null ? `\n按近 24 小时的速度约 ${D.disk.eta} 天满` : ""}`, D.disk.df.free < D.disk.warn_gb * GIB) : "",
@@ -290,77 +285,6 @@ function fleetPage() {
     <tr><th>服务器</th><th>负载</th><th class="r">显存</th><th>目录</th></tr>${F.unknown.map(w => `<tr class="link" tabindex="0" data-drw="${esc(DH.srv(w.id))}"><td class="nw"><b>${esc(w.holder)}</b> <span class="mut sm">${esc(w.id)}</span></td>
       <td class="sm" ${tip((w.chain || []).join("\n"))}>${esc(w.label)}${(w.names || []).length ? nameSum(w.names) : ""}</td><td class="r">${mb2g(w.mb)} GiB</td><td class="sm"><code>${esc(w.cwd || "—")}</code></td></tr>`).join("")}</table></div></div>`;
   return s;
-}
-/* 算力池概况（#76、#211）：摘要行里的一项与它打开的抽屉 #/fleet/pool。管理员与普通池成员均直接消费服务端 pool.summary()
-   产出的 D.pool.summary（唯一计数实现，前端不重复聚合）；普通池成员另读脱敏后的本人清单 D.pool.my_lists，严禁展示他人服务器与他人清单。 */
-const poolLists = () => Object.values(D.pool?.lists || {}).sort((a, b) => (a.since || 0) - (b.since || 0));
-const poolSelf = () => (D.fleet?.mine || []).filter(x => x.lend?.on || x.lend?.placed);     // 入池的自用主机（还跑着池放的、正搬走的也列）
-function poolCount() {
-  const s = D.pool?.summary || {};
-  return {on: s.on || 0, open: s.open || 0, rest: s.rest || 0, lent: s.lent || 0, back: s.back || 0,
-          wait: s.queued_lists || 0, self: s.self || 0, placed: s.placed || 0,
-          gpus_total: s.gpus_total ?? null, gpus_busy: s.gpus_busy ?? null, running_jobs: s.running_jobs ?? null};
-}
-function poolStat() {
-  const c = poolCount(), w = c.wait ? ` · ${c.wait} 条在等` : "";
-  const v = c.on ? `${c.on} 台入池（时段内 ${c.open}${c.self ? `，自用 ${c.self}` : ""}）· 借着 ${c.lent}${c.back ? `（${c.back} 要还）` : ""}${w}` : `没有服务器入池${w}`;
-  const gpuTip = c.gpus_total ? `\n池内在线 ${c.gpus_busy} / ${c.gpus_total} 张卡忙，运行中池任务 ${c.running_jobs || 0} 个` : "";
-  const t = `${c.on ? `入池 ${c.on} 台：此刻在时段内 ${c.open} 台${c.rest ? `（${c.rest} 台休息中）` : ""}，算力池借着 ${c.lent} 台${c.back ? `，其中 ${c.back} 台要还了` : ""}`
-    : "还没有服务器入池：持有人在「我的账号 → 我的服务器」开，管理员在这台的抽屉里代开"}${c.self || c.placed ? `\n自用主机入池 ${c.self} 台（不用借），跑着池里 ${c.placed} 条清单` : ""}${gpuTip}\n池里等着放的清单 ${c.wait} 条\n\n点开看算力池概况`;
-  return `<a class="fs fs-l" href="${DH.pool()}" data-drw="${DH.pool()}" ${tip(t)}><span class="mut">算力池</span><b>${esc(v)}</b></a>`;
-}
-function poolDrawer() {
-  const F = D.fleet, c = poolCount(), now = D.generated;
-  if (LIVE && ME && !ME.admin) {
-    if (!D.pool) return dHead(`<span class="fav">${icon("dash")}</span>`, "算力池", "只有算力池成员可见") + `<div class="db"><div class="card empty">你当前不是算力池成员：开启名下服务器的入池设置后即可查看共有池概况。</div></div>`;
-    const all = D.pool.my_lists || [], ls = all.filter(v => !v.done), done = all.filter(v => v.done);
-    const kpi = (k, v, sub) => `<div class="kpi"><div class="k">${k}</div><div class="v">${v}</div><div class="s">${sub}</div></div>`;
-    const agg = `<div class="kpis">
-      ${kpi("入池规模", `${c.on}<small> 台</small>`, `时段内 ${c.open} 台${c.rest ? ` · 休息 ${c.rest} 台` : ""}${c.self ? ` · 自用 ${c.self} 台` : ""}`)}
-      ${kpi("借用中", `${c.lent}<small> 台</small>`, c.back ? `其中 ${c.back} 台要还` : c.placed ? `自用跑着 ${c.placed} 条池清单` : "—")}
-      ${kpi("在线负载", c.gpus_total ? `${c.gpus_busy}<small> / ${c.gpus_total} 卡</small>` : "—", `运行中池任务 ${c.running_jobs || 0} 个`)}
-      ${kpi("池内排队", `${c.wait}<small> 条</small>`, `我的待放 ${ls.length} 条`)}</div>`;
-    const sv = srvOrder().map(srvById).filter(Boolean);
-    const row = x => { const h = DH.srv(x.id);
-      return `<div class="gd-row pl-row">${pfav(x.holder, `<span class="cdot" style="background:${fDot(x)}"></span>`)}
-        <div class="fc-t"><b><a href="${esc(h)}" data-drw="${esc(h)}">${esc(x.holder)}</a></b><span class="sm mut">${esc(x.id)} · ${fKind(x)}${x.pool ? " · " + esc(x.pool) : ""}${x.off ? " · 已关机" : ""}</span>
-          <span class="sm">${lendSay(x)}</span>${lendMsg(x.id)}</div>
-        <div class="acts">${lendLent(x) ? reclaimPop(x) : ""}${lendCan(x.id) ? lendPop(x) : ""}</div></div>`; };
-    const item = v => { const pj = v.project, ph = "#/p/" + encodeURIComponent(pj || "");
-      const name = pj && visibleProject(pj) ? `<a href="${esc(ph)}">${projName(pj, {always: true})}</a>` : esc(pj || "—");
-      return `<div class="gd-row pl-row"><div class="fc-t"><span>${name}</span><code>${esc(nrm(v.root || ""))}/<b>${esc(v.jobs)}</b></code>
-        <span class="sm mut">${v.host === "pool" ? "在池里" : "已分配到池内服务器"}${v.host === "pool" && v.since && !v.done ? ` · 等了 ${dur(now - v.since)}` : ""}</span>
-        <span class="sm">${v.why ? esc(v.why) : "这一轮正放到入池的主机上"}</span></div></div>`; };
-    return dHead(`<span class="fav">${icon("dash")}</span>`, "算力池", "所属共有池的聚合规模、在线负载与本人项目在池里的清单（不展示他人服务器与项目明细）")
-      + `<div class="db">${dSec("全池聚合概况", agg)}
-        ${dSec("我的服务器", sv.map(row).join("") || `<div class="empty">你名下当前没有持有的服务器。</div>`)}
-        ${dSec("我的池清单", ls.map(item).join("") || `<div class="empty">你的项目当前没有在池里等待的清单。用 <code>labmon worker add pool ROOT JOBS --project P</code> 提交。</div>`,
-          `<span class="sm mut">${ls.length} 条${c.wait > ls.length ? ` · 全池共 ${c.wait} 条排队` : ""}</span>`)}
-        ${done.length ? dSec("已跑完的池清单", done.map(item).join(""), `<span class="sm mut">${done.length} 条 · 不算在等</span>`) : ""}</div>`;
-  }
-  const all = poolLists(), ls = all.filter(v => !v.done), done = all.filter(v => v.done);   // 跑完了的（#86）收在后面
-  const rank = x => x.lend?.lent ? 0 : x.lend?.on ? 1 : 2;
-  const own = new Set(poolSelf().map(x => x.id));
-  const sv = srvOrder().map(srvById).filter(x => x && (!x.mine || own.has(x.id))).sort((a, b) => rank(a) - rank(b));
-  const row = x => { const h = DH.srv(x.id);
-    return `<div class="gd-row pl-row">${pfav(x.holder, `<span class="cdot" style="background:${fDot(x)}"></span>`)}
-      <div class="fc-t"><b><a href="${esc(h)}" data-drw="${esc(h)}">${esc(x.holder)}</a></b><span class="sm mut">${esc(x.id)} · ${fKind(x)}${x.pool ? " · " + esc(x.pool) : ""}${x.off ? " · 已关机" : ""}</span>
-        <span class="sm">${lendSay(x)}</span>${lendMsg(x.id)}</div>
-      <div class="acts">${lendLent(x) ? reclaimPop(x) : ""}${lendCan(x.id) ? lendPop(x) : ""}</div></div>`; };
-  const where = v => v.host === "pool" ? "在池里" : (x => x ? `在 ${esc(fName(x))} 上` : `在 ${esc(v.host)} 上`)(srvById(v.host));
-  const item = v => { const pj = v.project, ph = "#/p/" + encodeURIComponent(pj || "");
-    const name = pj && D.projects.some(p => p.id === pj) ? `<a href="${esc(ph)}">${projName(pj, {always: true})}</a>` : esc(pj || "—");
-    return `<div class="gd-row pl-row"><div class="fc-t"><span>${name}</span><code>${esc(nrm(v.root || ""))}/<b>${esc(v.jobs)}</b></code>
-      <span class="sm mut">${where(v)}${v.host === "pool" && v.since && !v.done ? ` · 等了 ${dur(now - v.since)}` : ""}</span>
-      <span class="sm">${v.why ? esc(v.why) : "这一轮正放到入池的主机上"}</span></div></div>`; };
-  const head = (c.on ? `${c.on} 台入池 · 时段内 ${c.open} · 借着 ${c.lent}${c.back ? `（${c.back} 要还）` : ""}` : "还没有服务器入池")
-    + (c.gpus_total ? ` · 在线 ${c.gpus_busy}/${c.gpus_total} 卡忙（${c.running_jobs || 0} 个任务）` : "");
-  return dHead(`<span class="fav">${icon("dash")}</span>`, "算力池", "组内服务器空着时借给算力池，跑组里别人交给池的清单；入池的自用主机不用借，池里的清单直接放上来")
-    + `<div class="db">${dSec("服务器", sv.map(row).join("") || `<div class="empty">[fleet] 里还没有服务器。</div>`,
-        `<span class="sm mut">${head}</span>${opsNote()}`)}
-      ${dSec("池里等着的清单", ls.map(item).join("") || `<div class="empty">池里没有等着放的清单。入池的人或管理员用 <code>labmon worker add pool ROOT JOBS --project P</code> 交清单，放到哪台由看板定。</div>`,
-        `<span class="sm mut">${ls.length} 条 · 约 ${Math.round((F?.interval || 600) / 60)} 分钟探一次各台，工作台每轮看放不放得下、要不要借</span>`)}
-      ${done.length ? dSec("池里跑完的清单", done.map(item).join(""), `<span class="sm mut">${done.length} 条 · 不算在等</span>`) : ""}</div>`;
 }
 // 选项卡放在顶栏里（顶栏吸顶，滚下去也能切）；数字：台数、人数、核对对不上的、最近 24 小时的事件
 function fleetTabs(tab) {
@@ -406,7 +330,7 @@ async function probeNow(id) {
 
 /* ---------- 详情抽屉：桌面从右侧滑出、窄屏从底部升起，背后的卡片墙不动。地址写在 hash 里
    （#/fleet/srv/<id>、#/fleet/people/<名字>、#/fleet/new/<池>，不记历史），Esc、点空白处、右上角 × 都能关 ---------- */
-const DH = {srv: id => "#/fleet/srv/" + encodeURIComponent(id), person: n => "#/fleet/people/" + encodeURIComponent(n), new: p => "#/fleet/new/" + encodeURIComponent(p), guard: () => "#/fleet/guard", pool: () => "#/fleet/pool",
+const DH = {srv: id => "#/fleet/srv/" + encodeURIComponent(id), person: n => "#/fleet/people/" + encodeURIComponent(n), new: p => "#/fleet/new/" + encodeURIComponent(p), guard: () => "#/fleet/guard",
   renew: (id = "") => "#/fleet/renew" + (id ? "/" + encodeURIComponent(id) : ""),
             proj: id => `#/p/${encodeURIComponent(id)}/manage`, arch: () => "#/archived", assign: id => `#/host/${encodeURIComponent(id)}/assign`};
 let DKEY = null, DLAST = "";
@@ -417,7 +341,7 @@ const dHead = (av, title, sub, right = "", mark = "", status = "") => { const b 
 // 从一个抽屉里点开另一个（服务器、人、保活守护）：记下来路，只记一级，返回键回去；关掉抽屉或从页面上点开的就清掉
 let DBACK = null;
 const dBack = () => { const d = DBACK && route(DBACK).drw;
-  return !d || DBACK === location.hash ? "" : d.k === "guard" ? "保活守护" : d.k === "pool" ? "算力池" : d.k === "renew" ? "续租" : d.k === "proj" ? "管理" : d.k === "arch" ? "已归档" : d.k === "srv" ? srvById(d.id)?.holder || d.id : d.k === "new" ? "开新的" : d.id === "+" ? "新的人" : d.id; };
+  return !d || DBACK === location.hash ? "" : d.k === "guard" ? "保活守护" : d.k === "renew" ? "续租" : d.k === "proj" ? "管理" : d.k === "arch" ? "已归档" : d.k === "srv" ? srvById(d.id)?.holder || d.id : d.k === "new" ? "开新的" : d.id === "+" ? "新的人" : d.id; };
 const dNav = (ids, id) => ids.length > 1 && ids.includes(id) ? `<span class="dnav"><button class="ib" data-dnav="-1" aria-label="上一个" ${tip("上一个（←）")}>${icon("chevl")}</button><button class="ib" data-dnav="1" aria-label="下一个" ${tip("下一个（→）")}>${icon("chevr")}</button></span>` : "";
 const dSec = (title, body, extra = "", id = "") => `<section class="card"${id ? ` id="${id}"` : ""}><div class="chd wrap"><b>${title}</b>${extra}</div>${body}</section>`;
 const kvHtml = kv => `<div class="kv">${kv.map(([k, v]) => `<span>${k}</span><span>${v}</span>`).join("")}</div>`;
@@ -464,17 +388,15 @@ function borrowSec(x) {
   const b = borrowOf(x);
   if (!b) return BMSG?.id === x.id ? dSec("借用", `<div class="rn-state">${esc(BMSG.msg)}</div>`) : "";
   if (D.fleet?.scope === "self") {
-    const say = b.pool ? (b.returning ? "算力池要还了：不再放新任务，在跑的跑完就还，还完开保活" : "算力池借着：跑池里交上来的清单；你回来用、关了入池、出了时段或没活了就还")
-      : `${b.by ? `已借给 ${b.by}` : "已借出"}${b.returning ? "（不再放新任务，在跑的跑完就还）" : ""}`;
-    const kv = [["借出", ts(b.since)], ...(b.pool ? [["借用方", "算力池"]] : b.by ? [["借用人", esc(b.by)]] : []),
-      [b.pool ? "时段到" : "约定还", b.until ? tsNear(b.until) : b.pool ? "全天" : "没约定"]];
-    const btns = b.pool && lendLent(x) ? `<div class="rn">${reclaimPop(x)}</div>` : "";
-    return dSec("借用", `<div class="rn-state">${esc(say)}</div>` + kvHtml(kv) + btns);
+    const say = `${b.by ? `已借给 ${b.by}` : "已借出"}${b.returning ? "（不再放新任务，在跑的跑完就还）" : ""}`;
+    const kv = [["借出", ts(b.since)], ...(b.by ? [["借用人", esc(b.by)]] : []),
+      ["约定还", b.until ? tsNear(b.until) : "没约定"]];
+    return dSec("借用", `<div class="rn-state">${esc(say)}</div>` + kvHtml(kv));
   }
   const hb = hostBorrow(x), run = hostRun(x), wd = D.hosts.find(e => e.id === x.id)?.status?.watchdogs || {};
   const wdt = ws => ws.map(w => `PID ${w.pid}（${w.cmd}：${w.why}）`).join("、");   // worker 找到的保活看门狗
-  const kv = [["借来", ts(b.since)], ...(b.by ? [["借用人", esc(b.by)]] : []), [b.pool ? "时段到" : "约定", b.until ? tsNear(b.until) : b.pool ? "全天" : "没约定"], ["截止", hb.cutoff ? `${tsNear(hb.cutoff)} <span class="mut">${esc(hb.why || "")}</span>` : "—"],
-    ["给", b.pool ? "算力池里的清单" : b.for ? b.for.map(esc).join("、") : "自己的项目"], ["在跑", run.length ? run.map(j => esc(j.name)).join("、") : `<span class="mut">没有任务</span>`],
+  const kv = [["借来", ts(b.since)], ...(b.by ? [["借用人", esc(b.by)]] : []), ["约定", b.until ? tsNear(b.until) : "没约定"], ["截止", hb.cutoff ? `${tsNear(hb.cutoff)} <span class="mut">${esc(hb.why || "")}</span>` : "—"],
+    ["给", b.for ? b.for.map(esc).join("、") : "自己的项目"], ["在跑", run.length ? run.map(j => esc(j.name)).join("、") : `<span class="mut">没有任务</span>`],
     ...hb.keep ? [[hb.keep.away ? "说好不用" : "给对方留", esc(keepText(hb.keep, true)) + (hb.other ? ` <span class="mut">对方此刻：显存 ${mb2g(Object.values(hb.other.vram || {}).reduce((a, v) => a + v, 0))} GiB、内存 ${hb.other.ram ?? "—"} GiB、CPU ${hb.other.cpu ?? "—"} 核</span>` : "")]] : [],
     ...wd.frozen?.length || wd.seen?.length ? [["看门狗", [wd.frozen?.length ? `暂停着（还卡时恢复）：${esc(wdt(wd.frozen))}` : "",
       wd.seen?.length ? `<span class="mut">找到、没动：${esc(wdt(wd.seen))}</span>` : ""].filter(Boolean).join("<br>")]] : []];
@@ -597,7 +519,6 @@ const hostRun = x => (D.hosts.find(e => e.id === x.id)?.status?.running || []).f
 // 借用的操作按钮（组内服务器抽屉与主机页共用）：改约定（弹出表单）、跑完就还 ↔ 撤销还（原地换，还掉之前能撤）、现在停（不能撤）。
 // 跑完就还、现在停先在按钮旁确认；过了约定时间的撤不了（下一轮又会要还），要先改约定。正在停下的不出按钮
 function borrowBtns(x) {
-  if (hostBorrow(x)?.pool) return lendMine(x.id) || canOps() ? reclaimPop(x) : "";   // 算力池借来的（#25）：借还由看板定，只能「收回」
   if (!canOps()) return opsNote();
   const b = hostBorrow(x), dis = fops().op?.active ? "disabled" : "", who = esc(x.holder);
   const run = hostRun(x), names = run.map(j => projName(j.project) + esc(j.name)).join("、"), past = b.cutoff && D.generated >= b.cutoff;
@@ -653,7 +574,6 @@ function srvDrawer(id) {
     ["容器", x.started ? `已运行 ${dur(now - x.started)} <span class="mut">${ts(x.started)} 启动${e.created ? ` · 作业 ${esc(fcr(e.created))} 创建` : ""}</span>` : "—"],
     ["上次探测", x.last ? `<span ${tip(x.mine ? "worker 最近一次写状态的时刻（自用主机不另外探，每轮采集读 worker 状态）" : "最近一次只读探测")}>${ts(x.last)}</span>${x.error ? ` <span style="color:var(--bad)">${esc(x.error)}</span>` : ""}` : "还没探过"],
     ["保活守护", `${esc(guardText(x))}${wk || selfView ? "" : ` <a href="${DH.guard()}" data-drw="${DH.guard()}">设置</a>`}`]);
-  if (x.lend) kv.push(["算力池", `${lendSay(x)}${lendLent(x) && !borrowOf(x) ? " " + reclaimPop(x) : ""}${lendCan(id) ? " " + lendPop(x) : ""}${lendMsg(id)}`]);
   const btns = LIVE && !selfView ? `<div class="rn">${srvBtns(x)}</div>${PERR[id] ? `<div class="rn-err">${esc(PERR[id])}</div>` : ""}${RERR[id] ? `<div class="rn-err">${esc(RERR[id])}</div>` : ""}` : "";
   s += dSec("概况", kvHtml(kv) + btns) + borrowSec(x) + workerSec(x);
   if (!x.off) {

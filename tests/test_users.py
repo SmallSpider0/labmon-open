@@ -705,48 +705,33 @@ class ViewTest(UsersBase):
             },
         }
         acc = U.Access({"p1"}, {"srv-mine"}, {"srv-mine"})
-        with mock.patch.object(PO, "member", return_value=False):
-            v0 = U.view(amy, snap, acc)
-        self.assertIsNone(v0["pool"])                                        # 非池成员不给共有池概况
+        v0 = U.view(amy, snap, acc)
+        self.assertIsNone(v0["pool"])                                        # PR 1 清理旧借用池后安全降级为 None
         # 共享盘：仅总盘 + 本人 OWNER，屏蔽他人与公共、names/owners_set/now
         self.assertEqual([o["name"] for o in v0["disk"]["owners"]], ["OWNER"])
         self.assertEqual(v0["disk"]["colors"], {"OWNER": "#1D9E75"})
         self.assertEqual([a["key"] for a in v0["disk"]["alerts"]], ["low", "burst:OWNER", "over:owner"])
         for forbidden in ("names", "owners_set", "now"):
             self.assertNotIn(forbidden, v0["disk"])
-        # 本人服务器：仅 OWNER 持有的 srv-b 与 srv-mine，屏蔽 ops/holders/quota/他人服务器
+        # 本人服务器：仅 OWNER 持有的 srv-b 与 srv-mine，屏蔽 ops/holders/quota/他人服务器与旧 lend
         fl = v0["fleet"]
         self.assertEqual((fl["scope"], fl["ops"], fl["holders"], fl["quota"]), ("self", None, [], None))
         self.assertEqual([s["id"] for s in fl["servers"]], ["srv-b"])
         self.assertEqual([s["id"] for s in fl["mine"]], ["srv-mine"])
         sb = fl["servers"][0]
         self.assertEqual(sb["borrow"], {"since": T0 - 3600, "until": T0 + 3600, "by": "ME", "returned": None})
-        for forbidden in ("reserve", "using", "lease_cut"):
+        for forbidden in ("reserve", "using", "lease_cut", "lend"):
             self.assertNotIn(forbidden, sb)
         self.assertEqual([w["label"] for w in sb["sample"]["work"]], ["keep_alive.py", "借用方任务", "owner_tool.py"])
         self.assertNotIn("secret_train.py", json.dumps(sb, ensure_ascii=False))
         self.assertNotIn("secret_repo", json.dumps(sb, ensure_ascii=False))
         self.assertEqual(fl["unknown"], [{"id": "srv-b", "holder": "OWNER", "kind": "unknown", "label": "proc", "mb": 500, "n": 1}])
-        # 自用主机入池跑他人任务：脱敏他人项目名与 cwd
+        # 自用主机跑他人任务：脱敏他人项目名与 cwd
         sm = fl["mine"][0]
-        self.assertEqual([w["label"] for w in sm["work"]], ["my_job", "算力池任务"])
-        self.assertEqual([w["label"] for w in sm["sample"]["work"]], ["my_job", "算力池任务"])
+        self.assertEqual([w["label"] for w in sm["work"]], ["my_job", "他人任务"])
+        self.assertEqual([w["label"] for w in sm["sample"]["work"]], ["my_job", "他人任务"])
         self.assertNotIn("secret_other_job", json.dumps(sm, ensure_ascii=False))
-        # 池成员：可见聚合概况与脱敏后的本人清单，不泄他人项目/服务器 ID/持有人名
-        with mock.patch.object(PO, "member", return_value=True):
-            v1 = U.view(amy, snap, acc)
-        self.assertIsInstance(v1["pool"], dict)
-        self.assertEqual(v1["pool"]["summary"]["lent"], 1)
-        self.assertEqual(v1["pool"]["summary"]["gpus_total"], 3)
-        self.assertEqual(v1["pool"]["summary"]["gpus_busy"], 2)
-        self.assertEqual(v1["pool"]["summary"]["running_jobs"], 2)
-        self.assertEqual(len(v1["pool"]["my_lists"]), 1)
-        ml = v1["pool"]["my_lists"][0]
-        self.assertEqual(ml["project"], "p1")
-        self.assertIsNone(ml["host"])                                        # 非 pool 的具体他人主机置 None
-        self.assertNotIn("srv-other", json.dumps(v1["pool"], ensure_ascii=False))
-        self.assertNotIn("OTHER", json.dumps(v1["pool"], ensure_ascii=False))
-        self.assertNotIn("p2", json.dumps(v1["pool"], ensure_ascii=False))
+        self.assertNotIn("lend", sm)
 
 
 if __name__ == "__main__":

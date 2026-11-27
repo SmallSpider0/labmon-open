@@ -425,54 +425,35 @@ class RegLanesTest(Base):
         self.assertEqual({j["id"]: j["status"] for j in C.collect(self.cfg())["jobs"]}["a_run"], "queued")
 
     def test_pool_placed_lane_follows(self):
-        # #78：池清单被 pool.tick 放到池借来的 a 上之后，这一轮写出的全局快照就让项目车道跟到 a：项目「主机」有 a、在跑的进 jobs[]、wait --job 认得出；
-        # 旧代码 regs 还是放之前读的，车道要再等一轮全局采集，期间停在池里、在跑的那一格当成排队。a 还掉、清单回池里以后，跑完的照样在、带开始与结束
+        # #78/#99：池清单落到主机 a 后车道跟到 a；回到池里后，按用量记录跑完的与失败尝试仍带原主机 a，未放的不带主机
         from unittest import mock
-        from fixtures import fake_host
-        from labmon import pool as PO
         from labmon import waits as WT
-        from labmon.config import fmt_time
         from labmon.state import append_row, save_json, state_dir, usage_file
         hf = self.d / "hosts.toml"
-        base = hf.read_text() + ('\n[fleet]\ninterval = 600\n\n[[fleet.servers]]\nid = "a"\nholder = "AA"\nssh = "root@h"\nport = 1\npool = "P"\nlend = true\n'
-                                 f'borrow_since = "{fmt_time(time.time() - 3600, year=True)}"\nborrow_pool = true\n')
-        hf.write_text(base)
+        hf.write_text(hf.read_text() + '\n[[hosts]]\nid = "a"\nlabel = "主机 A"\nssh = "root@h"\nport = 1\n')
         st = self.root / "state"
         cur = (st / "current").read_text().split()
-        (st / "current").write_text(" ".join(cur[:4] + ["a"]))      # a 上的 worker 放行的
-        k = PO.key(str(self.root), "jobs/q.txt")
-        q = {"root": str(self.root), "jobs": "jobs/q.txt", "project": "p1", "stop": "term", "gpus": None}
-        here = fake_host("here", {"pool_heads": {k: {"head": "a_run", "n": 3, "dep": None, "held": None}}})
-        a = fake_host("a", {"room": {"gpus": {"GPU-a": 40000.0}}}, borrow={"pool": True, "holder": "AA", "since": time.time() - 60})
-        glob = {"hosts": [here, a], "regs": [{"host": "here", "state": "active", "queues": []}, {"host": "a", "state": "active", "queues": []},
-                                             {"host": "pool", "state": "pool", "queues": [dict(q, added_t=time.time() - 300)]}]}
-        moves = []
-        fit = lambda it, hs: {"need": {"ngpu": 1, "vram": 1.0}, "hosts": {h: {"ok": True} for h in hs}}   # noqa: E731
-        PO._FIT.clear()
-        self.addCleanup(PO._FIT.clear)
-        PO.tick(glob, {}, move=lambda to, items, pool="": moves.append(to), fit=fit, start=lambda *x, **y: None, ret=lambda *x: None, fin=lambda *x, **y: "")
-        self.assertEqual(moves, ["a"])
-        save_json(state_dir() / "snapshot.json", glob)
+        (st / "current").write_text(" ".join(cur[:4] + ["a"]))
+        q = {"root": str(self.root), "jobs": "jobs/q.txt", "project": "p1", "stop": "term", "gpus": None, "pool": True}
+        save_json(state_dir() / "snapshot.json", {"hosts": [], "regs": [
+            {"host": "here", "state": "active", "queues": []},
+            {"host": "a", "state": "active", "queues": [q]},
+        ]})
         local = C.run_probe
         with mock.patch.object(C, "run_probe", lambda cfg, h: local(cfg, dict(h, ssh=None))), \
-                mock.patch.dict(os.environ, {"LABMON_LAN": "on"}):           # 不连 a：探针在本机跑，a 的目录就是这里
+                mock.patch("labmon.lan.check", return_value={"ok": True, "since": None}):
             snap = C.collect(self.cfg())
         self.assertIn("a", [h["id"] for h in snap["hosts"]])
         ln, = snap["lanes"]
         self.assertEqual((ln["host"], ln.get("pool")), ("a", None))
         self.assertEqual({j["id"]: j["status"] for j in snap["jobs"]}["a_run"], "running")
         self.assertEqual(WT.job_state(snap, "a_run", [])["st"], "running")
-        self.assertIn("在 root@h（池 · AA） 车道 1 上跑", WT.job_state(snap, "a_run", [])["text"])
-        # 还掉：a 目录里留着的登记（跑完的那一格已收尾）由 pool.tick 搬回池里；跑完的 a_done 照样在、时间线有开始与结束
-        hf.write_text(base + 'borrow_returned = "2026-11-18 10:00"\n')
+        # 清单回到池里：跑完的 a_done 与失败尝试仍按用量记录带原主机 a
         (st / "current").unlink()
-        glob = {"hosts": [here], "regs": [{"host": "here", "state": "active", "queues": []}, {"host": "a", "state": "returned", "queues": [q]}]}
-        moves.clear()
-        PO.tick(glob, {}, move=lambda to, items, pool="": moves.append(to), fit=fit, start=lambda *x, **y: None, ret=lambda *x: None, fin=lambda *x, **y: "")
-        self.assertEqual(moves, ["pool"])
-        save_json(state_dir() / "snapshot.json", glob)
-        # #99：工作台存的 a 的用量记录里有这条清单跑过的（先失败一次、再跑成）：回池后跑完的那格带着 a、失败的尝试也带着 a，项目页画在 a 下面
-        # （旧代码按车道主机 pool 找用量记录，什么也找不到，跑完的那格挂在不画的池车道上，从时间线消失）
+        save_json(state_dir() / "snapshot.json", {"hosts": [], "regs": [
+            {"host": "here", "state": "active", "queues": []},
+            {"host": "pool", "state": "pool", "queues": [{k: v for k, v in q.items() if k != "pool"}]},
+        ]})
         now, row = time.time(), {"p": "p1", "root": str(self.root), "queue": "jobs/q.txt", "n": "a_done", "g": []}
         for r in (dict(row, s=now - 3000, t=now - 2900, st="failed"), dict(row, s=now - 2800, t=now - 2000, st="done"), dict(row, n="x", s=now - 2800, t=now - 2000, st="done")):
             append_row(usage_file("a"), r, 86400, now)
@@ -484,23 +465,8 @@ class RegLanesTest(Base):
         self.assertTrue(done["start_ts"] and done["end_ts"])
         self.assertEqual(done.get("host"), "a")
         self.assertEqual([(x["name"], x.get("host")) for x in snap["attempts"]], [("a_done", "a")])
-        self.assertNotIn("host", next(j for j in snap["jobs"] if j["status"] == "queued"))     # 还没放的不带主机，不进时间线
+        self.assertNotIn("host", next(j for j in snap["jobs"] if j["status"] == "queued"))
         self.assertEqual(WT.job_state(snap, "a_done", [])["st"], "done")
-
-    def test_pool_returned_old_list_alerts(self):
-        # #88 E：算力池借过的主机还掉后，池的清单（带停法，pool._ours）由 pool.tick 搬回池里、不叫会话；借给池之前就登记在上面的旧清单（停法没写）池不收，
-        # 照报 returned_unfinished 叫会话自己搬（旧代码对池借过的主机一律不报，会话收不到）
-        from labmon.config import fmt_time
-        from labmon.state import save_json, state_dir
-        hf = self.d / "hosts.toml"
-        hf.write_text(hf.read_text() + ('\n[fleet]\ninterval = 600\n\n[[fleet.servers]]\nid = "a"\nholder = "AA"\nssh = "root@h"\nport = 1\npool = "P"\nlend = true\n'
-                                        f'borrow_since = "{fmt_time(time.time() - 3600, year=True)}"\nborrow_pool = true\nborrow_returned = "2026-11-18 10:00"\n'))
-        for stop, want in ((None, True), ("boundary", True), ("term", False)):
-            q = {"root": str(self.root), "jobs": "jobs/q.txt", "project": "p1", "stop": stop, "gpus": None}
-            save_json(state_dir() / "snapshot.json", {"regs": [{"host": "here", "state": "active", "queues": []}, {"host": "a", "state": "returned", "queues": [q]}]})
-            snap = C.collect(self.cfg())
-            self.assertEqual([ln["host"] for ln in snap["lanes"]], ["a"], stop)
-            self.assertEqual(any(a["key"].startswith("returned_unfinished:") for a in snap["alerts"]), want, stop)
 
     def test_pool_lane_why_and_wait(self):
         # #25：池车道的等待原因接上 pool.tick 写的为什么还没放；待放满 POOL_TELL_S 给实验会话一条 pool_wait:（只给会话、key 带开始等的时刻）
@@ -535,7 +501,7 @@ class RegLanesTest(Base):
         self.assertEqual(a["key"], f"pool_wait:p1:{lid}:nofit")
         self.assertIn("池里借着的服务器都放不下", a["msg"])
         snap["pool"]["lists"][k].pop("nofit")
-        snap["pool"]["lists"][k].update(why=PO.POOL_DONE, done=True)    # #86：池里跑完了的不算在等
+        snap["pool"]["lists"][k].update(why="清单里的行都跑完了", done=True)    # #86：池里跑完了的不算在等
         save_json(state_dir() / "snapshot.json", snap)
         out = C.collect(self.cfg())
         self.assertIsNone(out["lanes"][0]["waiting"])

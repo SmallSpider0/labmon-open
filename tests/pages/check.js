@@ -64,7 +64,7 @@ function page(O, hash) {                 // 按路由整页渲染（顶栏 + 正
 const ROUTES = ["#/", "#/host/srv-a", "#/host/srv-b", "#/host/没有的主机", "#/log", "#/log?host=srv-a&cat=op&q=x", "#/fleet", "#/fleet/people", "#/fleet/disk",
   "#/fleet/srv/srv-a", "#/fleet/srv/srv-b", "#/fleet/srv/srv-d", "#/fleet/srv/srv-e", "#/fleet/srv/srv-f", "#/fleet/srv/srv-g", "#/fleet/srv/gone",
   "#/fleet/people/OWNER", "#/fleet/people/ME", "#/fleet/people/NEWBIE", "#/fleet/people/GONE", "#/fleet/people/+", "#/fleet/new/pool-public", "#/fleet/guard",
-  "#/fleet/pool", "#/fleet/srv/srv-h", "#/fleet/renew", "#/fleet/renew/srv-d", "#/p/proj-a", "#/p/proj-a/manage", "#/p/proj-b/manage", "#/p/没有的项目/manage", "#/archived"];
+  "#/fleet/srv/srv-h", "#/fleet/renew", "#/fleet/renew/srv-d", "#/p/proj-a", "#/p/proj-a/manage", "#/p/proj-b/manage", "#/p/没有的项目/manage", "#/archived"];
 const TABS = ["done", "events", "ovr", "queues", "deps", "lw", "log"];
 
 let O;
@@ -450,8 +450,6 @@ t("overview", "本地盘开机以来的新写入（#149）：主机页的资源�
   ok(/data-rsel="srv-b"\s+disabled/.test(r), "借用中的服务器在批量续租里还能勾选");
   has(r, "正借来在用：先在它的「借用」里还掉（若已被平台停掉连不上，先点「与平台核对」，确认作业不在运行后会自动归还）再续租");
   ok(JSON.stringify(run(O, "rpBody(RPICK).ids")) === "[]", "rpBody 不应带出借用中的服务器");
-  r = run(O, 'const s = D.fleet.servers.find(x => x.id === "srv-b"); const p0 = s.borrow.pool; s.borrow.pool = true; const h = renewDrawer("srv-b"); s.borrow.pool = p0; h');
-  has(r, "正借给算力池：先在「借用」里点「收回」还掉（若已被平台停掉连不上，先点「与平台核对」，确认作业不在运行后会自动归还）再续租");
   run(O, "RPICK = null");
   const bsDown = run(O, 'borrowSec({...D.fleet.servers.find(s => s.id === "srv-b"), state: "down"})');
   has(bsDown, "这台已掉线，ssh 连不上时无法直接归还或续租：若怀疑作业已被平台停掉，先在组内服务器页点「与平台核对」");
@@ -1492,7 +1490,7 @@ t("escape", "恶意快照：各路由与记录卡都转义", () => {
   for (const r of ROUTES) { const h = page(E, r); ok(!raw(h), r + " 没转义"); }
   for (const tab of TABS) { E.RTAB = tab; for (const r of ["#/", "#/host/srv-a", "#/host/srv-b"]) ok(!raw(page(E, r)), `${r} ${tab} 没转义`); }
   E.RTAB = "done";
-  for (const [r, what] of [["#/", "总览"], ["#/host/srv-a", "主机页"], ["#/fleet", "组内"], ["#/fleet/disk", "共享盘"], ["#/fleet/srv/srv-d", "服务器抽屉"], ["#/fleet/srv/srv-a", "自用主机抽屉"], ["#/fleet/people/NEWBIE", "人员抽屉"], ["#/log", "记录页"], ["#/fleet/guard", "保活守护"], ["#/fleet/pool", "算力池抽屉"], ["#/fleet/renew", "批量续租抽屉"]])
+  for (const [r, what] of [["#/", "总览"], ["#/host/srv-a", "主机页"], ["#/fleet", "组内"], ["#/fleet/disk", "共享盘"], ["#/fleet/srv/srv-d", "服务器抽屉"], ["#/fleet/srv/srv-a", "自用主机抽屉"], ["#/fleet/people/NEWBIE", "人员抽屉"], ["#/log", "记录页"], ["#/fleet/guard", "保活守护"], ["#/fleet/renew", "批量续租抽屉"]])
     has(page(E, r), BADESC, what + " 没把恶意串转义后写出来：");
   { const tp = tips(page(E, "#/")); has(tp, "挪" + BADESC, "挪法建议悬停"); }
   E.RTAB = "log"; has(page(E, "#/host/srv-a"), BADESC, "worker 日志");
@@ -1523,7 +1521,7 @@ t("sparse", "总览：不在内网、组内与共享盘读不了的错误都写�
 });
 // overview.collect 读不了组内数据时给的兜底是 {error, servers: [], mine: []}：fleetPage 只写原因，抽屉不开（以前取 F.share.vram 报错、写 NaN）
 t("sparse", "组内服务器页在 fleet 兜底（只有 error）时渲染：写出原因，共享盘照看，抽屉不开", () => {
-  for (const r of ["#/fleet", "#/fleet/people", "#/fleet/disk", "#/fleet/srv/x", "#/fleet/people/x", "#/fleet/guard", "#/fleet/pool"]) clean(page(S, r), r);
+  for (const r of ["#/fleet", "#/fleet/people", "#/fleet/disk", "#/fleet/srv/x", "#/fleet/people/x", "#/fleet/guard"]) clean(page(S, r), r);
   has(page(S, "#/fleet"), "这一轮组内服务器的数据没读出来"); ok(!run(S, "DKEY"), "兜底时不该开抽屉");
 });
 
@@ -1566,7 +1564,7 @@ t("project", "会话的 wait 断了（#141）：wait_gone 只给用户，进红�
 t("project", "GPU 利用率（#51）：大字是近 1 小时的吃满程度（保活按 0），小字是各卡与本项目近 24 小时；没有 worker 数据的卡退回探针此刻值", () => {
   const h = app(P), i0 = h.lastIndexOf('<div class="kpi"', h.indexOf("GPU 利用率 · ")), kpi = h.slice(i0, h.indexOf('<div class="kpi"', i0 + 1));
   has(kpi, "GPU 利用率 · 4 卡 · 整机"); has(kpi, '62<small>% 近 1 小时 平均');                 // (72.3 + 4.2 + 90 + 80) / 4：srv-b 没有 busy，按探针此刻值逐卡补进平均（#54 审查）
-  has(kpi, "srv-a·0 72%"); has(kpi, "srv-a·1 4%"); has(kpi, "借 OWNER 90%"); has(kpi, "池 PERSON7 80%"); has(kpi, "本项目近 24 小时 63%");
+  has(kpi, "srv-a·0 72%"); has(kpi, "srv-a·1 4%"); has(kpi, "借 OWNER 90%"); has(kpi, "srv-h 80%"); has(kpi, "本项目近 24 小时 63%");
   const tt = tips(kpi); has(tt, "近 1 小时平均 62%"); has(tt, "其中 1 张卡没有 worker 数据"); has(tt, "只有保活（顶到 99%）"); has(tt, "保活按 0 算"); has(tt, "14.5 卡·时，平均把所用的卡用到 63%");
   has(h, '38%<span class="mut" style="font-weight:400"> 近 1 小时</span>');                    // 主机小图
   ok(run(P, "utilText({now: 0, m10: 0, h1: 4.2, cov: 1200, ka: 99}).span") === "近 20 分钟", "worker 刚起不满 1 小时该写实际多久");
@@ -1720,7 +1718,7 @@ t("project", "运行中的条上百分比是现在线在条上的位置，不是
 t("project", "时间线按主机分组：主机一行表头（利用率、事件都在里面），车道单行缩进，条上去掉自动分组的前缀", () => {
   const A = pjCtx(PJ, EVN); run(A, `TL.v = {a: ${-3 * H}, b: ${12 * H}}; drawTimeline()`);     // 固定 15 小时的视图：条宽与下面省略的写法对得上
   const tl = el(A, "tlbox").innerHTML, labs = [...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
-  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1 · q1", "车道 2 · q2", "借 OWNER", "车道 1 · b2", "池 PERSON7", "车道 1 · h"]), JSON.stringify(labs));   // 算力池不是主机，不画一行（#89）
+  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1 · q1", "车道 2 · q2", "借 OWNER", "车道 1 · b2", "srv-h", "车道 1 · h"]), JSON.stringify(labs));   // 算力池不是主机，不画一行（#89）
   ok(!tl.includes("GPU 利用率") && !tl.includes(" 事件<") && !tl.includes("同机别的项目<"), "还有单独的利用率、事件行或主机前缀");
   ok((tl.match(/stroke-opacity="\.4"/g) || []).length === 2, "三组之间该各有一条分隔线");
   has(tl, ">train_s1 · 44%<", "条上去掉 alpha_"); has(tl, ">⏸ unt…ata<", "占位任务"); has(tips(tl), "alpha_train_s1", "悬停是全名");
@@ -1753,7 +1751,7 @@ t("project", "#147 并行清单：车道名后标「并行 k/N」，同时在跑
 t("project", "#100 清单搬走后原主机在跑完的那一格：画在原主机下另起一行（只画那一格），登记所在主机那行不画它；运行中与明细标「在 X 上跑完」", () => {
   const A = pjCtx(J("project_moved.json"), EVN); run(A, `TL.v = {a: ${-3 * H}, b: ${12 * H}}; drawTimeline()`);
   const tl = el(A, "tlbox").innerHTML, labs = [...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].map(m => m[1]);
-  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1 · q1", "车道 2 · q2", "车道 1 · b2（在这台跑完）", "借 OWNER", "车道 1 · b2", "池 PERSON7", "车道 1 · h",
+  ok(JSON.stringify(labs) === JSON.stringify(["srv-a", "车道 1 · q1", "车道 2 · q2", "车道 1 · b2（在这台跑完）", "借 OWNER", "车道 1 · b2", "srv-h", "车道 1 · h",
     "srv-z", "车道 1 · b2（在这台跑完）"]), JSON.stringify(labs));
   clean(tl, "时间线");
   const rows = tl.split('stroke-opacity=".4"'), at = id => rows.findIndex(r => r.includes(`data-id="${id}"`));
@@ -2598,7 +2596,7 @@ t("auth", "管理员从公网入口来：平台操作的按钮换成一句「请
   ok(/data-fop="rpop"|data-renew=/.test(a), "内网入口的主机页没有续租按钮");
   ok(!/data-fop="rpop"|data-renew=|data-fop="renewone"/.test(b), "公网入口的主机页还有续租按钮"); has(b, "请从内网入口操作，或为此管理员开启公网平台操作");
   has(b, "data-now", "公网入口的立即采集");
-  for (const r of ["#/fleet", "#/fleet/srv/srv-a", "#/fleet/people", "#/fleet/guard", "#/fleet/pool", "#/fleet/renew"]) {
+  for (const r of ["#/fleet", "#/fleet/srv/srv-a", "#/fleet/people", "#/fleet/guard", "#/fleet/renew"]) {
     const h = page(Pb, r); clean(h, r);
     ok(!/data-fop="(sync|renewgo|wiz|offpick|bpick|ka|padd|pgive|pdef|pedit|logout)"|data-gdsave|data-drw="#\/fleet\/renew/.test(h), r + "：公网入口还有平台操作按钮");
   }
@@ -2953,133 +2951,45 @@ ta("auth", "路径前缀（#165）：工作台在 /pfx/、项目页在 /pfx/p/<i
   ok(L.location.href === base + "/pfx/p/proj-a/#/host/srv-a", "登录后去：" + L.location.href);
 });
 
-/* ---------- 算力池 B（#24）：入池开关、我的服务器、池清单 ---------- */
-// fetch 桩：记下 POST 的地址与正文；api/pool/lend 回一句与新的 servers
-const lendFetch = (C, servers) => run(C, `SF = []; fetch = (u, o) => { if (o?.body) SF.push([u, JSON.parse(o.body)]);
-  return Promise.resolve({ok: true, json: async () => u.startsWith("api/pool/") ? {msg: "存好了", servers: ${JSON.stringify(servers)}} : D}); };`);
-ta("overview", "入池（#24）：组内卡片标「入池」，抽屉有「算力池」一行；管理员代开要勾「已和这人说好」，时段两格要么都填要么都空", async () => {
+/* ---------- 旧借用型算力池 UI 已彻底移除（#212 PR 1） ---------- */
+t("overview", "旧借用型算力池 UI 已移除（#212）：组内页、服务器抽屉、主机页、我的账号与侧栏不再出现入池/收回/旧池抽屉", () => {
   const C = ovCtx(OV, RR, "#/fleet");
-  const card = run(C, 'fleetCard(srvById("srv-g"))'); has(card, ">入池</span>"); has(tips(card), "入池，22:00 开始");
-  ok(!run(C, 'fleetCard(srvById("srv-d"))').includes(">入池</span>"), "没入池的不该标");
-  const dr = page(C, "#/fleet/srv/srv-g"); has(dr, "入池，22:00 开始"); has(dr, "每天 22:00-09:00"); has(dr, 'data-lend="open"'); clean(dr, "入池抽屉");
-  const P = accCtx(OV, PUB_ME); ok(!page(P, "#/fleet/srv/srv-g").includes('data-lend="open"'), "不能做平台操作的管理员不该有代开按钮");
-  lendFetch(C, []);
-  await run(C, 'lendAct("open", {id: "srv-g"})');
-  ok(run(C, "POP.on") === true && run(C, "POP.draft.lf") === "22:00" && run(C, "POP.draft.lt") === "09:00", "弹窗没带上现在的时段");
-  let pop = page(C, "#/fleet/srv/srv-g"); has(pop, "已和 PERSON6 说好"); ok(/data-lend="go"[^>]*disabled/.test(pop), "没勾说好时保存该置灰"); clean(pop, "入池弹窗");
-  run(C, 'POP.draft.lt = ""');
-  await run(C, 'lendAct("go", {id: "srv-g"})');
-  has(run(C, "POP.err"), "开始和结束两格"); ok(run(C, "SF.length") === 0, "只填一格不该发请求");
-  run(C, 'POP.draft.lt = "07:30"; POP.ok = true');
-  await run(C, 'lendAct("go", {id: "srv-g"})');
-  ok(JSON.stringify(run(C, "SF[0]")) === JSON.stringify(["api/pool/lend", {id: "srv-g", on: true, hours: "22:00-07:30", ok: true}]), "代开的请求：" + JSON.stringify(run(C, "SF")));
-  ok(run(C, "POP") === null && run(C, "LMSG.m") === "存好了", "存好后该关弹窗、留一句");
-  await run(C, 'lendAct("open", {id: "srv-g"})'); run(C, "POP.on = false; render(false)");
-  ok(!page(C, "#/fleet/srv/srv-g").includes("已和 PERSON6 说好"), "关掉入池不用勾说好");
-  await run(C, 'lendAct("go", {id: "srv-g"})');
-  const off = run(C, 'SF.filter(x => x[0] === "api/pool/lend").at(-1)');
-  ok(JSON.stringify(off[1]) === JSON.stringify({id: "srv-g", on: false, hours: null, ok: false}), "代关的请求：" + JSON.stringify(off));
-});
-ta("auth", "「我的账号」的「我的服务器」（#24）：持有人自己开入池，不用勾说好；没有服务器不显示", async () => {
-  const mine = [{id: "srv-m", holder: "OWNER", label: "OWNER", pool: "pool-public", lend: {on: false, hours: null, open: false, say: "没入池"}}];
-  const U = accCtx(OVU, {...OWNER_ME, servers: mine, pool_member: false}, "#/me");
-  run(U, "ACC.at.me = 1");
-  let m = page(U, "#/me"); has(m, "我的服务器"); has(m, "srv-m"); has(m, "没入池"); clean(m, "我的服务器");
-  ok(!page(accCtx(OVU, OWNER_ME, "#/me"), "#/me").includes("我的服务器"), "没有服务器不该有这一节");
-  const on = [{...mine[0], lend: {on: true, hours: null, open: true, say: "入池，全天"}}];
-  lendFetch(U, on);
-  await run(U, 'lendAct("open", {id: "srv-m"})'); run(U, "POP.on = true; render(false)");
-  m = page(U, "#/me"); ok(!m.includes("说好"), "自己的服务器不该要勾说好"); ok(!/data-lend="go"[^>]*disabled/.test(m), "保存不该置灰");
-  await run(U, 'lendAct("go", {id: "srv-m"})');
-  ok(run(U, "POP") === null, "弹窗：" + JSON.stringify(run(U, "POP")));
-  ok(JSON.stringify(run(U, "SF[0]")) === JSON.stringify(["api/pool/lend", {id: "srv-m", on: true, hours: null, ok: false}]), "请求：" + JSON.stringify(run(U, "SF")));
-  has(page(U, "#/me"), "入池，全天", "存好后用回来的 servers 重画");
-});
-/* ---------- 自用主机入池（#79）：主机页一行「算力池」、组内卡片标「入池」、「我的服务器」标「自用」；收回只停池里的 ---------- */
-ta("overview", "自用主机入池（#79）：主机页有「算力池」一行与入池设置、收回；组内卡片标「入池」；收回的确认写“你自己的清单不动”", async () => {
-  const C = ovCtx(OV, RR, "#/host/srv-a");
-  let hp = page(C, "#/host/srv-a"); has(hp, "算力池"); has(hp, "跑着池里 1 条清单"); has(hp, 'data-lend="open"'); has(hp, 'data-lend="rc"'); clean(hp, "自用主机的算力池");
-  has(run(C, 'fleetCard(srvById("srv-a"))'), ">入池</span>");
-  const P = accCtx(OV, PUB_ME, "#/host/srv-a"); ok(!page(P, "#/host/srv-a").includes('data-lend="open"'), "不能做平台操作的管理员不该有入池设置");
-  lendFetch(C, []);
-  await run(C, 'lendAct("rc", {id: "srv-a"})');
-  hp = page(C, "#/host/srv-a"); has(hp, "你自己的清单不动"); has(hp, "不再往这台放"); clean(hp, "自用主机收回弹窗");
-  await run(C, 'lendAct("rcgo", {id: "srv-a"})');
-  ok(JSON.stringify(run(C, "SF[0]")) === JSON.stringify(["api/pool/reclaim", {id: "srv-a"}]), "收回的请求：" + JSON.stringify(run(C, "SF")));
-  await run(C, 'lendAct("open", {id: "srv-a"})');
-  hp = page(C, "#/host/srv-a"); has(hp, "ME（srv-a） 入池"); has(hp, "和你自己的清单按份额排"); has(hp, "已和 ME 说好"); clean(hp, "自用主机入池弹窗");
-  const mine = [{id: "srv-m", holder: "OWNER", label: "OWNER", pool: "pool-private", mine: true, lend: {on: true, hours: null, open: true, say: "入池，全天", mine: true, placed: 0, holder: "OWNER"}}];
-  const U = accCtx(OVU, {...OWNER_ME, servers: mine, pool_member: true}, "#/me");
-  run(U, "ACC.at.me = 1");
-  const m = page(U, "#/me"); has(m, "我的服务器"); has(m, "自用"); has(m, "入池，全天"); ok(!m.includes('data-lend="rc"'), "没有池清单的自用主机不该有收回"); clean(m, "我的服务器的自用主机");
-});
-/* ---------- 算力池 C（#25）：借着的那台标「算力池借着」、只能「收回」 ---------- */
-ta("overview", "算力池借着的（#25）：卡片标「算力池借着」不带“借用中”，抽屉「给」写池里的清单、只有「收回」，收回要确认、POST api/pool/reclaim", async () => {
-  const C = ovCtx(OV, RR, "#/fleet");
-  const card = run(C, 'fleetCard(srvById("srv-h"))'); has(card, "算力池借着"); ok(!card.includes("借用中 · 算力池"), "池借的标签不该带“借用中”：" + text(card));
-  let dr = page(C, "#/fleet/srv/srv-h"); has(dr, "算力池里的清单"); has(dr, 'data-lend="rc"'); has(dr, "收回");
-  ok(!dr.includes('data-fop="bret"') && !dr.includes('data-fop="bnow"'), "池借的不该有「跑完就还」「现在还」"); clean(dr, "池借抽屉");
-  ok(!page(accCtx(OV, PUB_ME), "#/fleet/srv/srv-h").includes('data-lend="rc"'), "不能做平台操作的管理员不该能收回");
-  lendFetch(C, []);
-  await run(C, 'lendAct("rc", {id: "srv-h"})');
-  dr = page(C, "#/fleet/srv/srv-h"); has(dr, "停下池任务、重排到别处，几分钟内还回来"); has(dr, 'data-lend="rcgo"'); has(dr, "停下并收回"); clean(dr, "收回弹窗");
-  ok(run(C, "SF.length") === 0, "点「收回」只开弹窗，不该发请求");
-  await run(C, 'lendAct("rcgo", {id: "srv-h"})');
-  ok(JSON.stringify(run(C, "SF[0]")) === JSON.stringify(["api/pool/reclaim", {id: "srv-h"}]), "收回的请求：" + JSON.stringify(run(C, "SF")));
-  ok(run(C, "POP") === null && run(C, "LMSG.m") === "存好了", "收回后该关弹窗、留一句");
-});
-ta("auth", "「我的服务器」里借给算力池的那台（#25）：标「算力池借着」、持有人能收回", async () => {
-  const mine = [{id: "srv-m", holder: "OWNER", label: "OWNER", pool: "pool-public", lend: {on: true, hours: null, open: true, lent: true, returning: false, rest: null, say: "算力池借着"}}];
-  const U = accCtx(OVU, {...OWNER_ME, servers: mine, pool_member: false}, "#/me");
-  run(U, "ACC.at.me = 1");
-  let m = page(U, "#/me"); has(m, "算力池借着"); has(m, 'data-lend="rc"'); clean(m, "我的服务器：借着");
-  const back = [{...mine[0], lend: {on: true, hours: null, open: true, lent: false, returning: false, rest: NOW + 3 * H, say: "入池，休息到 12:00（收回了）"}}];
-  lendFetch(U, back);
-  await run(U, 'lendAct("rc", {id: "srv-m"})'); await run(U, 'lendAct("rcgo", {id: "srv-m"})');
-  ok(JSON.stringify(run(U, "SF[0]")) === JSON.stringify(["api/pool/reclaim", {id: "srv-m"}]), "请求：" + JSON.stringify(run(U, "SF")));
-  m = page(U, "#/me"); has(m, "休息到"); ok(!m.includes('data-lend="rc"'), "还回来以后不该再有收回");
-});
-/* ---------- 算力池概况（#76）：组内摘要行的「算力池」与它的抽屉 #/fleet/pool ---------- */
-t("overview", "算力池概况（#76）：摘要行写入池、借着与在等的条数，点开抽屉；抽屉每台一行（借着的在前、入池的自用主机也列，#79），那一句与单台抽屉同一份，池里的清单写在哪、等了多久、为什么", () => {
-  const C = ovCtx(OV, RR, "#/fleet");
-  const f = page(C, "#/fleet"); has(f, 'data-drw="#/fleet/pool"'); has(text(f), "3 台入池（时段内 2，自用 1）· 借着 1 · 3 条在等");
-  has(tips(f), "池里等着放的清单 3 条"); has(tips(f), "自用主机入池 1 台（不用借），跑着池里 1 条清单");
-  has(run(C, "morePanel(route())"), "#/fleet/pool", "「更多」里组内的子项");
-  const drw = (X, r) => { page(X, r); return run(X, 'DKEY ? document.getElementById("drwp").innerHTML : ""'); };     // 只看抽屉，背后的卡片墙也有各台的链接
-  const dr = drw(C, "#/fleet/pool"); clean(dr, "算力池抽屉"); has(dr, "池里等着的清单");
-  ok(dr.indexOf("#/fleet/srv/srv-h") < dr.indexOf("#/fleet/srv/srv-g") && dr.indexOf("#/fleet/srv/srv-g") < dr.indexOf("#/fleet/srv/srv-d"), "顺序该是借着 → 入池 → 没入池");
-  ok(dr.indexOf("#/fleet/srv/srv-h") < dr.indexOf("#/fleet/srv/srv-a") && dr.indexOf("#/fleet/srv/srv-a") < dr.indexOf("#/fleet/srv/srv-d"), "入池的自用主机排在借着的之后、没入池的之前");
-  for (const id of ["srv-g", "srv-h", "srv-d", "srv-a"]) {
-    const say = run(C, `lendSay(srvById("${id}"))`); has(dr, say, id + " 的入池那一句"); has(page(C, "#/fleet/srv/" + id), say, id + " 单台抽屉的同一句");
+  const fl = page(C, "#/fleet"); clean(fl, "组内页");
+  for (const bad of ['data-drw="#/fleet/pool"', "台入池", "没有服务器入池", ">入池</span>"]) {
+    ok(!fl.includes(bad), "组内页残留旧池 UI：" + bad);
   }
-  has(dr, "每天 22:00-09:00"); has(dr, 'data-lend="open"'); has(dr, 'data-lend="rc"');
-  has(dr, 'href="#/p/proj-a"'); has(dr, "/data/me/proj-a/pq/<b>jobs/p.txt</b>"); has(dr, "在池里 · 等了 " + run(C, "dur(3600)"));
-  has(dr, "srv-h：显存不够"); has(dr, "这一轮正放到入池的主机上");
-  const h = dr.slice(dr.indexOf("jobs/p2.txt")); has(h.slice(0, 400), "在 " + run(C, 'fName(srvById("srv-h"))') + " 上"); ok(!h.slice(0, 400).includes("等了"), "在借着的主机上的不该写等了多久");
-  // #86：池里跑完了的不算在等（摘要行仍是 3 条），收在「池里跑完的清单」里、不写等了多久
-  const dn = dr.indexOf("池里跑完的清单"); ok(dn > dr.indexOf("jobs/p3.txt"), "跑完的该收在等着的后面"); const dh = dr.slice(dn);
-  has(dh, "jobs/cpu.txt"); has(dh, "行都跑完了"); ok(!dh.slice(0, 600).includes("等了"), "跑完的不该写等了多久");
-  const P = accCtx(OV, PUB_ME), pd = drw(P, "#/fleet/pool");
-  ok(!pd.includes('data-lend="open"') && !pd.includes('data-lend="rc"'), "不能做平台操作的管理员不该有入池设置与收回"); has(pd, "请从内网入口操作");
-  const U = accCtx(OVU, USER_ME); page(U, "#/fleet/pool"); ok(!run(U, "DKEY"), "非池成员普通用户不该开算力池抽屉");
+  ok(!run(C, "morePanel(route())").includes("#/fleet/pool"), "「更多」里不该再有旧算力池子项");
+  for (const id of ["srv-a", "srv-g", "srv-h"]) {
+    const dr = page(C, "#/fleet/srv/" + id); clean(dr, "抽屉 " + id);
+    ok(!dr.includes('data-lend=') && !dr.includes("入池设置") && !dr.includes("算力池借着"), `${id} 抽屉残留旧入池/收回 UI`);
+  }
+  const hp = page(C, "#/host/srv-a"); clean(hp, "主机页");
+  ok(!hp.includes('data-lend=') && !hp.includes("入池设置"), "自用主机页残留旧入池 UI");
+  // 直接访问已删除的 #/fleet/pool 安全降级，不报错也不打开抽屉
+  page(C, "#/fleet/pool"); ok(!run(C, "DKEY"), "访问已删除的 #/fleet/pool 不该打开抽屉");
+  // 我的账号页不再渲染旧入池「我的服务器」
+  const U = accCtx(OVU, OWNER_ME, "#/me"); run(U, "ACC.at.me = 1");
+  const m = page(U, "#/me"); clean(m, "我的账号");
+  ok(!m.includes("我的服务器") && !m.includes("入池设置"), "我的账号页残留旧入池节");
 });
-ta("auth", "普通用户入口开放（#211）：我的资源侧栏、本人服务器/抽屉、本人共享盘、所属共有池聚合抽屉与防泄密；poll 带 D.fleet 不误刷", async () => {
-  const MEMBER_ME = {...OWNER_ME, fleet_person: "OWNER", pool_member: true};
+ta("auth", "普通用户入口开放（#211，无池数据时安全降级）：我的资源侧栏、本人服务器/抽屉、本人共享盘与防泄密；poll 带 D.fleet 不误刷", async () => {
+  const MEMBER_ME = {...OWNER_ME, fleet_person: "OWNER", pool_member: false};
   const U = accCtx(OVUM, MEMBER_ME);
-  // 1. 侧栏有「我的资源」三项，不含「人员」「保活守护」
+  // 1. 侧栏有「我的资源」两项（我的服务器、共享盘），无池数据时安全降级不报错，不含「人员」「保活守护」
   const sd = side(U);
-  has(sd, 'data-sec="myres"'); has(sd, "我的资源"); has(sd, 'href="#/fleet"'); has(sd, 'href="#/fleet/disk"'); has(sd, 'href="#/fleet/pool"');
-  ok(!sd.includes("#/fleet/people") && !sd.includes("#/fleet/guard"), "普通用户侧栏出现了人员或保活守护");
-  // 2. 我的服务器页：含本人 srv-b、保留借用人名 ME、屏蔽对方项目 proj-b 与他人服务器、无平台操作按钮
+  has(sd, 'data-sec="myres"'); has(sd, "我的资源"); has(sd, 'href="#/fleet"'); has(sd, 'href="#/fleet/disk"');
+  ok(!sd.includes("#/fleet/people") && !sd.includes("#/fleet/guard") && !sd.includes("#/fleet/pool"), "普通用户侧栏出现了人员、保活守护或旧算力池");
+  // 2. 我的服务器页：含本人 srv-b、保留借用人名 ME、屏蔽对方项目 proj-b 与他人服务器、无平台操作与旧入池按钮
   const fl = page(U, "#/fleet"); clean(fl, "普通用户我的服务器");
-  has(fl, "OWNER"); has(fl, "借给 ME"); has(fl, "算力池");
-  for (const bad of ["PERSON3", "PERSON4", "PERSON7", "srv-d", "srv-e", "srv-h", "proj-b", 'data-fop="sync"', 'data-drw="#/fleet/renew"']) {
+  has(fl, "OWNER"); has(fl, "借给 ME");
+  for (const bad of ["PERSON3", "PERSON4", "PERSON7", "srv-d", "srv-e", "srv-h", "proj-b", 'data-fop="sync"', 'data-drw="#/fleet/renew"', "入池设置"]) {
     ok(!fl.includes(bad), "我的服务器页泄露或多余：" + bad);
   }
-  // 3. 本人服务器抽屉：可打开且不含平台操作按钮/开机参数/人员链接
+  // 3. 本人服务器抽屉：可打开且不含平台操作按钮/开机参数/人员链接/旧入池按钮
+  const drw = (X, r) => { page(X, r); return run(X, 'DKEY ? document.getElementById("drwp").innerHTML : ""'); };
   const srv = drw(U, "#/fleet/srv/srv-b"); clean(srv, "普通用户本人服务器抽屉");
   has(srv, "OWNER"); has(srv, "已借给 ME"); has(srv, "<span>借用人</span><span>ME</span>");
-  for (const bad of ['data-fop="wiz"', 'data-probe=', 'data-drw="#/fleet/people', "开机参数", "proj-b"]) {
+  for (const bad of ['data-fop="wiz"', 'data-probe=', 'data-drw="#/fleet/people', "开机参数", "proj-b", 'data-lend=']) {
     ok(!srv.includes(bad), "本人服务器抽屉泄露或多余：" + bad);
   }
   // 4. 共享盘页：仅总盘 + 本人 OWNER 目录，无他人目录与归属表单
@@ -3088,12 +2998,9 @@ ta("auth", "普通用户入口开放（#211）：我的资源侧栏、本人服�
   for (const bad of ["PERSON3", "stray_dir", 'data-disk="own"', "设置提醒线"]) {
     ok(!dk.includes(bad), "普通用户共享盘泄露或多余：" + bad);
   }
-  // 5. 所属共有池聚合抽屉：池成员可打开，展示 4 格聚合指标与脱敏后的本人清单，不泄他人服务器与人名
-  const pl = drw(U, "#/fleet/pool"); clean(pl, "普通用户共有池抽屉");
-  has(pl, "入池规模"); has(pl, "运行中池任务"); has(pl, "我的池清单"); has(pl, "jobs/p.txt");
-  for (const bad of ["PERSON3", "PERSON6", "PERSON7", "srv-g", "srv-h", "proj-b", "jobs/p2.txt"]) {
-    ok(!pl.includes(bad), "普通用户共有池抽屉泄露他人信息：" + bad);
-  }
+  // 5. #/fleet/pool 访问安全降级不报错
+  clean(page(U, "#/fleet/pool"), "普通用户访问旧 #/fleet/pool 安全降级");
+  ok(!run(U, "DKEY"), "访问已删除的 #/fleet/pool 不该打开抽屉");
   // 6. #/fleet/people 拦截
   has(page(U, "#/fleet/people"), "组内人员与账号管理只有管理员看得到");
   // 7. poll() 角色变化判定回归：普通用户收到含 D.fleet(scope=self) 的快照不 reload；收到管理员快照（无 access）触发 reload
@@ -3111,31 +3018,6 @@ ta("auth", "普通用户入口开放（#211）：我的资源侧栏、本人服�
   await run(A, "poll()");
   ok(run(A, "RELOADED") === 1, "管理员被降级为普通用户快照时未触发 location.reload");
 });
-t("overview", "算力池概况（#76、#211）：管理员直接复用服务端 D.pool.summary 计数；要还的写出来；都没入池、没有清单（含快照里没有 pool）时各写一句", () => {
-  const C = ovCtx(OV, RR, "#/fleet");
-  run(C, 'Object.assign(srvById("srv-h").lend, {returning: true, say: "算力池借着，要还了（在跑的跑完就还）"}); D.pool.summary = {...D.pool.summary, back: 1}');
-  has(text(page(C, "#/fleet")), "借着 1（1 要还）"); has(page(C, "#/fleet/pool"), "要还了");
-  // 验证管理员的 poolCount 直接读服务端 summary 而非前端重算
-  run(C, 'D.pool.summary = {...D.pool.summary, on: 7, open: 5, lent: 2, back: 1, queued_lists: 9}; render(false)');
-  has(text(el(C, "view").innerHTML), "7 台入池（时段内 5，自用 1）· 借着 2（1 要还） · 9 条在等");
-  run(C, 'D.fleet.servers.forEach(x => x.lend = {on: false, hours: null, open: false, lent: false, returning: false, rest: null, say: "没入池"}); D.pool = {}');
-  run(C, 'D.fleet.mine.forEach(x => x.lend = {on: false, hours: null, open: false, rest: null, mine: true, placed: 0, say: "没入池"})');
-  const f = page(C, "#/fleet"); has(text(f), "没有服务器入池"); ok(!text(f).includes("条在等"), "没有清单不该写条数");
-  const dr = page(C, "#/fleet/pool"); clean(dr, "空的算力池抽屉"); has(dr, "还没有服务器入池"); has(dr, "池里没有等着放的清单"); ok(!dr.includes('data-lend="rc"'));
-  run(C, "delete D.pool"); clean(page(C, "#/fleet/pool"), "快照里没有 pool");
-});
-t("overview", "算力池借来的主机（#25）：短名「池 X」、借用那一句说清何时还；「换到其他主机」不列它", () => {
-  const C = ovCtx(OV, RR);
-  const b = {holder: "PERSON7", pool: true, since: NOW - 2 * H, cutoff: NOW + 8 * H, why: "PERSON7 的入池时段结束", returning: null};
-  ok(run(C, `hostShort({id: "srv-h", borrow: ${JSON.stringify(b)}})`) === "池 PERSON7", "短名");
-  const say = run(C, `borrowText(${JSON.stringify(b)}, ${NOW})`); has(say, "算力池借 PERSON7 的"); has(say, "回来用、关了入池");
-  has(run(C, `borrowText(${JSON.stringify({...b, returning: NOW})}, ${NOW})`), "算力池要还给 PERSON7");
-  has(run(C, `borrowBadge(${JSON.stringify(b)}, ${NOW})`), "算力池借着");
-  const tb = () => run(C, `regTo(D.regs.find(x => x.host === "srv-old2"), "proj-b").map(t => t.id).join()`);
-  ok(tb() === "srv-a,srv-b", "前提：" + tb());
-  run(C, 'D.hosts.find(h => h.id === "srv-b").borrow = {holder: "PERSON7", pool: true}');
-  ok(tb() === "srv-a", "池借来的主机不该能搬去：" + tb());
-});
 t("reg", "交给算力池的清单（#24）：项目抽屉里一行「算力池 · 等着放到某台」、能撤回；接上卡不搬池里的；池成员能撤", () => {
   const C = ovCtx(OV, RR);
   const h = page(C, "#/p/proj-a/manage"); has(h, "算力池"); has(h, "等着放到某台"); has(h, "jobs/p.txt"); has(h, "从算力池撤回");
@@ -3148,16 +3030,16 @@ t("reg", "交给算力池的清单（#24）：项目抽屉里一行「算力池 
 t("project", "项目页的算力池（#24）：顶栏一个「算力池」，车道写在池里等着，资源小图不画它", () => {
   const C = pjCtx(PJ, EVN), h = app(C);
   has(h, "算力池"); has(tips(h), "交给算力池、还没放到哪台的清单");
-  ok(run(C, 'laneState(D.lanes.find(l => l.host === "pool"))') === "等待中：在算力池里等着放到某台：池里借着的服务器都放不下（srv-h：显存不够）（已等 60 分钟）", "池车道的状态：原因与已等多久（#89）");
+  ok(run(C, 'laneState(D.lanes.find(l => l.host === "pool"))') === "等待中：在算力池里等着放到某台：池里主机都放不下（srv-h：显存不够）（已等 60 分钟）", "池车道的状态：原因与已等多久（#89）");
   ok(run(C, 'laneName(D.lanes.find(l => l.host === "pool"), D.hosts)') === "算力池 车道 1 · p", "池车道名前写算力池");
   ok(run(C, 'laneName(D.lanes.find(l => l.host === "pool"), [{id: "srv-a"}, {id: "pool", pool: true, label: "算力池"}])') === "算力池 车道 1 · p", "只有一台真主机时池车道也写算力池");
   ok(run(C, 'laneName(D.lanes.find(l => l.host === "srv-a"), [{id: "srv-a"}, {id: "pool", pool: true, label: "算力池"}])') === "车道 1 · q1", "算力池不算进几台主机");
   has(h, "算力池里待放 1 条清单", "顶栏写池里待放几条，不当成一台主机");
   run(C, "drawTimeline()"); const tl = el(C, "tlbox").innerHTML;
   ok(![...tl.matchAll(/<text class="lab"[^>]*>(.*?)<\/text>/g)].some(m => m[1].includes("算力池") || m[1] === "车道 1 · p"), "时间线不该有算力池行（#89）");
-  has(tl, "算力池 车道 1 · p（1 个任务）不在图上：等待中：在算力池里等着放到某台：池里借着的服务器都放不下（srv-h：显存不够）（已等 60 分钟）", "时间线下写池里待放的原因与已等多久");
+  has(tl, "算力池 车道 1 · p（1 个任务）不在图上：等待中：在算力池里等着放到某台：池里主机都放不下（srv-h：显存不够）（已等 60 分钟）", "时间线下写池里待放的原因与已等多久");
   const rc = run(C, "resourcesCard()");
-  ok(!rc.includes("</span> 算力池</b>"), "资源小图不该画算力池"); has(rc, "srv-h（池 · PERSON7）", "池借来的主机照常画（#78）");
+  ok(!rc.includes("</span> 算力池</b>"), "资源小图不该画算力池"); has(rc, "srv-h", "项目主机照常画");
   ok(run(C, 'hostShort(D.hosts.find(h => h.pool))') === "算力池", "短名");
 });
 t("project", "项目页 CPU 占用监控（#208）：顶部 CPU 卡片展示核数/配额与限流，时间线主机行同轴叠画不同颜色 CPU 折线与图例、悬停读数，兼容旧快照", () => {

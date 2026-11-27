@@ -100,7 +100,7 @@ def main(argv=None):
     ap.add_argument("--gpus", help="add：只用这些卡（nvidia-smi 序号，逗号分隔）")
     ap.add_argument("--project", help="add：看板的项目 id（必写）；fit：按这个项目的历史估（缺省取同名任务最近一次的项目）")
     ap.add_argument("--expect-project", help="add / rm：在登记锁内核对这条清单所属的项目")
-    ap.add_argument("--pool", action="store_true", help="add：算力池放过来的（看板的 pool.tick 搬清单时带，#79）：登记里记 pool，看板据此认池清单")
+    ap.add_argument("--pool", action="store_true", help="add：算力池放过来的（登记里记 pool，用于区分池放的清单）")
     ap.add_argument("--expect-from", help="add：在登记锁内核对这条清单此刻还登记在这台（算力池搬清单用，#25：会话已撤回、已搬走的不再重新登记）")
     ap.add_argument("--stop", help="add：暂停时怎么停：boundary（缺省，等当前任务跑完）/ term / file:<相对 ROOT 的路径>")
     ap.add_argument("--until", type=float, help="override add：到期时刻（epoch 秒）")

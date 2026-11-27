@@ -37,7 +37,7 @@ from pathlib import Path
 
 from . import disk as DK
 from . import projects as PJ
-from .config import CLIENT_HEADER, COMMIT_RE, POOL, ConfigError, host_users, pause_by, sched, set_host_users, share_host, user_hosts
+from .config import CLIENT_HEADER, COMMIT_RE, POOL, ConfigError, active_hosts, host_users, pause_by, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
 from .state import file_sig, snapshot, state_root, write_atomic
 from .worker.pure import same_list  # noqa: F401 — 与 worker 共用唯一实现
@@ -428,8 +428,7 @@ def me(who: Ident, entry: str) -> dict:
     if who.role != "admin":                           # 普通用户：自己的项目与能用的主机（#167；页面上按项目判能不能改，canWrite(pid)）
         acc = access(who)
         out["own"], out["hosts"] = sorted(acc.projects), sorted(acc.allowed)
-    from .pool import member, my_servers              # pool 在顶层 import 本模块
-    out["servers"] = my_servers(who)                  # 我持有的组内服务器、自用主机（#79）与入池（#24，「我的账号 → 我的服务器」）
+    from .pool import member                          # pool 在顶层 import 本模块
     out["pool_member"] = member(who)
     if out["account"]:
         out["sessions"] = sorted(({**_sess_view(k, r), "this": k == who.key} for k, r in d["sessions"].items() if r.get("user") == who.name),
@@ -839,10 +838,27 @@ def may_host(who: Ident, hid: str) -> bool:
     保留主机 pool（算力池）问 pool.member。"""
     if who.role == "admin":
         return True
-    if str(hid) == POOL:                              # 算力池（#24）：池成员（有一台入池的组内服务器的持有人）能往里交清单
+    if str(hid) == POOL:
         from .pool import member                      # pool 在顶层 import 本模块
         return member(who)
     return any(str(h.get("id")) == str(hid) and who.name.lower() in host_users(h) for h in user_hosts())
+
+
+def need_holder(who: Ident, sid: str, cfg: dict | None = None) -> dict:
+    """核对 who 是不是服务器 sid（组内服务器或非借用的在用自用主机）的持有人本人（#211、#212）；不是抛 Denied(403)。"""
+    from . import fleet as F
+    cfg = F.conf() if cfg is None else cfg
+    if not cfg:
+        raise Denied(403, f"{sid} 不是你的服务器")
+    person, _ = person_of(who.name)
+    s = next((x for x in cfg.get("servers", []) if x["id"] == sid), None)
+    if s is None:
+        h = next((x for x in active_hosts() if not x.get("borrow") and str(x.get("id")) == sid), None)
+        if h is not None:
+            s = {**h, "holder": F.host_holder(h, cfg), "mine": True}
+    if s is None or not s.get("holder") or s["holder"] != person:
+        raise Denied(403, f"{sid} 不是你的服务器")
+    return s
 
 
 @dataclass
@@ -967,8 +983,8 @@ VIEW_DISK_ALERTS = DK.VIEW_DISK_ALERTS
 SELF_FLEET_KEYS = ("id", "holder", "job", "label", "ssh", "port", "pool", "public", "mine",
                    "last", "error", "down", "fails", "since", "started",
                    "lease_end", "off", "last_job", "state", "lw",
-                   "strip", "h0", "idle_h", "s7", "s30", "guard", "lend")
-SELF_BORROW_KEYS = ("since", "until", "pool", "returning", "returned", "by")
+                   "strip", "h0", "idle_h", "s7", "s30", "guard")
+SELF_BORROW_KEYS = ("since", "until", "returning", "returned", "by")
 STANDBY_SAY = "这台看板服务是备用：页面上的数据可能不是最新的，要动东西到主看板做"
 
 
@@ -997,15 +1013,15 @@ def _is_other_work(w: dict, person: str, borrowed: bool, other_jobs: set[str]) -
     return False
 
 
-def _sanitize_work(w: dict, pool_task: bool) -> dict:
-    """脱敏借用方/算力池任务：仅保留 kind/mb/n/etime 与通用标签，剥离 names/cwd/chain/owner/rule/pid。"""
-    return {"kind": w.get("kind"), "label": "算力池任务" if pool_task else "借用方任务",
+def _sanitize_work(w: dict, borrowed: bool) -> dict:
+    """脱敏借用方/他人任务：仅保留 kind/mb/n/etime 与通用标签，剥离 names/cwd/chain/owner/rule/pid。"""
+    return {"kind": w.get("kind"), "label": "借用方任务" if borrowed else "他人任务",
             "mb": w.get("mb"), "n": w.get("n"), "etime": w.get("etime")}
 
 
 def _clean_srv(x: dict, person: str, snap: dict, acc: Access) -> dict:
     """一台本人持有的服务器按白名单投影（#211）：保留实时资源、保活守护、租期、逐小时条与借用人名；
-    剥离 reserve/using/lease_cut/borrow.for/away；借用中与入池自用主机的他人任务脱敏。"""
+    剥离 reserve/using/lease_cut/borrow.for/away；借用中与自用主机上的他人任务脱敏。"""
     out = {k: x[k] for k in SELF_FLEET_KEYS if k in x}
     b = x.get("borrow")
     active_borrow = isinstance(b, dict) and bool(b.get("since")) and not b.get("returned")
@@ -1019,22 +1035,21 @@ def _clean_srv(x: dict, person: str, snap: dict, acc: Access) -> dict:
         out["borrow"] = cb
     else:
         out["borrow"] = None
-    # 自用主机上跑着他人项目（如入池跑的池任务）时，认出这些任务名并脱敏顶层 work 与 sample.work
+    # 自用主机上跑着他人项目时，认出这些任务名并脱敏顶层 work 与 sample.work
     other_jobs: set[str] = set()
     if x.get("mine"):
         he = next((h for h in snap.get("hosts") or [] if h.get("id") == x.get("id")), None)
         other_jobs = {j.get("name") for j in ((he or {}).get("status") or {}).get("running") or []
                       if j.get("name") and j.get("project") and j.get("project") not in acc.projects}
         if "work" in x and isinstance(x["work"], list):
-            out["work"] = [{"kind": "job", "label": "算力池任务", "mb": w.get("mb")}
+            out["work"] = [{"kind": "job", "label": "他人任务", "mb": w.get("mb")}
                            if w.get("kind") == "job" and w.get("label") in other_jobs else w
                            for w in x["work"]]
     smp = x.get("sample")
     if isinstance(smp, dict):
-        pool_task = bool((b or {}).get("pool")) if active_borrow else bool(x.get("mine"))
         ws = smp.get("work")
         if isinstance(ws, list) and (active_borrow or other_jobs):
-            ws = [_sanitize_work(w, pool_task) if _is_other_work(w, person, active_borrow, other_jobs) else w for w in ws]
+            ws = [_sanitize_work(w, active_borrow) if _is_other_work(w, person, active_borrow, other_jobs) else w for w in ws]
             out["sample"] = {**smp, "work": ws}
         else:
             out["sample"] = smp
@@ -1073,13 +1088,12 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     项目、已归档的、挪法建议、配色只留他的，登记只留那些主机上他项目的清单（#167）；
     共享盘经 disk.person_storage 仅保留总盘概况与本人目录/告警（叠加可见 scanner 与本人项目的 ours）；
     服务器经 _self_fleet 仅保留持有人是本人的服务器（scope="self"，借用中脱敏对方进程并保留借用人名）；
-    算力池仅对 pool.member(who) 下发 pool.summary 聚合概况与脱敏后的本人项目清单 my_lists，非成员为 None；
+    算力池在 PR 1 清理旧借用池后暂为 None（PR 2 接入共有池聚合概况）；
     主备只给 role 与一句通用的话；提醒（notices）、给实验会话的消息（wake）、看板服务所在机的体检（hostcheck，#166）给空值，记录的分类去掉组内的那几类。
     调度卡各项目的行照留（份额跨项目比；按钮页面上只在他自己的项目上），别人项目的暂停去掉谁下的（by），主人名去掉、只留分组用的 pk（#23）；
     主机状态里别人项目的临时指令同样去掉 by（_ovr_by，#27）。"""
     if who.role == "admin" or not snap:
         return snap
-    from . import pool as PO
     acc = acc or access(who, snap)
     person, _ = person_of(who.name)
     out = {k: snap[k] for k in VIEW_KEYS if k in snap}
@@ -1112,9 +1126,5 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
             out["disk"]["ours"] = {"dirs": [x for x in dk["ours"].get("dirs") or [] if x.get("p") in acc.projects],
                                    "projects": {k: v for k, v in (dk["ours"].get("projects") or {}).items() if k in acc.projects}}
     out["fleet"] = _self_fleet(snap.get("fleet"), person, snap, acc)
-    if PO.member(who):
-        ps = PO.summary(snap, own_projects=acc.projects)
-        out["pool"] = {"summary": {k: v for k, v in ps.items() if k != "my_lists"}, "my_lists": ps["my_lists"]}
-    else:
-        out["pool"] = None
+    out["pool"] = None
     return out

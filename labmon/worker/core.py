@@ -49,7 +49,6 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         # （内存与 CPU 不含任何保活的进程树：借来的主机上就是对方干活的用量，与算预留的组内探针同口径，#37）、各卡上 ka.sh 停不了的保活（宿主机 PID，只在借来的主机上认）、
         # 各卡上 labmon 之外的 GPU 进程（宿主机 PID）、ka.sh 停不了的保活进程树占的核（cpu_room 另扣；只在 worker 内存里，不写进状态）
         self.back, self.back_last = {}, {}    # 借来的主机：对方此刻超出预留的几项（卡 UUID、ram、cpu → 说明），各项最近一次超出的时刻
-        self.owner = []                       # 其中算主人回来的（去掉只因 ka.sh 停不了的保活超出的卡，#25）：状态的 guest.owner，算力池借来的整台不放
         self.cpu_hot = 0                      # 借来的主机：对方的 CPU 连着几轮超出预留（两轮才算超出，一轮的尖峰不算）
         self.ka_ticks = {}                    # 上一轮保活进程树的 CPU 累计之和 {树: (时刻, ticks)}（ka_cores；"all" 所有保活合起来，(pid, 启动时刻) 各棵保活树分开记）
         self.ka_roots = {}                    # 上一轮认作保活的 GPU 进程 {pid: (启动时刻, 是不是 ka.sh 停不了的)}：这一轮没认出来（nvidia-smi 超时等）但还在的照样算保活
@@ -1224,7 +1223,6 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                                                      "cpu": self.other["cpu"] and round(self.other["cpu"], 2)},
                       "back": list(self.back.values()), "quiet": sorted(set(self.back_last) - set(self.back)), "tight": self.tight,
                       "hit": self.hit, "away": self.away_state(),
-                      "owner": self.owner,      # 其中算主人回来的（#25：不含只因停不了的保活超出的卡）；算力池借来的看板据此要还
                       "block": self.guest_block()} if self.guest() else None,        # 整台不放新任务的原因（guest_block）：fit 照它挡整台
             "util10": u10,                        # 「在用时多高」（fit 用）
             "gpu_busy": self.busy_view(now),      # 「吃满程度」（只有保活时按 0；页面上的利用率，#51）

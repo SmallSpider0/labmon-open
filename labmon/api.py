@@ -199,16 +199,14 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
            lst: bool = False, may=None) -> dict:
     """labmon worker start|stop|status|add|rm|limit|fit：经 workerctl.run_out 一次 ssh；输出是 worker 打印的原文。
     status 成功时末尾补一行与这台共用 worker 目录的在用主机（home_text，#35 A）；may：普通用户能用哪台（None 不限），只列他能用的。
-    hid 是 pool（算力池，#24）时只认 add、rm；rm 在清单此刻登记的地方撤（pool.locate）。借给算力池的主机（#25）不收 add。
+    hid 是 pool（算力池）时只认 add、rm；rm 在清单此刻登记的地方撤（pool.locate）。
     fit --list（lst）：看与这台共用 worker 目录的在用主机（config.home_peers；may 是普通用户能用哪台，None 不限），在这台上读它们的状态（#35 B）。"""
     if sub not in WORKER_ACTS or not hid:
         return usage(f"不认识的 worker 动作 {sub}")
-    if hid == POOL and sub not in ("add", "rm"):         # 算力池（#24）只收清单、撤清单：没有 worker，状态看项目页
+    if hid == POOL and sub not in ("add", "rm"):         # 算力池只收清单、撤清单：没有 worker，状态看项目页
         return usage(f"算力池只能 worker add pool、worker rm pool：池里的清单在项目页看（{POOL_LABEL}那一栏），放到哪台由看板定")
-    if hid == POOL and sub == "rm" and len(rest) == 2:   # 撤回：清单此刻登记在哪（池里，或已放到借给池的主机上）就在哪撤
+    if hid == POOL and sub == "rm" and len(rest) == 2:   # 撤回：清单此刻登记在哪就在哪撤
         hid = P.locate(rest[0], rest[1])
-    if sub == "add" and hid in P.lent_ids():            # 借给算力池的主机（#25）：放什么由看板定，会话交给池
-        return usage(f"{hid} 是算力池借来的：放到哪台由看板定，往池里交：labmon worker add pool ROOT JOBS --project <项目>")
     try:
         with PJ._reg_locked() if sub == "add" else nullcontext():
             if project and sub != "rm" and (reason := unknown_project(project, require=sub == "add")):
