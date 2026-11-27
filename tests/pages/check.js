@@ -3321,4 +3321,72 @@ t("overview", "独立主机本地工作盘、磁盘闸门、可回收目录与�
   has(ph, "闸门");
 });
 
+t("overview", "WSL2 外部占卡暂停放行、共享模式、不报异常与抽屉 9p 路径提醒（#114 P3）", () => {
+  const S = JSON.parse(JSON.stringify(OV));
+  const wsl = JSON.parse(JSON.stringify(OV.hosts[0]));
+  Object.assign(wsl, {
+    id: "wsl-4090", label: "WSL2-4090", platform: null, platform_kind: "none", share: "private", standalone: true,
+    owner: "amy", lw: null, work_disk: null, lease_end: null, renew: null, auto_res: null, lend: null, borrow: null,
+  });
+  wsl.status = {
+    ...wsl.status,
+    running: [], external: [], gpu_procs: [],
+    kafight: null, throttle: null, keepalive: {}, disk_gate: null, gate: null,
+    info: {
+      ...wsl.status.info,
+      wsl: true,
+      gpus: [{i: 0, uuid: "GPU-wsl-0", name: "RTX 4090", used: 6400, total: 24576, util: 35,
+              unacct_mb: 6400, unacct_busy: true, unacct_why: "外部未归因显存 6.2 GiB（≥ 1.5 GiB）"}],
+    },
+    room: {gpus: {"GPU-wsl-0": 18176}, unacct: ["GPU-wsl-0"], ram: 48.0, cpu: 12.0, cpu_cap: 16},
+    waiting: [{project: "proj-a", name: "wsl_s1", root: "/home/u/work/projects/proj-a", queue: "jobs.txt",
+               since: NOW - 120, why: "外部（如宿主机）占卡暂停放行（GPU 0 约 6.2 GiB，本环境不可见其进程，释放后自动恢复）",
+               pos: {n: 1, puse: 1.0, focus: false, ratio: 1.0}}],
+  };
+  S.hosts.push(wsl);
+  const C = ovCtx(S, RR);
+  // 外部占卡暂停属于正常让路，绝不进 alertsOf 告警
+  ok(run(C, 'alertsOf(D.hosts.find(h => h.id === "wsl-4090"))').length === 0, "外部占卡暂停不应触发 alertsOf 告警");
+  const home = page(C, "#/");
+  clean(home, "WSL2 外部占卡总览");
+  has(home, "外部占卡");
+  has(home, "外部（如宿主机）占卡暂停放行");
+  const hp = page(C, "#/host/wsl-4090");
+  clean(hp, "WSL2 外部占卡主机页");
+  has(hp, "外部占卡暂停放行");
+  has(tips(hp), "默认整卡暂停放新任务且不杀已跑任务，释放后自动恢复");
+  // allow_shared_gpu 开启时：不在 room.unacct，显示可放与“外部占 X.X GiB”，不写暂停放行
+  const S2 = JSON.parse(JSON.stringify(S));
+  S2.hosts.find(x => x.id === "wsl-4090").status.room.unacct = [];
+  const hpShared = page(ovCtx(S2, RR), "#/host/wsl-4090");
+  clean(hpShared, "WSL2 共享模式主机页");
+  has(hpShared, "外部占 6.3 GiB");
+  ok(!hpShared.includes("外部占卡暂停放行"), "共享模式不应显示暂停放行徽章");
+  // 外部主机抽屉：allow_shared_gpu 开关与 /mnt/[a-z]/ 9p 性能风险提示
+  const drw = page(C, "#/ext/new");
+  clean(drw, "外部主机抽屉含 allow_shared_gpu");
+  has(drw, 'data-extf="allow_shared_gpu"');
+  ok(!drw.includes("9p 挂载"), "默认 ext4 路径不应显示 9p 警告");
+  run(C, 'EXT.form.data_root = "/mnt/c/labmon/work"; render(false)');
+  const drwMnt = el(C, "drwp").innerHTML;
+  clean(drwMnt, "抽屉 /mnt/c 提醒");
+  has(drwMnt, "9p 挂载");
+  run(C, 'EXT.form.data_root = "/mnt/data/labmon"; render(false)');
+  ok(!el(C, "drwp").innerHTML.includes("9p 挂载"), "/mnt/data 不是 Windows 盘符挂载，不应误报");
+  // 恶意字符串在 unacct_why 里必须转义
+  const SE = JSON.parse(JSON.stringify(S));
+  SE.hosts.find(x => x.id === "wsl-4090").status.info.gpus[0].unacct_why = "占卡" + BAD;
+  const CE = ovCtx(SE, RR);
+  clean(page(CE, "#/"), "WSL2 恶意 unacct_why 总览");
+  clean(page(CE, "#/host/wsl-4090"), "WSL2 恶意 unacct_why 主机页");
+  // 项目页 resourcesCard：展示外部占卡徽标与悬停说明
+  const PS = JSON.parse(JSON.stringify(PJ));
+  PS.hosts[0].gpus[0].unacct_mb = 6400;
+  PS.hosts[0].gpus[0].unacct_paused = true;
+  const ph = run(mkCtx(pgSrc, PS, {filename: "page.js"}), "resourcesCard()");
+  clean(ph, "项目页外部占卡 resourcesCard");
+  has(ph, "外部占卡");
+  has(tips(ph), "外部（如宿主机）占卡暂停放行");
+});
+
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));

@@ -53,6 +53,26 @@ OVER_FRAC, OVER_MIN_S = 0.2, 600
 # 只看 shell 与 python 跑的脚本（script_arg 与看门狗、组内保活归类共用）
 INTERP = re.compile(r"^(?:ba|da|z|k)?sh$|^python[\d.]*$")
 
+# WSL2 Windows 9p 挂载盘路径（/mnt/c、/mnt/d 等单字母盘符，不含 /mnt/data 等正常 Linux 数据盘；#114）
+WSL_MNT_RE = re.compile(r"^/mnt/[a-zA-Z](?:/|$)")
+
+
+def is_wsl_mnt(path):
+    """路径是否落在 WSL2 的 Windows 9p 挂载盘（/mnt/[a-z]/）下（唯一实现，worker 与看板共用，#114）。"""
+    s = str(path or "").strip()
+    if not s or not s.startswith("/"):
+        return False
+    return bool(WSL_MNT_RE.match(posixpath.normpath(s)))
+
+
+def wsl_mnt_warn(path, host=None):
+    """WSL2 工作目录落在 Windows 9p 挂载盘时的性能风险提示（不硬阻断；不命中返回 None）。"""
+    if not is_wsl_mnt(path):
+        return None
+    who = ("主机 %s 的 " % host) if host else ""
+    return ("%sdata_root（%s）位于 Windows 9p 挂载盘（/mnt/[a-z]/），I/O 极慢且文件锁语义不完整；"
+            "强烈建议改配到 WSL2 Linux ext4 目录（如 ~/.local/share/labmon/work）" % (who, path))
+
 
 # ---------- 文件签名与 JSONL ----------
 def file_sig(path, *, strict=False):

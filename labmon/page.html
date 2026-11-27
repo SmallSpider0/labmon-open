@@ -1025,9 +1025,16 @@ function resourcesCard() {
       tiles.push(tile(`GPU 利用率${gp.length > 1 ? " · " + gp.length + " 卡" : ""}`, `${U.big}${U.span ? `<span class="mut" style="font-weight:400"> ${U.span}</span>` : ""}`, chart({series, t0, t1: NOW, ymax: 100, fmt: v => f1(v, 0) + "%"}),
         U.tip + "\n曲线是各卡近 10 分钟平均\n\n" + gp.map(g => `GPU${g.index} ${g.name}  ${utilText(gpuBusy(h, g.index), g.util).big}  ${f1(g.temp, 0)}°C  ${f1(g.power, 0)}/${f1(g.power_limit, 0)} W`).join("\n")));
       const tot = sum(gp.map(g => g.mem_total)) / 1024;     // 显存探针给的是 MiB
-      tiles.push(tile(`显存 · ${f1(tot, 0)} GiB`, f1(sum(gp.map(g => g.mem_used)) / 1024, 1) + " GiB",
+      const unacctG = gp.filter(g => g.unacct_paused || (g.unacct_mb || 0) >= 512);
+      const anyPaused = unacctG.some(g => g.unacct_paused);
+      const unacctTip = unacctG.map(g => g.unacct_paused
+        ? `GPU${g.index} 外部（如宿主机）占卡暂停放行${g.unacct_mb ? `（约 ${f1(g.unacct_mb / 1024, 1)} GiB）` : ""}`
+        : `GPU${g.index} 外部未归因显存约 ${f1(g.unacct_mb / 1024, 1)} GiB`).join("\n");
+      const procTip = (h.gpu_procs || []).map(p => `PID ${p.pid}  ${f1(p.mem / 1024)} GiB  ${(p.cmd || "").slice(0, 60)}`).join("\n");
+      const memVal = f1(sum(gp.map(g => g.mem_used)) / 1024, 1) + " GiB" + (anyPaused ? ` <span class="badge b-warn">外部占卡</span>` : "");
+      tiles.push(tile(`显存 · ${f1(tot, 0)} GiB`, memVal,
         line(H.filter(r => r.mem).map(r => [r.t, sum(r.mem) / 1024]), tot, v => f1(v) + " GiB"),
-        (h.gpu_procs || []).map(p => `PID ${p.pid}  ${f1(p.mem / 1024)} GiB  ${(p.cmd || "").slice(0, 60)}`).join("\n") || "无 GPU 进程"));
+        [unacctTip, procTip || (unacctTip ? "" : "无 GPU 进程")].filter(Boolean).join("\n")));
       for (const g of gp) chips.push(`<span class="chip">${gp.length > 1 ? "GPU" + g.index + " " : ""}${f1(g.temp, 0)}°C · ${f1(g.power, 0)} W</span>`);
     }
     const cv = cpuView(h);

@@ -26,6 +26,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.host = host
         self.standalone = (os.environ.get("LABMON_STANDALONE") == "1") if standalone is None else bool(standalone)
         self._sched_standalone = False
+        self._allow_shared_gpu = os.environ.get("LABMON_ALLOW_SHARED_GPU") == "1"
         self.p = _C.Paths(host)
         self.disk = _D.Disk(shared, host) if (shared and not self.standalone) else None   # 共享盘用量（只有拿着租约的那台在扫）
         self.ldisk = _D.LocalDisk(host)          # 容器根盘开机以来的新写入与 labmon 目录的用量（每台扫自己的，#149）
@@ -49,7 +50,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.bwin = {}                        # 卡 UUID → 近 BUSY_WIN_S 秒的 (时刻, 利用率)：「吃满程度」，只有保活的那几轮记 0（gpu_busy，页面用，#51）
         self.bka = {}                         # 卡 UUID → 这一轮只有保活时保活顶出来的原值（gpu_busy 的 ka）
         self.own_cpu = None                   # worker 自己的 CPU 用时（算 labmon 之外的 CPU 占用）
-        self.other = {"vram": {}, "ram": None, "cpu": None, "ka": {}, "gid": {}, "ka_cpu": 0.0}   # labmon 之外的用量：各卡显存 MB、内存 GiB（收不回的，不算页缓存）、CPU 核
+        self.other = {"vram": {}, "ram": None, "cpu": None, "ka": {}, "gid": {}, "ka_cpu": 0.0, "unacct": {}}   # labmon 之外的用量：各卡显存 MB、内存 GiB（收不回的，不算页缓存）、CPU 核
         # （内存与 CPU 不含任何保活的进程树：借来的主机上就是对方干活的用量，与算预留的组内探针同口径，#37）、各卡上 ka.sh 停不了的保活（宿主机 PID，只在借来的主机上认）、
         # 各卡上 labmon 之外的 GPU 进程（宿主机 PID）、ka.sh 停不了的保活进程树占的核（cpu_room 另扣；只在 worker 内存里，不写进状态）
         self.back, self.back_last = {}, {}    # 借来的主机：对方此刻超出预留的几项（卡 UUID、ram、cpu → 说明），各项最近一次超出的时刻
@@ -137,8 +138,15 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         """当前 worker 是否运行在独立主机模式（环境变量 LABMON_STANDALONE=1、构造参数或 sched.json 下发）。"""
         return bool(getattr(self, "standalone", False) or getattr(self, "_sched_standalone", False))
 
+    def allow_shared_gpu(self):
+        """是否允许外部活跃占卡时按剩余显存共享放行（缺省 False：默认整卡暂停放新任务，#114）。"""
+        return bool(getattr(self, "_allow_shared_gpu", False))
+
     # ---- 日志与事件 ----
     def wlog(self, msg):
+        d = os.path.dirname(self.p.log)
+        if d:
+            os.makedirs(d, exist_ok=True)
         with open(self.p.log, "a") as f:
             f.write("%s %s\n" % (_C.now_str(), msg))
 
@@ -571,6 +579,12 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if fresh and isinstance(dg, dict):
                 self.disk_gate = {k: dg.get(k) for k in ("on", "why", "free_gb", "stop_gb", "quota_gb", "work_gb")}
                 self.disk_gate["on"] = bool(self.disk_gate.get("on"))
+            if fresh:
+                for g in (old.get("info") or {}).get("gpus") or []:
+                    if isinstance(g, dict) and g.get("uuid") and g.get("unacct_busy"):
+                        mb = float(g.get("unacct_mb") or 0.0)
+                        self.other["unacct"][g["uuid"]] = {"mb": mb, "deduct": mb, "util": g.get("util"),
+                                                           "busy": True, "why": g.get("unacct_why") or ""}
             # 跑空登记的空置起点与休眠态（#164）：重启照常沿用，不重置 2 天倒计时；记着休眠时的清单与登记 file_sig，停机期间变动也会醒来
             ri = old.get("reg_idle") if isinstance(old.get("reg_idle"), dict) else {}
             self.reg_idle = {str(k): {"since": float(v["since"]),
@@ -727,10 +741,31 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if g["owner"] == "other":
                 ovram[g["uuid"]] = ovram.get(g["uuid"], 0.0) + g["mb"]
                 ogid.setdefault(g["uuid"], set()).add(g["hpid"])
+        prev_busy = {u for u, v in (self.other.get("unacct") or {}).items() if v.get("busy")}
+        run_cards = {u for j in jobs for u in (j.get("gpus") or [])}
+        unacct = _M.unacct_vram(gpus, gp, running_cards=run_cards, prev_busy=prev_busy)
+        for g in gpus:
+            u = unacct.get(g["uuid"])
+            if not u:
+                continue
+            if u["deduct"] > 0:
+                g["unacct_mb"] = u["deduct"]
+                ovram[g["uuid"]] = ovram.get(g["uuid"], 0.0) + u["deduct"]
+            if u["busy"]:
+                g["unacct_busy"] = True
+                g["unacct_why"] = u["why"]
+        now_busy = {u for u, v in unacct.items() if v.get("busy")}
+        if now_busy != prev_busy:
+            idx = {g["uuid"]: g["i"] for g in gpus}
+            for u in sorted(now_busy - prev_busy):
+                self.wlog("卡 %s 检测到%s%s" % (idx.get(u, u), unacct[u]["why"],
+                                               "（已开启共享放行，按剩余显存调度）" if self.allow_shared_gpu() else "，暂停放新任务"))
+            for u in sorted(prev_busy - now_busy):
+                self.wlog("卡 %s 外部占卡已释放，恢复正常放行" % idx.get(u, u))
         cards_on = {}                             # 各任务此刻所用的卡（独占任务据此看同卡、同机有没有别的，作废）
         for j in jobs:
             if mine[id(j)]:
-                cards_on[id(j)] = self.measure(j, mine[id(j)], procs, gp, util, ovram, jobs, t)
+                cards_on[id(j)] = self.measure(j, mine[id(j)], procs, gp, util, ovram, jobs, t, unacct=unacct)
         self.info = h
         for d in h.get("disk") or []:
             if isinstance(d, dict):
@@ -767,8 +802,9 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if g["ka"]:
                 ka_ext.setdefault(g["uuid"], []).append(g["hpid"])
         self.other = {"vram": ovram, "cpu": None if extra is None else max(0.0, extra - ka_cpu), "ka": ka_ext, "gid": ogid, "ka_cpu": ka_x,
+                      "unacct": unacct,
                       "ram": max(0.0, m["anon"] - sum((j.get("use") or {}).get("ram") or 0.0 for j in jobs) - ka_ram) if m else None}
-        self.void_check(jobs, cards_on, gp, extra)
+        self.void_check(jobs, cards_on, gp, extra, unacct=unacct)
         self.guest_scan(t)
         self.oom_check(t)
         self.guest_tight(t)
@@ -778,8 +814,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                                                                          if g["pid"] and (g["owner"] == "keepalive" or g["ka"]) else {})) for g in gp]
         self.mem_events(m)
 
-    def void_check(self, jobs, cards_on, gp, extra):
-        """独占任务运行中被打扰（intruders：同卡、整机独占时同机有别的，或 labmon 之外占了 VOID_CPU 核以上）连着两轮就作废。
+    def void_check(self, jobs, cards_on, gp, extra, unacct=None):
+        """独占任务运行中被打扰（intruders：同卡、整机独占时同机有别的，未归因外部活跃占卡，或 labmon 之外占了 VOID_CPU 核以上）连着两轮就作废。
         cards_on：各任务所用的卡；extra：other_cpu。借来的主机上正推迟暂停看门狗（ka_wait，还没满 LOCK_WAIT_S，#38）时 GPU 保活不算：
         推迟一般只多一两轮，sample 里先于 keepalive 跑，第一轮只计 1 次、第二轮起豁免；满 LOCK_WAIT_S 还停不下来的照旧算。"""
         if self.ka_wait and _C.time.time() - self.ka_wait["t0"] < _K.LOCK_WAIT_S:
@@ -787,7 +823,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         for j in list(self.running.values()):
             if not j.get("excl") or j.get("stopping") or _C.is_hold(j["name"]) or id(j) not in cards_on:
                 continue
-            hit = sum(_C.intruders(j["excl"], cards_on[id(j)], jobs, gp, extra, j), [])
+            hit = sum(_C.intruders(j["excl"], cards_on[id(j)], jobs, gp, extra, j, unacct=unacct), [])
             j["void_n"] = j.get("void_n", 0) + 1 if hit else 0
             if j["void_n"] >= 2:
                 self.void_job(j, "独占%s期间有 %s" % ({"gpu": "卡", "host": "整机"}[j["excl"]], "、".join(hit[:3])))
@@ -1314,7 +1350,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             "room": {"ram": _S.ram_free(S), "margin": S["margin"], "gpus": {u: max(0.0, v) for u, v in _S.card_free(S).items()},
                      "cpu": _S.cpu_free(S), "cpu_cap": S["cpu_cap"], "other_cpu": S["cpu"],   # other_cpu：认得准的 labmon 之外的核数（fit 判整机独占，同 intruders）
                      "keep": {c["uuid"]: round(c["keep"]) for c in S["cards"] if c["keep"]},   # 各卡给对方留着的 MB（keep_left）：fit 的整卡封顶 card_need 照它
-                     "owner": sorted(S["owner"])},        # 不放的卡（对方超出预留或刚回落、有停不了的保活）：fit 的快照照它（fit_snapshot）
+                     "owner": sorted(S["owner"]),         # 不放的卡（对方超出预留或刚回落、有停不了的保活）：fit 的快照照它（fit_snapshot）
+                     "unacct": sorted(S["unacct"])},      # 外部（如宿主机）活跃占卡暂停放行的卡（#114）：fit 与页面照它
             "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"], **({"pool": q["pool"]} if q.get("pool") else {}),
                         "empty": q.get("empty", False), "sleeping": bool(q.get("sleeping")), "empty_since": q.get("empty_since"),
                         "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {}),

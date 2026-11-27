@@ -112,7 +112,8 @@ class WorkerTest(WorkerBase):
         self.assertEqual((self.d / "keepalive_demo" / "ka.log").read_text().split(), ["stop", "start"])
 
     def test_waits_for_memory(self):
-        self.env["LABMON_GPUS"] = "GPU-aaa:40000:80000"           # 卡 80 GiB、空 40 GiB：60 GiB 放得下，只是现在没空
+        self.env["LABMON_GPUS"] = "GPU-aaa:80000:80000"           # 卡 80 GiB，先由占卡任务记账占 40 GiB：60 GiB 放得下，只是现在没空
+        self.queue("0bg", [f"holder|{self.gate()}   # vram=40 est_min=0.01"])
         a = self.queue("a", ["big|true   # vram=60", "small|true"])
         self.start()
         st = self.d / "home" / "hosts" / "t" / "status.json"
@@ -130,6 +131,7 @@ class WorkerTest(WorkerBase):
         self.assertEqual(len(wt), 1)
         self.assertEqual((wt[0]["name"], wt[0]["queue"], wt[0]["root"]), ("big", "jobs/q.txt", str(a)))
         self.assertIn("60 GiB", wt[0]["why"])
+        self.release()
 
     def test_status_has_cmd_tail_and_wait_since(self):
         # 页面展开任务要看命令与日志末尾；等待列表要写已等多久（同一个任务一直等就不重置）
@@ -413,6 +415,10 @@ class AdmissionTest(WorkerBase):
         (h / "usage.jsonl").write_text(json.dumps({"name": "x_s0", "project": "a", "rc": "0", "min": 30, "gpus": ["GPU-aaa"],
                                                    "ram_peak": 1.0, "vram_peak": peak_mb, "gpu_util": 60, "with_gpu": []}) + "\n")
         self.env["LABMON_GPUS"] = gpus
+        parts = gpus.split(":")
+        used_mb = int(parts[2]) - int(parts[1])
+        if used_mb > 0:
+            self.env["LABMON_GPU_APPS"] = f"9999:{used_mb}:{parts[0]}"
         self.queue("a", ["r_s0|sleep 30   # vram=1"])
         self.start()
         self.until(lambda: self.status().get("running") and len((self.status().get("util10") or {})) == 1)
@@ -1539,11 +1545,13 @@ class AdmissionUnitTest(UnitBase):
         # a 等了 31 分钟、卡上显存被占着放不下；b 本来放得下，也要让位（不管 b 是哪个项目、在跑的多少）
         qs = self.hosts.queues({"a": ["big|true   # vram=30"], "b": ["small|sleep 5   # vram=1"]})
         os.environ["LABMON_GPUS"] = "GPU-aaa:20000:40000"
+        os.environ["LABMON_GPU_APPS"] = "9999:20000:GPU-aaa"
         try:
             self.w.wsince = {"a": ("big", time.time() - 31 * 60, False)}
             self.w.tick(qs, True)
         finally:
             os.environ.pop("LABMON_GPUS")
+            os.environ.pop("LABMON_GPU_APPS", None)
         why = {w["name"]: w["why"] for w in json.loads(Path(self.w.p.status).read_text())["waiting"]}
         self.assertIn("没有可用显存", why["big"])
         self.assertIn("让位：a 的 big 已等 31 分钟", why["small"])
@@ -1557,7 +1565,6 @@ class AdmissionUnitTest(UnitBase):
             self.w.tick(qs[:1], True)                       # 先只有 a：a1 放行
             now = time.time()
             Path(self.w.p.eta).write_text(json.dumps({"t": now + 1, "jobs": {"a|a1": now + 1800}}))
-            os.environ["LABMON_GPUS"] = "GPU-aaa:19000:40000"
             self.w.tick(qs, False)
         finally:
             os.environ.pop("LABMON_GPUS")
@@ -1737,6 +1744,7 @@ class AdmissionUnitTest(UnitBase):
         # pa 被暂停期间不算在等：resume 后不会立刻满 wait_cap 成屏障，pb 照常放行（以前暂停半小时一恢复别的项目全让位）
         qs = self.hosts.queues({"pa": ["big|true   # vram=30"], "pb": ["small|sleep 5   # vram=1"]})
         os.environ["LABMON_GPUS"] = "GPU-aaa:20000:40000"           # 卡上只剩 20 GiB：big 放不下、small 放得下
+        os.environ["LABMON_GPU_APPS"] = "9999:20000:GPU-aaa"
         try:
             Path(self.w.p.overrides).write_text(json.dumps([{"kind": "pause", "target": "pa", "until": None, "t": time.time()}]))
             self.w.wsince = {"pa": ("big", time.time() - 31 * 60, False)}   # 暂停前已等了一阵
@@ -1753,6 +1761,7 @@ class AdmissionUnitTest(UnitBase):
             self.assertEqual(st["running"][0]["wait"], 0.0)
         finally:
             os.environ.pop("LABMON_GPUS")
+            os.environ.pop("LABMON_GPU_APPS", None)
             self.kill_running()
 
     def test_stalled_requests_leave_keepalive_on(self):
@@ -6161,7 +6170,7 @@ class UsageTest(unittest.TestCase):
             (d / "cg" / "cpu" / "cpu.cfs_period_us").write_text("100000")
             m = worker_module(d, LABMON_PROC=str(self.p), LABMON_CGROUP=str(d / "cg"))
             env = {"LABMON_GPUS": "GPU-aaa:20000:48000:77",
-                   "LABMON_GPU_APPS": "5101:2048:GPU-aaa,5200:1000:GPU-aaa,5300:6886:GPU-aaa,7777:500:GPU-aaa"}
+                   "LABMON_GPU_APPS": "5101:2048:GPU-aaa,5200:1000:GPU-aaa,5300:6886:GPU-aaa,7777:18066:GPU-aaa"}
             os.environ.update(env)
             try:
                 w = m.Worker("t")
@@ -6444,7 +6453,7 @@ class UsageTest(unittest.TestCase):
         旧做法把整棵树算成对方的（5.7 GiB、2.0 核），内存与 CPU 都超出预留、两张卡都不放。"""
         with tempfile.TemporaryDirectory() as td:
             m, clock, ticks = self.ext_host(Path(td))
-            env = {"LABMON_GPUS": "GPU-aaa:42000:49140:0,GPU-bbb:42000:49140:90", "LABMON_GPU_APPS": "5300:6748:GPU-bbb"}
+            env = {"LABMON_GPUS": "GPU-aaa:49140:49140:0,GPU-bbb:42000:49140:90", "LABMON_GPU_APPS": "5300:6748:GPU-bbb"}
             os.environ.update(env)
             try:
                 w = m.Worker("t")
@@ -6575,7 +6584,7 @@ class UsageTest(unittest.TestCase):
         核数照样另记（ka_roots 记着它是对方的保活）；那张卡这一轮没认出来，回落后 GUEST_QUIET_S 内照样不放（back_last）。"""
         with tempfile.TemporaryDirectory() as td:
             m, clock, ticks = self.ext_host(Path(td))
-            os.environ["LABMON_GPUS"] = "GPU-aaa:42000:49140:0,GPU-bbb:42000:49140:90"
+            os.environ["LABMON_GPUS"] = "GPU-aaa:49140:49140:0,GPU-bbb:42000:49140:90"
             try:
                 w = m.Worker("t")
                 os.makedirs(w.p.dir)

@@ -238,6 +238,7 @@ function extDefaultForm(h = null) {
     disk_quota_gb: h?.disk_quota_gb != null ? String(h.disk_quota_gb) : "",
     cpu_quota: h?.cpu_quota != null ? String(h.cpu_quota) : "",
     mps_vram_gb: h?.mps_vram_gb != null ? String(h.mps_vram_gb) : "",
+    allow_shared_gpu: !!h?.allow_shared_gpu,
   };
 }
 async function extLoad(id) {
@@ -264,7 +265,7 @@ function extInput(el, ev) {
   const k = el.dataset.extf;
   if (k === "forceDel") { EXT.forceDel = !!el.checked; return render(false); }
   EXT.form[k] = el.type === "checkbox" ? !!el.checked : el.value;
-  if (ev === "change" && (k === "ssh_key" || k === "platform_kind")) render(false);
+  if (ev === "change" && (k === "ssh_key" || k === "platform_kind" || k === "allow_shared_gpu" || k === "data_root")) render(false);
 }
 async function extAct(act, d = {}) {
   if (!EXT || EXT.busy) return;
@@ -287,6 +288,7 @@ async function extAct(act, d = {}) {
       disk_quota_gb: f.disk_quota_gb === "" ? null : Number(f.disk_quota_gb),
       cpu_quota: f.cpu_quota === "" ? null : Number(f.cpu_quota),
       mps_vram_gb: f.mps_vram_gb === "" ? null : Number(f.mps_vram_gb),
+      allow_shared_gpu: !!f.allow_shared_gpu,
     };
     if (st.isNew && !body.id) { st.err = "请填写主机 id（小写字母、数字、- 或 _）"; return render(false); }
     if (!ME?.admin && !body.ssh) { st.err = "请填写 SSH 地址（如 user@203.0.113.10）"; return render(false); }
@@ -389,13 +391,17 @@ function extHostDrawer(id) {
         <option value="managed"${f.ssh_key !== "system" ? " selected" : ""}>看板专用密钥（managed，推荐）</option>
         <option value="system"${f.ssh_key === "system" ? " selected" : ""}>宿主机默认密钥（system，仅管理员）</option></select></label>` : ""}
     </div>${keyCard}`;
+  const wslMntWarn = /^\/mnt\/[a-zA-Z](?:\/|$)/.test((f.data_root || "").trim())
+    ? `<div class="sm" style="color:var(--warn)">⚠ 路径指向 Windows 盘（WSL2 9p 挂载），大量小文件、日志与检查点读写极慢；WSL2 下建议改到 Linux ext4 盘（如 ~/.local/share/labmon/work）</div>` : "";
   const disk = `<div class="aform">
       ${inp("data_root", "独立工作根目录（data_root）", "~/.local/share/labmon/work")}
+      ${wslMntWarn}
       ${inp("disk_warn_gb", "磁盘预警线（GiB，默认 20）", "20", 'type="number" min="0"')}
       ${inp("disk_stop_gb", "磁盘停止线（GiB，默认 10，触发闸门停放新任务）", "10", 'type="number" min="0"')}
       ${inp("disk_quota_gb", "工作目录软配额（GiB，可选）", "留空不限", 'type="number" min="1"')}
       ${inp("cpu_quota", "CPU 核数配额（可选）", "留空自动检测", 'type="number" min="1"')}
       ${inp("mps_vram_gb", "Apple Silicon 统一内存显存上限（GiB，可选）", "仅 Mac 用", 'type="number" min="1"')}
+      <label class="sm pop-ck"><input type="checkbox" data-extf="allow_shared_gpu" ${f.allow_shared_gpu ? "checked" : ""} ${dis}> 外部（如宿主机）占卡时允许按剩余显存共享放行（默认整卡暂停放新任务，WSL2 等场景建议保持关闭）</label>
     </div>`;
   const acts = can ? `<div class="row wrap" style="gap:8px;margin-top:8px">
       <button class="btn pri" type="button" data-ext="save" ${dis}>${st.busy ? "保存中…" : st.isNew ? "保存并生成公钥" : "保存修改"}</button>

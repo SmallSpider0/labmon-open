@@ -497,6 +497,12 @@ def main(argv=None):
         print("  内存闸门关闭中：停止放行")
     if (st.get("disk_gate") or {}).get("on"):
         print("  " + (st["disk_gate"].get("why") or "磁盘闸门关闭中：暂停放新任务"))
+    if (st.get("info") or {}).get("wsl") or _M.is_wsl():
+        mnt_w = _P.wsl_mnt_warn(_C.DATA_ROOT)
+        if mnt_w:
+            print("  警告：" + mnt_w)
+    for ln in _M.unacct_lines(st):
+        print("  " + ln)
     for o in st.get("overrides", []):
         print("  临时指令 " + _C.ovr_text(o))
     wd = _K.load_frozen(p)                           # 直接读 frozen.json：刚拉起、状态还没写时也看得到

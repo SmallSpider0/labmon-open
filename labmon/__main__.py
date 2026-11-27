@@ -171,6 +171,8 @@ def cmd_host(argv: list[str]) -> int:
         ap.add_argument("--disk-quota", dest="disk_quota_gb", type=float, help="工作目录软配额 GiB")
         ap.add_argument("--cpu-quota", dest="cpu_quota", type=float, help="允许占用的 CPU 核数上限")
         ap.add_argument("--mps-vram", dest="mps_vram_gb", type=float, help="Apple Silicon 统一内存显存上限 GiB")
+        ap.add_argument("--allow-shared-gpu", dest="allow_shared_gpu", action=argparse.BooleanOptionalAction, default=None,
+                        help="检测到宿主机等外部活跃占卡时，允许按剩余显存共享放行而非默认整卡暂停（可用 --no-allow-shared-gpu 关闭）")
         ap.add_argument("--admin", action="store_true", help="使用管理员令牌（管理员操作或内网管理他人/本机外部主机时使用）")
         a = ap.parse_args(rest)
         body: dict = {}
@@ -183,7 +185,7 @@ def cmd_host(argv: list[str]) -> int:
         elif a.ssh is not None:
             body["ssh"] = a.ssh
         for k in ("port", "label", "platform_kind", "ssh_key", "owner", "lease_until", "data_root", "python",
-                  "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "cpu_quota", "mps_vram_gb"):
+                  "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "cpu_quota", "mps_vram_gb", "allow_shared_gpu"):
             v = getattr(a, k)
             if v is not None:
                 body[k] = v

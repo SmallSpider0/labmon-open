@@ -135,7 +135,7 @@ def ssh(h: dict, remote: str, stdin: str = "", timeout: float | None = None) -> 
 
 
 def worker_env(h: dict) -> str:
-    """把主机的部署路径（ka_bin、data_root、local_dir）与独立主机标记交给 worker；取值按 shell 参数安全转义（支持 ~/ 展开）。"""
+    """把主机的部署路径（ka_bin、data_root、local_dir）、独立主机标记与外部占卡共享策略交给 worker；取值按 shell 参数安全转义（支持 ~/ 展开）。"""
     pairs = [
         ("KA_BIN", h.get("ka_bin")),
         ("LABMON_DATA_ROOT", h.get("data_root")),
@@ -146,6 +146,8 @@ def worker_env(h: dict) -> str:
         parts.append("LABMON_STANDALONE=1")
         if h.get("allow_outside_root"):
             parts.append("LABMON_ALLOW_OUTSIDE_ROOT=1")
+    if h.get("allow_shared_gpu"):
+        parts.append("LABMON_ALLOW_SHARED_GPU=1")
     if h.get("cpu_quota") is not None:
         parts.append(f"LABMON_CPU_QUOTA={shlex.quote(str(h['cpu_quota']))}")
     return " ".join(parts)
