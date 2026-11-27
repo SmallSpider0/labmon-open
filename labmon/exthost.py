@@ -268,8 +268,14 @@ def _norm_fields(data: dict, who: U.Ident, *, existing: dict | None = None) -> d
         ssh_key = str(key_in).strip().lower()
         if ssh_key not in ("managed", "system"):
             raise U.Denied(400, f"ssh_key 只能是 managed（看板专用密钥）或 system（宿主机默认密钥），写的是 {key_in!r}")
-        if ssh_key == "system" and not is_admin:
-            raise U.Denied(403, "普通用户只能使用看板生成的专用密钥（managed），不能使用看板宿主机默认密钥")
+    # 确定最终字段后统一执行普通用户权限边界校验（覆盖继承自已有配置的值，防止省略 ssh_key 继承 system 绕过）
+    if not is_admin:
+        if not ssh:
+            raise U.Denied(403, "普通用户只能添加远端 SSH 外部主机，不能将 ssh 留空")
+        if sh != "private":
+            raise U.Denied(403, "普通用户外部主机强制为私有模式（private）")
+        if ssh_key != "managed":
+            raise U.Denied(403, "普通用户只能使用看板生成的专用密钥（managed），不能修改使用宿主机默认密钥（system）的主机")
 
     if not is_admin:
         owner = who.name

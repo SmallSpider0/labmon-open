@@ -485,7 +485,7 @@ def _to_worker(projects: list[dict], t: float, sw: dict, snap: dict | None = Non
         sh = dict(sw)
         if is_standalone(h):
             sh["standalone"] = True
-        for k in ("disk_warn_gb", "disk_stop_gb", "disk_quota_gb"):
+        for k in ("disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "cpu_quota"):
             if h.get(k) is not None:
                 sh[k] = h[k]
         out = {"eta.json": {"t": round(t + _CLOCK.get(h["id"], 0)), "jobs": jobs, "prog": by_prog},

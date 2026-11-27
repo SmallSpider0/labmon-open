@@ -550,7 +550,11 @@ class WorkDisk(Disk):
             top_dir = parts[0]
             if mpid is not None or (top_dir == "projects" and len(parts) >= 2 and parts[1] != "."):
                 pid = mpid if mpid is not None else parts[1]
-                pe = projs.setdefault(pid, {"b": 0, "m": None, "d24": 0, "top": []})
+                pe = projs.setdefault(pid, {"b": 0, "m": None, "d24": 0, "top": [], "dir": None})
+                real_root = mroot if mroot is not None else os.path.join(base, "projects", parts[1])
+                real_rel = os.path.relpath(real_root, base) if real_root.startswith(base + "/") else real_root
+                if not pe["dir"] or len(real_rel) < len(pe["dir"]):
+                    pe["dir"] = real_rel
                 pe["b"] += b
                 if m and (not pe["m"] or m > pe["m"]):
                     pe["m"] = m

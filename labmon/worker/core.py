@@ -949,6 +949,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         waiting, reqs = self.requests(queues, first)
         try:
             self.sample(queues)                   # 先读主机现状：准入要用当前的内存与各任务实测
+            self.apply_cpu_quota(self.info, pol)  # 将外部主机配置的 cpu_quota 接入准入、推演与 fit 容量
             self.disk_events(self.info, pol)      # 独立主机低水位/软配额磁盘闸门（不杀在跑任务，仅 pre() 拦截新任务）
             self.watch(_C.time.time())               # 借来的主机：找看门狗（在停保活之前，看得到是谁拉起的）
         except Exception as e:  # noqa: BLE001 — 统计出错不能拖垮调度

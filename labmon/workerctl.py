@@ -134,6 +134,8 @@ def worker_env(h: dict) -> str:
         parts.append("LABMON_STANDALONE=1")
         if h.get("allow_outside_root"):
             parts.append("LABMON_ALLOW_OUTSIDE_ROOT=1")
+    if h.get("cpu_quota") is not None:
+        parts.append(f"LABMON_CPU_QUOTA={shlex.quote(str(h['cpu_quota']))}")
     return " ".join(parts)
 
 

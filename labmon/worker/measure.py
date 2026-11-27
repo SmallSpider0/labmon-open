@@ -653,6 +653,19 @@ class MeasureMixin:
             self.event("failcnt", "容器内存撞上限 %d 次（累计 %d）" % (fc - self.failcnt, fc))
         self.failcnt = fc
 
+    def apply_cpu_quota(self, info, pol):
+        """将主机配置的 cpu_quota 软配额接入有效 CPU 容量（#114）：
+        无 cgroup 限额的独立机按配置值启用 CPU 记账；已有更大 cgroup 配额时收紧到配置值（且不超过逻辑核数 nproc）。"""
+        cfg = (pol or {}).get("cpu_quota")
+        if not (isinstance(info, dict) and cfg is not None and cfg > 0):
+            return
+        cands = [float(cfg)]
+        if info.get("cpu_quota"):
+            cands.append(float(info["cpu_quota"]))
+        if info.get("nproc"):
+            cands.append(float(info["nproc"]))
+        info["cpu_quota"] = min(cands)
+
     def disk_events(self, info, pol):
         """本地盘低水位/软配额准入闸门（#114，复用内存闸门模式）：
         - 触发：data_root 所在卷 free < disk_stop_gb，或配置了 disk_quota_gb 且已扫描 <data_root> 总占用 > disk_quota_gb；

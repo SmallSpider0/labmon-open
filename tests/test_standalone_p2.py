@@ -236,6 +236,16 @@ class DiskGateWorkDiskCleanTest(unittest.TestCase):
             self.assertFalse(w.disk_gate["on"])
 
             # 5. place() 的 pre() 在闸门开启时拦截新任务，但不终止在跑任务
+            # 顺便验证 cpu_quota 配置经 apply_cpu_quota 接入 worker 有效容量（无 cgroup 限额与大于配额均受限）
+            info_nocg = {"nproc": 16, "cpu_quota": None}
+            w.apply_cpu_quota(info_nocg, {"cpu_quota": 2.0})
+            self.assertEqual(info_nocg["cpu_quota"], 2.0)
+            info_bigcg = {"nproc": 16, "cpu_quota": 8.0}
+            w.apply_cpu_quota(info_bigcg, {"cpu_quota": 2.0})
+            self.assertEqual(info_bigcg["cpu_quota"], 2.0)
+            w.info = {"nproc": 16, "cpu_quota": 2.0, "mem": {"limit": 64.0, "anon": 1.0, "used": 1.0}, "gpus": []}
+            snap_cq = w.snapshot({})
+            self.assertEqual(snap_cq["cpu_cap"], 2)
             w.disk_gate = {"on": True, "why": "本地盘空间不足：剩 8.0 GiB", "free_gb": 8.0, "stop_gb": 10.0, "recover_gb": 12.0}
             S = {"now": time.time(), "cards": [], "jobs": [{"name": "already_running", "project": "p1", "gpus": [], "vram": {}, "ram": 1.0, "cpu": 1.0, "excl": None, "tag": None, "hold": False}],
                  "room": 64.0, "margin": 8.0, "limit": 64.0, "cpu_room": 8.0, "cpu_cap": 8, "tags": {}, "holds": {}, "owner": set(), "who": "对方", "kept": False,
@@ -295,6 +305,19 @@ class DiskGateWorkDiskCleanTest(unittest.TestCase):
             self.assertIn("proj-a", wk_mapped["projects"])
             self.assertNotIn("folder-name", wk_mapped["projects"])
             self.assertEqual(wk_mapped["projects"]["proj-a"]["b"], 3 * m.GIB)
+            self.assertEqual(wk_mapped["projects"]["proj-a"]["dir"], "projects/folder-name/code")
+            # host_work_disk 生成可回收路径必须使用真实目录 dir，绝不拿项目 ID 反推成 projects/proj-a
+            e_mapped = {
+                "id": "ext-1", "label": "ext-1", "standalone": True, "data_root": str(data_root),
+                "status": {
+                    "info": {"disk": [{"path": str(data_root), "free": 50.0, "total": 200.0, "kind": "local"}]},
+                    "queues": [], "running": [],
+                    "storage": {"work": wk_mapped, "local": {}, "projects": {str(data_root / "projects/folder-name/code"): "proj-a"}},
+                },
+            }
+            hw_mapped = DK.host_work_disk(e_mapped, CF.host_defaults({"id": "ext-1", "standalone": True, "data_root": str(data_root)}), now)
+            self.assertEqual(hw_mapped["reclaimable"][0]["u"], "projects/folder-name/code")
+            self.assertEqual(hw_mapped["reclaimable"][0]["path"], str(data_root / "projects/folder-name/code"))
 
             # 2. host_work_disk 计算 14 天闲置可回收候选 & project_storage / api.disk 区分共享盘与本地工作盘
             old_t = now - 20 * 86400
@@ -543,6 +566,20 @@ class ExternalHostDualEntrySecurityTest(unittest.TestCase):
         self.assertTrue(res["ok"], res)
         self.assertEqual(len(captured), 1)
         self.assertTrue(res["info"]["writable"])
+
+        # 3. 回归：管理员创建归属普通用户的 ssh_key="system" 主机，该用户省略 ssh_key 编辑修改目标时必须被 403 拒绝（不能继承 system 绕过）
+        EH.add_external({
+            "id": "ext-sys-amy", "ssh": "u@203.0.113.89", "ssh_key": "system", "owner": "amy",
+        }, self.boss)
+        with self.assertRaises(U.Denied) as cm:
+            EH.edit_external("ext-sys-amy", {"ssh": "u@203.0.113.90"}, self.amy)
+        self.assertEqual(cm.exception.code, 403)
+        # 4. 回归：overview._to_worker 与 workerctl.worker_env 均下发 cpu_quota 到独立主机
+        from labmon import workerctl as WC
+        h_py = next(h for h in CF.all_hosts() if h["id"] == "ext-py")
+        _, for_host = O._to_worker([], time.time(), {}, {})
+        self.assertEqual(for_host(h_py)["sched.json"].get("cpu_quota"), 6)
+        self.assertIn("LABMON_CPU_QUOTA=6", WC.worker_env(h_py))
 
     def test_http_routes_and_standby_and_worker_clean_auth(self):
         """走真实 HTTP Server 验证 /api/hosts/external* 与 /api/worker/clean 路由、鉴权与备用拒写。"""

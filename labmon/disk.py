@@ -435,6 +435,13 @@ def host_work_disk(e: dict, hcfg: dict | None = None, t: float | None = None) ->
     projects = {}
     reclaimable = []
     wprojs = wk.get("projects") or {}
+    # 从 storage.projects（{物理路径: 项目 id}）建反向索引，避免仅凭项目 ID 猜测目录名
+    reg_dir_by_pid = {}
+    root_clean = root.rstrip("/")
+    for rpath, rpid in (sg.get("projects") or {}).items():
+        if rpid and rpath and rpid not in reg_dir_by_pid:
+            rp = str(rpath).rstrip("/")
+            reg_dir_by_pid[rpid] = rp[len(root_clean) + 1:] if root_clean and rp.startswith(root_clean + "/") else rp
     all_pids = sorted(set(wprojs) | set(loc))
     for pid in all_pids:
         wp = wprojs.get(pid) or {}
@@ -445,27 +452,30 @@ def host_work_disk(e: dict, hcfg: dict | None = None, t: float | None = None) ->
         scratch_b = int(lp.get("scratch") or 0)
         is_act = pid in active_p
         idle_days = int((t - m) // 86400) if m and t > m else 0
+        # 优先使用 WorkDisk.summary 记录的真实目录 dir 或登记映射，绝不盲目用 pid 反推物理路径
+        rel_dir = wp.get("dir") or reg_dir_by_pid.get(pid) or f"projects/{pid}"
+        full_dir = rel_dir if rel_dir.startswith("/") else f"{root_clean}/{rel_dir}" if root_clean else rel_dir
         rec_proj = (not is_act) and bool(m) and (t - m >= RECLAIM_DAYS * 86400) and (b >= RECLAIM_MIN_B)
         if rec_proj:
-            reclaimable.append({"u": f"projects/{pid}", "path": f"{root.rstrip('/')}/projects/{pid}", "project": pid, "kind": "project",
+            reclaimable.append({"u": rel_dir, "path": full_dir, "project": pid, "kind": "project",
                                 "b": b, "idle_days": idle_days, "m": m})
         lm = lp.get("m") or m
         l_idle = int((t - lm) // 86400) if lm and t > lm else 0
         if (not is_act) and cache_b >= RECLAIM_MIN_B and (not lm or t - lm >= RECLAIM_DAYS * 86400):
-            reclaimable.append({"u": f".tmp/cache/{pid}", "path": f"{root.rstrip('/')}/.tmp/cache/{pid}", "project": pid, "kind": "cache",
+            reclaimable.append({"u": f".tmp/cache/{pid}", "path": f"{root_clean}/.tmp/cache/{pid}", "project": pid, "kind": "cache",
                                 "b": cache_b, "idle_days": l_idle, "m": lm})
         if (not is_act) and scratch_b >= RECLAIM_MIN_B and (not lm or t - lm >= RECLAIM_DAYS * 86400):
-            reclaimable.append({"u": f".tmp/jobs/{pid}", "path": f"{root.rstrip('/')}/.tmp/jobs/{pid}", "project": pid, "kind": "scratch",
+            reclaimable.append({"u": f".tmp/jobs/{pid}", "path": f"{root_clean}/.tmp/jobs/{pid}", "project": pid, "kind": "scratch",
                                 "b": scratch_b, "idle_days": l_idle, "m": lm})
         projects[pid] = {
             "b": b, "m": m, "d24": wp.get("d24") or 0, "top": wp.get("top") or [],
-            "cache": cache_b, "scratch": scratch_b, "active": is_act,
+            "dir": rel_dir, "cache": cache_b, "scratch": scratch_b, "active": is_act,
             "idle_days": idle_days, "reclaimable": rec_proj,
         }
     reclaimable.sort(key=lambda x: -x["b"])
     common = wk.get("common") or {}
     dirs = [
-        {"u": f"projects/{pid}", "name": pid, "p": pid, "b": v["b"], "d24": v["d24"], "m": v["m"]}
+        {"u": v["dir"], "name": pid, "p": pid, "b": v["b"], "d24": v["d24"], "m": v["m"]}
         for pid, v in projects.items() if v["b"] > 0
     ] + [
         {"u": k, "name": k, "p": None, "b": int(b), "d24": None, "m": None}

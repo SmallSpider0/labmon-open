@@ -1210,11 +1210,20 @@ class SchedMixin:
                "hl": float(d["half_life_h"]) * 3600 if d.get("half_life_h") else _C.POLICY["hl"],
                "w": {str(k): float(v) for k, v in (d.get("weight") or {}).items()},
                "own": {str(k): str(v) for k, v in own.items() if v}}
-        if st or any(k in d for k in ("standalone", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb")):
+        env_cq = os.environ.get("LABMON_CPU_QUOTA")
+        if st or any(k in d for k in ("standalone", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "cpu_quota")) or env_cq:
             out["standalone"] = st
             out["disk_warn_gb"] = _opt_num("disk_warn_gb", _C.DISK_WARN_GB if st else None)
             out["disk_stop_gb"] = _opt_num("disk_stop_gb", _C.DISK_STOP_GB if st else None)
             out["disk_quota_gb"] = _opt_num("disk_quota_gb", None)
+            cq = _opt_num("cpu_quota", None)
+            if cq is None and env_cq:
+                try:
+                    cq = float(env_cq)
+                except ValueError:
+                    cq = None
+            if cq is not None and cq > 0:
+                out["cpu_quota"] = cq
         return out
 
     def cards(self, ngpu, vram_gib, excl):
