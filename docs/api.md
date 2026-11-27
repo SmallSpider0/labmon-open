@@ -287,7 +287,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 | `POST /api/hosts/external/<id>/test` | 单次测试外部主机 SSH 连通性、OS/WSL/GPU、Python 版本与 `data_root` 可用空间（不重试） |
 | `POST /api/hosts/external/<id>/key {"rotate"?}` | 查看或轮换外部主机专用 Ed25519 公钥（`rotate=true` 时断开旧连接），仅返回公钥、指纹与授权命令 |
 | `GET /api/hosts` | `{"missing", "hosts": [{"id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until", "worker_home", "data_root", "local_dir", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "platform_kind", "share", "standalone", "ssh_key_mode", "ssh_key_fp", "home_with"}]}`：`labmon host list`、`labmon borrow` 与外部机抽屉共用（普通用户只列他能用及名下的主机，他人私有外部机完全不可见） |
-| `POST /api/fleet/manage {"id", "on"}` | `{"id", "on", "msg", "manage"}`：将已开账号的组员名下服务器切为「接入本人调度」（`on=true`，删 `manage` 键并尝试部署拉起 worker）或「仅监控」（`on=false`，先停 worker 再写 `manage = false`，不杀在跑任务）；已在 `[[hosts]]` 配置、关机、借用中或未开账号回 409（`fleet.set_member_manage`，#224） |
+| `POST /api/fleet/manage {"id", "on"}` | `{"id", "on", "msg", "manage"}`：将已开账号的组员名下服务器切为「接入本人调度」（`on=true`，删 `manage` 键并清 `relaunch` 冷却，由主服务后台按共享盘已部署代码自动拉起）或「仅监控」（`on=false`，先停 worker 并记 `auto:monitor` 标记再写 `manage = false`，不杀在跑任务）；严格与 worker 代码部署分离（绝不推送或替换 worker 代码）；已在 `[[hosts]]` 配置、关机、借用中或未开账号回 409（`fleet.set_member_manage`，#224） |
 
 | `GET /api/disk` | `{"rc", "out", "err", "data"}`：`out` 是排好的总盘概况与本人共享盘用量，`data` 是 `disk.person_storage` 的脱敏结果（`api.my_disk`，#211） |
 | `GET /api/project/<id>/status` | `{"rc", "out", "err", "data"}`：`out` 是排好的项目现状，`data` 是项目快照原样（[schema.md](schema.md)；还没采集过为 null）（`api.status`） |

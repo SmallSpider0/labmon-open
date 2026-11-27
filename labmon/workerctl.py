@@ -144,6 +144,8 @@ def worker_env(h: dict) -> str:
     parts = [f"{name}={shell_path(str(value))}" for name, value in pairs if value]
     if h.get("member_auto"):
         parts.append("LABMON_NO_KA=1")
+    if h.get("member_restrict"):
+        parts.append("LABMON_RESTRICT_PROJECTS=1")
     if is_standalone(h):
         parts.append("LABMON_STANDALONE=1")
         if h.get("allow_outside_root"):
@@ -229,10 +231,103 @@ def _clear_borrow_cmd(path: str) -> str:
     return f"{shlex.quote(code)} {shlex.quote(path)}"
 
 
+def _clear_queues_cmd(home: str, hid: str, *, keep_projects: set[str] | None = None,
+                      drop_projects: set[str] | None = None, since: float | None = None,
+                      rm_sched: bool = True) -> str:
+    """在远端用 Python 3.8+ 于共享盘 reg.lock 锁内清理 hosts/<hid>/queues/*.json 遗留登记（#224）：
+    - keep_projects 不为 None（普通持有人或未开账号）：删除 project 不在 keep_projects 或损毁的登记；
+    - keep_projects 为 None（管理员持有人）：按 drop_projects / since 删除借用方登记，若两者均未提供则清空全部；
+    - rm_sched 为真时一并删除 hosts/<hid>/sched.json，防止新拉起 worker 在下一轮采集前读到旧主人的策略。
+    输出 qclean=ok:<清理条数>（不含独立纯数字，避免干扰 du 输出解析）。"""
+    spec = {
+        "home": home.rstrip("/"),
+        "hid": str(hid),
+        "keep": sorted(keep_projects) if keep_projects is not None else None,
+        "drop": sorted(drop_projects) if drop_projects else None,
+        "since": float(since) if since is not None else None,
+        "rm_sched": bool(rm_sched),
+    }
+    code = (
+        "import fcntl, glob, json, os, sys\n"
+        "cfg = json.loads(sys.argv[1])\n"
+        "home, hid = cfg['home'], cfg['hid']\n"
+        "hd = os.path.join(home, 'hosts', hid)\n"
+        "qd = os.path.join(hd, 'queues')\n"
+        "n = 0\n"
+        "if os.path.isdir(qd):\n"
+        "    lk_path = os.path.join(home, 'reg.lock')\n"
+        "    os.makedirs(home, exist_ok=True)\n"
+        "    with open(lk_path, 'w') as lk:\n"
+        "        try:\n"
+        "            fcntl.flock(lk, fcntl.LOCK_EX)\n"
+        "        except OSError:\n"
+        "            pass\n"
+        "        keep = set(cfg['keep']) if cfg['keep'] is not None else None\n"
+        "        drop = set(cfg['drop']) if cfg['drop'] is not None else None\n"
+        "        since = cfg['since']\n"
+        "        for f in glob.glob(os.path.join(qd, '*.json')):\n"
+        "            rm = False\n"
+        "            try:\n"
+        "                reg = json.loads(open(f).read())\n"
+        "                proj = reg.get('project') if isinstance(reg, dict) else None\n"
+        "            except (OSError, ValueError):\n"
+        "                proj = None\n"
+        "                rm = True\n"
+        "            if not rm:\n"
+        "                if keep is not None:\n"
+        "                    rm = proj not in keep\n"
+        "                elif drop is not None or since is not None:\n"
+        "                    if drop and proj in drop:\n"
+        "                        rm = True\n"
+        "                    elif since is not None:\n"
+        "                        try:\n"
+        "                            rm = os.stat(f).st_mtime >= since - 5\n"
+        "                        except OSError:\n"
+        "                            rm = False\n"
+        "                else:\n"
+        "                    rm = True\n"
+        "            if rm:\n"
+        "                try:\n"
+        "                    os.remove(f)\n"
+        "                    n += 1\n"
+        "                except OSError:\n"
+        "                    pass\n"
+        "if cfg['rm_sched']:\n"
+        "    sp = os.path.join(hd, 'sched.json')\n"
+        "    if os.path.exists(sp):\n"
+        "        try:\n"
+        "            os.remove(sp)\n"
+        "        except OSError:\n"
+        "            pass\n"
+        "print('qclean=ok:%d' % n)\n"
+    )
+    return f"{shlex.quote(code)} {shlex.quote(json.dumps(spec, ensure_ascii=False))}"
+
+
+def stop_managed_worker(h: dict, reason: str, *, ssh_fn=None, timeout: float | None = 15) -> tuple[int, str]:
+    """停止组员自动接入服务器（member_auto）的 worker，并写入带 auto:<reason> 前缀的 stopped 标记（#224）：
+    - 仅停进程、绝不上传或替换 worker 代码；
+    - 与管理员手动 labmon worker stop 留下的纯时间 stopped 区分开：重新开通账号或切回接入调度后，
+      overview.relaunch 会自动识别 auto:* 并恢复拉起，而手动 stop 仍保持不自动拉起；
+    - peer worker 仍见 hosts/<id>/stopped 存在，停机期间不会误当在用 peer。"""
+    LS.need(f"停用受管 worker（{reason}）")
+    hc = host_defaults(dict(h))
+    hid = str(hc["id"])
+    we = worker_env(hc)
+    w = (f"env {we} " if we else "env ") + f"{shlex.quote(hc['python'])} {shell_path(hc['worker_home'].rstrip('/') + '/labmon_worker.py')}"
+    sf = shell_path(f"{hc['worker_home'].rstrip('/')}/hosts/{hid}/stopped")
+    hd = shell_path(f"{hc['worker_home'].rstrip('/')}/hosts/{hid}")
+    tag = f"auto:{reason}"
+    cmd = f"{w} stop --host {shlex.quote(hid)}; rc=$?; mkdir -p {hd} && printf '%s %s\\n' {shlex.quote(tag)} \"$(date '+%F %T')\" > {sf}; exit $rc"
+    run = ssh_fn or ssh
+    return run(hc, cmd, timeout=timeout) if ssh_fn is None else run(hc, cmd)
+
+
 def clear_overrides(hid: str, *, home: str | None = None, borrow_only: bool = False, skip=(),
-                    ssh_fn=None, target: dict | None = None) -> tuple[bool, str]:
+                    ssh_fn=None, target: dict | None = None, clear_queues: dict | None = None) -> tuple[bool, str]:
     """清理共享盘上 hosts/<hid>/overrides.json：借用归还连不上目标机时删整份（borrow_only=False）；
     换人或开机接成自用主机时只清遗留借用指令 guest 与 target=borrow 的 deadline（borrow_only=True，保留其它主机级指令）。
+    clear_queues 非空时在同一条 ssh 中顺带清理 hosts/<hid>/queues 遗留登记与旧 sched.json（#224，一条连接不加额外 ssh）。
     target 给了就在该主机上直接执行；否则经 config.home_host 从在用主机（排除 skip）里依次挑共用 worker_home 的代办，
     连不上（rc == 255）顺延试下一台。返回 (是否清理成功, 说明或原因)，不抛错阻塞归还与开机。"""
     LS.need("清理临时指令")
@@ -265,9 +360,20 @@ def clear_overrides(hid: str, *, home: str | None = None, borrow_only: bool = Fa
     if not cands:
         return False, f"没有与 {hid} 共用 worker 目录（{home}）的在用主机"
     ovr = f"{home.rstrip('/')}/hosts/{hid}/overrides.json"
+    q_extra = ""
+    if clear_queues is not None:
+        q_extra = _clear_queues_cmd(
+            home, hid,
+            keep_projects=clear_queues.get("keep_projects"),
+            drop_projects=clear_queues.get("drop_projects"),
+            since=clear_queues.get("since"),
+            rm_sched=clear_queues.get("rm_sched", True),
+        )
     last_err = ""
     for c in cands:
         cmd = f"{shlex.quote(c['python'])} -c {_clear_borrow_cmd(ovr)}" if borrow_only else f"rm -f {shell_path(ovr)}"
+        if q_extra:
+            cmd = f"{cmd} && {shlex.quote(c['python'])} -c {q_extra}"
         rc, out = run(c, cmd)
         if rc == 0:
             if borrow_only:
@@ -335,6 +441,7 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
         we = worker_env(hc)
         return (f"env {we} " if we else "env ") + f"{shlex.quote(hc['python'])} {shell_path(hc['worker_home'].rstrip('/') + '/labmon_worker.py')}"
     if sub == "start":
+        deploy = opts.pop("deploy", True)
         home = h["worker_home"]
         w = _wcmd(h)
         guest = (h.get("borrow") and not h["borrow"].get("swap")) or h.get("member_auto")   # 直接借来或自动接入的组员服务器：不在容器里扫全组共享盘
@@ -343,6 +450,8 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
         # 一条连接：把 main 上已提交的 labmon_worker.py、worker/*.py 与停启保活的 ka.sh 打成 tar.gz 经标准输入送出，
         # 先在 worker_home 下建临时目录解包（失败则清理退出、不破坏现有文件），再替换 worker/*.py、清掉已删模块与旧 __pycache__、替换 ka.sh 与入口脚本，
         # 最后后台拉起（--replace 让旧 worker 退出、由新进程接管任务）。后台那句单独写、不接在 cd 或 && 后面，否则 ssh 会挂到进程结束。
+        # deploy="if_missing"（主服务后台自动拉起 member_auto，#224）：远端已有 labmon_worker.py 时绝不覆盖共享盘代码也不 --replace，
+        # 仅在首次尚未安装时落地 main 已提交版本，彻底将常规自动拉起与管理员内网代码升级分离。
         # START_CHECK_S 秒后看它还在不在：启动即崩的（输出接的是 /dev/null）带上 worker.log 末尾、退出码 3，调用方报“拉起失败”而不是“已拉起”
         log = shell_path(f"{home.rstrip('/')}/hosts/{hid}/worker.log")
         hq_home = shell_path(home.rstrip("/"))
@@ -357,19 +466,38 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
             )
         else:
             sync_pkg = ""
-        remote = (
-            f"mkdir -p {hq_home} && d=$(mktemp -d {hq_home}/.deploy.XXXXXX) || exit 1\n"
-            f'if ! (base64 -d > "$d/.pkg.tgz" && tar -xzf "$d/.pkg.tgz" -C "$d" && {sync_pkg}'
-            f'mv "$d/ka.sh" {hq_home}/ka.sh && '
-            f'mv "$d/labmon_worker.py" {hq_home}/labmon_worker.py); then rm -rf "$d"; exit 1; fi\n'
-            f'rm -rf "$d"\n'
-            f"setsid nohup {w} run --host {hq} --replace{sh}{sa} > /dev/null 2>&1 < /dev/null &\n"
-            f"sleep {START_CHECK_S}; o=$({w} ls --host {hq}); echo \"$o\"\n"
-            f"case \"$o\" in worker：运行中*) ;; *) echo '---- worker.log 末尾'; tail -n 12 {log}; exit 3;; esac"
-        )
+        if deploy == "if_missing":
+            remote = (
+                f"mkdir -p {hq_home}\n"
+                f"if [ ! -f {hq_home}/labmon_worker.py ]; then\n"
+                f"  d=$(mktemp -d {hq_home}/.deploy.XXXXXX) || exit 1\n"
+                f'  if ! (base64 -d > "$d/.pkg.tgz" && tar -xzf "$d/.pkg.tgz" -C "$d" && {sync_pkg}'
+                f'mv "$d/ka.sh" {hq_home}/ka.sh && '
+                f'mv "$d/labmon_worker.py" {hq_home}/labmon_worker.py); then rm -rf "$d"; exit 1; fi\n'
+                f'  rm -rf "$d"\n'
+                f"else\n"
+                f"  cat >/dev/null\n"
+                f"fi\n"
+                f"o=$({w} ls --host {hq} 2>/dev/null)\n"
+                f"case \"$o\" in worker：运行中*) echo \"$o\"; exit 0;; esac\n"
+                f"setsid nohup {w} run --host {hq}{sh}{sa} > /dev/null 2>&1 < /dev/null &\n"
+                f"sleep {START_CHECK_S}; o=$({w} ls --host {hq}); echo \"$o\"\n"
+                f"case \"$o\" in worker：运行中*) ;; *) echo '---- worker.log 末尾'; tail -n 12 {log}; exit 3;; esac"
+            )
+        else:
+            remote = (
+                f"mkdir -p {hq_home} && d=$(mktemp -d {hq_home}/.deploy.XXXXXX) || exit 1\n"
+                f'if ! (base64 -d > "$d/.pkg.tgz" && tar -xzf "$d/.pkg.tgz" -C "$d" && {sync_pkg}'
+                f'mv "$d/ka.sh" {hq_home}/ka.sh && '
+                f'mv "$d/labmon_worker.py" {hq_home}/labmon_worker.py); then rm -rf "$d"; exit 1; fi\n'
+                f'rm -rf "$d"\n'
+                f"setsid nohup {w} run --host {hq} --replace{sh}{sa} > /dev/null 2>&1 < /dev/null &\n"
+                f"sleep {START_CHECK_S}; o=$({w} ls --host {hq}); echo \"$o\"\n"
+                f"case \"$o\" in worker：运行中*) ;; *) echo '---- worker.log 末尾'; tail -n 12 {log}; exit 3;; esac"
+            )
         rc, out = ssh(h, remote, b64)
         dirty = subprocess.run(["git", "-C", str(HERE), "diff", "--quiet", DEPLOY_REF, "--", "labmon_worker.py", "worker", "ka.sh"]).returncode
-        return rc, (f"（工作区的 labmon_worker.py、worker/ 或 ka.sh 与 {DEPLOY_REF} 上的不同，部署的是 {DEPLOY_REF} 上已提交的版本）\n" if dirty else "") + out
+        return rc, (f"（工作区的 labmon_worker.py、worker/ 或 ka.sh 与 {DEPLOY_REF} 上的不同，部署的是 {DEPLOY_REF} 上已提交的版本）\n" if dirty and deploy != "if_missing" else "") + out
     extra = " ".join(shlex.quote(a) for a in args) + (f" --gpus {shlex.quote(gpus)}" if gpus else "")
     extra += " --idle" if opts.pop("idle", False) else ""
     extra += " --list" if opts.pop("list", False) else ""    # fit --list（#35 B）：位置参数是 ROOT JOBS，hosts 是看哪几台

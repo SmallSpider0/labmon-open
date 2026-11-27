@@ -127,6 +127,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.watch_t, self.watch_seen = 0.0, set()   # 借来的主机上次找看门狗的时刻、记过事件的可能的看门狗
         # 保活由 worker 管的前提：未禁用保活（LABMON_NO_KA!=1，#224）、有 ka.env（这台的保活配置）与随 worker 发来的 ka.sh（#105）；缺一样就当这台没配保活（keepalive.ctl 为假）
         self.no_ka = os.environ.get("LABMON_NO_KA") == "1"
+        self.restrict_projects = os.environ.get("LABMON_RESTRICT_PROJECTS") == "1"
+        self.foreign_reg = set()              # 已记过事件的不属于当前持有人允许范围的登记文件（#224）
         env = subprocess.run(["bash", "-c", '. "$1" 2>/dev/null; echo "${AGRI_ROOT:-}"; echo "${AGRI_KA_SCRIPT:+${AGRI_KA_DIR:-}/$AGRI_KA_SCRIPT}"', "_", _C.KA_ENV],
                              capture_output=True, text=True).stdout.split("\n") if (not self.no_ka) and os.path.exists(_C.KA_ENV) and os.path.exists(_C.KA_SH) else []
         keepalive_demo = env[0].strip() if env else ""
@@ -144,6 +146,19 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
     def allow_shared_gpu(self):
         """是否允许外部活跃占卡时按剩余显存共享放行（缺省 False：默认整卡暂停放新任务，#114）。"""
         return bool(getattr(self, "_allow_shared_gpu", False))
+
+    def allowed_projects(self, pol=None):
+        """自动接入的组员服务器项目白名单硬隔离（#224）：
+        - sched.json 下发了 allowed_projects 列表时仅放行列表内项目；显式下发 None（管理员持有人）时不限；
+        - 启动带 LABMON_RESTRICT_PROJECTS=1 但尚未收到带 allowed_projects 的 sched.json 时 fail-closed（返回空集），
+          防止借用归还/换人后的空窗期偷跑前任遗留队列。"""
+        p = self.policy() if pol is None else pol
+        if "allowed_projects" in p:
+            ap = p.get("allowed_projects")
+            return set(ap) if isinstance(ap, list) else None
+        if getattr(self, "restrict_projects", False):
+            return set()
+        return None
 
     # ---- 日志与事件 ----
     def wlog(self, msg):
@@ -210,6 +225,10 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         续租、归还打断它也只是重开后接着等（推演里同样不挡，place 先放占位任务再看截止）。
         lasting：只看持久的挡法（截止、drain、pause、借来的主机只给别的项目用），跳过对方此刻超出预留（guest_block）：
         推演（forecast 排除哪些队列）与 offers（几小时后接不接得了）用它，此刻才有的原因推演不模拟（#25）；真放行看全部。"""
+        if not kinds:
+            allowed = self.allowed_projects()
+            if allowed is not None and r.get("project") not in allowed:
+                return "owner", "项目 %s 不在当前持有人允许范围内，拒绝放行" % (r.get("project") or "?")
         for o in self.ovr:
             if kinds and o["kind"] not in kinds:
                 continue
@@ -848,6 +867,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         跑空满 IDLE_REG_S（2 天，#164）转休眠的登记：每轮只对清单文件做一次 file_sig（复用登记文件的 stat 判重登记），
         不读 .env、状态目录与标记；清单文件或登记文件一变立即醒来照常排。"""
         out, bad = [], []
+        allowed = self.allowed_projects()
+        seen_foreign = set()
         prev_q = {(os.path.normpath(j.get("root") or ""), j.get("queue")) for j in getattr(self, "prev", {}).values() if j.get("kind") == "queue"}
         for f, reg, rsig, mtime, changed in _Q.regs(self.p.queues, cache=self.reg_cache, with_meta=True):
             if isinstance(reg, Exception):
@@ -855,9 +876,16 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 continue
             try:
                 key, root, jobs = reg["_slug"], reg["root"], reg["jobs"]
-                _ = reg["project"]
+                proj = reg["project"]
             except (KeyError, TypeError, AttributeError) as e:
                 bad.append((f, e))
+                continue
+            if allowed is not None and proj not in allowed:
+                seen_foreign.add(f)
+                if f not in self.foreign_reg:
+                    self.foreign_reg.add(f)
+                    self.event("worker", "跳过不属于当前持有人允许范围的登记队列：%s/%s（项目 %s）" % (root, jobs, proj),
+                               project=proj, root=root, queue=jobs)
                 continue
             idle = self.reg_idle.get(key)
             if changed or (idle and idle.get("rsig") and idle["rsig"] != rsig):   # 重新 worker add：立即唤醒
@@ -885,6 +913,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if f not in self.bad_reg:
                 self.bad_reg.add(f)
                 self.event("worker", "登记文件坏了，跳过这条队列：%s（%r）" % (f, e))
+        self.foreign_reg &= seen_foreign
         self.peers(_C.time.time())
         keep, yielded = [], {}
         for q in out:

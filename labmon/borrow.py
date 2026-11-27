@@ -36,14 +36,14 @@ import time
 from . import fleet as F
 from . import fleetops as FO
 from . import lease as LS
-from .config import GIB, HOSTS_LOCK, ConfigError, _read_toml, check_future, fmt_time, guest_host, host_defaults, hosts_file, parse_time, set_fleet_keys, user_hosts
+from .config import GIB, HOSTS_LOCK, ConfigError, _member_account, _read_toml, check_future, fmt_time, guest_host, host_defaults, hosts_file, parse_time, set_fleet_keys, user_hosts
 from . import projects as PJ
 from .records import log_events, tell
 from .renew import eta_of
 from .service import log
 from .state import load_json, load_rows, save_json, state_dir
-from .users import person_of
-from .workerctl import clear_overrides, host_conf, override_each, run_out, worker_env
+from .users import people_of, person_of
+from .workerctl import _clear_queues_cmd, clear_overrides, host_conf, override_each, run_out, worker_env
 
 MARGIN_S = 3600                  # 对方租期到期前这么久截止：续租会重启容器，没跑完的白跑
 DUE_WARN_S = 2 * 3600            # 约定时间前这么久提醒一次
@@ -408,9 +408,26 @@ def wrote_note(w: dict | None, holder: str) -> str | None:
             + f"），没动：留在 {holder} 那边，我们拿不到，对方续租时会清掉")
 
 
+def _return_queue_policy(s: dict) -> dict:
+    """借用归还时清理 hosts/<id>/queues/*.json 的过滤策略（#224）：
+    - 持有人绑定的普通账号：仅保留持有人本人名下项目（彻底隔离借用方遗留队列，同时不误删持有人原有登记）；
+    - 持有人未开账号：清空全部借用遗留登记；
+    - 持有人为管理员：删除借用期间（borrow_for 或 borrow_since 之后）登记的队列。"""
+    from . import overview as O
+    acct = _member_account(s.get("holder"), people_of())
+    if not acct:
+        return {"keep_projects": set(), "rm_sched": True}
+    allowed = O._host_allowed_projects({"member_auto": True, "users": [acct]})
+    if allowed is not None:
+        return {"keep_projects": allowed, "rm_sched": True}
+    bfor = s.get("borrow_for")
+    drop = {str(x) for x in bfor} if isinstance(bfor, list) and bfor else None
+    return {"keep_projects": None, "drop_projects": drop, "since": parse_time(s.get("borrow_since")), "rm_sched": True}
+
+
 def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), probe=None, gone: bool | str = False, stuck: dict | None = None,
            mine: dict | None = None, adopt=None, clear_ovr=None) -> str:
-    """归还：一条 ssh 停 worker、停掉还挂着的占位任务（kill：它们的进程组）、清掉容器里 labmon 的本地目录与这台的临时指令。主机清单写 borrow_returned。
+    """归还：一条 ssh 停 worker、停掉还挂着的占位任务（kill：它们的进程组）、清掉容器里 labmon 的本地目录、这台的临时指令与借用方遗留队列登记。主机清单写 borrow_returned。
     卡上的保活是借用期间 worker 开的（mine：worker 状态的 keepalive.mine；没有就按 ka.sh 的事件日志认），不动进程、登记成看板的保活
     （adopt 缺省 fleet.ka_adopt，在现场核对身份，#102）：不停再开，没有空档；认不出的照旧——借来时 GPU 上没有保活的停掉再按保活守护开，
     借来时就有对方保活的不碰、按保活守护开（已在跑不重开；开了就盯着，对方的实验上来就让出）。然后恢复借来时暂停的保活看门狗（worker 的 thaw：
@@ -418,44 +435,51 @@ def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), prob
     wrote：借用期间本地盘 labmon 目录之外新写的（worker 的 storage.wrote：只列出来，不动，wrote_note）。
     stuck：借用期间 worker 要卡时停不了卡上的保活（worker 状态的 keepalive.stuck，#102）：结果里照实写一句，不只说保活是谁的。
     gone：
-    - True（容器已换）：先 ssh 到这台 worker stop 与删 overrides.json；若连不上（rc == 255），经共用 worker_home 的在用主机删共享盘上的 overrides.json，
+    - True（容器已换）：先 ssh 到这台 worker stop、删 overrides.json 与清借用方遗留队列；若连不上（rc == 255），经共用 worker_home 的在用主机代办清理，
       不抛错阻塞归还；不 kill 旧进程组、不停保活、不清 /tmp/labmon、不开保活、不恢复看门狗。
-    - "stopped"（#171：link_step 判定掉线且平台核对确认作业不在运行）：容器已没，不 ssh 这台、不 probe，直接经共用 worker_home 的在用主机删 overrides.json 并记归还。"""
+    - "stopped"（#171：link_step 判定掉线且平台核对确认作业不在运行）：容器已没，不 ssh 这台、不 probe，直接经共用 worker_home 的在用主机代办清理并记归还。"""
     cfg, s = _server(sid)
     h = host_conf(sid)
     w = f"env {worker_env(h)} {shlex.quote(h['python'])} {shlex.quote(h['worker_home'] + '/labmon_worker.py')}"
     ka_cmd = F.ka_cmd(s, cfg)
     theirs = bool((load_json(state_dir() / "borrow.json", {}).get(sid) or {}).get("ka"))
     ovr_file = f"rm -f {shlex.quote(h['worker_home'] + '/hosts/' + sid + '/overrides.json')}"
+    q_pol = _return_queue_policy(s)
+    q_cmd = f"{shlex.quote(h['python'])} -c {_clear_queues_cmd(h['worker_home'], sid, **q_pol)}"
+    sf = shlex.quote(h["worker_home"].rstrip("/") + "/hosts/" + sid + "/stopped")
+    hd = shlex.quote(h["worker_home"].rstrip("/") + "/hosts/" + sid)
+    mark_auto = f"mkdir -p {hd} && printf 'auto:borrow_return %s\\n' \"$(date '+%F %T')\" > {sf}"
     stopped = gone == "stopped"
     ovr_note, do_probe = None, not stopped
     if stopped:
-        ok, why = (clear_ovr or clear_overrides)(sid, home=h["worker_home"], skip={sid})
+        ok, why = (clear_ovr or clear_overrides)(sid, home=h["worker_home"], skip={sid}, clear_queues=q_pol)
         if not ok:
             ovr_note = f"共享盘上的临时指令暂未删成（{why}），下次接入或再借时清理"
         mb = 0
     else:
-        remote = (f"{w} stop --host {shlex.quote(sid)} >/dev/null 2>&1; {ovr_file}" if gone else
+        # 一条 ssh：停 worker、删 overrides.json 并隔离借用方遗留队列与旧 sched.json；仅队列清理成功时把 stopped 标为 auto:borrow_return，
+        # 避免清理失败时恢复本人 worker 误放行借用方任务（#224）
+        remote = (f"{w} stop --host {shlex.quote(sid)} >/dev/null 2>&1; {ovr_file}; {q_cmd} && {mark_auto}" if gone else
                   f"{w} stop --host {shlex.quote(sid)} >/dev/null 2>&1; sleep 2; "
                   + "".join(f"kill -TERM -- -{int(p)} 2>/dev/null; " for p in kill)
-                  + f"du -sm /tmp/labmon 2>/dev/null | cut -f1; rm -rf /tmp/labmon; {ovr_file}")
+                  + f"du -sm /tmp/labmon 2>/dev/null | cut -f1; rm -rf /tmp/labmon; {ovr_file}; {q_cmd} && {mark_auto}")
         rc, out, err = (ssh or F.ssh)(s, remote)
         if rc == 255:
             if not gone:
                 raise ConfigError(f"连不上 {label(s)}，还没还（若作业已被平台停掉，先点「与平台核对」，确认不在运行后会自动按已停归还）：{err.strip()}")
-            ok, why = (clear_ovr or clear_overrides)(sid, home=h["worker_home"], skip={sid})
+            ok, why = (clear_ovr or clear_overrides)(sid, home=h["worker_home"], skip={sid}, clear_queues=q_pol)
             if not ok:
                 ovr_note = f"共享盘上的临时指令暂未删成（{why}），下次接入或再借时清理"
             mb, do_probe = 0, False
         else:
             mb = 0 if gone else next((int(x) for x in out.split() if x.isdigit()), 0)
     set_fleet_keys({"borrow_returned": fmt_time(time.time(), year=True)}, f"把 {label(s)} 还给 {s['holder']}", sid=sid)
-    # 归还后若持有人已开账号且未退出调度（#224），清理 relaunch 冷却与刚停 worker 留下的 stopped 标记，让下一轮采集自动拉回本人 worker
+    # 归还后清除已下发缓存（强制下一轮重写新持有人 sched.json）；若持有人已开账号且未退出调度（#224），清 relaunch 冷却，
+    # 由主服务下一轮采集按 auto:borrow_return 自动拉回本人 worker（且受 LABMON_RESTRICT_PROJECTS + allowed_projects 硬隔离）
+    from . import overview as O
+    O.clear_sent(sid)
     if any(str(x.get("id")) == sid and x.get("member_auto") for x in user_hosts()):
-        from . import overview as O
         O.clear_relaunch(sid)
-        if not stopped and not gone:
-            (ssh or F.ssh)(s, f"rm -f {shlex.quote(h['worker_home'] + '/hosts/' + sid + '/stopped')}")
     since = parse_time(s.get("borrow_since"))
     took = f"（借了 {(time.time() - since) / 3600:.0f} 小时）" if since else ""
     if gone:

@@ -1245,6 +1245,9 @@ class SchedMixin:
                "hl": float(d["half_life_h"]) * 3600 if d.get("half_life_h") else _C.POLICY["hl"],
                "w": {str(k): float(v) for k, v in (d.get("weight") or {}).items()},
                "own": {str(k): str(v) for k, v in own.items() if v}}
+        if "allowed_projects" in d:
+            ap = d.get("allowed_projects")
+            out["allowed_projects"] = [str(x) for x in ap] if isinstance(ap, list) else None
         env_cq = os.environ.get("LABMON_CPU_QUOTA")
         env_sg = os.environ.get("LABMON_ALLOW_SHARED_GPU") == "1"
         if "allow_shared_gpu" in d:

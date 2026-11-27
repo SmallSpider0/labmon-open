@@ -386,8 +386,10 @@ def member_manage_state(s: dict, hosts: list[dict], *, links: dict | None = None
 def member_host(s: dict, hosts: list[dict], acct: str, fleet_cfg: dict | None = None) -> dict:
     """已开账号的组员名下 [[fleet.servers]] 自动接入本人调度时的受管主机条目（#224）：
     复用模板或 [fleet] 的 SSH/python/data_root/worker_home/shared/mounts/checks，不继承 ka_bin（不碰用户自开保活），
-    仅开放给持有人本人（users=[acct]），不写 platform_job/platform_pool 以免被误当成 [[hosts]] 自用机。"""
+    仅开放给持有人本人（users=[acct]），普通账号另标 member_restrict（worker 启动时启用项目白名单硬隔离，防遗留队列越权放行），
+    不写 platform_job/platform_pool 以免被误当成 [[hosts]] 自用机。"""
     from .fleet import state_file                 # fleet 在上层 import 本模块，这里只能延迟 import
+    from .users import account as _account
     tpl = _guest_tpl(hosts)
     fcfg = fleet_cfg or {}
     base = {k: tpl[k] for k in ("python", "data_root", "worker_home", "shared", "mounts", "checks") if k in tpl}
@@ -400,10 +402,12 @@ def member_host(s: dict, hosts: list[dict], acct: str, fleet_cfg: dict | None = 
     lbl = str(s.get("label") or "").strip()
     holder = str(s.get("holder") or "")
     label = lbl if lbl and lbl != holder else f"{node}（{holder}）" if holder else node
+    acc = _account(acct)
     out = {**base,
            "id": str(s["id"]), "label": label, "ssh": s.get("ssh"), "port": s.get("port", PORT),
            "known_hosts": str(state_file("known_hosts")), "worker": "auto",
-           "users": [acct], "share": "private", "member_auto": True, "member_holder": holder}
+           "users": [acct], "share": "private", "member_auto": True, "member_holder": holder,
+           "member_restrict": (acc or {}).get("role") != "admin"}
     if fcfg.get("lease_days") is not None:
         out["lease_days"] = fcfg["lease_days"]
     return out

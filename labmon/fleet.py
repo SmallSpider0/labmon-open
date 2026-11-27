@@ -1147,12 +1147,13 @@ def set_guard(sid: str | None = None, on: bool | None = None, idle_min=None, wat
         set_fleet_keys(keys, "改保活守护的时间")
 
 
-def set_member_manage(sid: str, on: bool, by: str, *, stop_fn=None, start_fn=None, clear_relaunch_fn=None) -> dict:
+def set_member_manage(sid: str, on: bool, by: str, *, stop_fn=None, clear_relaunch_fn=None) -> dict:
     """单台组员服务器一键切换「接入调度 / 仅监控（停 worker）」（#224，POST /api/fleet/manage 调用）：
     - 过 lease.need 主备守门；
     - 仅适用于已开通看板账号、未在 [[hosts]] 显式配置、未关机且未借出的 [[fleet.servers]]；
-    - 切为仅监控（on=False）：先尝试停掉该台 worker（在跑任务继续跑完，不再放新任务；连不上不阻塞退出），再落盘 manage = false；
-    - 切回接入调度（on=True）：清除 manage 键恢复默认自动接入，清 relaunch 冷却，内网可达时尝试立即部署拉起 worker（同步清除 stopped 标记）。"""
+    - 严格与 worker 代码部署分离：本路由绝不上传或替换 worker 代码（代码推送与升级仍仅限管理员在内网经 /api/worker/start 执行）；
+    - 切为仅监控（on=False）：先尝试经 stop_managed_worker 停掉该台 worker（仅停进程并记 auto:monitor 标记，在跑任务继续跑完；连不上不阻塞退出），再落盘 manage = false；
+    - 切回接入调度（on=True）：清除 manage 键恢复默认自动接入，清 relaunch 冷却与已下发缓存，交由主服务后台 overview.relaunch 按已部署代码自动拉起。"""
     LS.need("切换服务器接入调度")
     if not isinstance(on, bool):
         raise ConfigError("on 参数须为 true（接入调度）或 false（仅监控）")
@@ -1183,10 +1184,12 @@ def set_member_manage(sid: str, on: bool, by: str, *, stop_fn=None, start_fn=Non
     if not on:
         stop_note = ""
         if ms["on"]:
-            do_stop = stop_fn or (lambda hid: W.run_out("stop", hid, []))
             if stop_fn is not None or L.check()["ok"]:
                 try:
-                    rc, out = do_stop(sid)
+                    if stop_fn is not None:
+                        rc, out = stop_fn(sid)
+                    else:
+                        rc, out = W.stop_managed_worker(W.host_conf(sid), "monitor")
                     if rc == 0:
                         stop_note = "已停止 worker（在跑任务继续跑完，不再放新任务）"
                     else:
@@ -1203,22 +1206,9 @@ def set_member_manage(sid: str, on: bool, by: str, *, stop_fn=None, start_fn=Non
 
     set_fleet_keys({"manage": None}, f"{by} 将 {name} 重新接入本人调度", sid=sid)
     clear_rl(sid)
-    start_note = ""
-    do_start = start_fn or (lambda hid: W.run_out("start", hid, []))
-    if start_fn is not None or L.check()["ok"]:
-        try:
-            rc, out = do_start(sid)
-            if rc == 0:
-                start_note = "已部署并拉起 worker（不动已有实验与自开保活）"
-            else:
-                tail = ((out or "").strip().splitlines() or [f"退出码 {rc}"])[-1][:120]
-                start_note = f"本次拉起暂未成功（{tail}），下一轮采集会自动重试拉起"
-        except (ConfigError, OSError) as x:
-            start_note = f"本次拉起暂未成功（{x}），下一轮采集会自动重试拉起"
-    else:
-        start_note = "当前不在内网，恢复内网后下一轮采集会自动拉起 worker"
+    O.clear_sent(sid)
     s_on = {k: v for k, v in s.items() if k != "manage"}
-    msg = f"{name} 已重新接入本人调度；{start_note}"
+    msg = f"{name} 已重新接入本人调度，主服务将在下一轮采集自动拉起 worker（不动已有实验与自开保活）"
     return {"id": sid, "on": True, "msg": msg, "manage": member_manage_state(s_on, hosts_raw)}
 
 

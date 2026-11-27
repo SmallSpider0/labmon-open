@@ -1133,6 +1133,14 @@ def run_swap(cfg: dict, cli: P.Client, code: str | None, ids=(), kind: str = "sw
         else:
             probe(new["id"])
             from . import overview as O
+            from .config import _member_account
+            from .users import people_of
+            if kind == "swap":
+                acct = _member_account(new.get("holder"), people_of())
+                q_pol = {"keep_projects": O._host_allowed_projects({"member_auto": True, "users": [acct]}) if acct else set(), "rm_sched": True}
+                mine_h = _mine_host_spec(new["id"], new)
+                ovr_fn(new["id"], home=mine_h["worker_home"], borrow_only=True, target=mine_h, ssh_fn=ovr_run, clear_queues=q_pol)
+            O.clear_sent(new["id"])
             O.clear_relaunch(new["id"])
         r.done(note)
         notify([f"{name}（{new['id']}）{'换节点' if kind == 'move' else '开机'}完成：{conn['cmd']}"])

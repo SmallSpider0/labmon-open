@@ -419,8 +419,11 @@ def _expire(t: float) -> None:
 
 
 def _host_allowed_projects(h: dict) -> set[str] | None:
-    """外部主机归属普通用户时，返回其名下允许下发历史/eta/sched 的项目集合；管理员或无普通归属主返回 None（不限）。"""
+    """外部主机或自动接入的组员服务器（#224）归属普通用户时，返回其名下允许下发历史/eta/sched 及放行的项目集合；管理员或无普通归属主返回 None（不限）。"""
     owner = h.get("owner")
+    if not owner and h.get("member_auto"):
+        us = h.get("users") or []
+        owner = us[0] if us else None
     if not owner:
         return None
     acc = U.account(owner)
@@ -510,16 +513,21 @@ def _to_worker(projects: list[dict], t: float, sw: dict, snap: dict | None = Non
     def for_host(h: dict) -> dict:
         sh = dict(sw)
         standalone = is_standalone(h)
-        allowed = _host_allowed_projects(h) if standalone else None
+        member_auto = bool(h.get("member_auto"))
+        allowed = _host_allowed_projects(h) if (standalone or member_auto) else None
         if allowed is not None:
-            # 普通用户归属外部机：eta.json 与 sched.json 仅保留本人获准项目，绝不泄露他人项目名、任务名或预计结束时刻
+            # 普通用户归属外部机 / 自动接入的组员服务器：eta.json 与 sched.json 仅保留本人获准项目，绝不泄露他人项目名、任务名或预计结束时刻
             for k in ("weight", "pause", "focus", "owner"):
                 if isinstance(sh.get(k), dict):
                     sh[k] = {p: v for p, v in sh[k].items() if p in allowed}
             h_jobs = {k: v for k, v in jobs.items() if k.partition("|")[0] in allowed}
             h_prog = [k for k in by_prog if k.partition("|")[0] in allowed]
+            if member_auto:
+                sh["allowed_projects"] = sorted(allowed)
         else:
             h_jobs, h_prog = jobs, by_prog
+            if member_auto:
+                sh["allowed_projects"] = None
         if standalone:
             sh["standalone"] = True
         for k in ("disk_warn_gb", "disk_stop_gb", "disk_quota_gb"):
@@ -915,21 +923,29 @@ def clear_relaunch(hid: str) -> None:
 
 def relaunch(snap: dict, start=None) -> list[str]:
     """主机清单里标了 worker = "auto" 的主机：能连上而 worker 不在（多半是容器重启），就拉起 worker（10 分钟内最多一次）。
-    手动 labmon worker stop 过的不拉，status.json 读不出的也不拉（worker 多半还在）。拉起记在本机 events.jsonl（输出放 detail），
-    工作台的事件里能看到；返回的消息带上输出，调用方记进服务日志。start(主机) 返回 (退出码, 输出)。"""
-    if start is None:
-        start = lambda hid: run_out("start", hid, [])
+    手动 labmon worker stop 过的不拉，status.json 读不出的也不拉（worker 多半还在）。
+    对自动接入的组员服务器（member_auto，#224）：
+    - 生命周期停机留下的 auto:* 标记（切仅监控/删账号/借用归还）在重新成为合法 member_auto 后自动允许拉起，管理员手动 stop 仍不拉；
+    - 默认走 deploy="if_missing"：共享盘已有 worker 代码时绝不覆盖代码或 --replace 运行中 worker。
+    拉起记在本机 events.jsonl（输出放 detail），工作台的事件里能看到；返回的消息带上输出，调用方记进服务日志。start(主机) 返回 (退出码, 输出)。"""
     sd = state_dir()
     sd.mkdir(parents=True, exist_ok=True)
     last = load_json(sd / "relaunch.json", {})
     out = []
     for h in snap["hosts"]:
-        if h.get("ephemeral") or not h.get("auto") or h.get("error") or h.get("status_error") or h.get("stopped") or (h.get("status") and h.get("worker_up")):
+        stopped = h.get("stopped")
+        manual_stopped = bool(stopped) and not (h.get("member_auto") and str(stopped).startswith("auto:"))
+        if h.get("ephemeral") or not h.get("auto") or h.get("error") or h.get("status_error") or manual_stopped or (h.get("status") and h.get("worker_up")):
             continue
         if time.time() - last.get(h["id"], 0) < RELAUNCH_GAP:
             continue
         last[h["id"]] = time.time()
-        rc, text = start(h["id"])
+        if start is not None:
+            rc, text = start(h["id"])
+        elif h.get("member_auto"):
+            rc, text = run_out("start", h["id"], [], deploy="if_missing")
+        else:
+            rc, text = run_out("start", h["id"], [])
         msg = (f"{h['label']}：worker 不在" + (f"（状态停在 {fmt_time(h['status']['t'])}）" if h.get("status") else "")
                + ("，已重新拉起" if rc == 0 else f"，拉起失败（退出码 {rc}）"))
         log_events([{"kind": "relaunch", "host": h["id"], "msg": msg, "detail": text.strip()[-400:]}])

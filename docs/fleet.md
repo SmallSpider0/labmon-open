@@ -215,13 +215,14 @@ GPU 长时间没在用（没跑实验也没开保活）的服务器会被平台�
   1. 未在 `[[hosts]]` 显式配置（不与 `[[hosts]]` 的 `id` 或在用 `(ssh, port)` 冲突，尊重现有配置不重复覆盖）；
   2. 未在看板上关机、未处于借用中（借用中走 `guest_host` 互斥，归还后按未退出状态自动恢复）；
   3. 未在该服务器块显式设为 `manage = false`（仅监控）。
-- **自动部署与跟随拉起**：主服务（过 `lease.primary()`）每轮采集经 `overview.relaunch` 自动部署并拉起 worker；新开、续租、换节点或容器重启时自动清冷却（`overview.clear_relaunch`）跟随拉起；换人时自动清掉旧持有人的 `manage` 标记；删账号时尽力停掉已在线的 `member_auto` worker 并撤出受管列表。
-- **可单台退出 / 重新接入**：持有人本人（经 `users.need_holder`）与具平台操作许可的管理员（经 `users.can_ops`）可在「我的账号 → 我的服务器」或服务器抽屉「调度接入」一键切换（`POST /api/fleet/manage`）：
-  - 切为「仅监控」：先停该台 worker（运行中任务继续跑完，不再放新任务）再写 `manage = false` 撤出受管列表，保留只读监控；
-  - 切回「接入调度」：删掉 `manage` 键恢复默认自动接入，并立即尝试部署拉起 worker（同步清除共享盘 `stopped` 标记）。
+- **自动部署与跟随拉起**：主服务（过 `lease.primary()`）每轮采集经 `overview.relaunch` 以 `deploy = "if_missing"` 自动拉起 worker（共享盘已有 `labmon_worker.py` 时只拉起已部署代码，绝不覆盖代码或替换运行中 worker；代码部署升级仍仅限管理员在内网走 `/api/worker/start`）；新开、续租、换节点、重开账号或容器重启时自动清冷却（`overview.clear_relaunch`）跟随拉起；换人时自动清掉旧持有人的 `manage` 标记与前任遗留队列；删账号时尽力停掉已在线的 `member_auto` worker 并写 `auto:account_removed` 标记（后续重开账号时可自动恢复拉起，不与管理员手动 `labmon worker stop` 混淆）。
+- **可单台退出 / 重新接入**：持有人本人（经 `users.need_holder`）与具平台操作许可的管理员（经 `users.can_ops`）可在「我的账号 → 我的服务器」或服务器抽屉「调度接入」一键切换（`POST /api/fleet/manage`，严格只做开关状态与退出停进程，绝不推送或替换 worker 代码）：
+  - 切为「仅监控」：先停该台 worker 并记 `auto:monitor` 标记（运行中任务继续跑完，不再放新任务）再写 `manage = false` 撤出受管列表，保留只读监控；
+  - 切回「接入调度」：删掉 `manage` 键并清 `relaunch` 冷却，由主服务下一轮采集按共享盘已部署 worker 自动拉起。
 - **安全护栏**：
   - **未开账号严格只读**：未开通或未无误绑定账号的组员服务器绝不自动部署 worker，也拒绝手动开启接入；
-  - **不动已有实验与自开保活**：部署拉起时 `workerctl.worker_env` 下发 `LABMON_NO_KA=1`（不传 `KA_BIN` 与 `--shared`），worker 禁用 `ka.sh` 启停与看门狗冻结，容器内所有非 labmon GPU 进程（含已有实验与用户自开 `keep_alive` 保活）统一按 `owner = "other"` 真实扣减显存/内存/CPU 并在独占检查中避让，绝不抢卡；
+  - **不动已有实验与自开保活**：拉起时 `workerctl.worker_env` 下发 `LABMON_NO_KA=1`（不传 `KA_BIN` 与 `--shared`），worker 禁用 `ka.sh` 启停与看门狗冻结，容器内所有非 labmon GPU 进程（含已有实验与用户自开 `keep_alive` 保活）统一按 `owner = "other"` 真实扣减显存/内存/CPU 并在独占检查中避让，绝不抢卡；
+  - **借用归还 / 换人队列隔离与项目白名单硬护栏**：借用归还与换人时先清理 `hosts/<id>/queues` 中不属于当前持有人的遗留登记与旧 `sched.json`；普通账号名下的 `member_auto` 主机另带 `LABMON_RESTRICT_PROJECTS=1` 并由看板经 `sched.json` 下发 `allowed_projects`，worker 在 `registry()` 与 `override_hit()` 强制按白名单拦截（收到 `allowed_projects` 前 fail-closed），绝不偷跑借用方或前任遗留任务；
   - **默认仅本人可用**：仅开放给持有人本人（`users = [本人]`），不自动向他人开放、不自动进入共有型算力池（`[pools.*]` 仍只认 `[[hosts]]`）。
 
 工作台左侧“组内”一组（管理员）：

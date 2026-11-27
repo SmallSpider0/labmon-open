@@ -517,6 +517,7 @@ def add(name: str, role: str, by: str, t: float | None = None, *, person: str) -
             raise Denied(409, str(e)) from e
         code, st = _new_code(t)
         d["users"][name] = {"role": role, "pw": None, "setup": st, "t": round(t), "by": by, "fleet_person": person}
+    _wake_member_hosts(name)
     _log(f"{by} 加了账号 {name}（{ROLES[role]}），关联组内人员 {person}，设置码 24 小时内有效")
     return code
 
@@ -531,6 +532,7 @@ def bind_person(name: str, person: str, by: str) -> str:
             return f"{k} 已关联组内人员 {person}"
         _check_bind(d["users"], k, person, existing=True)
         d["users"][k]["fleet_person"] = person
+    _wake_member_hosts(k)
     msg = f"{k} 已关联组内人员 {person}"
     _log(f"{by} 把账号 {k} 关联到组内人员 {person}")
     return msg
@@ -577,6 +579,20 @@ def person_of(name: str | None) -> tuple[str | None, str | None]:
     users = _read()["users"]
     k = _key(users, name) if name else None
     return people_of(users)[k] if k else (None, None)
+
+
+def _wake_member_hosts(acct: str) -> None:
+    """新开通账号或补绑定持有人后（#224），清除其名下自动接入组员服务器的 relaunch 冷却与已下发缓存，
+    避免此前删账号留下的冷却或缓存拖延自动恢复拉起（auto:account_removed 由 overview.relaunch 自动放行）。"""
+    try:
+        from . import overview as O
+        for h in user_hosts():
+            if h.get("member_auto") and acct.lower() in host_users(h):
+                hid = str(h["id"])
+                O.clear_relaunch(hid)
+                O.clear_sent(hid)
+    except ConfigError:
+        pass
 
 
 def free_people(users: dict | None = None) -> list[str]:
@@ -744,7 +760,7 @@ def remove(name: str, by: str, *, stop_fn=None) -> str:
     能用的主机（主机清单的 users）、共有池显式成员（[pools.*].members，#212）、项目归属（meta.json 的 owner）与推送配置。
     若该账号名下存在自动接入的组员服务器（member_auto，#224）且当前 worker 在线，锁外尽力停掉其 worker 后撤出受管列表。
     暂停是谁下的（[sched.pause_by]、worker 指令的 by）不动：同名新账号要管理员再把项目交给它才用得上。删不了自己，也删不了最后一个管理员。"""
-    from .config import HOSTS_LOCK, host_defaults, shell_path
+    from .config import HOSTS_LOCK, host_defaults
     auto_hosts: list[dict] = []
     with HOSTS_LOCK, PJ._reg_locked(), _edit() as d:
         k = _key(d["users"], name)
@@ -768,7 +784,6 @@ def remove(name: str, by: str, *, stop_fn=None) -> str:
         for kind in ("sessions", "tokens"):
             d[kind] = {h: r for h, r in d[kind].items() if r.get("user") != k}
     if auto_hosts:
-        import shlex
         from . import lan as L
         from . import lease as LS
         from . import overview as O
@@ -783,10 +798,8 @@ def remove(name: str, by: str, *, stop_fn=None) -> str:
                 except Exception:  # noqa: BLE001 — 停 worker 失败不阻塞删账号
                     pass
             elif hid in snap_up and LS.primary() and (not h.get("ssh") or L.check()["ok"]):
-                we = W.worker_env(h)
-                cmd = f"{'env ' + we + ' ' if we else ''}{shlex.quote(h['python'])} {shell_path(h['worker_home'].rstrip('/') + '/labmon_worker.py')} stop --host {shlex.quote(hid)}"
                 try:
-                    W.ssh(h, cmd, timeout=10)
+                    W.stop_managed_worker(h, "account_removed", timeout=10)
                 except Exception:  # noqa: BLE001 — 停 worker 失败不阻塞删账号
                     pass
     _log(f"{by} 删了账号 {k}（连同它的会话与令牌）")
