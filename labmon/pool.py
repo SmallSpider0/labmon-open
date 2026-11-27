@@ -105,6 +105,22 @@ def locate(root: str, jobs: str, snap: dict | None = None, pid: str | None = Non
     return fallback
 
 
+def reg_home(hid: str, root: str | None = None, jobs: str | None = None, snap: dict | None = None) -> str | None:
+    """从快照 regs 里查目标主机/池入口 hid（优先精确匹配 root+jobs）对应的共享域 worker_home；找不到返回 None。
+    用于强制删除命名池后，按残留登记的共享域精准代办 worker rm，避免跨共享域误连。"""
+    snap = snapshot() if snap is None else snap
+    fallback = None
+    for x in (snap or {}).get("regs") or []:
+        if str(x.get("host") or "") != str(hid):
+            continue
+        h = x.get("home") or None
+        if root and jobs and any(same_list(q, root, jobs) for q in x.get("queues") or []):
+            return h
+        if fallback is None and h:
+            fallback = h
+    return fallback
+
+
 # ---------- 合并各在线 worker 汇报的 pool_heads ----------
 def _heads(hosts: list[dict], home: str, hmap: dict[str, dict]) -> dict[tuple[str, str], dict]:
     """合并同一 worker_home 下各在线 worker 的 pool_heads：按 (无 err 优先, pool_t 较晚) 逐条择优（#86、#99 PR #93）。

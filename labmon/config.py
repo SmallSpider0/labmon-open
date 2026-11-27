@@ -917,10 +917,10 @@ def _last_pool_end(lines: list[str]) -> int:
 
 @_hosts_edit
 def save_pool(pid: str, *, label: str | None = None, hosts: list[str], members: list[str] | None = None,
-              exclusive: bool = True, create: bool = False, by: str = "看板") -> dict:
+              exclusive: bool = True, create: bool = False, by: str = "看板", snap: dict | None = None) -> dict:
     """管理员新建或编辑共有型算力池 [pools.<id>]（#240，唯一落盘入口）：
     走 HOSTS_LOCK 原子改写 hosts.toml，复用 pools() 同套强校验（合法 id、非保留名、同 worker_home、
-    单机单池互斥、禁独立机/借用机/本机入池）并校验显式成员账号存在。返回 {"pool", "changed", "msg"}。"""
+    单机单池互斥、禁独立机/借用机/本机入池）并校验显式成员账号存在；编辑已有池且仍有未完成清单时禁止切换到另一共享域。返回 {"pool", "changed", "msg"}。"""
     from .users import account as _account
     pid = str(pid or "").strip()
     if not POOL_ID_RE.fullmatch(pid):
@@ -986,6 +986,22 @@ def save_pool(pid: str, *, label: str | None = None, hosts: list[str], members: 
     new_text = "".join(new_lines)
     parsed = _check_pools_toml(new_text)
     saved = pools(parsed)[pid]
+    if not create:
+        try:
+            old_pm = pools(raw)
+        except ConfigError:
+            old_pm = {}
+        old_pool = old_pm.get(pid)
+        if old_pool and old_pool["worker_home"].rstrip("/") != saved["worker_home"].rstrip("/"):
+            from .pool import pool_activity
+            act = pool_activity(pid, snap=snap, pool_map=old_pm)
+            if act["pending"] or act["placed"]:
+                bits = [x for x in (f"{act['pending']} 条待放清单" if act["pending"] else "",
+                                    f"{act['placed']} 条已落机清单" if act["placed"] else "") if x]
+                raise ConfigError(
+                    f"算力池 {pid} 仍有 {' 和 '.join(bits)}，不能切换到另一共享域"
+                    f"（{old_pool['worker_home']} → {saved['worker_home']}）；请先等清单跑完或撤回后再切换"
+                )
     if not create and new_text == old_text:
         return {"pool": saved, "changed": False, "msg": f"算力池「{saved['label']}」（{saved['host_id']}）配置没有变动"}
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -1037,7 +1053,14 @@ def remove_pool(pid: str, *, force: bool = False, by: str = "看板", snap: dict
     phid = (pcfg or {}).get("host_id") or (POOL if pid == POOL else f"{POOL_PREFIX}{pid}")
     why = f"{by} 删除了共有算力池「{label}」（{phid}）" + ("（强制）" if force and (act["pending"] or act["placed"]) else "")
     _write_checked(p, new_text, why, {"host": None, "hosts": None}, check=_check_pools_toml)
-    tail = "（在跑任务不受中断，已落机清单留在原主机继续跑完；待放目录残留清单可用 labmon worker rm 清理）" if (act["pending"] or act["placed"]) else ""
+    if act["pending"] and act["placed"]:
+        tail = f"（在跑任务不受中断，已落机清单留在原主机继续跑完；待放目录残留清单可用 labmon worker rm {phid} ROOT JOBS 清理）"
+    elif act["pending"]:
+        tail = f"（待放目录残留清单可用 labmon worker rm {phid} ROOT JOBS 清理）"
+    elif act["placed"]:
+        tail = "（在跑任务不受中断，已落机清单留在原主机继续跑完）"
+    else:
+        tail = ""
     return f"已删除算力池「{label}」（{phid}）{tail}"
 
 

@@ -3808,6 +3808,7 @@ ta("overview", "共有型算力池管理员 GUI 新建/编辑/删除与公网/�
   const drwNew = el(A, "drwp").innerHTML;
   clean(drwNew, "#240 新建算力池抽屉");
   ok(!/<select\b/i.test(drwNew), "新建/编辑算力池抽屉绝不使用 <select>");
+  has(drwNew, 'class="seg form-seg"');
   has(drwNew, 'role="radiogroup"'); has(drwNew, "独占模式"); has(drwNew, "开放模式");
   has(drwNew, '<footer class="dft">');
   has(drwNew, "已归属「另一个池」"); has(drwNew, "独立主机不共享集群 worker_home");
@@ -3833,6 +3834,10 @@ ta("overview", "共有型算力池管理员 GUI 新建/编辑/删除与公网/�
   clean(drwEdit, "#240 编辑算力池抽屉");
   ok(!/<select\b/i.test(drwEdit), "编辑抽屉也不使用 <select>");
   ok(/data-plf="id"[^>]*readonly/.test(drwEdit), "编辑态池 ID 必须只读");
+  // 有未完成清单的池即使取消勾选原机，仍锁定原共享域防止误切到异域
+  run(A, `poolInput({dataset: {plf: "host", v: "srv-a"}, checked: false}, "change")`);
+  has(el(A, "drwp").innerHTML, "有未完成清单时不可切换", "有未完成清单的池清空勾选后仍应锁定原共享域");
+  run(A, `poolInput({dataset: {plf: "host", v: "srv-a"}, checked: true}, "change")`);
   has(drwEdit, 'data-pl="delask"');
   run(A, `poolAct("delask", {})`);
   const drwDel = el(A, "drwp").innerHTML;

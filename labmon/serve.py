@@ -130,7 +130,7 @@ from . import client as CL
 from .config import CLIENT_HEADER, server as server_conf
 from . import dist as DI
 from . import service as S
-from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, cfg_spec, check_future, home_key, host_pair, host_users, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pool_home, remove_pool, resolve_pool, save_pool, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
+from .config import ALERT_KEYS, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, cfg_spec, check_future, home_key, host_pair, host_users, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pool_home, pool_id_of, remove_pool, resolve_pool, save_pool, sched_ovr_text, set_host_users, set_sched_ovr, set_weight, sources, \
     stale_limit, user_hosts, STALE_PAD_S, STALE_RUNS
 from .records import ReportQuota, cat_of, log_events, project_mine, records, report, report_headers, schedule_project, tell
 from .service import log, notify, rotate_log
@@ -775,21 +775,36 @@ class Handler(BaseHTTPRequestHandler):
             sub = path.rsplit("/", 1)[-1]
             args = _worker_args(sub, body)
             hid = s("host")
-            p = None
+            p, rm_checked = None, False
             if is_pool_id(hid) or hid.startswith("pool:"):
+                res_err = None
                 try:
                     p = resolve_pool(hid)
                 except ConfigError as e:
-                    raise U.Denied(400, str(e)) from e
-                U.need_host(who, p["host_id"] if p else hid)
+                    res_err = e
+                if sub == "rm" and p is None and len(args) == 2:
+                    # 命名池已被强制删除时，允许普通用户经 need_reg 撤回自己项目在该池的残留待放/已落机登记
+                    target_h = PO.locate(*args, pid=pool_id_of(hid))
+                    if PO.reg_home(target_h, *args) or not is_pool_id(target_h):
+                        body["project"] = U.need_reg(who, target_h, *args)
+                        rm_checked = True
+                    elif res_err is not None:
+                        raise U.Denied(400, str(res_err)) from res_err
+                    else:
+                        U.need_host(who, hid)
+                else:
+                    if res_err is not None:
+                        raise U.Denied(400, str(res_err)) from res_err
+                    U.need_host(who, p["host_id"] if p else hid)
             else:
                 U.need_host(who, hid)
             if sub == "add":
                 U.need_project(who, s("project"))
                 U.need_list(who, *args, s("project"))
             elif sub == "rm":                          # 共有池（#24、#212）：按清单此刻登记在哪核（池待放或已落机的池主机；api.worker 同经 pool.locate）
-                target_h = PO.locate(*args, pid=p["id"] if p else None) if (is_pool_id(hid) and len(args) == 2) else hid
-                body["project"] = U.need_reg(who, target_h, *args)
+                if not rm_checked:
+                    target_h = PO.locate(*args, pid=p["id"] if p else None) if (is_pool_id(hid) and len(args) == 2) else hid
+                    body["project"] = U.need_reg(who, target_h, *args)
             elif sub == "clean":
                 if not body.get("project"):
                     raise U.Denied(403, "普通用户运行 worker clean 必须通过 --project 指定自己的项目")
@@ -1261,7 +1276,7 @@ class Handler(BaseHTTPRequestHandler):
                 create = body.get("create", False)
                 if not isinstance(create, bool):
                     raise U.Denied(400, "create 要是布尔值")
-                out = save_pool(pid, label=label, hosts=hosts_in, members=members_in, exclusive=exclusive, create=create, by=who.name)
+                out = save_pool(pid, label=label, hosts=hosts_in, members=members_in, exclusive=exclusive, create=create, by=who.name, snap=snapshot())
                 self.board.overview.wake.set()
                 log(f"算力池：{out['msg']}（{who.name}）")
                 return self._json(200, out)

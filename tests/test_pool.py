@@ -1266,6 +1266,90 @@ pool = "P"
             self.assertEqual(st, 409, err)
             self.assertTrue(err.get("standby"))
 
+    def test_save_pool_blocks_domain_switch_with_active_lists(self):
+        """Codex P2-1：池仍有待放或已落机清单时，拒绝编辑切换到另一 worker_home 共享域；清单清空后才允许切换。"""
+        CF.save_pool("a100", label="A100 池", hosts=["h1"], members=["alice"], create=True, by="boss")
+        before = (self.d / "hosts.toml").read_text()
+        snap_pend = {
+            "pool": {"lists": {"a100|/data/lab/pa|jobs/q1.txt": {"pool": "a100", "root": "/data/lab/pa", "jobs": "jobs/q1.txt", "done": False}}},
+            "regs": [{"host": "pool:a100", "state": "pool", "home": "/data/lab/labmon", "queues": [{"root": "/data/lab/pa", "jobs": "jobs/q1.txt", "project": "pa"}]}],
+        }
+        snap_placed = {
+            "pool": {"lists": {}},
+            "regs": [{"host": "h1", "state": "active", "home": "/data/lab/labmon", "queues": [{"root": "/data/lab/pa", "jobs": "jobs/q2.txt", "project": "pa", "pool": "a100"}]}],
+        }
+        for label, sn in (("待放", snap_pend), ("已落机", snap_placed)):
+            with self.assertRaises(CF.ConfigError, msg=label) as e:
+                CF.save_pool("a100", label="A100 池", hosts=["h3"], members=["alice"], create=False, by="boss", snap=sn)
+            self.assertIn("共享域", str(e.exception))
+            self.assertEqual((self.d / "hosts.toml").read_text(), before)
+        # 清单清空后允许切换到新共享域
+        res = CF.save_pool("a100", label="A100 池", hosts=["h3"], members=["alice"], create=False, by="boss",
+                           snap={"regs": [], "pool": {"lists": {}}})
+        self.assertTrue(res["changed"])
+        self.assertEqual(res["pool"]["worker_home"], "/data/other/labmon")
+
+    def test_worker_rm_deleted_named_pool_pending_list(self):
+        """Codex P2-2：强制删除命名池后，仍可经 worker rm pool:<id> 按快照 home 精准撤回待放清单（含普通用户撤自己项目），而未知池名仍报错。"""
+        import urllib.error
+        import urllib.request
+        from fixtures import board
+        from labmon import projects as PJ
+        from labmon.state import save_json, state_dir
+
+        CF.save_pool("p1", label="默认域池", hosts=["h1"], members=["alice"], create=True, by="boss")
+        CF.save_pool("a100", label="他域池", hosts=["h3"], members=["alice"], create=True, by="boss")
+        PJ.put_config("pa", 'id = "pa"\n', owner="alice")
+        snap = {
+            "hosts": [make_host_entry("h1", gpus=1, busy_gpus=0), make_host_entry("h3", gpus=1, busy_gpus=0)],
+            "pool": {"lists": {"a100|/data/other/pa|jobs/q1.txt": {"pool": "a100", "root": "/data/other/pa", "jobs": "jobs/q1.txt", "done": False}}},
+            "regs": [
+                {"host": "pool:a100", "state": "pool", "home": "/data/other/labmon", "queues": [
+                    {"root": "/data/other/pa", "jobs": "jobs/q1.txt", "project": "pa"},
+                ]},
+            ],
+        }
+        save_json(state_dir() / "snapshot.json", snap)
+        msg = CF.remove_pool("a100", force=True, by="boss", snap=snap)
+        self.assertIn("labmon worker rm pool:a100", msg)
+        self.assertNotIn("a100", CF.pools())
+
+        # ① CLI / api.worker 撤回已删命名池的待放清单：必须携带 /data/other/labmon 并通过 h3 执行，而不是误连 h1
+        seen_ssh = []
+        with mock.patch.object(LS, "primary", return_value=True), \
+                mock.patch.object(W, "ssh", side_effect=lambda h, cmd, *a, **k: seen_ssh.append((h["id"], h["worker_home"], cmd)) or (0, "已移除\n")):
+            r = A.worker("rm", "pool:a100", ["/data/other/pa", "jobs/q1.txt"])
+        self.assertEqual(r["rc"], 0, r)
+        self.assertEqual(seen_ssh[0][0], "h3")
+        self.assertEqual(seen_ssh[0][1], "/data/other/labmon")
+        self.assertIn("--host pool:a100", seen_ssh[0][2])
+
+        # ② 乱写从未存在且快照无残留的命名池仍报找不到算力池，不误连别的共享域
+        r_bad = A.worker("rm", "pool:ghost", ["/data/other/pa", "jobs/q1.txt"])
+        self.assertEqual(r_bad["rc"], 3)
+        self.assertIn("找不到算力池", r_bad["err"])
+
+        # ③ 普通用户经 HTTP API 撤回已删命名池里自己项目的待放清单：按 need_reg 核准放行
+        srv = board(self, scopes=("admin",), name="boss", role="admin")
+        save_json(state_dir() / "snapshot.json", snap)
+        user_tok = make_token("alice", role="user", scopes=("read", "project"))
+        base = f"http://127.0.0.1:{srv.server_address[1]}"
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(
+            base + "/api/worker/rm",
+            data=json.dumps({"host": "pool:a100", "args": ["/data/other/pa", "jobs/q1.txt"]}).encode(),
+            method="POST",
+            headers={"Authorization": f"Bearer {user_tok}", "Content-Type": "application/json"},
+        )
+        seen_ssh.clear()
+        with mock.patch.object(LS, "primary", return_value=True), \
+                mock.patch.object(W, "ssh", side_effect=lambda h, cmd, *a, **k: seen_ssh.append((h["id"], cmd)) or (0, "已移除\n")):
+            with opener.open(req, timeout=5) as resp:
+                self.assertEqual(resp.status, 200)
+                body = json.loads(resp.read().decode())
+        self.assertEqual(body["rc"], 0, body)
+        self.assertEqual(seen_ssh[0][0], "h3")
+
 
 if __name__ == "__main__":
     unittest.main()

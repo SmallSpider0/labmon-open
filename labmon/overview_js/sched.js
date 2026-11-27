@@ -341,15 +341,21 @@ function poolDrawer(id) {
         : "开放：既可经池入口提交，也允许有权限的用户直投池内单台主机。"}</div>
     </div>`;
 
-  // 池内主机复选列表：按已选主机自动锁定 worker_home，异域或已归属他池主机自动标灰说明原因
+  // 池内主机复选列表：按已选主机自动锁定 worker_home，异域或已归属他池主机自动标灰说明原因；
+  // 编辑已有池且仍有未完成清单时，保持锁定原池共享域（与后端 save_pool 一致，防误切域丢待放清单）
+  const pendingN = curPool?.pending || 0, placedN = curPool?.placed || 0, hasAct = pendingN > 0 || placedN > 0;
+  const lockedHome = !isNew && hasAct && curPool?.worker_home ? curPool.worker_home : null;
   const allHosts = st.opts?.hosts || [];
-  let targetHome = null;
-  for (const h of allHosts) if (f.hosts.has(h.id) && h.worker_home) { targetHome = h.worker_home; break; }
+  let targetHome = lockedHome;
+  if (!targetHome) for (const h of allHosts) if (f.hosts.has(h.id) && h.worker_home) { targetHome = h.worker_home; break; }
   const hostState = h => {
     const checked = f.hosts.has(h.id);
     if (h.pool_id && h.pool_id !== (isNew ? "" : id)) return {checked, disabled: true, why: `已归属「${h.pool_label || h.pool_id}」（单机单池互斥）`, ord: 2};
     if (!h.eligible && !checked) return {checked, disabled: true, why: h.why || "不可入池", ord: 3};
-    if (targetHome && h.worker_home !== targetHome && !checked) return {checked, disabled: true, why: `worker_home 不同（${h.worker_home}，当前已选 ${targetHome}）`, ord: 2};
+    if (targetHome && h.worker_home !== targetHome && !checked) {
+      const rsn = lockedHome ? `与原池共享域不同（${h.worker_home}），有未完成清单时不可切换` : `worker_home 不同（${h.worker_home}，当前已选 ${targetHome}）`;
+      return {checked, disabled: true, why: rsn, ord: 2};
+    }
     return {checked, disabled: false, why: h.returned ? "已归还（取消勾选即可移出池）" : "", ord: checked ? 0 : 1};
   };
   const sortedHosts = [...allHosts].sort((a, b) => hostState(a).ord - hostState(b).ord || a.id.localeCompare(b.id));
@@ -389,7 +395,6 @@ function poolDrawer(id) {
 
   // 固定底栏 + 编辑态 popConfirm 删除确认
   const vErr = can && !st.loading ? poolValidation(st) : "";
-  const pendingN = curPool?.pending || 0, placedN = curPool?.placed || 0, hasAct = pendingN > 0 || placedN > 0;
   const delOpen = !isNew && popIs("pl-del", id);
   const delWarn = hasAct ? `<div class="rk-need"><div>该算力池当前仍有 ${[pendingN ? `${pendingN} 条待放清单` : "", placedN ? `${placedN} 条已落机清单` : ""].filter(Boolean).join("、")}。</div>
     <label class="sm pop-ck"><input type="checkbox" data-plf="forceDel"${f.forceDel ? " checked" : ""}${st.busy ? " disabled" : ""}> 强制删除（不中断已在主机上运行的任务，已落机清单留在原主机继续跑完）</label></div>` : "";

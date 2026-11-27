@@ -19,7 +19,7 @@ from . import pool as P
 from . import projects as PJ
 from . import users as U
 from . import workerctl as W
-from .config import GIB, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, host_platform, host_pool, host_share, host_ssh_key, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pools, resolve_pool, set_returned, set_sched_ovr, user_hosts
+from .config import GIB, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, host_platform, host_pool, host_share, host_ssh_key, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pool_id_of, pools, resolve_pool, set_returned, set_sched_ovr, user_hosts
 from .worker import cpu_line, ka_lines, unacct_lines
 from .worker.pure import is_wsl_mnt, other_load, other_load_text, wsl_mnt_warn
 from .records import EVENT_KINDS, project_rows
@@ -222,14 +222,28 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
     clean（#114）：仅清理 <LABMON_LOCAL>/{cache,jobs} 自管缓存与已结束单格临时，默认 --dry-run，显式 --yes 才删，绝不触碰 projects/ 产物。"""
     if sub not in WORKER_ACTS or not hid:
         return usage(f"不认识的 worker 动作 {sub}")
+    rm_home: str | None = None
     try:
         if is_pool_id(hid) or hid.startswith("pool:"):
             if sub not in ("add", "rm", "status", "fit"):
                 return usage(f"算力池入口只支持 worker add / rm / status / fit --list（不支持 worker {sub}）")
-            pcfg = resolve_pool(hid)
+            pcfg, res_err = None, None
+            try:
+                pcfg = resolve_pool(hid)
+            except ConfigError as e:
+                if sub != "rm":
+                    raise
+                res_err = e
             if pcfg is None:
                 if sub == "rm" and len(rest) == 2:
-                    hid = P.locate(rest[0], rest[1])
+                    pid = pool_id_of(hid)
+                    target_h = P.locate(rest[0], rest[1], pid=pid)
+                    rm_home = P.reg_home(target_h, rest[0], rest[1])
+                    if res_err is not None and not rm_home and is_pool_id(target_h):
+                        raise res_err
+                    hid = target_h
+                elif res_err is not None:
+                    raise res_err
                 else:
                     return {"rc": 3, "out": "", "err": "[labmon] 主机清单（hosts.toml）尚未配置共有型算力池（[pools.<id>]）\n"}
             else:
@@ -258,6 +272,7 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
                     return {"rc": rc, "out": out, "err": ""}
                 if sub == "rm" and len(rest) == 2:
                     hid = P.locate(rest[0], rest[1], pid=pcfg["id"])
+                    rm_home = P.reg_home(hid, rest[0], rest[1]) or (pcfg.get("worker_home") if hid == pcfg["host_id"] else None)
                 else:
                     hid = pcfg["host_id"]
         elif sub == "add":
@@ -285,6 +300,7 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
             fl = {"list": True, "hosts": ",".join(h for h in home_peers(hid, peer_pool) if h == hid or may is None or may(h))} if lst and sub == "fit" else {}
             cl = {"cache": cache, "scratch": scratch, "dry_run": dry_run, "yes": yes} if sub == "clean" else {}
             rc, out = W.run_out(sub, hid, rest, gpus, project=project if sub != "rm" else None, stop=stop,
+                                **({"home": rm_home} if sub == "rm" and rm_home else {}),
                                 **({"expect_project": project} if own and sub in ("add", "rm") else {}), **fl, **cl)
     except ConfigError as e:
         return {"rc": 3, "out": "", "err": f"[labmon] {e}\n"}
