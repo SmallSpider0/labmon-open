@@ -40,7 +40,7 @@ from . import projects as PJ
 from .config import CLIENT_HEADER, COMMIT_RE, ConfigError, active_hosts, host_users, is_pool_id, pause_by, resolve_pool, sched, set_host_users, share_host, user_hosts
 from .records import EVENT_CATS, cat_of, log_events, schedule_project
 from .state import file_sig, snapshot, state_root, write_atomic
-from .worker.pure import same_list  # noqa: F401 — 与 worker 共用唯一实现
+from .worker.pure import pool_id_of, same_list  # noqa: F401 — 与 worker 共用唯一实现
 
 CLIENT_RECENT_S = 30 * 86400
 
@@ -1041,12 +1041,24 @@ SELF_BORROW_KEYS = ("since", "until", "returning", "returned", "by")
 STANDBY_SAY = "这台看板服务是备用：页面上的数据可能不是最新的，要动东西到主看板做"
 
 
-def _ovr_by(h: dict, own) -> dict:
-    """一台主机项给普通用户：worker 状态里别人项目的临时指令去掉谁下的（by，#27），同调度卡上别人项目的暂停（#16）。"""
-    st = h.get("status") or {}
-    if not any(o.get("by") and o.get("target") not in own for o in st.get("overrides") or []):
+def _ovr_by(h: dict, own, allow_ph: set[str] | None = None) -> dict:
+    """一台主机项给普通用户：worker 状态里别人项目的临时指令去掉谁下的（by，#27），同调度卡上别人项目的暂停（#16）；
+    同时按 allow_ph 裁剪 status.pool_heads，只留本人所属共有池且属于本人项目的待放清单，防同 worker_home 跨池/跨人泄露（#212）。"""
+    st = h.get("status")
+    if not isinstance(st, dict):
         return h
-    return {**h, "status": {**st, "overrides": [o if o.get("target") in own else {k: v for k, v in o.items() if k != "by"} for o in st["overrides"]]}}
+    ovrs = st.get("overrides") or []
+    chg_ovr = any(o.get("by") and o.get("target") not in own for o in ovrs)
+    ph = st.get("pool_heads")
+    chg_ph = isinstance(ph, dict) and allow_ph is not None and any(k not in allow_ph for k in ph)
+    if not chg_ovr and not chg_ph:
+        return h
+    nst = dict(st)
+    if chg_ovr:
+        nst["overrides"] = [o if o.get("target") in own else {k: v for k, v in o.items() if k != "by"} for o in ovrs]
+    if chg_ph:
+        nst["pool_heads"] = {k: v for k, v in ph.items() if k in allow_ph}
+    return {**h, "status": nst}
 
 
 def _is_other_work(w: dict, person: str, borrowed: bool, other_jobs: set[str]) -> bool:
@@ -1151,15 +1163,44 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     person, _ = person_of(who.name)
     from . import pool as PO
     try:
-        my_pools = sorted(p["host_id"] for p in PO.user_pools(who).values() if p.get("hosts"))
+        u_pools = PO.user_pools(who)
+        my_pool_ids = set(u_pools)
+        my_pools = sorted(p["host_id"] for p in u_pools.values() if p.get("hosts"))
         pool_view = PO.summary(snap.get("pool"), who, acc)
     except ConfigError:
-        my_pools, pool_view = [], None
+        my_pool_ids, my_pools, pool_view = set(), [], None
+    allow_ph: set[str] = set()
+    if my_pool_ids and acc.projects:
+        def _add_ph(phid: str, root: str, jobs: str) -> None:
+            nr, nj = _nrm(root), _nrm(jobs)
+            for j in {jobs, nj}:
+                allow_ph.add(f"{phid}|{nr}|{j}")
+                allow_ph.add(f"{nr}|{j}")
+        for x in snap.get("regs") or []:
+            phid = str(x.get("host") or "")
+            if not is_pool_id(phid):
+                continue
+            pid = pool_id_of(phid)
+            if not pid:
+                try:
+                    rp = resolve_pool(phid)
+                    pid = rp["id"] if rp else None
+                except ConfigError:
+                    pid = None
+            if pid not in my_pool_ids:
+                continue
+            for q in x.get("queues") or []:
+                if q.get("project") in acc.projects and q.get("root") and q.get("jobs"):
+                    _add_ph(phid, q["root"], q["jobs"])
+        if isinstance(pool_view, dict):
+            for v in (pool_view.get("lists") or {}).values():
+                if v.get("pool") in my_pool_ids and v.get("project") in acc.projects and v.get("root") and v.get("jobs"):
+                    _add_ph(v.get("pool_host") or f"pool:{v['pool']}", v["root"], v["jobs"])
     out = {k: snap[k] for k in VIEW_KEYS if k in snap}
     out.update(notices=[], wake=[], hostcheck=None,
                event_cats=[c for c in snap.get("event_cats") or EVENT_CATS if c[0] not in FLEET_CATS and c[0] != "report"],
                access={"own": sorted(acc.projects), "hosts": sorted(acc.allowed), "pools": my_pools})
-    out["hosts"] = [_ovr_by(h, acc.projects) for h in snap.get("hosts") or [] if h.get("id") in acc.hosts]
+    out["hosts"] = [_ovr_by(h, acc.projects, allow_ph) for h in snap.get("hosts") or [] if h.get("id") in acc.hosts]
     out["projects"] = [p for p in snap.get("projects") or [] if p.get("id") in acc.projects]
     out["archived"] = [a for a in snap.get("archived") or [] if a.get("id") in acc.projects]
     out["rebalance"] = {k: v for k, v in (snap.get("rebalance") or {}).items() if k in acc.projects}

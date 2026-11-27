@@ -3086,6 +3086,37 @@ class PoolListTest(UnitBase):
         h = json.loads(Path(self.w.p.status).read_text())["pool_heads"][k]
         self.assertEqual((h["head"], h["n"], h["dep"]), ("B", 2, None))
 
+    def test_pool_todo_multi_pool_readd_wakes_sleeping(self):
+        # Codex P2：同 worker_home 下存在多个池目录时，各池目录登记缓存相互独立；
+        # 池清单跑空满 2 天进入 sleeping 后，删除 .done 并重新 worker add 必须触发 changed=True 立即唤醒，不被另一池目录清空缓存。
+        out = io.StringIO()
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", out):
+            rc = self.m.main(["add", self.q["root"], "jobs/q.txt", "--host", "pool:a100", "--project", "pa"])
+        self.assertEqual(rc, 0, out.getvalue())
+        # 同时存在第二个合法池目录（哪怕空着，rtx4090 排在 a100 之后）
+        (self.hosts.home / "hosts" / "pool:rtx4090" / "queues").mkdir(parents=True, exist_ok=True)
+        for name in ("A", "A2"):
+            Path(self.q["state"], f"{name}.done").write_text("")
+        self.w.peer_t = 0
+        self.w.tick([], True)
+        self.hosts.advance(self.m.IDLE_REG_S + 10)
+        self.w.peer_t = 0
+        self.w.tick([], False)
+        k = "pool:a100|%s|jobs/q.txt" % os.path.normpath(self.q["root"])
+        st = json.loads(Path(self.w.p.status).read_text())
+        self.assertTrue(st["pool_heads"][k].get("sleeping"), st["pool_heads"])
+        # 删除 .done 并重新 worker add（不改清单文件），应立刻唤醒
+        Path(self.q["state"], "A.done").unlink()
+        self.hosts.advance(2)
+        with mock.patch("sys.stdout", out), mock.patch("sys.stderr", out):
+            rc = self.m.main(["add", self.q["root"], "jobs/q.txt", "--host", "pool:a100", "--project", "pa"])
+        self.assertEqual(rc, 0, out.getvalue())
+        self.w.peer_t = 0
+        self.w.tick([], False)
+        h = json.loads(Path(self.w.p.status).read_text())["pool_heads"][k]
+        self.assertFalse(h.get("sleeping"), h)
+        self.assertEqual((h["head"], h["n"]), ("A", 1))
+
 class SelfPoolTest(UnitBase):
     """入池的自用主机（#79）：看板把池清单放到这台时 worker add --pool，登记里记 pool；它与主人自己的清单在同一台按人的份额排（不另设优先），
     状态的 queues、todo 带 pool，offers 不叫会话挪它（落点由看板定）。"""

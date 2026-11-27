@@ -1323,10 +1323,12 @@ class SchedMixin:
         qdirs = [(os.path.basename(os.path.dirname(d)), d)
                  for d in sorted(glob.glob(os.path.join(_C.HOME, "hosts", "*", "queues")))
                  if _P.is_pool_id(os.path.basename(os.path.dirname(d)))]
-        seen_k = set()
+        seen_k, live_dirs = set(), set()
         for phid, qdir in qdirs:
             pid = _P.pool_id_of(phid)
-            for f, reg, _rsig, _mtime, changed in _Q.regs(qdir, cache=self.pool_reg_cache, with_meta=True):
+            live_dirs.add(qdir)
+            pcache = self.pool_reg_cache.setdefault(qdir, {})
+            for f, reg, _rsig, _mtime, changed in _Q.regs(qdir, cache=pcache, with_meta=True):
                 if isinstance(reg, Exception) or not (reg.get("root") and reg.get("jobs") and reg.get("project")):
                     continue
                 key, root, jobs = (phid, reg["_slug"]), reg["root"], reg["jobs"]
@@ -1408,6 +1410,7 @@ class SchedMixin:
                       "held": paused, **({"par": par} if par > 1 else {})}
                 out.append((phid, 0.0, now, ln))
         self.pool_idle = {k: v for k, v in self.pool_idle.items() if k in seen_k}
+        self.pool_reg_cache = {d: c for d, c in self.pool_reg_cache.items() if d in live_dirs}
         return out
 
     def cpu_hints(self, S, util):

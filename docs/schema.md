@@ -214,7 +214,7 @@
   `hosts[].status.overrides[]` 里项目级的暂停、优先带 `global: true`（worker 从 `sched.json` 接上的，每台都有一份），`once: true` 的是不带 `--host` 的 `pause --now` 给各台下的“只停一次”：停完照样挡着，全局暂停送到就删（最多 30 分钟）。经看板带 `--host` 下的暂停、优先另带 `by`：谁下的（看板账号名；没有的当管理员下的，#27），普通用户看到的快照里别人项目的指令去掉 `by`。
 - 顶层 `pool`（`pool.tick`，未配置 `[pools.<id>]` 时为 null；普通用户经 `pool.summary` 投影，非池成员为 null，#212）：
   `{error? 配置校验报错字符串, pools [{id 池 id, host_id 池入口（pool 或 pool:<id>）, label, exclusive 是否独占（缺省 true）, members? 成员账号列表（普通成员视图剥离）, hosts [{id, label, online, returned, drain, deadline, gpus, free_gpus, running, queued, lease_end}], online, total, gpus, free_gpus, running, queued, pending, placed}], lists {"目录|清单": {pool 池 id, pool_host 池入口, project, root, jobs, head, n, since, why, nofit, done, sleeping?, dep?, dep_end?, elsewhere?, held?}}}`。
-  共有池运行时状态存在 `overview/pool.json`（`{t, wait_since, moved_at, down_since}`，仅主租约写入）。
+  共有池运行时状态存在 `overview/pool.json`（`{t, wait_since, moved_at, down_state}`，`down_state` 经 `health.link_step(..., down_s=POOL_DOWN_S)` 维护各池主机连续失联状态，仅主租约写入）。
 - 顶层 `regs` 是登记的全局视图（`overview._regs`，项目「管理」抽屉用，[workbench.md「项目的管理抽屉」](workbench.md#项目的管理抽屉)）：各主机目录下登记的清单，每台一项
   `{host, label, state active|pool|returned|unlisted（在用、共有算力池待放目录（host 为 pool 或 pool:<id>，#24、#212）、主机清单里已归还、主机清单里已没有）, returned 归还时刻（epoch 秒，没有为 null）, home 所在 worker_home, standalone 是否独立主机（#114；前端 regTo / adoptSrc 据此禁止跨独立机搬登记）, t 读到的时刻（在用的是那份状态的 t）,
   stale 这一轮没读到、沿用上一轮的, queues [{root, jobs, project, stop, gpus}] 或 null（在用主机这轮既没状态、也没读到文件，上一轮也没有）}`；

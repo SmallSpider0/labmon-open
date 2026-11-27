@@ -63,7 +63,7 @@
 | 54 | 旧借用池配置残留校验 | `config.LEGACY_POOL_KEYS`、`config.check_legacy_pool`（`config.user_hosts` 与 `fleet.conf` 共用，对 `[[hosts]]` 与 `[[fleet.servers]]` 拦截 `lend`/`lend_hours`/`borrow_pool`） |
 | 55 | 服务器持有人鉴权 | `users.need_holder`（核组内服务器 `holder` 与非借用自用主机 `fleet.host_holder`，`serve.Handler._own` 的 `fleet_srv` 调用） |
 | 56 | 租期到期时刻；租期提醒的档 | `health.lease_end`；`health.lease_due` |
-| 57 | 掉线与恢复判定；换了新容器 | `health.link_step`；`health.container_step` |
+| 57 | 掉线与恢复判定；换了新容器 | `health.link_step`（支持自定义阈值 `down_s`，看板主机、组内服务器、项目页与共有算力池失联撤离共用）；`health.container_step` |
 | 58 | 平台操作 | `fleetops.run_*`（`fleetops.OP_NAMES`）；核对的比对 `fleetops.reconcile`、确认作业不在运行 `fleetops.job_stopped`（`platform.json` 的 `stopped`）；停平台作业、提交克隆并等运行 `fleetops.stop_job`、`fleetops.submit_job`（`op.json`）；出错时这一台的状态一句话 `fleetops._note` |
 | 59 | 这一台此刻能不能动 | `fleetops._risk`、`fleetops._need_ack`（`lw`、`fleetops._lw`）；页面上 `FBUSY`、`FRISKY`，勾选框的文字 `ackText`（overview_js/fleetops.js） |
 | 60 | 换人、换节点、开机的作业名、端口与规格核对；续租、开机换了容器清旧主机密钥；连一台时新主机密钥记在哪份 | `fleetboot.taken_jobs`、`fleetboot.job_name`；`fleetboot.back_port`、`fleetboot.pick_port`（`fleetboot.used_ports`）；`fleetboot.pool_specs`、`fleetboot.spec_of`、`fleetboot.spec_name`、`fleetboot.check_spec`（`fleetboot.check`、`fleetboot.preview`）；页面上 `poolSpecs`、`specName`（overview_js/fleet.js）；`fleet.forget`（`fleetboot.mine`、`known_hosts`）；`fleet._ssh_cmd` |

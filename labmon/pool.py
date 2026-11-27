@@ -16,6 +16,7 @@ import time
 from pathlib import Path
 
 from . import config as CF
+from . import health as HL
 from . import lease as LS
 from . import users as U
 from . import workerctl as W
@@ -291,20 +292,21 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
     pst = load_json(state_file(), {}) or {}
     wait_since: dict[str, float] = dict(pst.get("wait_since") or {})
     moved_at: dict[str, dict] = dict(pst.get("moved_at") or {})
-    down_since: dict[str, float] = dict(pst.get("down_since") or {})
+    down_state: dict[str, dict] = {k: dict(v) for k, v in (pst.get("down_state") or {}).items() if isinstance(v, dict)}
 
-    # 1. 更新池内主机连续失联起点（仅内网在线时计时，离网不误记）
+    # 1. 更新池内主机连续失联状态（复用 health.link_step 唯一实现，离网 ok=None 清零未判掉线的计数）
     all_pool_hids = {hid for p in pool_map.values() for hid in p["hosts"]}
-    if lan_ok:
-        for hid in all_pool_hids:
-            e = by_host.get(hid)
-            if e and not e.get("error") and e.get("worker_up"):
-                down_since.pop(hid, None)
-            elif e:
-                down_since.setdefault(hid, t)
-            else:
-                down_since.pop(hid, None)
-    down_since = {hid: ts for hid, ts in down_since.items() if hid in all_pool_hids}
+    for hid in all_pool_hids:
+        e = by_host.get(hid)
+        if not e:
+            down_state.pop(hid, None)
+            continue
+        hs = down_state.setdefault(hid, {})
+        ok = None if not lan_ok else bool(not e.get("error") and e.get("worker_up"))
+        if HL.link_step(hs, ok, t, down_s=POOL_DOWN_S) == "down":
+            hs["down"] = f"主机离线/worker 失联满 {POOL_DOWN_S // 60} 分钟"
+    down_state = {hid: st for hid, st in down_state.items()
+                  if hid in all_pool_hids and (st.get("fails") or st.get("down"))}
 
     can_act = lan_ok and LS.primary() and use_ssh
     do_fit = fit_fn or _default_fit
@@ -336,8 +338,8 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
                 evac_hosts[hid] = "主机不在用"
                 continue
             if e.get("error") or not e.get("worker_up"):
-                if hid in down_since and t - down_since[hid] >= POOL_DOWN_S:
-                    evac_hosts[hid] = f"主机离线/worker 失联满 {POOL_DOWN_S // 60} 分钟"
+                if (down_state.get(hid) or {}).get("down"):
+                    evac_hosts[hid] = down_state[hid]["down"]
                 continue
             st = e.get("status") or {}
             if _has_override(st, "drain", t):
@@ -607,7 +609,7 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
     wait_since = {k: v for k, v in wait_since.items() if k in seen_waiting_keys}
     moved_at = {k: v for k, v in moved_at.items() if t - float((v or {}).get("t") or 0) <= 86400}
     if LS.primary():
-        save_json(state_file(), {"t": round(t), "wait_since": wait_since, "moved_at": moved_at, "down_since": down_since})
+        save_json(state_file(), {"t": round(t), "wait_since": wait_since, "moved_at": moved_at, "down_state": down_state})
     return {"pools": out_pools, "lists": out_lists}
 
 

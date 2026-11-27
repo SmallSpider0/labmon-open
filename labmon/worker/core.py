@@ -89,7 +89,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.reg_cache = {}                   # 本机登记文件 {路径: (fsig, st_mtime, reg 或 Exception)}：未变时不重读 JSON
         self.reg_idle = {}                    # 空置计时与休眠态 {队列 key: {since, sig, sleep}}（#164；重启经 load_prev 找回）
         self.sleep_marks = {}                 # 休眠队列的标记快照 {队列 key: {任务名: done|failed}}（转休眠时记，list_state 零 I/O 合入）
-        self.pool_reg_cache = {}              # 算力池登记文件缓存 {路径: (fsig, st_mtime, reg)}（pool_todo 用）
+        self.pool_reg_cache = {}              # 算力池登记文件缓存 {池登记目录: {路径: (fsig, st_mtime, reg)}}（pool_todo 按池目录隔离）
         self.pool_idle = {}                   # 算力池待放清单的空置计时与休眠态 {队列 key: {since, sig, sleep}}（#164）
         self.opars = {}                       # 算力池清单并行数缓存 {路径: (fsig, par)}（pool_todo 用）
         self.peer_regs = {}                   # 别的在用主机（peer_st）登记的清单 {(目录, 清单): [(登记文件修改时间, 主机)]}（peers 一起读，registry 认同一条清单归谁，#95）

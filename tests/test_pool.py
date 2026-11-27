@@ -452,6 +452,37 @@ members = ["alice"]
         self.assertTrue(vis_alice(ev_a))
         self.assertFalse(vis_alice(ev_b))
 
+    def test_view_filters_cross_pool_heads(self):
+        """Codex P1：同 worker_home 两个不同成员池，普通用户经可见主机 status.pool_heads 绝不能读到未加入池或他人项目的待放清单。"""
+        k_a = "pool:a100|/data/lab/pa|jobs/secret_a.txt"
+        k_b = "pool:rtx4090|/data/lab/pb|jobs/my_b.txt"
+        k_b_other = "pool:rtx4090|/data/lab/pa|jobs/other_in_4090.txt"
+        ph = {
+            k_a: {"pool": "pool:a100", "pool_id": "a100", "head": "secret_a1", "n": 2},
+            k_b: {"pool": "pool:rtx4090", "pool_id": "rtx4090", "head": "my_b1", "n": 1},
+            k_b_other: {"pool": "pool:rtx4090", "pool_id": "rtx4090", "head": "other_a1", "n": 1},
+        }
+        snap = {
+            "generated": 1_700_000_000.0, "lan": {"ok": True}, "event_kinds": {}, "event_cats": [],
+            "hosts": [make_host_entry("h1", pool_heads=ph), make_host_entry("h3", pool_heads=ph)],
+            "projects": [{"id": "pa"}, {"id": "pb"}], "archived": [], "rebalance": {}, "colors": {},
+            "regs": [
+                {"host": "pool:a100", "state": "pool", "queues": [{"root": "/data/lab/pa", "jobs": "jobs/secret_a.txt", "project": "pa"}]},
+                {"host": "pool:rtx4090", "state": "pool", "queues": [
+                    {"root": "/data/lab/pb", "jobs": "jobs/my_b.txt", "project": "pb"},
+                    {"root": "/data/lab/pa", "jobs": "jobs/other_in_4090.txt", "project": "pa"},
+                ]},
+            ],
+            "occ": {}, "pool": None,
+        }
+        # bob 仅属于 rtx4090（h3），无权访问 a100（h1）与 pa
+        v_bob = U.view(who("bob"), snap)
+        self.assertEqual([h["id"] for h in v_bob["hosts"]], ["h3"])
+        got_ph = v_bob["hosts"][0]["status"]["pool_heads"]
+        self.assertNotIn(k_a, got_ph)
+        self.assertNotIn(k_b_other, got_ph)
+        self.assertIn(k_b, got_ph)
+
 
 class PoolSchedulingTest(Base):
     def setUp(self):
@@ -576,6 +607,33 @@ members = ["alice", "bob"]
         self.assertEqual(len(moves), 1)
         self.assertEqual(moves[0][:2], ("h2", "h3"))
         self.assertIn("失联", moves[0][2])
+
+    def test_down_evacuation_resets_across_lan_offline(self):
+        """Codex P1：首次失败后离网超过 10 分钟再回内网，不把离网时间算成主机失联；需回网后连续有效探测失联满 10 分钟才撤离。"""
+        regs = [{"host": "h2", "state": "active", "queues": [{"root": "/data/lab/pb", "jobs": "jobs/b1.txt", "project": "pb", "pool": "a100"}]}]
+        hosts = [
+            make_host_entry("h2", worker_up=False, error="ssh timeout", t=self.t),
+            make_host_entry("h3", gpus=2, busy_gpus=0, t=self.t),
+        ]
+        moves = []
+
+        def fake_fit(pcfg, it, cands):
+            return {"head": "x", "need": {"ngpu": 1, "est_min": 30},
+                    "hosts": {h: {"ok": True, "nofit": False, "free_cards": 2, "free_vram": 80000, "same_proj": False, "load": {"run": 0, "wait": 0, "until": 0}} for h in cands}}
+
+        with mock.patch.object(LS, "primary", return_value=True):
+            # 1. t0 内网首次失败：不撤离
+            P.tick(hosts, regs, self.sw, self.t, lan_ok=True, move_fn=lambda to, it, pid, rsn: moves.append(to), fit_fn=fake_fit)
+            self.assertEqual(moves, [])
+            # 2. t0 + 60 离网（lan_ok=False）：重置未判掉线的连续失联计数
+            P.tick(hosts, regs, self.sw, self.t + 60, lan_ok=False, move_fn=lambda to, it, pid, rsn: moves.append(to), fit_fn=fake_fit)
+            self.assertEqual(moves, [])
+            # 3. t0 + 700（离网满 10 分钟后）回内网首次失败：应重新起算，绝不能立刻撤离
+            P.tick(hosts, regs, self.sw, self.t + P.POOL_DOWN_S + 100, lan_ok=True, move_fn=lambda to, it, pid, rsn: moves.append(to), fit_fn=fake_fit)
+            self.assertEqual(moves, [])
+            # 4. 回网后持续失联满 10 分钟（t0 + 700 + 601）再次有效探测失败：此刻才撤离到 h3
+            P.tick(hosts, regs, self.sw, self.t + P.POOL_DOWN_S * 2 + 101, lan_ok=True, move_fn=lambda to, it, pid, rsn: moves.append(to), fit_fn=fake_fit)
+            self.assertEqual(moves, ["h3"])
 
     def test_dep_wait_elsewhere_and_nofit_alert(self):
         # 队首等依赖（#98）与 elsewhere 暂留待放不落机；全池 nofit 标记 nofit=True 并由 collect._lane 立即报 pool_wait:...:nofit
