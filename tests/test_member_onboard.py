@@ -811,6 +811,26 @@ pool = "pool-public"
         self.assertTrue(ok)
         self.assertFalse(sf.exists())
 
+        # _cleanup_candidates 唯一复用：目标机优先、支持 skip 过滤与连不上(rc=255)回退同共享域代办机
+        sf.write_text("manual:2026-11-27 12:00:00\n")
+        cands, wh, err = W._cleanup_candidates("srv-alice")
+        self.assertIsNone(err)
+        self.assertEqual(wh, str(self.fake_home))
+        self.assertEqual([c["id"] for c in cands][:2], ["srv-alice", "fixed-a"])
+        tried = []
+        def _fallback_ssh(h, cmd):
+            tried.append(h["id"])
+            if h["id"] == "srv-alice":
+                return 255, "ssh refused"
+            return subprocess.run(["bash", "-c", cmd], capture_output=True, text=True).returncode, ""
+        ok_fb, _ = W.clear_stopped("srv-alice", ssh_fn=_fallback_ssh)
+        self.assertTrue(ok_fb)
+        self.assertEqual(tried, ["srv-alice", "fixed-a"])
+        self.assertFalse(sf.exists())
+        # skip 参数与 clear_overrides 共用同一份 _cleanup_candidates
+        cands_skip, _, _ = W._cleanup_candidates("srv-alice", skip={"srv-alice"})
+        self.assertEqual(cands_skip[0]["id"], "fixed-a")
+
 
 if __name__ == "__main__":
     unittest.main()
