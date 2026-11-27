@@ -3106,10 +3106,13 @@ ta("auth", "普通用户入口开放（#211）：我的资源侧栏、本人服�
   await run(A, "poll()");
   ok(run(A, "RELOADED") === 1, "管理员被降级为普通用户快照时未触发 location.reload");
 });
-t("overview", "算力池概况（#76）：要还的写出来；都没入池、没有清单（含快照里没有 pool）时各写一句", () => {
+t("overview", "算力池概况（#76、#211）：管理员直接复用服务端 D.pool.summary 计数；要还的写出来；都没入池、没有清单（含快照里没有 pool）时各写一句", () => {
   const C = ovCtx(OV, RR, "#/fleet");
-  run(C, 'Object.assign(srvById("srv-h").lend, {returning: true, say: "算力池借着，要还了（在跑的跑完就还）"})');
+  run(C, 'Object.assign(srvById("srv-h").lend, {returning: true, say: "算力池借着，要还了（在跑的跑完就还）"}); D.pool.summary = {...D.pool.summary, back: 1}');
   has(text(page(C, "#/fleet")), "借着 1（1 要还）"); has(page(C, "#/fleet/pool"), "要还了");
+  // 验证管理员的 poolCount 直接读服务端 summary 而非前端重算
+  run(C, 'D.pool.summary = {...D.pool.summary, on: 7, open: 5, lent: 2, back: 1, queued_lists: 9}; render(false)');
+  has(text(el(C, "view").innerHTML), "7 台入池（时段内 5，自用 1）· 借着 2（1 要还） · 9 条在等");
   run(C, 'D.fleet.servers.forEach(x => x.lend = {on: false, hours: null, open: false, lent: false, returning: false, rest: null, say: "没入池"}); D.pool = {}');
   run(C, 'D.fleet.mine.forEach(x => x.lend = {on: false, hours: null, open: false, rest: null, mine: true, placed: 0, say: "没入池"})');
   const f = page(C, "#/fleet"); has(text(f), "没有服务器入池"); ok(!text(f).includes("条在等"), "没有清单不该写条数");

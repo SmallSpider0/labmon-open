@@ -291,24 +291,15 @@ function fleetPage() {
       <td class="sm" ${tip((w.chain || []).join("\n"))}>${esc(w.label)}${(w.names || []).length ? nameSum(w.names) : ""}</td><td class="r">${mb2g(w.mb)} GiB</td><td class="sm"><code>${esc(w.cwd || "—")}</code></td></tr>`).join("")}</table></div></div>`;
   return s;
 }
-/* 算力池概况（#76、#211）：摘要行里的一项与它打开的抽屉 #/fleet/pool。管理员读组内服务器的 lend、pool.lists 与 pool.summary；
-   普通池成员读服务端聚合的 D.pool.summary 与脱敏后的本人清单 D.pool.my_lists，严禁展示他人服务器与他人清单。 */
+/* 算力池概况（#76、#211）：摘要行里的一项与它打开的抽屉 #/fleet/pool。管理员与普通池成员均直接消费服务端 pool.summary()
+   产出的 D.pool.summary（唯一计数实现，前端不重复聚合）；普通池成员另读脱敏后的本人清单 D.pool.my_lists，严禁展示他人服务器与他人清单。 */
 const poolLists = () => Object.values(D.pool?.lists || {}).sort((a, b) => (a.since || 0) - (b.since || 0));
 const poolSelf = () => (D.fleet?.mine || []).filter(x => x.lend?.on || x.lend?.placed);     // 入池的自用主机（还跑着池放的、正搬走的也列）
 function poolCount() {
-  if (LIVE && ME && !ME.admin && D.pool?.summary) {
-    const s = D.pool.summary;
-    return {on: s.on || 0, open: s.open || 0, rest: s.rest || 0, lent: s.lent || 0, back: s.back || 0,
-            wait: s.queued_lists || 0, self: s.self || 0, placed: s.placed || 0,
-            gpus_total: s.gpus_total || 0, gpus_busy: s.gpus_busy || 0, running_jobs: s.running_jobs || 0};
-  }
-  const ls = (D.fleet?.servers || []).map(x => x.lend || {}), own = poolSelf().map(x => x.lend), lent = ls.filter(L => L.lent);
-  const on = [...ls.filter(L => L.on || L.lent), ...own.filter(L => L.on)];
-  const ps = D.pool?.summary;
-  return {on: on.length, open: on.filter(L => L.lent || L.open && !L.rest && !L.bar).length, rest: on.filter(L => !L.lent && L.rest).length,
-          lent: lent.length, back: lent.filter(L => L.returning).length, wait: poolLists().filter(v => !v.done).length,
-          self: own.filter(L => L.on).length, placed: own.reduce((n, L) => n + (L.placed || 0), 0),
-          gpus_total: ps?.gpus_total ?? null, gpus_busy: ps?.gpus_busy ?? null, running_jobs: ps?.running_jobs ?? null};
+  const s = D.pool?.summary || {};
+  return {on: s.on || 0, open: s.open || 0, rest: s.rest || 0, lent: s.lent || 0, back: s.back || 0,
+          wait: s.queued_lists || 0, self: s.self || 0, placed: s.placed || 0,
+          gpus_total: s.gpus_total ?? null, gpus_busy: s.gpus_busy ?? null, running_jobs: s.running_jobs ?? null};
 }
 function poolStat() {
   const c = poolCount(), w = c.wait ? ` · ${c.wait} 条在等` : "";

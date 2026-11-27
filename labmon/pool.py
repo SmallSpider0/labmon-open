@@ -718,7 +718,8 @@ def summary(snap: dict, own_projects: set[str] | None = None, cfg: dict | None =
         gpus_total += len(gpus)
         runs = [j for j in st.get("running") or [] if not j.get("hold")]
         exts = [j for j in st.get("external") or [] if not j.get("hold")]
-        busy_uuids = {u for j in runs + exts for u in (j.get("gpus") or [])}
+        proc_uuids = {p.get("uuid") for p in st.get("gpu_procs") or [] if p.get("uuid") and p.get("owner") != "keepalive"}
+        busy_uuids = {u for j in runs + exts for u in (j.get("gpus") or [])} | proc_uuids
         gpu_uuids = [g.get("uuid") for g in gpus if g.get("uuid")]
         gpus_busy += sum(1 for u in gpu_uuids if u in busy_uuids) if gpu_uuids else min(len(gpus), len(busy_uuids))
         if is_lent:

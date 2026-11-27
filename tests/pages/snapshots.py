@@ -20,6 +20,7 @@ from labmon.config import STALE_PAD_S, STALE_RUNS, cfg_spec, stale_limit
 from labmon.fleet import local_writes
 from labmon import hostcheck as HC
 from labmon.overview import EVENT_CATS, EVENT_KINDS, gpu_busy
+from labmon.pool import summary as pool_summary
 from labmon.users import Access, Ident, view
 
 BAD = "<i id=x>&\"'<!--<script>alert(1)</script>"
@@ -417,7 +418,7 @@ def overview() -> dict:
              {"p": "proj-a", "n": "cpu_pack_s2", "lane": "车道 1", "t0": NOW + 0.5 * H, "t1": NOW + H, "g": [], "st": "plan"}]
     occ_b = [{"p": "proj-b", "n": "beta_eval_s7", "lane": "车道 1", "t0": NOW - H, "t1": NOW + 2 * H, "g": [0], "st": "run"},
              {"p": "proj-b", "n": "beta_eval_s8", "lane": "车道 1", "t0": NOW + 2 * H, "t1": NOW + 4 * H, "g": [0], "st": "plan"}]
-    return {"generated": NOW, "hosts": [a, b], "colors": {"proj-a": "#7F77DD", "proj-b": "#D85A30"}, "notices": [],
+    d = {"generated": NOW, "hosts": [a, b], "colors": {"proj-a": "#7F77DD", "proj-b": "#D85A30"}, "notices": [],
             "lan": {"ok": True, "since": None, "checked": NOW}, "wake": [], "event_kinds": EVENT_KINDS, "event_cats": EVENT_CATS,
             "fleet": _fleet(a), "disk": _disk(), "occ": {"srv-a": occ_a, "srv-b": occ_b}, "regs": _regs(a, b),
             # 算力池（pool.tick，#25）：各待放清单为什么还没放（键「目录|清单」）；在借着的主机上的 since 是这一轮的时刻，没有 why 的是这一轮正放出去
@@ -457,6 +458,8 @@ def overview() -> dict:
                          {"id": "proj-older", "title": None, "t": NOW - 20 * 86400, "regs": [], "skipped": []}],
             "hostcheck": hostcheck(), "server": {"role": "primary", "id": "dashboard-host-a1b2c3", "since": NOW - 86400, "holder": None, "renew": None,
                                                  "until": None, "bad": None, "home": None, "say": ""}}
+    d["pool"]["summary"] = pool_summary(d, cfg={})
+    return d
 
 
 def hostcheck() -> dict:

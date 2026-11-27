@@ -1163,6 +1163,26 @@ class PoolGuardTest(Base):
         self.assertIn("算力池正在调度可用服务器", s["my_lists"][1]["why"])
         self.assertIn("当前没有可借的入池服务器", s["my_lists"][2]["why"])
         self.assertEqual(s["my_lists"][0]["why"], P.POOL_DONE)
+        # worker 之外直接在卡上跑的 CUDA 进程（gpu_procs owner="other"）须计入忙卡，保活（owner="keepalive"）不计入
+        other_snap = {
+            "hosts": [
+                {"id": "self2", "worker_up": True, "lend": {"on": True, "open": True, "mine": True, "placed": 0}, "status": {
+                    "info": {"gpus": [
+                        {"i": 0, "uuid": "GPU-other-0", "util": 95, "used": 25000, "total": 46068},
+                        {"i": 1, "uuid": "GPU-ka-1", "util": 99, "used": 700, "total": 46068},
+                    ]},
+                    "running": [], "external": [],
+                    "gpu_procs": [
+                        {"uuid": "GPU-other-0", "owner": "other", "mb": 25000, "comm": "python"},
+                        {"uuid": "GPU-ka-1", "owner": "keepalive", "mb": 700, "comm": "python"},
+                    ],
+                }},
+            ],
+            "fleet": {"servers": [], "mine": [{"id": "self2", "lend": {"on": True, "open": True, "mine": True, "placed": 0}}]},
+            "pool": {"lists": {}},
+        }
+        s2 = P.summary(other_snap, cfg={"servers": []})
+        self.assertEqual((s2["gpus_total"], s2["gpus_busy"], s2["running_jobs"]), (2, 1, 0))
 
 
 class CollectHookTest(Base):
