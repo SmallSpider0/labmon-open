@@ -907,6 +907,49 @@ members = ["alice"]
         self.assertEqual(rc, 0, out)
         self.assertEqual(tried[:2], ["h1", "h2"])
 
+    def test_overview_regs_fallback_when_first_host_down(self):
+        """Codex 第五轮 P2：同共享域首台 h1 失联时，overview.collect 当轮立即回退到可达的 h2 补读登记；下轮直接选 h2 读取。"""
+        from labmon import overview as OV
+        (self.d / "hosts.toml").write_text(SHARED_HOSTS.format(pools="""
+[pools.a100]
+label = "双机池"
+hosts = ["h1", "h2"]
+members = ["alice"]
+"""))
+        import time
+        now = time.time()
+        k = "pool:a100|/data/lab/pa|jobs/q.txt"
+        st_h2 = make_host_entry("h2", gpus=1, busy_gpus=0,
+                                share={"wait_cap_min": 180, "half_life_h": 24, "use": {}, "weight": {}},
+                                pool_heads={k: {"pool": "pool:a100", "pool_id": "a100", "head": "j1", "n": 1}}, t=now)["status"]
+        reg_line = f"{OV.REG} pool:a100 q1.json {int(now)}\n" + json.dumps({"root": "/data/lab/pa", "jobs": "jobs/q.txt", "project": "pa"})
+        calls = []
+
+        def fake_fetch(h):
+            calls.append((h["id"], h.get("regs") is not None))
+            if h["id"] == "h1":
+                return (None, "ssh: connect failed")
+            reg_part = reg_line if h.get("regs") is not None else ""
+            raw = ("\n" + OV.SEP + "\n").join([json.dumps(st_h2), "", "", str(int(now)), "", "", "", reg_part, ""])
+            return (raw, None)
+
+        with mock.patch.object(OV, "fetch", side_effect=fake_fetch), \
+                mock.patch.object(P, "_default_fit", return_value=None), \
+                mock.patch.object(LS, "decide", return_value="primary"), \
+                mock.patch.object(LS, "primary", return_value=True), \
+                mock.patch.object(OV.L, "gather", side_effect=lambda items, fn, *a: ({"ok": True, "since": None}, {k: fn(v) for k, v in items.items()})):
+            snap1 = OV.collect(use_ssh=True)
+            self.assertIsNotNone(snap1)
+            pool_reg = next((r for r in snap1["regs"] if r["host"] == "pool:a100"), None)
+            self.assertIsNotNone(pool_reg, snap1["regs"])
+            self.assertEqual(len(pool_reg["queues"]), 1)
+            self.assertEqual(snap1["pool"]["pools"][0]["pending"], 1)
+            # 第二轮：old_hosts 已知 h1 失败，直接选 h2 读 regs，不再补采
+            calls.clear()
+            snap2 = OV.collect(use_ssh=True)
+            self.assertIsNotNone(snap2)
+            self.assertEqual([c for c in calls if c[1]], [("h2", True)])
+
 
 class PoolInfraTest(Base):
     def test_locate_and_worker_rm(self):

@@ -671,11 +671,16 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
         if not use_ssh:
             item["ssh"] = None
         by[h["id"]] = item
+    old_hosts = {x["id"]: x for x in old.get("hosts", [])}
     by_key: dict[tuple, list[dict]] = {}
     for h in by.values():
         by_key.setdefault(home_key(h), []).append(h)
-    for hk, group in by_key.items():                        # 每个共享域（home_key）挑第一台顺带读同域主机目录里的登记（_regs）
-        group[0]["regs"] = [group[0]["id"]] if hk[0] == "host" else list(by)
+    reg_pick: dict[tuple, dict] = {}
+    for hk, group in by_key.items():                        # 每个共享域（home_key）挑一台（优先上一轮无错的）顺带读同域主机目录里的登记（_regs）
+        pick = (group[0] if hk[0] == "host" else
+                min(group, key=lambda x: 0 if (old_hosts.get(x["id"]) and not old_hosts[x["id"]].get("error")) else 1))
+        pick["regs"] = [pick["id"]] if hk[0] == "host" else list(by)
+        reg_pick[hk] = pick
     by_lease = {k: v for k, v in by.items() if k in lease_ids}
     by_other = {k: v for k, v in by.items() if k not in lease_ids}
     lan, got = L.gather(by_lease, fetch, lambda k: bool(by_lease[k].get("ssh")), t) if by_lease else ({"ok": True, "since": None}, {})
@@ -688,6 +693,20 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
         got.update(got2)
         if not by_lease or (lan["ok"] and not lan2["ok"]):
             lan = lan2
+    if lan["ok"]:                                          # 共享域首选登记代读节点本轮失联时，立即切换到同域本轮可达节点补读登记（#212）
+        for hk, group in by_key.items():
+            if hk[0] == "host":
+                continue
+            pick = reg_pick[hk]
+            if got.get(pick["id"], (None,))[0] is not None:
+                continue
+            alt = next((x for x in group if x["id"] != pick["id"] and got.get(x["id"], (None,))[0] is not None), None)
+            if alt is not None:
+                r2 = fetch(dict(alt, regs=list(by), put=None, lease=None))
+                if r2[0] is not None:
+                    pick.pop("regs", None)
+                    alt["regs"] = list(by)
+                    got[alt["id"]] = r2
     _expire(t)
     prev = {} if lan["ok"] else {x["id"]: x for x in old.get("hosts", [])}
     hosts = []
