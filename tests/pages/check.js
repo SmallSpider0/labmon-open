@@ -3071,6 +3071,29 @@ t("project", "项目页的算力池（#24）：顶栏一个「算力池」，车
   ok(!rc.includes("</span> 算力池</b>"), "资源小图不该画算力池"); has(rc, "srv-h", "项目主机照常画");
   ok(run(C, 'hostShort(D.hosts.find(h => h.pool))') === "算力池", "短名");
 });
+t("project", "项目页共有算力池主机小徽标（#251）：顶栏主机项与资源卡标题展示紧凑小徽标，时间线主机表头与折线悬停同步写明池名，非池主机不受影响且转义恶意字符", () => {
+  const C = pjCtx(PJ, EVN), h = app(C);
+  const top = run(C, "topline()"), rc = run(C, "resourcesCard()");
+  has(top, "池 · A6000 共有池", "顶栏入池主机应展示共有池小徽标");
+  has(tips(top), "所属共有算力池：A6000 共有池", "顶栏入池主机与徽标悬停应说明所属共有池");
+  ok((top.match(/池 · A6000 共有池/g) || []).length === 1, "顶栏只有入池主机 srv-h 出徽标");
+  has(rc, "池 · A6000 共有池", "资源卡标题处应展示共有池小徽标");
+  has(tips(rc), "所属共有算力池：A6000 共有池", "资源卡徽标悬停应说明所属共有池");
+  ok((rc.match(/池 · A6000 共有池/g) || []).length === 1, "资源卡只有入池主机 srv-h 出徽标");
+  run(C, "drawTimeline()");
+  const tl = el(C, "tlbox").innerHTML;
+  has(tips(tl), "srv-h\n所属共有算力池：A6000 共有池", "时间线主机表头悬停应写明所属共有池名称");
+  ok(!tips(tl).includes("srv-a（A6000）\n所属共有算力池"), "未入池主机 srv-a 不应带共有池提示");
+  // 时间线折线悬停读数（srv-h 补一个采样以触发 TLH 命中）
+  const H2 = pjCtx({...PJ, history: [...PJ.history, {t: NOW - 600, host: "srv-h", ok: true, util: [80], busy: [80], cpu_pct: 3.0}, {t: NOW - 300, host: "srv-h", ok: true, util: [80], busy: [80], cpu_pct: 3.0}]}, EVN);
+  run(H2, "drawTimeline()");
+  const hov = run(H2, '(() => { const b = document.getElementById("tlbox"); b.getBoundingClientRect = () => ({left: 0, width: 800}); return tlHostHover({dataset: {thost: "srv-h"}}, {clientX: TL.g.L + TL.g.PW * 0.5}); })()');
+  has(hov, "srv-h（共有算力池：A6000 共有池）", "时间线折线悬停应带所属共有池名称");
+  // 恶意字符串转义
+  const E = pjCtx(PJE, EVE), eh = app(E);
+  clean(eh, "evil 共有池小徽标");
+  has(eh, "池 · 池" + BADESC, "evil 共有池名称应正确转义");
+});
 t("project", "项目页 CPU 占用监控（#208）：顶部 CPU 卡片展示核数/配额与限流，时间线主机行同轴叠画不同颜色 CPU 折线与图例、悬停读数，兼容旧快照", () => {
   const C = pjCtx(PJ, EVN), h = app(C);
   has(h, "CPU 占用", "顶部指标区应有 CPU 占用卡片");

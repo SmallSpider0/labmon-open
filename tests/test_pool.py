@@ -1384,6 +1384,57 @@ pool = "P"
         self.assertEqual(body["rc"], 0, body)
         self.assertEqual(seen_ssh[0][0], "h3")
 
+    def test_project_snapshot_host_pool_badge_and_isolation(self):
+        """项目快照 hosts[] 透传 pool_id/pool_label（#251）：管理员与池成员可见，非池成员不泄露池名，未入池/临时/已归还主机不设。"""
+        from labmon import collect as CL
+        from labmon import projects as PJ
+        from labmon.state import save_json
+
+        CF.save_pool("a100", label="A100 共有池", hosts=["h1"], members=["alice"], create=True, by="boss")
+        for pid, owner in (("p-admin", "boss"), ("p-alice", "alice"), ("p-bob", "bob"), ("p-anon", None)):
+            f = PJ.cfg_file(pid)
+            f.parent.mkdir(parents=True, exist_ok=True)
+            f.write_text(f'[project]\nid = "{pid}"\n')
+            if owner:
+                save_json(f.parent / "meta.json", {"owner": owner})
+
+        def run_hosts(pid: str) -> dict[str, dict]:
+            cfg = {
+                "id": pid,
+                "hosts": [
+                    {"id": "h1", "label": "h1（A100）", "ssh": None, "returned": None, "mounts": [], "checks": []},
+                    {"id": "h2", "label": "h2（未入池）", "ssh": None, "returned": None, "mounts": [], "checks": []},
+                    {"id": "eph1", "label": "colab-t4", "ephemeral": True, "returned": None, "mounts": [], "checks": []},
+                    {"id": "ret1", "label": "已归还", "ssh": None, "returned": 1700000000, "mounts": [], "checks": []},
+                ],
+                "queues": [],
+            }
+            probes = {
+                "h1": ({"t": 1700001000, "gpu": [], "cgroup": {}, "mounts": {}, "checks": {}}, None),
+                "h2": ({"t": 1700001000, "gpu": [], "cgroup": {}, "mounts": {}, "checks": {}}, None),
+                "eph1": ({"online": True, "instance_id": "inst-1", "gpu": [], "cgroup": {}, "storage": []}, None),
+                "ret1": (None, None),
+            }
+            snap: dict = {"hosts": [], "alerts": []}
+            sd = Path(self.tmp.name) / f"sd_{pid}"
+            sd.mkdir(parents=True, exist_ok=True)
+            CL._hosts(cfg, probes, False, {"hosts": []}, snap, {}, [], sd, 1700001000.0)
+            return {h["id"]: h for h in snap["hosts"]}
+
+        # 管理员名下项目、无主项目与池成员 alice 项目均透传 pool_id / pool_label
+        for pid in ("p-admin", "p-anon", "p-alice"):
+            by = run_hosts(pid)
+            self.assertEqual(by["h1"].get("pool_id"), "a100", pid)
+            self.assertEqual(by["h1"].get("pool_label"), "A100 共有池", pid)
+            for other in ("h2", "eph1", "ret1"):
+                self.assertNotIn("pool_id", by[other], f"{pid}/{other}")
+                self.assertNotIn("pool_label", by[other], f"{pid}/{other}")
+
+        # 非池成员 bob 的项目不泄露池名
+        by_bob = run_hosts("p-bob")
+        self.assertNotIn("pool_id", by_bob["h1"])
+        self.assertNotIn("pool_label", by_bob["h1"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -662,7 +662,8 @@ def project() -> dict:
                          "returning": None, "now": False, "back": [], "tight": None, "overdue": False, "keep": {"vram": 2.0, "ram": 14.5, "cpu": 1.0, "bump": 1.0, "hold": False}, "swap": None}},
              {"id": "srv-h", "label": "srv-h", "ok": True, "error": None, "gpus": [gpu(0, 12000.0, 80.0)], "busy": [{"i": 0, "now": 80.0, "m10": 80.0, "h1": 80.0, "cov": 3600, "d1": 40.0, "d1cov": 7200}],
               "gpu_procs": [], "cgroup": {"cpu_quota": 8.0, "mem_used": 3e9, "mem_limit": 6.5e10, "mem_rss": 1e9},
-              "loadavg": [1.0, 1.0, 1.0], "cpu_pct": 3.0, "mounts": [], "checks": [], "borrow": None},
+              "loadavg": [1.0, 1.0, 1.0], "cpu_pct": 3.0, "mounts": [], "checks": [], "borrow": None,
+              "pool_id": "a6000", "pool_label": "A6000 共有池"},
              {"id": "pool", "label": "算力池", "pool": True, "ok": True, "error": None}]        # 算力池（collect._hosts 的 pool）：一张小卡
     hist = []
     for k in range(144):
@@ -745,6 +746,7 @@ def project_evil() -> dict:
     d["hosts"][0]["checks"][0].update(label="检" + BAD, out="出" + BAD)
     d["hosts"][0]["mounts"][0]["label"] = "盘" + BAD
     d["hosts"][1]["borrow"]["holder"] = "人" + BAD
+    d["hosts"][2]["pool_label"] = "池" + BAD
     d["lanes"][0]["label"] = "道" + BAD
     d["lanes"][1]["paused"] = "停" + BAD
     d["lanes"][2].update(waiting="等" + BAD, stuck="卡" + BAD)

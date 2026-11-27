@@ -27,7 +27,8 @@ from . import lan as L
 from . import lease as LS
 from . import pool as PO
 from . import projects as PJ
-from .config import AUTO_GROUP_RE, GIB, POOL_LABEL, STALE_S, ConfigError, fmt_dur, fmt_time, is_pool_id, parse_time, pick_color, pool_id_of, stale_limit, with_queues
+from . import users as U
+from .config import AUTO_GROUP_RE, GIB, POOL_LABEL, STALE_S, ConfigError, fmt_dur, fmt_time, host_pool, is_pool_id, parse_time, pick_color, pool_id_of, pools, stale_limit, with_queues
 from .fleet import worker_fresh
 from .health import link_step
 from .state import load_json, load_rows, save_json, snapshot, usage_file, usage_hosts, write_atomic
@@ -567,6 +568,15 @@ def _host_cpu(cg: dict, prev: dict | None, t: float, w_entry: dict | None) -> di
     return out
 
 
+def _owner_can_see_pool(pid: str, pool_id: str, pool_map: dict[str, dict]) -> bool:
+    """项目主人是否有权查看共有池 pool_id：无主项目（归管理员）、管理员项目与该池成员可见，其余不透传池名（#251）。"""
+    owner = U.owner_of(pid)
+    if not owner:
+        return True
+    role = ((U._read()["users"].get(owner) or {}).get("role")) or "user"
+    return PO.member(U.Ident(owner, role, frozenset(), "internal", ""), pool_id, pool_map=pool_map)
+
+
 def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, state: dict, hist: list, sd: Path, t: float) -> dict:
     """各主机：探针结果到 snap["hosts"]（GPU、cgroup、挂载点、自定义检查），连不上的沿用上次存的 last_probe_*.json 并标过期，
     已归还的只留一张标注卡片；这一轮的采样追加到 hist；连通状态（link_step）与磁盘余量的告警。返回各主机的探针原始结果（车道按它读队列）。"""
@@ -575,6 +585,10 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
     w_hosts = {e["id"]: e for e in glob_snap.get("hosts", [])}
     lent = {e["id"]: e["borrow"] for e in glob_snap.get("hosts", []) if e.get("borrow")}   # 借来的主机：没有就用主机清单里记的
     busy = {e["id"]: e["busy"] for e in glob_snap.get("hosts", []) if e.get("busy")}       # 各卡的吃满程度（工作台那一轮 overview.gpu_busy 算好的，#51）
+    try:
+        pm = pools()
+    except ConfigError:
+        pm = {}
     for h in cfg["hosts"]:
         p, err = probes[h["id"]]
         hs = hstate.setdefault(h["id"], {})           # 连通状态（health.link_step 记的 fails / since / down）与 idle_since
@@ -651,6 +665,9 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
         if link_step(hs, None if lan_off and h["ssh"] else p is not None, t) == "down":
             hs["down"] = err
         hd: dict = {"id": h["id"], "label": h["label"], "ok": p is not None, "error": err, "borrow": lent.get(h["id"]) or h.get("borrow")}
+        hp = host_pool(h["id"], pm) if pm else None
+        if hp and _owner_can_see_pool(cfg["id"], hp["id"], pm):
+            hd["pool_id"], hd["pool_label"] = hp["id"], hp["label"]
         if p is None:
             p = _last_probe(last_path)            # 显示上一次的数据，并标明过期
             hd["stale"] = p is not None

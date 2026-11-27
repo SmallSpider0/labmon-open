@@ -39,6 +39,7 @@
     "mounts": [{"path": "/tmp", "label": "容器 /tmp", "total_gb": 1024.0, "avail_gb": 24.9, "used_pct": 97.6,
                 "min_gb": 10, "kind": "cloud|local"}],   // 容量与 min_gb 都是 GiB（2^30）；disk_low 按 min_gb 与配置的 max_used_pct 判；临时主机的挂载点带 kind（cloud 云盘默认 min_gb=1.0 并出 ephemeral_disk_low，local 为实例本地盘，#213）
     "ephemeral": false, "instance_id": null,    // 推模式临时主机时 ephemeral=true 并带 instance_id，不经 SSH 探测、不计入实验室共享盘（#213）
+    "pool_id": "a6000", "pool_label": "A6000 共有池",   // 可选（#251）：仅当常驻主机归属共有算力池且项目主人为管理员或该池成员时写入，否则缺省
     "checks": [{"id": "keepalive", "label": "GPU 保活在跑", "state": "ok|fail|na", "out": "…", "detail": ["…"]}]
   }],                                           // 有交给算力池的清单时另有一项 {"id": "pool", "label": "算力池", "pool": true, "ok", "error"}（#24）：ok 是代读它的在用主机这轮读到了，其余字段都没有
 
