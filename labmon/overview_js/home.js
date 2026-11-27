@@ -92,6 +92,7 @@ const projName = (id, {always = false, plain = false} = {}) => {
   const t = D.projects.find(p => p.id === id)?.title || id;
   return plain ? t + " " : `<span class="nw"><span class="dot" style="background:${color(id)}"></span> <span ${tip(id)}>${esc(t)}</span></span> `;
 };
+let AL_EXP = false;                // 总览告警超 5 条时默认折叠，点击展开/收起
 function home() {
   const noHost = !myHosts().length && !hasPoolCompute();      // 确实没有可用主机且不在任何有主机的共有池才提（#15、#212、#224）
   const fleetSrvs = D.fleet?.servers || [], fleetN = fleetSrvs.length;
@@ -125,8 +126,16 @@ function home() {
     <div class="kpi"><div class="k">最早到期的租期</div><div class="v">${lease ? leaseHtml(lease.lease_end) : "—"}</div><div class="s">${lease ? `${esc(hostShort(lease))} · ${ts(lease.lease_end)} 到期` : "没有登记租期"}</div></div>
     <div class="kpi"><div class="k">预计全部跑完</div><div class="v" style="font-size:19px">${last ? ts(last.t1) : "—"}</div><div class="s" ${mk ? tip(`下一个里程碑：${projName(mk.p.id, {plain: true})}${mk.label} ${ts(mk.ts)}`) : ""}>${last ? `${projName(last.p)}剩 ${dur(last.t1 - now)}` : "没有排队的任务"}${mk ? `，离 ${mk.p.id === last?.p ? "" : projName(mk.p.id)}${esc(mk.label)} ${dur(mk.ts - now)}` : ""}</div></div>
     <div class="kpi"><div class="k">告警</div><div class="v" style="color:${na ? "var(--bad)" : "var(--ok)"}">${na}<small> 条</small></div><div class="s">${na ? (fal.length || pal.length ? "含" + [fal.length ? `${fLbl} ${fal.length} 条` : "", pal.length ? `项目 ${pal.length} 条` : ""].filter(Boolean).join("、") + "，" : "") + "见下方" : `${D.hosts.filter(h => h.worker_up).length} / ${D.hosts.length} 台 worker 在跑`}</div></div></div>`;
-  if (na) s += `<div class="alerts">${al.map(a => `<div>⚠ ${esc(a)}</div>`).join("")}${fal.map(a => `<div>⚠ <a href="${fHref}">${fLbl}</a>：${esc(a)}</div>`).join("")}`
-    + `${pal.map(({ps, m}) => `<div>⚠ ${ps.map(p => `<a href="#/p/${encodeURIComponent(p.id)}">${esc(p.title || p.id)}</a>`).join("、")}：${esc(m)}</div>`).join("")}</div>`;
+  if (na) {
+    const items = [...al.map(a => `<div>⚠ ${esc(a)}</div>`),
+      ...fal.map(a => `<div>⚠ <a href="${fHref}">${fLbl}</a>：${esc(a)}</div>`),
+      ...pal.map(({ps, m}) => `<div>⚠ ${ps.map(p => `<a href="#/p/${encodeURIComponent(p.id)}">${esc(p.title || p.id)}</a>`).join("、")}：${esc(m)}</div>`)];
+    const fold = items.length > 5 && !AL_EXP;
+    const head = items.slice(0, 5).join("");
+    const extra = items.length > 5 ? `<div class="al-extra"${fold ? " hidden" : ""}>${items.slice(5).join("")}</div>`
+      + `<div><button class="lnk sm" type="button" data-alexp aria-expanded="${!fold}">${fold ? `展开其余 ${items.length - 5} 条告警 ▾` : "收起告警 ▴"}</button></div>` : "";
+    s += `<div class="alerts">${head}${extra}</div>`;
+  }
   const addExtBtn = LIVE && ME && (ME.admin ? canOps() : ME.write) ? `<span class="sp"></span><button class="btn mini-btn" data-drw="#/ext/new">+ 添加外部主机</button>` : "";
   s += `<div class="card"><div class="chd wrap"><b>主机</b><span class="sm mut">点一行看详情</span>${addExtBtn}</div><div class="scroll"><table>
     <tr><th>主机</th><th>worker</th><th style="min-width:180px" ${tip("每张卡一行：条是显存，数字是显存占比 · GPU 近 1 小时平均利用率（保活按 0 算）")}>显存 · 利用率</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("集群主机显示共享盘；独立主机显示本地工作盘（含低水位/配额闸门）；红线是告警/停止线")}>磁盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
@@ -562,10 +571,10 @@ function resCard(h) {
     }
   } else if (h.standalone && h.work_disk) {
     const wd = h.work_disk, recN = (wd.reclaimable || []).length, gOn = !!(wd.disk_gate?.on || h.status?.disk_gate?.on);
-    const right = gOn ? `<span class="badge b-bad">已暂停放新任务</span>` : recN ? `<span class="badge b-warn">${recN} 处可回收</span>` : "持久保存";
+    const badge = gOn ? ` <span class="badge b-bad">已暂停放新任务</span>` : recN ? ` <span class="badge b-warn">${recN} 处可回收</span>` : "";
     s += row("本地工作盘", workDiskBar(wd, false),
-      `<span style="${wd.low || gOn ? "color:var(--bad)" : ""}">剩 ${Math.round((wd.free || 0) / GIB)} / ${Math.round((wd.total || 0) / GIB)} GiB</span><span class="mut">工作区 ${wd.work_b != null ? GB(wd.work_b) + " GiB" : "待扫描"}${wd.quota_gb ? ` / 配额 ${wd.quota_gb}` : ""}</span>`,
-      right,
+      `<span style="${wd.low || gOn ? "color:var(--bad)" : ""}">剩 ${Math.round((wd.free || 0) / GIB)} / ${Math.round((wd.total || 0) / GIB)} GiB</span><span class="mut">工作区 ${wd.work_b != null ? GB(wd.work_b) + " GiB" : "待扫描"}${wd.quota_gb ? ` / 配额 ${wd.quota_gb}` : ""}</span>${badge}`,
+      `<span class="sm mut">持久保存</span>`,
       `${wd.root}：独立主机本地工作盘（持久保存，不会随续租清空）；低于 ${wd.warn_gb} GiB 预警，低于 ${wd.stop_gb} GiB 暂停放新任务\n目录明细与可回收列表见下方「记录 · 本地工作盘」`);
   } else if (x) {
     const pts = (D.disk.hist || []).filter(r => r[0] >= now - 7 * 86400).map(r => [r[0], x.dk.total - r[1] / GIB]), dg = "d:" + h.id;
@@ -588,8 +597,11 @@ function resCard(h) {
       + `超过基线且每秒不少于 ${nf.min_ops} 次算慢（条变红）：准入不看，共享盘扫描与拷本地依赖先让路，同一件最多推迟 30 分钟${nf.slow ? "\n此刻：慢" : ""}${psiT("io")}`);
   }
   const sg = st.storage || {}, L = hostLw(h);
-  if (L) s += row("本地盘", lwBar(L, sg.local), lwVal(L), heatTag(lwHeat(L)) || (h.borrow ? "对方续租时清空" : "续租会清空"),
-    `${LW_TIP}\n$LABMON_CACHE（项目跨格缓存）与 $LABMON_SCRATCH（单格临时，成功后删）在 /tmp/labmon，也在根盘上\n按写的总量画的构成与各目录在下方「记录 · 本地盘」`);
+  if (L) {
+    const ht = heatTag(lwHeat(L));
+    s += row("本地盘", lwBar(L, sg.local), lwVal(L) + (ht ? " " + ht : ""), h.borrow ? "对方续租时清空" : "续租会清空",
+      `${LW_TIP}\n$LABMON_CACHE（项目跨格缓存）与 $LABMON_SCRATCH（单格临时，成功后删）在 /tmp/labmon，也在根盘上\n按写的总量画的构成与各目录在下方「记录 · 本地盘」`);
+  }
   const dk = pr.disk;
   if (dk) s += row("本地盘读写", big(`<i style="width:${dk.busy ?? 0}%;background:var(--accent);opacity:.6"></i>`),
     dk.busy == null ? "—" : `忙 ${Math.round(dk.busy)}%${dk.await != null ? `<span class="mut">${g1(dk.await)} ms/次</span>` : ""}`, sp(r => r.busy),

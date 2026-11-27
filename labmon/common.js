@@ -593,7 +593,7 @@ function tlSvg(box, rows, o = {}) {
   if (TL.cur) { TL.last = TL.cur; TL.cur = null; }
   return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${TL_DEFS}<defs><clipPath id="tlclip"><rect x="${L}" y="0" width="${PW}" height="${H}"/></clipPath></defs>${s}</svg>`;
 }
-// 画进页面：#tlbox 放图（下面接 o.more），#tlkey 放图例，#tlbar 放按钮。o.items(seen) 在画完后调，给图例条目 [[画法, 说明, 样例]]，
+// 画进页面：#tlbox 放图（下面接 o.more），#tlkey 放图例，#tlbar 放按钮。o.items(seen) 在画完后调，给图例条目 [[画法, 说明, 样例, 可选悬停详述]]，
 // 只列图上出现了的（seen）；里程碑与现在线各页都有，接在最后
 function tlShow(box, rows, o = {}) {
   const seen = new Set();
@@ -603,7 +603,7 @@ function tlShow(box, rows, o = {}) {
     ["now", "现在", tlSw(`<line x1="6" x2="6" y1="0" y2="12" stroke="var(--bad)" stroke-width="1.5"/>`, 12)]];
   const key = document.getElementById("tlkey");
   if (key) {
-    key.innerHTML = `<button class="btn tlkey-b" data-tlkey>${TL.key ? "收起图例" : "图例"}</button><div class="tlkey-l">${items.filter(([k]) => seen.has(k)).map(([, t, sw]) => `<span>${sw}${t}</span>`).join("")}
+    key.innerHTML = `<button class="btn tlkey-b" data-tlkey>${TL.key ? "收起图例" : "图例"}</button><div class="tlkey-l">${items.filter(([k]) => seen.has(k)).map(([, t, sw, h]) => `<span${h ? " " + tip(h) : ""}>${sw}${t}</span>`).join("")}
       <span class="mut ops">拖动平移 · ⌘/Ctrl＋滚轮或双指捏合缩放 · 双击放大，Shift＋双击缩小</span></div>`;
     key.classList.toggle("open", TL.key);
   }
@@ -674,8 +674,8 @@ const afterText = (af, self) => af.map(([p, n]) => p === self ? n : `${p} 的 ${
 // 占用条的图例条目（接进 tlShow 的 items）；pre 是说明前缀
 const occItems = (c, pre = "") => [
   ["occ_done", pre + "已跑", tlSw(jobBar("done", false, 0, 1, 22, 10, c))],
-  ["occ_run", pre + "在跑（填色到现在，右端是预计结束）", tlSw(jobBar("running", false, 0, 1, 22, 10, c, .45))],
-  ["occ_plan", pre + "排队（worker 按放行规则推演，同机各项目一起排）", tlSw(jobBar("queued", false, 0, 1, 22, 10, c))],
+  ["occ_run", pre + "在跑", tlSw(jobBar("running", false, 0, 1, 22, 10, c, .45)), pre + "在跑（填色到现在，右端是预计结束）"],
+  ["occ_plan", pre + "排队", tlSw(jobBar("queued", false, 0, 1, 22, 10, c)), pre + "排队（worker 按放行规则推演，同机各项目一起排）"],
   ["occ_failed", pre + "失败", tlSw(jobBar("failed", false, 0, 1, 22, 10, "var(--bad)"))],
   ["occ_stop", pre + "停下重排", tlSw(jobBar("failed", false, 0, 1, 22, 10, "var(--warn)"))]];
 function occBars(items, y, h, c, o) {

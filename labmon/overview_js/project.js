@@ -210,8 +210,7 @@ function assignCard(h) {
     const go = `<button class="btn pri" data-assign="go" data-h="${esc(h.id)}" ${P?.busy ? "disabled" : ""}>${P?.busy ? "正在通知…" : "通知实验会话"}</button>`;
     ctl = popConfirm(btn, open, body, go, true);
   }
-  return `<div class="card assign"><div class="chd wrap"><b>给项目用</b><span class="sm mut">这台自用主机还没有登记队列</span></div>
-    <div class="row wrap" style="gap:8px;align-items:center"><span class="sm mut">选一个项目，通知它的实验会话来登记清单。</span>${ctl}</div>${msg}</div>`;
+  return `<div class="card assign"><div class="row wrap" style="gap:8px;align-items:center"><b>给项目用</b><span class="sm mut">这台自用主机还没有登记队列，选一个项目通知它的实验会话来登记。</span><span class="sp"></span>${ctl}</div>${msg}</div>`;
 }
 function assignDrawer(id) {
   const h = D.hosts.find(e => e.id === id), A = h && assignSrc(h), hn = h ? hostShort(h) : id;
@@ -220,8 +219,15 @@ function assignDrawer(id) {
   const ps = A.ps;
   if (APICK?.host !== id || !ps.some(p => p.id === APICK.to)) APICK = {host: id, to: ps[0].id, busy: false, err: null};
   const S = APICK;
+  const briefOf = p => {
+    const run = D.hosts.flatMap(e => jobsOf(e)).filter(j => j.project === p.id).length;
+    const sp = D.sched?.projects?.find(o => o.id === p.id);
+    const q = sp ? (sp.queued || 0) : D.hosts.flatMap(e => e.status?.waiting || []).filter(w => w.project === p.id && w.name).length;
+    return [run ? `运行 ${run}` : "", q ? `排队 ${q}` : ""].filter(Boolean).join(" · ") || (p.no_work_since ? NO_WORK : "空闲");
+  };
   const rows = ps.map(p => `<label class="rg-to"><input type="radio" name="assignto" data-assignto="${esc(p.id)}"${S.to === p.id ? " checked" : ""}${S.busy ? " disabled" : ""}>`
-    + `<span class="dot" style="background:${color(p.id)}"></span><b>${esc(p.title || p.id)}</b>${p.title && p.title !== p.id ? `<span class="sm mut">${esc(p.id)}</span>` : ""}</label>`).join("");
+    + `<span class="dot" style="background:${color(p.id)}"></span><b>${esc(p.title || p.id)}</b>${p.title && p.title !== p.id ? `<span class="sm mut">${esc(p.id)}</span>` : ""}`
+    + `<span class="sp"></span><span class="sm mut nw">${esc(briefOf(p))}</span></label>`).join("");
   const foot = `<div class="rn"><button class="btn pri" data-assign="dgo" data-h="${esc(id)}" ${S.busy ? "disabled" : ""}>${S.busy ? "正在通知…" : "通知实验会话"}</button>
     <button class="btn" data-dclose ${S.busy ? "disabled" : ""}>取消</button></div>${S.err ? `<div class="rn-err">${esc(S.err)}</div>` : ""}`;
   return dHead(`<span class="fav">${icon("server")}</span>`, `给项目用 · ${esc(hn)}`, "通知选定项目的实验会话来登记清单（不改动现有登记）")
@@ -526,9 +532,9 @@ function projOwnerSec(p) {
   const open = popIs("owner", p.id), who = p.owner ? acctPerson(p.owner) : "";
   const label = p.owner ? `<b ${tip("看板账号 " + p.owner)}>${esc(who)}</b>${p.owner === ME?.name ? ' <span class="chip">我</span>' : ""}` : "<b>归管理员</b>";
   const b = `<button class="btn mini-btn" data-pj="owner" data-p="${esc(p.id)}">更改项目归属</button>`;
-  const form = !open ? "" : `<label>归属给谁 <select class="ain" data-owner ${ACC.load.users ? "disabled" : ""}>
+  const form = !open ? "" : `<div class="aform acc-pop-form"><label>归属给谁<select class="ain" data-owner ${ACC.load.users ? "disabled" : ""}>
     <option value="">归管理员</option>${(ACC.users?.users || []).map(u => `<option value="${esc(u.name)}"${u.name === POP.owner ? " selected" : ""}>${esc(u.fleet_person && u.fleet_person !== u.name ? `${u.fleet_person}（账号 ${u.name}）` : u.name)}</option>`).join("")}
-    </select></label>${accErr(ACC.loadError.users, false)}${accLine("load")}${pjErr()}`;
+    </select></label></div>${accErr(ACC.loadError.users, false)}${accLine("load")}${pjErr()}`;
   const go = ACC.load.users || !ACC.users ? "" : pjGo("ownergo", p.id, "保存");
   const edit = canWrite() && ME.account ? popConfirm(b, open, form, go, true) : "";
   return dSec("项目归属", `${permissionRow("归属", label, edit)}${PJMSG && PJMSG.pid === p.id ? `<div class="rn-state">${esc(PJMSG.msg)}</div>` : ""}`);

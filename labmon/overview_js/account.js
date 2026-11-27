@@ -110,12 +110,15 @@ async function accAct(act, d = {}) {
     if (v("acpn") !== v("acpn2")) { ACC.err = {k: "pop", m: "两遍新口令不一样"}; return render(false); }
     return accPost("password", {old: v("acpo"), new: v("acpn")}, "pw", "me");
   }
-  if (act === "tok" && popIs("acc-tok", ME.name)) return accPost("tokens/add", {name: v("acn").trim(), scopes: [v("acs")]}, "tok", "me",
-    j => { ACC.show = {page: "me", k: "tok", name: j.name, v: j.token, until: j.until}; ACC.msg = null; });
+  if (act === "tok" && popIs("acc-tok", ME.name)) {
+    const scope = POP.draft?.toks || document.querySelector('input[name="acs"]:checked')?.value || (ACC.me || ME)?.token_scopes?.[0] || "";
+    return accPost("tokens/add", {name: v("acn").trim(), scopes: [scope]}, "tok", "me",
+      j => { ACC.show = {page: "me", k: "tok", name: j.name, v: j.token, until: j.until}; ACC.msg = null; });
+  }
   if (act === "onboard" && POP?.k === "acc-onboard") {
     const name = v("acun").trim(), person = POP.id;
     if (!name || !person) { ACC.err = {k: "pop", m: "要填登录名并确认组内人员"}; return render(false); }
-    return accPost("users/add", {name, admin: v("acur") === "admin", person}, act, "users",
+    return accPost("users/add", {name, admin: POP.draft?.ur === "admin", person}, act, "users",
       j => { ACC.show = {k: "code", where: act, name, subject: person, v: j.code}; ACC.msg = null; });
   }
   const U = ACC.users?.users?.find(u => u.name === n);
@@ -167,8 +170,11 @@ function accItem(x, info, owner = "") {
 function pushSec(M) {
   const P = M.push || {}, name = M.name, open = popIs("acc-push", name), bark = POP?.kind !== "ntfy";
   const b = (act, title) => `<button class="btn" data-acc="${act}" ${ACC.busy ? "disabled" : ""}>${title}</button>`;
-  const edit = popConfirm(b("push", P.set ? "更换推送配置" : "设置推送"), open, open ? `<div class="aform">
-    <label>推送方式<select class="ain" data-pushkind><option value="bark"${bark ? " selected" : ""}>Bark</option><option value="ntfy"${bark ? "" : " selected"}>ntfy</option></select></label>
+  const edit = popConfirm(b("push", P.set ? "更换推送配置" : "设置推送"), open, open ? `<div class="aform acc-pop-form">
+    <div class="field"><span>推送方式</span><div class="seg form-seg" role="radiogroup" aria-label="推送方式">
+      <button type="button" role="radio" aria-checked="${bark}" class="${bark ? "on" : ""}" data-pushkind="bark">Bark</button>
+      <button type="button" role="radio" aria-checked="${!bark}" class="${!bark ? "on" : ""}" data-pushkind="ntfy">ntfy</button>
+    </div></div>
     <label>${bark ? "推送密钥" : "主题"}<input id="acpushkey" class="ain" type="password" autocomplete="off"></label>
     <label>${bark ? "加密密钥（可选）" : "访问令牌（可选）"}<input id="acpushsecret" class="ain" type="password" autocomplete="off"></label></div>
     ${accLine("pop")}` : "", accGo("pushgo", name, "保存"), true);
@@ -241,8 +247,8 @@ function myExtHostsSec(M) {
 }
 
 /* ---------- 外部主机右侧抽屉（#/ext/new、#/ext/<id>）：零私钥上传，API/CLI + GUI 共用 /api/hosts/external* ---------- */
-let EXT = null;   // {id, isNew, visit, loading, busy, testing, deleting, form, key, test, msg, err, confirmDel, forceDel}
-function extLeave() { EXT = null; }
+let EXT = null;   // {id, isNew, visit, loading, busy, testing, form, key, test, msg, err, forceDel, advOpen}
+function extLeave() { if (POP?.k === "ext-del") popClose(); EXT = null; }
 function extDefaultForm(h = null) {
   return {
     id: h?.id || "", label: h?.label || "", ssh: h?.ssh || "", port: h?.port != null ? String(h.port) : "22",
@@ -286,7 +292,7 @@ function extInput(el, ev) {
 async function extAct(act, d = {}) {
   if (!EXT || EXT.busy) return;
   const st = EXT, visit = st.visit, f = st.form;
-  if (act === "delask") { st.confirmDel = !st.confirmDel; st.err = null; return render(false); }
+  if (act === "delask") { popToggle("ext-del", st.id); st.err = null; return render(false); }
   if (act === "save") {
     const body = {
       ...(st.isNew ? {id: (f.id || "").trim()} : {}),
@@ -368,12 +374,12 @@ function extHostDrawer(id) {
   if (!EXT || (isNew ? !EXT.isNew && EXT.origNew !== true : EXT.id !== id)) {
     const snapH = !isNew ? (D.hosts || []).find(x => x.id === id) : null;
     EXT = {id, isNew, origNew: isNew, visit: Date.now(), loading: false, busy: false, testing: false,
-      form: extDefaultForm(snapH), key: null, test: null, msg: null, err: null, confirmDel: false, forceDel: false};
+      form: extDefaultForm(snapH), key: null, test: null, msg: null, err: null, forceDel: false, advOpen: false};
     if (!isNew && LIVE) extLoad(id);
   }
   const st = EXT, f = st.form, dis = st.busy || st.loading ? "disabled" : "";
   const can = LIVE && ME && (ME.admin ? canOps() : ME.write);
-  const inp = (k, label, ph = "", extra = "") => `<label>${label}<input class="ain" data-extf="${k}" value="${esc(f[k] ?? "")}" placeholder="${esc(ph)}" autocomplete="off" ${extra} ${dis}></label>`;
+  const inp = (k, label, ph = "", extra = "", cls = "") => `<label${cls ? ` class="${cls}"` : ""}>${label}<input class="ain" data-extf="${k}" value="${esc(f[k] ?? "")}" placeholder="${esc(ph)}" autocomplete="off" ${extra} ${dis}></label>`;
   const keyCard = st.key ? `<div class="secret" role="status">
       <div class="row wrap"><b>看板专用公钥（零私钥上传）</b><span class="sm mut">${esc(st.key.fingerprint || "")}</span><span class="sp"></span>
         <button class="btn mini-btn" type="button" data-copy="${esc(st.key.pubkey)}">复制公钥</button>
@@ -381,52 +387,68 @@ function extHostDrawer(id) {
         ${can ? `<button class="btn mini-btn" type="button" data-ext="rotate" ${dis}>轮换密钥</button>` : ""}</div>
       <div class="sm mut" style="margin:4px 0">将下面命令粘贴到目标机执行一次，授权看板公钥登录（私钥仅留看板本机隔离目录，绝不索要个人私钥）：</div>
       <code class="v" style="word-break:break-all">${esc(st.key.auth_cmd)}</code></div>`
-    : `<div class="sm mut">${f.ssh_key === "system" ? "使用看板宿主机的默认 SSH 密钥（仅管理员可用）。" : "保存后将自动为这台主机生成专属 Ed25519 公钥与一行 authorized_keys 授权命令（零私钥上传）。"}</div>`;
+    : `<div class="sm mut" style="margin-top:8px">${f.ssh_key === "system" ? "使用看板宿主机的默认 SSH 密钥（仅管理员可用）。" : "保存后将自动为这台主机生成专属 Ed25519 公钥与一行 authorized_keys 授权命令（零私钥上传）。"}</div>`;
   const testRes = st.test ? (st.test.ok
     ? `<div class="rn-state">${esc(st.test.msg || "连通正常")}</div>`
     : `<div class="rn-err">${esc(st.test.error || "连通失败")}${st.test.hint ? `<div class="sm mut" style="margin-top:4px">建议：${esc(st.test.hint)}</div>` : ""}</div>`) : "";
-  const delBox = !st.isNew && can ? (st.confirmDel
-    ? `<div class="pop-w" style="margin-top:8px"><b>确认删除外部主机 ${esc(st.id)}？</b><div class="sm">将从主机清单移除并同步销毁看板专用私钥、断开 SSH 长连接。</div>
-        <label class="sm pop-ck"><input type="checkbox" data-extf="forceDel" ${st.forceDel ? "checked" : ""}> 强制删除（即使仍有排队或在跑任务）</label>
-        <div class="row" style="gap:6px;margin-top:6px"><button class="btn pri dz" type="button" data-ext="delgo" ${dis}>确认删除</button><button class="btn" type="button" data-ext="delask" ${dis}>取消</button></div></div>`
-    : `<button class="btn danger" type="button" data-ext="delask" ${dis}>删除外部主机</button>`) : "";
-  const basic = `<div class="aform">
-      ${inp("id", "主机 ID（小写字母/数字/-/_）", "ext-4090", st.isNew ? "" : "readonly")}
+  const mainForm = `<div class="aform ext-grid">
+      ${inp("id", "主机 ID", "ext-4090", st.isNew ? "" : "readonly")}
       ${inp("label", "显示名称", "外租 4090 / WSL2-本机")}
-      <label>平台类型<select class="ain" data-extf="platform_kind" ${dis}>
-        <option value="other"${f.platform_kind === "other" ? " selected" : ""}>外租平台（只做租期提醒，不做平台操作）</option>
-        <option value="none"${f.platform_kind === "none" ? " selected" : ""}>自有机器（WSL2 / 个人主机 / 本机 Mac）</option></select></label>
-      ${f.platform_kind === "other" ? inp("lease_until", "租期到期（可选，YYYY-MM-DD HH:MM）", "2026-12-01 18:00") : ""}
-      ${ME?.admin ? inp("owner", "归属账号（可选，留空归管理员）", "如 alice") : `<div class="sm mut">归属：<b>${esc(ME?.name || "本人")}</b>（私有，仅本人可见，最多 3 台）</div>`}
-    </div>`;
-  const conn = `<div class="aform">
-      ${inp("ssh", ME?.admin ? "SSH 地址（留空表示看板本机）" : "SSH 地址（user@host，禁回环/内网保留段）", "ubuntu@203.0.113.10")}
+      <div class="field ext-span"><span>平台类型</span><div class="seg form-seg" role="radiogroup" aria-label="平台类型">
+        <button type="button" role="radio" aria-checked="${f.platform_kind === "other"}" class="${f.platform_kind === "other" ? "on" : ""}" data-extseg="platform_kind" data-val="other" ${dis}>外租平台</button>
+        <button type="button" role="radio" aria-checked="${f.platform_kind === "none"}" class="${f.platform_kind === "none" ? "on" : ""}" data-extseg="platform_kind" data-val="none" ${dis}>自有机器</button>
+      </div><div class="sm mut">${f.platform_kind === "other" ? "只做租期提醒，不做平台操作" : "WSL2 / 个人主机 / 本机 Mac"}</div></div>
+      ${f.platform_kind === "other" ? inp("lease_until", "租期到期（可选）", "2026-12-01 18:00") : ""}
+      ${ME?.admin ? inp("owner", "归属账号（留空归管理员）", "如 alice", "", f.platform_kind === "other" ? "" : "ext-span")
+        : `<div class="sm mut ext-span">归属：<b>${esc(ME?.name || "本人")}</b>（私有，仅本人可见，最多 3 台）</div>`}
+      ${inp("ssh", ME?.admin ? "SSH 地址（留空为看板本机）" : "SSH 地址（user@host）", "ubuntu@203.0.113.10")}
       ${inp("port", "SSH 端口", "22", 'type="number" min="1" max="65535"')}
-      ${inp("python", "远端 Python 路径", "python3")}
-      ${ME?.admin ? `<label>SSH 密钥模式<select class="ain" data-extf="ssh_key" ${dis}>
-        <option value="managed"${f.ssh_key !== "system" ? " selected" : ""}>看板专用密钥（managed，推荐）</option>
-        <option value="system"${f.ssh_key === "system" ? " selected" : ""}>宿主机默认密钥（system，仅管理员）</option></select></label>` : ""}
+      ${ME?.admin ? `<div class="field ext-span"><span>SSH 密钥</span><div class="seg form-seg" role="radiogroup" aria-label="SSH 密钥">
+        <button type="button" role="radio" aria-checked="${f.ssh_key !== "system"}" class="${f.ssh_key !== "system" ? "on" : ""}" data-extseg="ssh_key" data-val="managed" ${dis}>看板专用</button>
+        <button type="button" role="radio" aria-checked="${f.ssh_key === "system"}" class="${f.ssh_key === "system" ? "on" : ""}" data-extseg="ssh_key" data-val="system" ${dis}>宿主机默认</button>
+      </div></div>` : ""}
     </div>${keyCard}`;
-  const wslMntWarn = /^\/mnt\/[a-zA-Z](?:\/|$)/.test((f.data_root || "").trim())
-    ? `<div class="sm" style="color:var(--warn)">⚠ 路径指向 Windows 盘（WSL2 9p 挂载），大量小文件、日志与检查点读写极慢；WSL2 下建议改到 Linux ext4 盘（如 ~/.local/share/labmon/work）</div>` : "";
-  const disk = `<div class="aform">
-      ${inp("data_root", "独立工作根目录（data_root）", "~/.local/share/labmon/work")}
-      ${wslMntWarn}
-      ${inp("disk_warn_gb", "磁盘预警线（GiB，默认 20）", "20", 'type="number" min="0"')}
-      ${inp("disk_stop_gb", "磁盘停止线（GiB，默认 10，触发闸门停放新任务）", "10", 'type="number" min="0"')}
-      ${inp("disk_quota_gb", "工作目录软配额（GiB，可选）", "留空不限", 'type="number" min="1"')}
-      ${inp("cpu_quota", "CPU 核数配额（可选）", "留空自动检测", 'type="number" min="1"')}
-      ${inp("mps_vram_gb", "Apple Silicon 统一内存显存上限（GiB，可选）", "仅 Mac 用", 'type="number" min="1"')}
-      <label class="sm pop-ck"><input type="checkbox" data-extf="allow_shared_gpu" ${f.allow_shared_gpu ? "checked" : ""} ${dis}> 外部（如宿主机）占卡时允许按剩余显存共享放行（默认整卡暂停放新任务，WSL2 等场景建议保持关闭）</label>
-    </div>`;
-  const acts = can ? `<div class="row wrap" style="gap:8px;margin-top:8px">
+  const hasWslWarn = /^\/mnt\/[a-zA-Z](?:\/|$)/.test((f.data_root || "").trim());
+  const wslMntWarn = hasWslWarn
+    ? `<div class="sm ext-span" style="color:var(--warn)">⚠ 路径指向 Windows 盘（WSL2 9p 挂载），大量小文件、日志与检查点读写极慢；WSL2 下建议改到 Linux ext4 盘（如 ~/.local/share/labmon/work）</div>` : "";
+  const advDirty = hasWslWarn
+    || (f.python || "python3").trim() !== "python3"
+    || (f.data_root || "~/.local/share/labmon/work").trim() !== "~/.local/share/labmon/work"
+    || String(f.disk_warn_gb ?? "20") !== "20"
+    || String(f.disk_stop_gb ?? "10") !== "10"
+    || String(f.disk_quota_gb ?? "").trim() !== ""
+    || String(f.cpu_quota ?? "").trim() !== ""
+    || String(f.mps_vram_gb ?? "").trim() !== ""
+    || !!f.allow_shared_gpu;
+  const adv = `<details class="dfold" data-extadv${st.advOpen || advDirty ? " open" : ""}>
+      <summary>高级选项（工作目录、Python、磁盘水位与资源配额）</summary>
+      <div class="aform ext-grid" style="margin-top:8px">
+        ${inp("data_root", "工作目录", "~/.local/share/labmon/work", "", "ext-span")}
+        ${wslMntWarn}
+        ${inp("python", "远端 Python", "python3")}
+        ${inp("disk_quota_gb", "工作区配额（GiB）", "留空不限", 'type="number" min="1"')}
+        ${inp("disk_warn_gb", "磁盘预警线（GiB）", "20", 'type="number" min="0"')}
+        ${inp("disk_stop_gb", "磁盘停止线（GiB）", "10", 'type="number" min="0"')}
+        ${inp("cpu_quota", "CPU 配额（核）", "留空自动检测", 'type="number" min="1"')}
+        ${inp("mps_vram_gb", "MPS 显存上限（GiB）", "仅 Mac 用", 'type="number" min="1"')}
+        <label class="sm pop-ck ext-span"><input type="checkbox" data-extf="allow_shared_gpu" ${f.allow_shared_gpu ? "checked" : ""} ${dis}> 外部（如宿主机）占卡时允许按剩余显存共享放行（默认整卡暂停，WSL2 建议关闭）</label>
+      </div></details>`;
+  const delOpen = popIs("ext-del", st.id);
+  const delPop = !st.isNew && can ? popConfirm(
+    `<button class="btn danger" type="button" data-ext="delask" ${dis}>删除外部主机</button>`,
+    delOpen,
+    !delOpen ? "" : `<b>确认删除外部主机 ${esc(st.id)}？</b><div class="sm mut">将从主机清单移除并同步销毁看板专用私钥、断开 SSH 长连接。</div>
+      <label class="sm pop-ck"><input type="checkbox" data-extf="forceDel" ${st.forceDel ? "checked" : ""}> 强制删除（即使仍有排队或在跑任务）</label>${st.err ? `<div class="rn-err">${esc(st.err)}</div>` : ""}`,
+    `<button class="btn pri dz" type="button" data-ext="delgo" ${dis}>确认删除</button>`, true) : "";
+  const dangerSec = delPop ? `<section class="card dz"><div class="dz-r"><div><b>删除外部主机</b><div class="sm mut">从主机清单移除、销毁看板专用私钥并断开 SSH 长连接。</div></div><span class="pop-l">${delPop}</span></div></section>` : "";
+  const foot = can ? `<footer class="dft"><div class="rn">
       <button class="btn pri" type="button" data-ext="save" ${dis}>${st.busy ? "保存中…" : st.isNew ? "保存并生成公钥" : "保存修改"}</button>
       ${!st.isNew ? `<button class="btn" type="button" data-ext="test" ${st.testing || st.busy ? "disabled" : ""}>${st.testing ? "测试中…" : "测试连通"}</button>` : ""}
-      <button class="btn" type="button" data-dclose ${dis}>关闭</button><span class="sp"></span>${delBox}</div>` : opsNote();
+      <button class="btn" type="button" data-dclose ${dis}>关闭</button></div></footer>` : `<footer class="dft">${opsNote()}</footer>`;
   return dHead(`<span class="fav">${icon("server")}</span>`, st.isNew ? "添加外部主机" : `外部主机 · ${esc(st.id)}`,
       "独立工作盘 · 零私钥上传 · 绝不碰平台操作")
-    + `<div class="db">${st.loading ? `<div class="empty">正在读取配置…</div>` : ""}${st.msg ? `<div class="rn-state">${esc(st.msg)}</div>` : ""}${st.err ? `<div class="rn-err">${esc(st.err)}</div>` : ""}${testRes}
-      ${dSec("基本信息", basic)}${dSec("SSH 连接与专用公钥", conn)}${dSec("本地工作盘与资源水位", disk)}${dSec("操作", acts)}</div>`;
+    + `<div class="db">${st.loading ? `<div class="empty">正在读取配置…</div>` : ""}${st.msg ? `<div class="rn-state">${esc(st.msg)}</div>` : ""}${st.err && !delOpen ? `<div class="rn-err">${esc(st.err)}</div>` : ""}${testRes}
+      ${dSec("基本信息与连接", mainForm)}<section class="card">${adv}</section>${dangerSec}</div>${foot}`;
 }
 function mePage(tab) {
   if (!LIVE || !ME) return `<div class="card"><div class="empty">账号要经看板服务（labmon serve）打开才看得到。</div></div>`;
@@ -450,13 +472,13 @@ function mePage(tab) {
   if (tab === "security") return head + sess;
   const draft = popIs("acc-tok", M.name) ? POP.draft : {};
   const sel = draft.toks || (M.token_scopes || [])[0];
-  const opts = (M.token_scopes || []).map(s => `<option value="${esc(s)}"${s === sel ? " selected" : ""}>${esc(info[s]?.[0] || s)}：${esc(info[s]?.[1] || "")}</option>`).join("");
+  const opts = (M.token_scopes || []).map(s => `<label class="rg-to"><input type="radio" name="acs" data-pop-field="toks" value="${esc(s)}"${s === sel ? " checked" : ""}><span><b>${esc(info[s]?.[0] || s)}</b>${info[s]?.[1] ? `<div class="sm mut">${esc(info[s][1])}</div>` : ""}</span></label>`).join("");
   const toks = dSec("令牌", `<div class="sm mut" style="margin-bottom:8px">给脚本与命令行用（部署脚本、备份）：请求头带 <code>Authorization: Bearer &lt;令牌&gt;</code>。原文只在建好时显示一次，看板只存哈希。</div>
       ${tk.length ? `<div class="ulist">${tk.map(x => accItem(x, info)).join("")}</div>` : `<div class="empty">还没有令牌。</div>`}
       ${accShow("tok")}${accLine("tok")}`,
     `<span class="sm mut">${tk.length} 个</span><span class="sp"></span>${accountFormPop("tok", M.name, "创建令牌", `
       <label>名称<input class="ain" id="acn" data-pop-field="tokn" value="${esc(draft.tokn || "")}" placeholder="如：部署脚本" maxlength="40" autocomplete="off"></label>
-      <label>能做什么<select class="ain" id="acs" data-pop-field="toks">${opts}</select></label>`)}`);
+      <div class="field"><span>能做什么</span><div class="rg-tos" id="acs" role="radiogroup" aria-label="能做什么">${opts}</div></div>`)}`);
   if (tab === "tokens") return head + toks;
   // 没单独分配主机、但自己的项目在别的主机上有车道的，照实说在哪几台（与总览「开始使用」同一口径：myHosts）
   const seen = myHosts().filter(id => !(M.hosts || []).includes(id));
@@ -544,7 +566,9 @@ function onboardPop(n) {
   return popConfirm(btn, open, open ? `<form class="aform acc-pop-form" data-accf="onboard" method="post">
     <p class="sm mut">为 <b>${esc(n)}</b> 开通看板账号</p>
     <label>登录名<input class="ain" id="acun" data-pop-field="un" value="${esc(draft.un || "")}" maxlength="32" autocomplete="off" autocapitalize="off" spellcheck="false" required></label>
-    <label>账号角色<select class="ain" id="acur" data-pop-field="ur"><option value="user"${draft.ur !== "admin" ? " selected" : ""}>普通用户</option>
-      <option value="admin"${draft.ur === "admin" ? " selected" : ""}>管理员</option></select></label>
+    <div class="field"><span>账号角色</span><div class="seg form-seg" id="acur" role="radiogroup" aria-label="账号角色">
+      <button type="button" role="radio" aria-checked="${draft.ur !== "admin"}" class="${draft.ur !== "admin" ? "on" : ""}" data-pop-seg="ur" data-val="user">普通用户</button>
+      <button type="button" role="radio" aria-checked="${draft.ur === "admin"}" class="${draft.ur === "admin" ? "on" : ""}" data-pop-seg="ur" data-val="admin">管理员</button>
+    </div></div>
     ${accLine("pop")}<div class="pop-b"><button class="btn pri" type="submit" ${ACC.busy ? "disabled" : ""}>开通账号</button>${popX}</div></form>` : "", null, true);
 }

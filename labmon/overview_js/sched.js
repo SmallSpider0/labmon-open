@@ -81,7 +81,7 @@ function schedFlag(p, k) {
       `<div class="rn-note"><b>暂停 ${esc(pname(p.id))}</b>：所有主机（含之后加入的）不再放行它的新任务，正在跑的自然跑完（同 <code>labmon pause</code>）。要马上按停法停下正在跑的，用命令行 <code>labmon pause ${esc(p.id)} --now</code>。</div>
       ${whenPick("schp", "到期", POP.until, "无期限", "无期限：用完点「恢复」", {fresh: POP.wnow})}${err()}`, go("pgo", "暂停"), true);
 }
-const schedBtns = p => schedFlag(p, "focus") + " " + schedFlag(p, "paused");
+const schedBtns = p => { const bs = [schedFlag(p, "focus"), schedFlag(p, "paused")].filter(Boolean); return bs.length ? `<span class="sched-acts">${bs.join("")}</span>` : ""; };
 // 份额（调度卡与项目「管理」抽屉共用；#23 按人）：近期在用的项目 on（用过卡、占着卡、排着队）；su 是所有项目的用量和（use_sum，含已归档、卡上不列的）；同一人（pk，看板上没有的项目 pk 为 null、合起来算一份）
 // 的几个项目合起来算一份，应得是 1 ÷ 近期在用的人数 n，再按权重分给这人的项目（sw(pk) 是这人在用项目的权重和）；who 是这人的名字（普通用户看别人的为 null）
 const pkOf = p => p.pk ?? null;
@@ -126,7 +126,7 @@ function poolSummaryCard() {
       <td class="r">${p.placed}</td>
       <td class="r">${p.pending}${nofit ? ` <span class="badge b-bad">${nofit} 放不下</span>` : ""}</td></tr>`;
   }).join("");
-  return `<div class="card"><div class="chd wrap"><b>共有算力池</b><span class="sm mut">统一经 <code>labmon worker add pool</code>（或 <code>pool:&lt;id&gt;</code>）提交，按人公平份额即时落机与空闲窃取</span><span class="sp"></span><a class="sm" href="#/pool">详情 →</a></div>
+  return `<div class="card"><div class="chd wrap"><b>共有算力池</b><span class="sm mut" ${tip("提交命令：labmon worker add pool（或 pool:<id>）ROOT JOBS --project <项目>")}>按人公平份额自动挑机，空闲主机自动接管待放任务</span><span class="sp"></span><a class="sm" href="#/pool">详情 →</a></div>
     <div class="scroll"><table><tr><th>算力池</th><th class="r">在线主机</th><th class="r">空闲 / 总 GPU</th><th class="r">运行 / 排队</th><th class="r">已落机清单</th><th class="r">待放清单</th></tr>${rows}</table></div></div>`;
 }
 
@@ -167,12 +167,14 @@ function poolPage() {
     const lRows = pLists.map(v => {
       const link = D.projects.some(x => x.id === v.project) ? v.project : null;
       const st = v.nofit ? `<span class="badge b-bad">全池放不下</span> ${esc(v.why || "")}` : esc(v.why || "等待下一轮落机");
-      return `<tr><td>${projCell({project: v.project, link})}</td><td class="sm"><code>${esc(v.root)}/<b>${esc(v.jobs)}</b></code></td>
+      return `<tr><td>${projCell({project: v.project, link}, {title: true})}</td><td class="sm"><code>${esc(v.root)}/<b>${esc(v.jobs)}</b></code></td>
         <td class="sm">${esc(v.head || "—")}</td><td class="r sm">${v.n || "—"}</td>
         <td class="r sm nw">${v.since ? dur(now - v.since) : "—"}</td><td class="sm mut">${st}</td></tr>`;
     }).join("");
-    s += `<div class="card"><div class="chd wrap"><b>${esc(p.label)}</b><code class="sm">${esc(p.host_id)}</code>${modeTag}${memTag}<span class="sp"></span>
-      <span class="sm mut">在线 ${p.online}/${p.total} 台 · 空 ${p.free_gpus}/${p.gpus} 卡 · 已落机 ${p.placed} 条 · 待放 ${p.pending} 条</span></div>
+    const metaParts = [memTag, `<span class="sm mut">已落机 ${p.placed} 条 · 待放 ${p.pending} 条</span>`].filter(Boolean);
+    s += `<div class="card"><div class="chd wrap"><b>${esc(p.label)}</b><code class="sm">${esc(p.host_id)}</code>${modeTag}<span class="sp"></span>
+      <span class="sm mut">在线 ${p.online}/${p.total} 台 · 空 ${p.free_gpus}/${p.gpus} 卡</span></div>
+      <div class="row wrap" style="gap:4px 12px;margin:-4px 0 8px">${metaParts.join("")}</div>
       <div class="scroll"><table><tr><th>主机</th><th>状态</th><th class="r">空闲 / 总 GPU</th><th class="r">运行</th><th class="r">排队</th><th>租期</th></tr>${hRows}</table></div>
       ${pLists.length ? `<div class="sub">待放清单（${pLists.length} 条）</div><div class="scroll"><table><tr><th>项目</th><th>清单</th><th>队首</th><th class="r">待跑</th><th class="r">已等</th><th>状态 / 原因</th></tr>${lRows}</table></div>`
         : `<div class="sm mut" style="margin-top:8px">当前没有待放清单。提交命令：<code>labmon worker add ${esc(p.host_id)} ROOT JOBS --project &lt;项目&gt;</code></div>`}</div>`;

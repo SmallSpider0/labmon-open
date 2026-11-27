@@ -238,7 +238,7 @@ document.addEventListener("change", e => {               // 批量续租的勾�
   if ("bfor" in d && POP?.sel) { t.checked ? POP.sel.add(d.bfor) : POP.sel.delete(d.bfor); return; }
   if ("owner" in d && POP?.k === "owner") { POP.owner = t.value; return; }
   if ("achost" in d && POP?.k === "acc-hosts") { t.checked ? POP.sel.add(d.achost) : POP.sel.delete(d.achost); return; }
-  if ("pushkind" in d && POP?.k === "acc-push") { POP.kind = t.value; ACC.err = null; t.blur(); return render(false); }
+  if ("popField" in d && POP?.draft) { POP.draft[d.popField] = t.value; return render(false); }
   if ("regto" in d && POP) { POP.to = d.regto; POP.err = null; return render(false); }   // 换到哪台
   if ("assignto" in d && APICK && !APICK.busy) { APICK.to = d.assignto; APICK.err = null; return render(false); }   // 给项目用：抽屉内选项目
   if ("adopt" in d && ADOPT) { ADOPT.sel[d.adopt] = t.checked; return render(false); }    // 接上卡的勾选
@@ -287,6 +287,7 @@ tipBind({
 document.addEventListener("toggle", e => {
   if (e.target.matches?.("details.agal")) ST.set("agal", e.target.open);        // 主机页「给实验会话的提示」的开合（common.js 的 alertBox）
   if (e.target.matches?.("details.rk-more") && POP) POP.more = e.target.open;          // 弹窗里「细节」的开合（riskMore）
+  if (e.target.matches?.("details[data-extadv]") && EXT) EXT.advOpen = e.target.open;  // 外部主机抽屉「高级选项」开合
   if (e.target.matches?.("details.fold")) {
     const f = ST.get("cardOpen", {}), k = e.target.dataset.fold;
     if (!!f[k] === e.target.open) return;
@@ -387,6 +388,13 @@ document.addEventListener("click", e => {
   if (asg) { if (!asg.disabled) assignAct(asg.dataset.assign, asg.dataset); return; }
   const exb = e.target.closest?.("[data-ext]");
   if (exb) { if (!exb.disabled) extAct(exb.dataset.ext, exb.dataset); return; }
+  const pk = e.target.closest?.("button[data-pushkind]");
+  if (pk && POP?.k === "acc-push") { POP.kind = pk.dataset.pushkind; ACC.err = null; return render(false); }
+  const es = e.target.closest?.("button[data-extseg]");
+  if (es && EXT && !es.disabled) { EXT.form[es.dataset.extseg] = es.dataset.val; return render(false); }
+  const ps = e.target.closest?.("button[data-pop-seg]");
+  if (ps && POP?.draft && !ps.disabled) { POP.draft[ps.dataset.popSeg] = ps.dataset.val; return render(false); }
+  if (e.target.closest?.("[data-alexp]")) { AL_EXP = !AL_EXP; return render(false); }
   const fm = e.target.closest?.("[data-fman]");
   if (fm && LANOFF() && fm.dataset.fman === "go") return noNet(e, fm);
   if (fm) { if (!fm.disabled) manageAct(fm.dataset.fman, fm.dataset); return; }
