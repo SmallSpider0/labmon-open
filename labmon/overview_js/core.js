@@ -23,7 +23,6 @@ function route(h = location.hash) {
   let d = h.match(/^#\/log(?:\?(.*))?$/);
   if (d) return {kind: "log", f: Object.fromEntries(new URLSearchParams(d[1] || ""))};
   if (h === "#/fleet/guard") return {kind: "fleet", tab: BGTAB || "slots", drw: {k: "guard", id: ""}};
-  if (h === "#/fleet/pool") return {kind: "fleet", tab: BGTAB || "slots", drw: {k: "pool", id: ""}};
   if ((d = h.match(/^#\/fleet\/renew(?:\/(.+))?$/))) return {kind: "fleet", tab: BGTAB || "slots", drw: {k: "renew", id: d[1] ? dec(d[1]) : ""}};
   d = h.match(/^#\/fleet\/srv\/(.+)$/);
   if (d) return {kind: "fleet", tab: BGTAB || "slots", drw: {k: "srv", id: dec(d[1])}};
@@ -72,7 +71,7 @@ function closeDrw() {
 }
 function stepDrw(dir) {
   const d = route().drw;
-  if (!d || d.k === "new" || d.k === "guard" || d.k === "pool" || d.k === "renew" || d.k === "proj" || d.k === "arch" || d.k === "assign" || d.k === "account" || d.id === "+") return;
+  if (!d || d.k === "new" || d.k === "guard" || d.k === "renew" || d.k === "proj" || d.k === "arch" || d.k === "assign" || d.k === "account" || d.id === "+") return;
   const ids = d.k === "srv" ? srvOrder() : peopleOrder(), k = ids.indexOf(d.id);
   if (k >= 0 && ids.length > 1) nav(DH[d.k](ids[(k + dir + ids.length) % ids.length]));
 }
@@ -239,13 +238,13 @@ function navModel(r) {
       sub: p.no_work_since ? NO_WORK : p.generated ? `${ts(p.generated)} 更新` : ""})).concat(archItem(r))},
   ];
   const selfView = LIVE && ME && !ME.admin;
-  if (selfView) {               // 普通用户（#211）：按数据有无展示「我的资源」（我的服务器、共享盘；池成员另见算力池），隐藏全组人员与保活守护
+  if (selfView) {               // 普通用户（#211）：按数据有无展示「我的资源」（我的服务器、共享盘），隐藏全组人员与保活守护
     const F = D.fleet && !D.fleet.error ? D.fleet : null, nSrv = F ? F.servers.length + F.mine.length : 0;
-    const hasDisk = !!D.disk?.df, hasPool = !!D.pool, items = [];
+    const hasDisk = !!D.disk?.df, items = [];
     if (nSrv) {
       const fa = fleetAlerts().length;
       items.push({k: "fleet", href: "#/fleet", ico: icon("server"), label: "我的服务器", ab: "服务器",
-        on: r.kind === "fleet" && r.tab === "slots" && r.drw?.k !== "pool", bad: fa,
+        on: r.kind === "fleet" && r.tab === "slots", bad: fa,
         full: fa ? `我的服务器：${fa} 条提醒` : "我的服务器", sub: `${nSrv} 台`});
     }
     if (hasDisk) {
@@ -254,19 +253,13 @@ function navModel(r) {
         on: r.kind === "fleet" && r.tab === "disk", bad: da,
         full: da ? `共享盘：${da} 条告警` : "本人共享盘用量", sub: `剩 ${GB(D.disk.df.free)} GiB`});
     }
-    if (hasPool) {
-      const pc = poolCount();
-      items.push({k: "pool", href: DH.pool(), ico: icon("dash"), label: "算力池", ab: "算力池",
-        on: r.kind === "fleet" && r.drw?.k === "pool", bad: 0,
-        full: "算力池聚合概况", sub: pc.on ? `${pc.on} 台入池 · 借着 ${pc.lent}` : "算力池"});
-    }
     if (items.length) secs.push({id: "myres", name: "我的资源", ct: nSrv || "", sep: true, items});
   } else {
     if (D.fleet) {                // 各台在概况页里，侧栏不逐台列；「更多」里另列概况页的几个选项卡与保活守护
       const fa = fleetAlerts().length, F = D.fleet;
       secs.push({id: "fleet", name: "组内服务器", ct: F.servers.length + F.mine.length, sep: true, items: [{k: "fleet", href: "#/fleet", ico: icon("users"), label: "概况", ab: "组内", on: r.kind === "fleet", bad: fa,
         full: fa ? `组内服务器：${fa} 条提醒` : "组内服务器", sub: `${F.servers.length + F.mine.length} 台`,
-        subs: [["人员", "#/fleet/people", icon("user")], ["共享盘", "#/fleet/disk", icon("db")], ["保活守护", DH.guard(), icon("shield")], ["算力池", DH.pool(), icon("dash")]]}]});
+        subs: [["人员", "#/fleet/people", icon("user")], ["共享盘", "#/fleet/disk", icon("db")], ["保活守护", DH.guard(), icon("shield")]]}]});
     }
     if (!D.fleet && LIVE && ME?.admin && ME.scopes.includes("admin")) secs.push({id: "fleet", name: "组内", sep: true, items: [
       {k: "fleet", href: "#/fleet/people", ico: icon("users"), label: "人员", ab: "人员", on: r.kind === "fleet", full: "组内人员"}]});

@@ -1096,19 +1096,6 @@ class AuthTest(unittest.TestCase):
             S.reg_move("g", [it])
         self.assertEqual([x["key"].split(":")[1] for x in told()], ["move"])
 
-    def test_reg_move_refuses_pool_lent_host(self):
-        # #25：借给算力池的主机上放什么由看板定：页面上的「换到其他主机」搬不过去（旧代码照搬）
-        admin = make_token()
-        PJ.put_config("exp", 'id = "exp"\n')
-        first = {"host": "a", "project": "exp", "root": "/root", "jobs": "q.txt", "stop": "term"}
-        save_json(state_dir() / "snapshot.json", {"regs": [{"host": "a", "queues": [first]}]})
-        with mock.patch.object(S.W, "run_out", return_value=(0, "完成")) as run, mock.patch.object(S.L, "check", return_value={"ok": True}), \
-                mock.patch.object(S.PO, "lent_ids", return_value={"g"}):
-            status, _, body = self.call(self.lan + "/reg/move", {"to": "g", "items": [first]}, tok=admin)
-        self.assertEqual(status, 409, body)
-        self.assertIn("算力池借来的", body.decode())
-        run.assert_not_called()
-
     def test_host_assign_permissions_and_behavior(self):
         # #173：无登记自用主机「给项目用」：路由鉴权（need_host + need_project）、主备租约（lease.need）、仅自用主机、经 records.tell 通知实验会话
         admin = make_token("boss", role="admin", scopes=("project",))

@@ -114,16 +114,13 @@ BEGIN_STEPS = ["探一次：对方空着或轻用", "查共享盘、Python 与�
 
 
 def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=None, start=None, ovr=_ovr, step=None, light: bool = False,
-          away: bool = False, *, account: str | None = None, pool: bool = False, src: str = "看板页面上") -> str:
+          away: bool = False, *, account: str | None = None, src: str = "看板页面上") -> str:
     """借来用（已在借的就改约定时间与给哪些项目用）。先探一次：对方要么空着（GPU 上没有进程或只有 ka.sh 管的保活，worker 要卡时会停它；
     认作保活的 GPU 进程逐个核对在不在 ka.sh running 列出的进程组里，相对路径起的同一脚本 ka.sh 也认，#29），
     要么轻用（using：有 VS Code、终端或小实验，且 share 判为轻用）——轻用的要 light（页面上勾「对方在轻用」）；
     共享盘与 Python 在；再写进主机清单、下 guest（带给对方留的量）与截止指令、拉起 worker。返回说明；不能借就抛 ConfigError。
     step(note)：做完 BEGIN_STEPS 的一步就调一次（最后一步不调），看板上的借来用（fleetops.run_borrow）拿它显示进度。
     away：对方说好约定时间前不用（不给对方留余量），要有约定时间；改约定时按它重写（不勾就去掉）。
-    pool：算力池自动借（pool.want_borrow 经 fleetops 调，#25）：持有人开了入池就是同意，不记借的人（borrow_by），记 borrow_pool；
-    只许 GPU 上除保活外没有进程（VS Code、终端这类轻用照样给主人留预留）；until 是入池时段结束（全天的为 None）。
-    borrow.json 这台的 pool 子项记下容器的启动时刻（started：换了容器就还，pool._returns），再借时留着休息期、退避这些记忆。
     改约定真改了什么时经 records.tell 告诉用这台的项目（_tell_retime，#127）；src 是 tell 那句的来源（命令行 api.borrow 传「命令行 labmon borrow」）。"""
     LS.need("借用")                                  # 备用的看板服务不借（#163）：主那台在管这台的指令与归还
     via_op, step = step is not None, step or (lambda note=None: None)
@@ -136,8 +133,6 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
             "borrow_away": fmt_time(until, year=True) if away else None}
     what = (f"到 {fmt_time(until)}" if until else "没约定时间") + (f"，只给 {'、'.join(projects)} 用" if projects else "") \
         + (f"，{s['holder']} 说好这段时间不用" if away else "")
-    if F.borrowed(s) and (pool or s.get("borrow_pool")):     # 手动借与池借互斥：池借着的由持有人或管理员「收回」，不改约定
-        raise ConfigError(f"{label(s)} 正借给算力池：要用就往池里交清单（labmon worker add pool），要还给 {s['holder']} 就点「收回」")
     if F.borrowed(s):
         set_fleet_keys(keys, f"改借用 {label(s)} 的约定：{what}", sid=sid)
         _sync(sid, ovr)
@@ -145,15 +140,13 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
         log_events([{"kind": "borrow", "host": sid, "who": s["holder"], "msg": msg}])
         _tell_retime(s, keys, what, src)
         return msg
-    person, error = (None, None) if pool else person_of(account)
-    if error or (not pool and not person):
+    person, error = person_of(account)
+    if error or not person:
         raise ConfigError(error or f"账号 {account} 尚未关联组内人员")
     if sid in F.off_servers():
         raise ConfigError(f"{label(s)} 已关机")
     if s.get("share") == "private":
         raise ConfigError(f"{label(s)} 设为只自用（share = private）：不能借用")
-    if pool and s.get("share") == "borrow":
-        raise ConfigError(f"{label(s)} 设为仅手动借用（share = borrow）：不能由算力池自动借用")
     if sid in FO.busy() and not via_op:            # 看板上的借来用本身就是这台的操作（fleetops.start 已排过别的操作）
         raise ConfigError(f"{label(s)} 正在做平台操作")
     raw, err = (fetch or F.fetch)(s)
@@ -163,9 +156,7 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
     use = using(a)
     if not can_borrow(a):
         raise ConfigError(f"{label(s)} 上 {s['holder']} 在用（{use}），不是轻用，不能借")
-    if pool and F._brief_work(a):                   # 算力池只在 GPU 空着或只有保活时借（AGENTS.md「只守真会出事的规则」）
-        raise ConfigError(f"{label(s)} 的 GPU 上有 {s['holder']} 的进程（{F._brief_work(a)}）：算力池只在 GPU 空着或只有保活时借")
-    if use and not light and not pool:
+    if use and not light:
         raise ConfigError(f"{label(s)} 上 {s['holder']} 在轻用（{use}）：确认和这人说好轻用时也借，再勾「对方在轻用」")
     kp = {**reserve_for(sid), "hold": bool(use), **({"away": round(until)} if away else {})}
     step(f"{s['holder']} 在轻用（{use}）" if use else "只有保活" if a["work"] else "GPU 空着")
@@ -190,18 +181,13 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
         _, current = _server(sid)
         if F.borrowed(current) or current["holder"] != s["holder"] or current["job"] != s["job"]:
             raise ConfigError(f"{label(s)} 的登记已变，请刷新后再试")
-        if pool and not (current.get("lend") and F.lend_open(current, time.time())[0]):   # 探测期间持有人关了入池、改了时段：按最新的配置不借
-            raise ConfigError(f"{label(s)} 刚关了入池或不在入池时段里了：算力池不借")
         set_fleet_keys({"borrow_since": fmt_time(time.time(), year=True), "borrow_returned": None, "borrow_by": person, "borrow_light": True if use else None,
-                        "borrow_pool": True if pool else None, **keys},
-                       f"{'算力池借来' if pool else '借用'} {label(s)}：{what}", sid=sid)
+                        **keys},
+                       f"借用 {label(s)}：{what}", sid=sid)
     ka_on = any(w["kind"] == "keepalive" and not w.get("ours") for w in a["work"])   # 借来时对方的保活在：还的时候不停它（labmon 自己开的不算）
 
-    def fresh(st):                                   # 这一次借用重新记；算力池的记忆（休息期、退避、nofit）跨借用留着
-        mem = dict((st.get(sid) or {}).get("pool") or {})
-        if pool:
-            mem.update(started=a.get("started"), since=round(time.time()), idle=None, busy=None)   # busy 只算这一次借用的
-        st[sid] = {"warned": [], "ka": ka_on, **({"pool": mem} if mem else {})}
+    def fresh(st):                                   # 这一次借用重新记
+        st[sid] = {"warned": [], "ka": ka_on}
     _update(fresh)
     notes = []
     if _sync(sid, ovr):
@@ -209,8 +195,8 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
     step(notes[0] if notes else what)
     rc, out = (start or _start)(sid)
     notes.append("worker 已拉起" if rc == 0 else f"worker 拉起失败（退出码 {rc}）")
-    msg = f"{'算力池借来' if pool else '借来'} {label(s)}：{what}；{keep_text(kp)}；{'，'.join(notes)}"
-    log_events([{"kind": "borrow", "host": sid, "who": s["holder"], "msg": msg, "detail": out.strip()[-400:], **({"pool": True} if pool else {})}])
+    msg = f"借来 {label(s)}：{what}；{keep_text(kp)}；{'，'.join(notes)}"
+    log_events([{"kind": "borrow", "host": sid, "who": s["holder"], "msg": msg, "detail": out.strip()[-400:]}])
     return msg
 
 
@@ -320,18 +306,16 @@ def reserve_for(sid: str, t: float | None = None, bump: float = 1.0) -> dict:
 
 def _keep(hid: str, t: float | None = None) -> dict:
     """借来的这台现在给对方留的量（含这次借用被挤到后的倍数）；hold：借来时对方在轻用，要预先留出（空着时借的不留）；
-    away：对方说好不用到几点（主机清单的 borrow_away，还没到才带），那以前 worker 不留。
-    pool：算力池借来的（#25）：worker 见到主人回来（guest.owner）整台不放新任务。"""
+    away：对方说好不用到几点（主机清单的 borrow_away，还没到才带），那以前 worker 不留。"""
     h = next((x for x in user_hosts() if str(x.get("id")) == hid), None) or {}
     b, now = h.get("borrow") or {}, time.time() if t is None else t
     return {**reserve_for(hid, t, (load_json(state_dir() / "borrow.json", {}).get(hid) or {}).get("bump") or 1.0),
-            "hold": bool(b.get("light")), **({"away": round(b["away"])} if b.get("away") and now < b["away"] else {}),
-            **({"pool": 1} if b.get("pool") else {})}
+            "hold": bool(b.get("light")), **({"away": round(b["away"])} if b.get("away") and now < b["away"] else {})}
 
 
 def _drift(cur: dict | None, want: dict) -> bool:
     """指令里的预留与该有的差得多（任一项差 10% 以上，或指令没带）：要重下。"""
-    return (not cur or cur.get("hold", True) != want["hold"] or cur.get("away") != want.get("away") or bool(cur.get("pool")) != bool(want.get("pool"))
+    return (not cur or cur.get("hold", True) != want["hold"] or cur.get("away") != want.get("away")
             or any(abs((cur.get(k) or 0) - want[k]) > 0.1 * want[k] for k in RESERVE_MIN))
 
 
@@ -339,8 +323,7 @@ def _want(b: dict, cut: float | None, keep: dict | None = None) -> dict:
     """借来的主机上该有的临时指令：{(kind, target): {at, keep}}。guest 只在直接借的主机上下，带着给对方留的量。"""
     out = {} if b.get("swap") else {("guest", ",".join(b["for"]) if b.get("for") else None):
                                     {"at": None, "keep": {**{k: keep[k] for k in RESERVE_MIN}, "hold": keep["hold"],
-                                                          **({"away": keep["away"]} if keep.get("away") else {}),
-                                                          **({"pool": 1} if keep.get("pool") else {})} if keep else None}}
+                                                          **({"away": keep["away"]} if keep.get("away") else {})} if keep else None}}
     if cut:
         out[("deadline", "borrow")] = {"at": cut, "keep": None}
     return out
@@ -435,7 +418,7 @@ def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), prob
     wrote：借用期间本地盘 labmon 目录之外新写的（worker 的 storage.wrote：只列出来，不动，wrote_note）。
     stuck：借用期间 worker 要卡时停不了卡上的保活（worker 状态的 keepalive.stuck，#102）：结果里照实写一句，不只说保活是谁的。
     gone：
-    - True（换了容器，算力池 R5）：先 ssh 到这台 worker stop 与删 overrides.json；若连不上（rc == 255），经共用 worker_home 的在用主机删共享盘上的 overrides.json，
+    - True（容器已换）：先 ssh 到这台 worker stop 与删 overrides.json；若连不上（rc == 255），经共用 worker_home 的在用主机删共享盘上的 overrides.json，
       不抛错阻塞归还；不 kill 旧进程组、不停保活、不清 /tmp/labmon、不开保活、不恢复看门狗。
     - "stopped"（#171：link_step 判定掉线且平台核对确认作业不在运行）：容器已没，不 ssh 这台、不 probe，直接经共用 worker_home 的在用主机删 overrides.json 并记归还。"""
     cfg, s = _server(sid)
@@ -476,7 +459,7 @@ def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), prob
                     if stopped else "容器换了（续租或重启），上面的 worker 与任务已随旧容器停下，新容器没动")
         msg = f"已把 {sid} 还给 {s['holder']}{took}：{why_gone}" + (f"；{ovr_note}" if ovr_note else "")
         _update(lambda st: st.setdefault(sid, {}).update(returning=None, done=round(time.time())))
-        log_events([{"kind": "borrow_return", "host": sid, "who": s["holder"], "msg": msg, **({"pool": True} if s.get("borrow_pool") else {})}])
+        log_events([{"kind": "borrow_return", "host": sid, "who": s["holder"], "msg": msg}])
         return msg
     # 卡上的保活是借用期间 worker 开的：登记成看板的保活，不停再开（#102）；认不出就照旧
     ad, adn = (adopt or F.ka_adopt)(s, cfg, since, time.time(), mine) if ka_cmd and since else ("no", "")
@@ -500,10 +483,9 @@ def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), prob
              f"卡上的保活是借用期间起来的，{adn}，没登记成看板的保活" if ad == "unsure" and theirs else None,
              f"借用期间 worker 要卡时停不了它（{stuck['why']}，{fmt_time(stuck['t0'])} 起），任务和它同卡分算力" if stuck else None,
              wd, wrote_note(wrote, s["holder"])]
-    msg = (f"已把 {sid} 还给 {s['holder']}{took}：" + "；".join(x for x in notes if x)
-           + ("。" if s.get("borrow_pool") else f"。可以告诉 {s['holder']} 了"))      # 算力池借的是持有人事先同意的，不用另行告诉
+    msg = f"已把 {sid} 还给 {s['holder']}{took}：" + "；".join(x for x in notes if x) + f"。可以告诉 {s['holder']} 了"
     _update(lambda st: st.setdefault(sid, {}).update(returning=None, done=round(time.time())))
-    log_events([{"kind": "borrow_return", "host": sid, "who": s["holder"], "msg": msg, **({"pool": True} if s.get("borrow_pool") else {})}])
+    log_events([{"kind": "borrow_return", "host": sid, "who": s["holder"], "msg": msg}])
     return msg
 
 
@@ -577,9 +559,7 @@ def _say(st: dict, key: str, kind: str, hid: str, who: str | None, msg: str, evs
 
 def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish, ovr=_ovr) -> tuple[list[str], list[dict]]:
     """每轮全局采集后调用：补齐指令、到点提醒、对方在用时提醒、要还且跑完了就归还；给借来的主机填 e["borrow"]。
-    返回 (要弹的通知, wake 条目 [{key, msg, projects}]，projects 为 None 是各项目都报)。
-    算力池借的（borrow.pool，#25）：不给实验会话发 borrow*（池清单的去向由 pool 经 records.tell 说），提醒只进记录、不弹通知（还不成的照弹）；
-    主人回来、要还与搬走由 pool.tick 管，这里不另提醒“对方在用”。"""
+    返回 (要弹的通知, wake 条目 [{key, msg, projects}]，projects 为 None 是各项目都报)。"""
     cfg_arg = cfg
     cfg = cfg if cfg is not None else F.conf() or {}
     sts, fst = load_json(state_dir() / "borrow.json", {}), F._load_state()
@@ -588,7 +568,7 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
         b, hid = h.get("borrow"), str(h.get("id"))
         if not b or h.get("returned") or hid not in by:
             continue
-        e, swap, pool = by[hid], bool(b.get("swap")), bool(b.get("pool"))
+        e, swap = by[hid], bool(b.get("swap"))
         lease = None if swap else F.lease_end(fst.get(hid) or {}, cfg)
         cut, why = cutoff(b, lease)
         st = sts.setdefault(hid, {})
@@ -606,14 +586,12 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
             late, back, tight = ((st.get("last") or {}).get(k) for k in ("late", "back", "tight"))   # 免得 borrow_cut、borrow_back 消失再出现、labmon wait 重复叫醒
             late, back = late or [], back or []      # worker 不在时项目探针那边车道没有 held，沿用的 late 不会报出 borrow_cut
         who, name, msgs = b.get("holder") or "原使用人", e.get("label", hid), []
-        say = lambda key, kind, msg: _say(st, key, kind, hid, b.get("holder"), msg, evs,   # noqa: E731
-                                          [] if pool and kind != "borrow_return" else msgs)   # 算力池的只进记录（还不成的照弹）
-        hl = e.get("health") or {}                   # #171：掉线判定（health.link_step）+ 平台核对作业不在运行 → 按已停归还（手动借与池借共用）
+        say = lambda key, kind, msg: _say(st, key, kind, hid, b.get("holder"), msg, evs, msgs)   # noqa: E731
+        hl = e.get("health") or {}                   # #171：掉线判定（health.link_step）+ 平台核对作业不在运行 → 按已停归还
         if not swap and hl.get("state") == "down" and FO.job_stopped(hid, after=b.get("since"), down_since=hl.get("since"))[0]:
             try:
                 done = finish_fn(hid, gone="stopped")
-                if not pool:
-                    msgs.append(done)
+                msgs.append(done)
                 st.update(returning=None, done=round(t))
                 out += msgs
                 returned_any = True
@@ -647,15 +625,15 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
                 f"{_jobs(run)} 跑完就还给 {who}" if run else f"现在还给 {who}") + _late_text(late, why, user=True))
             if run and t >= cut + OVER_S:
                 say(f"over:{round(cut)}", "borrow_due", f"{name} 已超过约定时间 {(t - cut) / 3600:.0f} 小时，{_jobs(run)} 还在跑；"
-                    + (f"跑完再换回给 {who}" if swap else "要马上还就在看板上点「收回」" if pool else "要马上还就在看板上点「现在停」"))
-        if back and not st.get("back") and not away_on and not pool:
+                    + (f"跑完再换回给 {who}" if swap else "要马上还就在看板上点「现在停」"))
+        if back and not st.get("back") and not away_on:
             st["back"] = round(t)
             say(f"back:{round(t)}", "borrow_back", f"{name} 上" + (f"有了别人的 GPU 进程（{'、'.join(back[:3])}）：不再放新任务，" if swap else
                 f" {who} 用得比预留多（{'；'.join(back[:3])}）：这部分不再放新任务，") + (
                 "正在跑的照常跑完" if run else "可以还了") + ("" if swap else f"；和 {who} 商量要不要现在还"))
         elif ws and not back:
             st["back"] = None
-        if tight and not st.get("tight") and not pool:
+        if tight and not st.get("tight"):
             st["tight"] = round(t)
             say(f"tight:{round(t)}", "borrow_back", f"{name} 快撞上限（{tight}）：正在跑的{(' ' + _jobs(run)) if run else ''}照常跑完、不放新任务；"
                 + f"要不要停由你和 {who} 商量，要停就在看板上点「现在停」")
@@ -673,8 +651,7 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
                 done = finish_fn(hid, wrote=(ws.get("storage") or {}).get("wrote"), stuck=(ws.get("keepalive") or {}).get("stuck"),
                                  mine=(ws.get("keepalive") or {}).get("mine"),
                                  kill=[j["pid"] for j in ws.get("running", []) if j.get("hold") and j.get("pid")])
-                if not pool:                         # 算力池的归还只进记录（finish 记了 borrow_return）
-                    msgs.append(done)
+                msgs.append(done)
                 st.update(returning=None, done=round(t))
                 out += msgs
                 returned_any = True
@@ -688,8 +665,6 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
         e["borrow"] = {**b, "cutoff": cut, "why": why, "returning": st.get("returning"), "now": bool(st.get("returning") and st.get("now")), "back": back, "tight": tight,
                        "overdue": bool(cut and t >= cut and run), "keep": kp, "other": g.get("other"),
                        "late": late, "late_do": late_do(why) if late else None, "late_say": late_do(why, user=True) if late else None}
-        if pool:                                     # 算力池的：实验会话不往这台加清单、不用知道它借没借着
-            continue
         if st.get("returning") or (cut and t >= cut):           # 要还的原因照实写：到点、用户点了跑完就还、现在停
             due = f"到了约定时间（{fmt_time(cut)}）" if cut and t >= cut else "正在停下，停完就还" if st.get("now") else "要还了（用户点了跑完就还）"
             # key 再带要还的时刻（#129）：点了跑完就还、撤销、再点是新的一次；换给自己的没有 returning，取约定时刻
@@ -715,9 +690,9 @@ def check(hosts: list[dict], t: float, cfg: dict | None = None, finish_fn=finish
         if ab and t - ab["t"] < OVER_S:
             wake.append({"key": f"borrow_back:{ep}:away:{ab['t']}", "projects": ps, "host": hid, "msg": ab["msg"]})
     cfg_after = (F.conf() or {}) if (returned_any and cfg_arg is None) else cfg
-    for s in cfg_after.get("servers", []):           # 还了的：一天内 wait 还报，登记在上面的队列要换主机（算力池的由 pool 搬回池里）
+    for s in cfg_after.get("servers", []):           # 还了的：一天内 wait 还报，登记在上面的队列要换主机
         rt = parse_time(s.get("borrow_returned"))
-        if s.get("borrow_since") and rt and t - rt < DONE_KEEP_S and not s.get("borrow_pool"):
+        if s.get("borrow_since") and rt and t - rt < DONE_KEEP_S:
             wake.append({"key": f"borrow_done:{s['id']}:{round(rt)}", "projects": _projects(s.get("borrow_for")), "host": s["id"],
                          "msg": f"{s['id']} 已于 {fmt_time(rt)} 还给 {s['holder']}：登记在它上面、没跑完的队列要换到别的主机（labmon worker add）"})
     log_events(evs, t)

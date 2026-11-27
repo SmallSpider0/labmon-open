@@ -276,7 +276,7 @@ function topline() {
   const gone = D.hosts.filter(h => h.returned && !retShown(h));
   const pl = poolLanes().filter(l => l.unfinished);
   const hosts = D.hosts.filter(h => !gone.includes(h) && (!h.pool || pl.length || !h.ok)).map(h => {
-    if (h.pool) return `<span class="nw ${h.ok ? "mut" : ""}" style="${h.ok ? "" : "color:var(--bad)"}" ${tip("交给算力池、还没放到哪台的清单：看板挑一台入池的服务器放过去\n" + (pl.map(l => `${laneName(l, D.hosts)}：${laneState(l)}`).join("\n") || "") + (h.ok ? "" : "\n" + (h.error || "这一轮没读到池里的清单")))}>算力池里待放 ${pl.length} 条清单</span>`;
+    if (h.pool) return `<span class="nw ${h.ok ? "mut" : ""}" style="${h.ok ? "" : "color:var(--bad)"}" ${tip("交给算力池、还没放到哪台的清单：看板挑一台算力池服务器放过去\n" + (pl.map(l => `${laneName(l, D.hosts)}：${laneState(l)}`).join("\n") || "") + (h.ok ? "" : "\n" + (h.error || "这一轮没读到池里的清单")))}>算力池里待放 ${pl.length} 条清单</span>`;
     if (h.returned) return `<span class="nw mut" ${tip(`已归还（${ts(h.returned)}），不再连接；还有任务没跑完`)}><span class="cdot" style="background:var(--faint)"></span> ${esc(h.label)} · 已归还</span>`;
     if (h.ephemeral) {
       const cv = h.ok ? cpuView(h) : null;

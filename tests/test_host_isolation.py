@@ -27,12 +27,12 @@ from labmon import backup as BK  # noqa: E402
 from labmon import borrow as B  # noqa: E402
 from labmon import config as C  # noqa: E402
 from labmon import disk as DK  # noqa: E402
+from labmon import fleet as F  # noqa: E402
 from labmon import health as H  # noqa: E402
 from labmon import lan as L  # noqa: E402
 from labmon import lease as LS  # noqa: E402
 from labmon import overview as O  # noqa: E402
 from labmon import platform as P  # noqa: E402
-from labmon import pool as PO  # noqa: E402
 from labmon import renew as R  # noqa: E402
 from labmon import serve as SV  # noqa: E402
 from labmon import users as U  # noqa: E402
@@ -272,34 +272,21 @@ class DomainIsolationTest(unittest.TestCase):
         self.assertEqual(called, [])
         self.assertIsNone(e["auto_res"])
 
-    def test_pool_and_borrow_respect_share_classification(self):
+    def test_borrow_respects_share_classification(self):
         self.hf.write_text(
-            '[[hosts]]\nid = "c1"\nssh = "root@198.51.100.1"\nplatform_job = "A"\nplatform_holder = "AA"\ndata_root = "/data/me"\n\n'
-            '[[hosts]]\nid = "c_priv"\nssh = "root@198.51.100.2"\nplatform_job = "A2"\nplatform_holder = "AA"\ndata_root = "/data/me"\nshare = "private"\n\n'
-            '[[hosts]]\nid = "c_bor"\nssh = "root@198.51.100.3"\nplatform_job = "A3"\nplatform_holder = "AA"\ndata_root = "/data/me"\nshare = "borrow"\n\n'
-            '[[hosts]]\nid = "ext1"\nssh = "u@203.0.113.1"\nplatform_kind = "other"\ndata_root = "/data/me"\n\n'
             '[fleet]\ninterval = 600\n\n'
             '[[fleet.servers]]\nid = "s_priv"\nholder = "AA"\nssh = "root@h"\nport = 1\npool = "P"\nshare = "private"\n\n'
             '[[fleet.servers]]\nid = "s_bor"\nholder = "AA"\nssh = "root@h"\nport = 2\npool = "P"\nshare = "borrow"\n'
         )
         make_token("AA", role="user", scopes=("read",))
-        by = {h["id"]: h for h in C.active_hosts()}
-        self.assertIsNone(PO._self_bar(by["c1"]))
-        self.assertIn("private", PO._self_bar(by["c_priv"]))
-        self.assertIn("borrow", PO._self_bar(by["c_bor"]))
-        self.assertIn("独立主机", PO._self_bar(by["ext1"]))
-
-        who = U.Ident("AA", "user", frozenset({"read", "project"}), "token", "k")
-        for sid in ("s_priv", "s_bor"):
-            with self.assertRaises(U.Denied) as err:
-                PO.set_lend(sid, True, None, who, False, False)
-            self.assertEqual(err.exception.code, 409)
         with self.assertRaises(C.ConfigError) as e1:
             B.begin("s_priv", account="AA")
         self.assertIn("private", str(e1.exception))
+        # 非法 share 值应被 fleet.conf 拒绝
+        self.hf.write_text('[fleet]\ninterval = 600\n\n[[fleet.servers]]\nid = "s_bad"\nholder = "AA"\nssh = "root@h"\nport = 1\npool = "P"\nshare = "invalid"\n')
         with self.assertRaises(C.ConfigError) as e2:
-            B.begin("s_bor", pool=True)
-        self.assertIn("borrow", str(e2.exception))
+            F.conf()
+        self.assertIn("share", str(e2.exception))
 
 
 class WorkerPathAndInitTest(unittest.TestCase):

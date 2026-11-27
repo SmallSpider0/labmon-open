@@ -176,7 +176,6 @@ function canOpenDrawer(r) {
   if (r.kind !== "fleet") return false;
   if (!LIVE || ME?.admin) return (D.fleet && !D.fleet.error) || (r.drw.k === "person" && ME?.scopes.includes("admin"));
   if (r.drw.k === "srv") return !!(D.fleet && !D.fleet.error && srvById(r.drw.id));
-  if (r.drw.k === "pool") return !!D.pool;
   return false;
 }
 function drawer(r) {
@@ -200,7 +199,7 @@ function drawer(r) {
   if (DKEY && DKEY !== key && DKEY.startsWith("person:")) { FDK = {}; if (FPED && !FPED.isNew) FPED = null; }
   if (DKEY?.startsWith("renew:") && d.k !== "renew") renewLeave();     // 切到别的抽屉也算离开续租
   if (DKEY?.startsWith("assign:") && d.k !== "assign") APICK = null;
-  const html = d.k === "srv" ? srvDrawer(d.id) : d.k === "new" ? newDrawer(d.id) : d.k === "guard" ? guardDrawer() : d.k === "pool" ? poolDrawer() : d.k === "renew" ? renewDrawer(d.id) : d.k === "proj" ? projDrawer(d.id)
+  const html = d.k === "srv" ? srvDrawer(d.id) : d.k === "new" ? newDrawer(d.id) : d.k === "guard" ? guardDrawer() : d.k === "renew" ? renewDrawer(d.id) : d.k === "proj" ? projDrawer(d.id)
     : d.k === "assign" ? assignDrawer(d.id) : d.k === "arch" ? archDrawer() : directoryDrawer(d);
   const section = d.section || "";
   const previous = pane.dataset.section;
@@ -232,7 +231,6 @@ document.addEventListener("change", e => {               // 批量续租的勾�
   if ("pack" in d && POP) { POP.ack = t.checked; return render(false); }
   if ("wack" in d && FWIZ) { FWIZ.ack = t.checked; return render(false); }
   if ("bok" in d && POP) { POP.ok = t.checked; return render(false); }
-  if ("lon" in d && POP?.k === "lend") { POP.on = t.checked; POP.err = null; return render(false); }
   if ("baway" in d && POP) { POP.away = t.checked; return borrowSync(); }
   if ("blight" in d && POP) { POP.light = t.checked; return render(false); }
   if ("bfor" in d && POP?.sel) { t.checked ? POP.sel.add(d.bfor) : POP.sel.delete(d.bfor); return; }
@@ -370,8 +368,6 @@ document.addEventListener("click", e => {
   if (wp && FWIZ) { FWIZ = {...FWIZ, person: wp.dataset.wp, err: null}; wizPreview(); return; }
   const ws = e.target.closest?.("[data-ws]");
   if (ws && FWIZ && !ws.disabled) { FWIZ = {...FWIZ, spec: ws.dataset.ws, err: null}; wizPreview(); return; }
-  const ld = e.target.closest?.("[data-lend]");
-  if (ld) { if (!ld.disabled) lendAct(ld.dataset.lend, ld.dataset); return; }
   const ac = e.target.closest?.("[data-acc]");
   if (ac) { if (!ac.disabled && !ACC.busy) accAct(ac.dataset.acc, ac.dataset); return; }
   const sc = e.target.closest?.("[data-sch]");

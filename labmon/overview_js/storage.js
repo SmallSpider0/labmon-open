@@ -266,7 +266,7 @@ function hostPage(id) {
   const h = D.hosts.find(x => x.id === id);
   if (!h) return `<div class="card empty">没有这台主机（可能已归还）。<a href="#/">回总览</a></div>`;
   const st = h.status;
-  let s = alertBox(alertsOf(h), ST.get("agal", false)) + hostStrip(h) + (h.ephemeral ? "" : renewCard(h) + poolCard(h));
+  let s = alertBox(alertsOf(h), ST.get("agal", false)) + hostStrip(h) + (h.ephemeral ? "" : renewCard(h));
   const evTab = {id: "events", name: "事件", note: recNote({host: h.id}, 40), body: () => recSlice({host: h.id}, 40)};
   if (!st) return s + `<div class="card empty">${esc(h.error || h.status_error || "这台主机上还没有 worker 状态。")}</div>` + recCard("host", [evTab]);
   s += (h.ephemeral ? "" : adoptCard(h) + assignCard(h)) + resCard(h);

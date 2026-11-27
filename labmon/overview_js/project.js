@@ -59,8 +59,7 @@ const freeCards = h => { const gs = h?.status?.info?.gpus || [], busy = new Set(
 // info 是给人挑的：空着几张卡、租期
 function regTo(x, pid) {
   if (x.standalone) return [];
-  return (D.regs || []).filter(y => y.state === "active" && !y.standalone && y.host !== x.host && canUseHost(y.host) && nrm(y.home) === nrm(x.home)
-      && !D.hosts.find(e => e.id === y.host)?.borrow?.pool).map(y => {        // 算力池借来的与独立主机不列：不共享 worker 目录
+  return (D.regs || []).filter(y => y.state === "active" && !y.standalone && y.host !== x.host && canUseHost(y.host) && nrm(y.home) === nrm(x.home)).map(y => {        // 独立主机不列：不共享 worker 目录
     const h = D.hosts.find(e => e.id === y.host), b = h?.borrow, ov = h?.status?.overrides || [];
     const no = b?.for?.length && !b.for.includes(pid) ? `借来的，只给 ${b.for.join("、")} 用` : "";
     const note = no || [ov.some(o => o.kind === "drain") ? "drain 中，不放行" : "", !h?.worker_up ? "worker 没在跑，拉起后放行" : ""].filter(Boolean).join("，");
@@ -259,7 +258,7 @@ function projRegSec(p) {
   let s = grp.map(({x, qs}) => {
     const pool = x.state === "pool", off = x.state !== "active" && !pool, h = !off && D.hosts.find(e => e.id === x.host), n = regTally(x, qs, p);
     const name = h ? `<a href="#/host/${encodeURIComponent(x.host)}" ${tip(h.label)}>${esc(hostShort(h))}</a>` : `<span ${tip(x.host)}>${esc(x.label || x.host)}</span>`;
-    const tags = [pool ? `<span class="badge b-acc" ${tip("交给算力池、还没放到哪台的清单：看板挑一台入池的组内服务器放过去")}>等着放到某台</span>` : x.state === "unlisted" ? `<span class="badge b-mute" ${tip("主机清单里已经没有这一台，它的清单记录还留在共享盘上")}>主机清单里没有</span>`
+    const tags = [pool ? `<span class="badge b-acc" ${tip("交给算力池、还没放到哪台的清单：看板挑一台算力池服务器放过去")}>等着放到某台</span>` : x.state === "unlisted" ? `<span class="badge b-mute" ${tip("主机清单里已经没有这一台，它的清单记录还留在共享盘上")}>主机清单里没有</span>`
       : off ? `<span class="badge b-mute">已归还${x.returned ? " " + esc(ts(x.returned)) : ""}</span>` : "",
       x.stale ? `<span class="badge b-warn" ${tip(off ? "代读它的那台在用主机这一轮没连上，或本机不在内网" : "这台这一轮没读到状态")}>这轮没读到，用的是 ${x.t ? esc(ts(x.t)) : "上一轮"} 的</span>` : ""].filter(Boolean);
     const shown = qs.filter(q => !regQuiet(p, x, q)), hid = qs.length - shown.length;

@@ -486,7 +486,7 @@ def build(cfg: dict, probes: dict, out_dir: Path, lan: dict | None = None, glob_
     _history(cfg, snap, state, hist, hist_path, t)
     snap["gpu_mine"] = gpu_mine(cfg["id"], [h["id"] for h in snap["hosts"]], glob_snap, t)
     snap["rebalance"] = (glob_snap.get("rebalance") or {}).get(cfg["id"])    # 挪法建议（rebalance.suggest 在工作台那一轮算好的）：_lane 的 borrow_cut 与 _rebalance 用
-    # 算力池里这个项目待放的清单为什么还没放、从何时起等（pool.tick 在工作台那一轮写的，#25）：池车道的等待原因与 pool_wait 告警用
+    # 算力池里这个项目待放的清单为什么还没放、从何时起等（全局快照 pool.lists）：池车道的等待原因与 pool_wait 告警用
     snap["pool"] = {k: v for k, v in ((glob_snap.get("pool") or {}).get("lists") or {}).items() if v.get("project") == cfg["id"]}
     ratios, quiet = _lanes(cfg, snap, state, raw_by_host, t)
     _sync_returned_done(cfg, raw_by_host, sd, t)
@@ -751,7 +751,7 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
         info["fs_skew"] = raw["fs_skew"]
     lane.update(info)
     if hcfg[q["host"]].get("pool"):                  # 算力池里待放的（#24）：没有 worker 管，等看板放到某台；不报队列进程不在
-        pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {}     # 为什么还没放（pool.tick，#25）
+        pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {}     # 为什么还没放（全局快照 pool.lists）
         done = pv.get("done")                         # 池里跑完了的（pool.lists 的 done，#86）：不算在等、不写已等多久
         lane.update(pool=True, managed=True, alive=False, waiting=None if lane.get("paused") or done else POOL_WAIT + (f"：{pv['why']}" if pv.get("why") else ""),
                     pool_since=None if done else pv.get("since"))     # 从何时起在池里等（页面上写已等多久，#89）
@@ -802,24 +802,20 @@ def _lane(q: dict, cfg: dict, snap: dict, raw_by_host: dict, work: dict, t: floa
     snap["lanes"].append(lane)
     pv = (snap.get("pool") or {}).get(PO.key(q.get("root"), q.get("jobs"))) or {} if lane.get("pool") else {}
     if pv.get("since") and unfinished and not pv.get("done") and not lane.get("paused") and t - pv["since"] >= PO.POOL_TELL_S:
-        # 池里待放满 2 小时：一条清单一条，只给会话（池里排队是常态，不标红）。key 带车道不带起点：别的清单等满另报，回池重新计时不变（REWAKE_S 内不再叫醒）；
-        # 借着的都放不下、也借不到（pool.tick 的 nofit）换一个 key 另报一次（#130：以前 key 只带项目，第一条报过以后都不再叫醒）
+        # 池里待放满 2 小时：一条清单一条，只给会话（池里排队是常态，不标红）。key 带车道不带起点：别的清单等满另报，回池重新计时不变（REWAKE_S 内不再叫醒）
         nofit = bool(pv.get("nofit"))
         alerts.append(alert(f"pool_wait:{cfg['id']}:{q['id']}" + (":nofit" if nofit else ""), "agent",
                             f"{q.get('jobs')} 在算力池里等了 {fmt_dur(t - pv['since'])}（{pv.get('why') or '还没放到哪台'}）。"
-                            + ("池里此刻放不下它、也没有能借的入池服务器：要早点跑就登记到自己能用的主机" if nofit else "不急就接着等；要早点跑可以登记到自己能用的主机")
+                            + ("池里此刻放不下它：要早点跑就登记到自己能用的主机" if nofit else "不急就接着等；要早点跑可以登记到自己能用的主机")
                             + "（labmon worker add <主机> ROOT JOBS --project <项目>，一条清单只归一台，它就出了池）"))
-    if returned and (hcfg[q["host"]].get("borrow") or {}).get("pool") and PO._ours({"stop": q.get("reg_stop")}):
-        pass                                         # 算力池借过的主机还掉了：池的清单由看板搬回池里（pool.tick），不叫会话换主机；借给池之前留下的旧登记池不收，照下面报（#88 E）
-    elif returned:
+    if returned:
         if unfinished:
             left = f"{hcfg[q['host']]['label']} 已归还，{q['name']} 还有 {unfinished} 个任务没跑完"
             # key 带主机与归还时刻（#129）：搬到别的主机、那台又还掉是新的一件；归还期间不变
             alerts.append(alert(f"returned_unfinished:{q['id']}:{q['host']}:{int(returned)}", "both",
                                 f"{left}：把这条清单 labmon worker add 到别的在用主机（车道跟着登记走，monitor.toml 不用改）",
                                 f"{left}：可在项目的「管理」里换到别的主机，或由实验会话登记到别的主机"))
-    elif lane.get("held") == "deadline" and unfinished and (bw := next(x for x in snap["hosts"] if x["id"] == q["host"]).get("borrow") or {}).get("late") \
-            and not bw.get("pool"):                  # 算力池借来的：看板自己会搬（pool.tick），不叫会话
+    elif lane.get("held") == "deadline" and unfinished and (bw := next(x for x in snap["hosts"] if x["id"] == q["host"]).get("borrow") or {}).get("late"):
 
         # 借来的主机上队首被约定归还挡住（borrow.late_jobs 认定约定归还是这台最早的截止）：这台不会再放它，叫醒会话换主机或请用户延长约定
         # （怎么办的那句取 borrow.late_do）；只读 worker 已有的状态，不改放行规则。归还后由上面的 returned_unfinished 接手，续租截止挡住的不报

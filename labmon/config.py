@@ -298,6 +298,17 @@ def _read_toml(path: Path) -> dict:
         raise ConfigError(f"读不了配置 {path}：{e}") from e
 
 
+LEGACY_POOL_KEYS = ("lend", "lend_hours", "borrow_pool")
+
+
+def check_legacy_pool(hf: Path, item: dict) -> None:
+    """旧借用型算力池字段校验唯一实现（#212 已删除）：user_hosts() 与 fleet.conf() 共用，
+    确保残留 lend / lend_hours / borrow_pool 的主机绝不会进入调度、采集或自动拉起流程。"""
+    bad = [k for k in LEGACY_POOL_KEYS if k in item]
+    if bad:
+        raise ConfigError(f"{hf} 里 {item.get('id')} 含有已删除的旧借用型算力池字段（{'、'.join(bad)}），请从主机清单移除")
+
+
 def user_hosts() -> list[dict]:
     """用户级主机清单里的主机（还没补缺省值；已归还的也在，带 returned）：[[hosts]]，加上借过的组内服务器（guest_host）。
     借用中由看板拉起 worker，还了（borrow_returned）就和归还的自用主机一样不再连接。
@@ -311,9 +322,13 @@ def user_hosts() -> list[dict]:
     if any(str(h.get("id")) == POOL for h in hosts):
         raise ConfigError(f"{hf} 的 [[hosts]] 不能叫 {POOL}：它是算力池的保留 id")
     for h in hosts:
+        check_legacy_pool(hf, h)
         if h.get("borrow_until"):
             h["borrow"] = {"holder": h.get("borrow_from"), "since": None, **_until(h["borrow_until"]), "for": None, "swap": True}
-    return hosts + [guest_host(s, hosts) for s in (d.get("fleet") or {}).get("servers", []) if s.get("borrow_since")]
+    servers = (d.get("fleet") or {}).get("servers", [])
+    for s in servers:
+        check_legacy_pool(hf, s)
+    return hosts + [guest_host(s, hosts) for s in servers if s.get("borrow_since")]
 
 
 def _until(v) -> dict:
@@ -626,18 +641,16 @@ def pool_home(hosts: list[dict] | None = None) -> str | None:
 
 def guest_host(s: dict, hosts: list[dict]) -> dict:
     """借来的组内服务器当调度主机用时的样子：id 用组内服务器的，照抄一台在用自用主机（_guest_tpl）的 python、data_root、worker_home（显式配的；与 pool_home 同一个目录选择）、shared、mounts、checks
-    （同一套镜像与共享盘），ssh 主机密钥沿用组内服务器的 known_hosts。hosts：[[hosts]] 各块。
-    算力池自动借来的（borrow_pool，#25）：borrow.pool 为真，名字写「节点（池 · 持有人）」。"""
+    （同一套镜像与共享盘），ssh 主机密钥沿用组内服务器的 known_hosts。hosts：[[hosts]] 各块。"""
     from .fleet import state_file                 # fleet 在上层 import 本模块，这里只能延迟 import
     tpl = _guest_tpl(hosts)
     node = str(s.get("ssh", "")).rsplit(".", 1)[-1] or str(s["id"])
-    pool = bool(s.get("borrow_pool"))
     return {**{k: tpl[k] for k in ("python", "data_root", "worker_home", "ka_bin", "shared", "mounts", "checks") if k in tpl},
-            "id": str(s["id"]), "label": f"{node}（池 · {s.get('holder')}）" if pool else f"{node}（借 {s.get('holder')}）", "ssh": s.get("ssh"), "port": s.get("port", 22),
+            "id": str(s["id"]), "label": f"{node}（借 {s.get('holder')}）", "ssh": s.get("ssh"), "port": s.get("port", 22),
             "known_hosts": str(state_file("known_hosts")), "worker": "auto", "returned": s.get("borrow_returned"),
             "borrow": {"holder": str(s.get("holder")), "since": parse_time(s.get("borrow_since")), **_until(s.get("borrow_until")),
                        "for": s.get("borrow_for") or None, "light": bool(s.get("borrow_light")),
-                       "away": parse_time(s.get("borrow_away")), **({"pool": True} if pool else {})}}
+                       "away": parse_time(s.get("borrow_away"))}}
 
 
 def _merge_items(base: list, extra: list, key: str) -> list:
@@ -730,7 +743,7 @@ def set_returned(hid: str, when: str | None) -> Path:
 @_hosts_edit
 def set_fleet_holder(sid: str, holder: str, job: str | None = None) -> Path:
     """在用户级主机清单 [[fleet.servers]] 里把这一台的 holder 改掉（开机换人时），只改这一行，行尾注释与其余原样保留；
-    换了人时去掉入池的两行（lend、lend_hours：新持有人没同意过，#24）。job：平台作业名与名字不同时（同名作业已在跑，加了后缀）写一行 job，相同就去掉。"""
+    job：平台作业名与名字不同时（同名作业已在跑，加了后缀）写一行 job，相同就去掉。"""
     p = hosts_file()
     lines = p.read_text().splitlines(keepends=True) if p.exists() else []
     for s, end, bid in _blocks(lines, "[[fleet.servers]]"):
@@ -742,10 +755,8 @@ def set_fleet_holder(sid: str, holder: str, job: str | None = None) -> Path:
         m = re.match(r"""(\s*holder\s*=\s*)("[^"]*"|'[^']*')(.*)$""", lines[k].rstrip("\n"))
         if not m:
             raise ConfigError(f"{p} 里 {sid} 的 holder 行看不懂：{lines[k].strip()}")
-        changed = m.group(2)[1:-1] != holder
         lines[k] = f'{m.group(1)}"{holder}"{m.group(3)}\n'
-        # 换了人：入池（lend、lend_hours，#24）是原持有人同意的，新持有人没同意过，一并去掉
-        block = [l for l in lines[s + 1:end] if not re.match(r"\s*job\s*=", l) and not (changed and re.match(r"\s*lend(_hours)?\s*=", l))]
+        block = [l for l in lines[s + 1:end] if not re.match(r"\s*job\s*=", l)]
         if job and job != holder:
             block.insert(next(i for i, l in enumerate(block) if re.match(r"\s*holder\s*=", l)) + 1, f'job = "{job}"   # 平台作业名（同名作业已在跑，加了后缀）\n')
         return _write_checked(p, "".join(lines[:s + 1] + block + lines[end:]), f"{sid} 的使用人改为 {holder}")
@@ -927,8 +938,7 @@ def add_mine_host(hid: str, job: str, ssh: str, port: int, pool: str, label: str
     raw = _read_toml(p) if p.exists() else {}
     hosts = raw.get("hosts", [])
     fleet = raw.get("fleet")
-    keys = {"returned": None, "platform_holder": holder, "platform_job": job, "platform_pool": pool, "borrow_until": None, "borrow_from": None,   # 上次借来时的约定不带过来
-            "lend": None, "lend_hours": None}   # 入池（#79）：开出来的自用主机一律不入池、要入池由持有人手动开（维护者 11-18 定），恢复的、照抄的都不带
+    keys = {"returned": None, "platform_holder": holder, "platform_job": job, "platform_pool": pool, "borrow_until": None, "borrow_from": None}   # 上次借来时的约定不带过来
     for s, end, bid in _blocks(lines, "[[hosts]]"):
         h = next((x for x in hosts if str(x.get("id")) == bid), {})
         if h.get("ssh") == ssh and int(h.get("port") or 22) == int(port):

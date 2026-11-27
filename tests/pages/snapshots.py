@@ -20,7 +20,6 @@ from labmon.config import STALE_PAD_S, STALE_RUNS, cfg_spec, stale_limit
 from labmon.fleet import local_writes
 from labmon import hostcheck as HC
 from labmon.overview import EVENT_CATS, EVENT_KINDS, gpu_busy
-from labmon.pool import summary as pool_summary
 from labmon.users import Access, Ident, view
 
 BAD = "<i id=x>&\"'<!--<script>alert(1)</script>"
@@ -146,8 +145,6 @@ def _host_a() -> dict:
     return {"id": "srv-a", "label": "srv-a（A6000）", "error": None, "status_error": None, "status": status, "lan_off": False, "auto": True,
             "lw": local_writes(status["info"]["rootfs"], status["storage"]["wrote"], status["storage"]["own"]),     # overview._annotate
             "platform": {"job": "ME"}, "clock": int(NOW), "stopped": None, "age": 4.0, "worker_up": True,
-            # 自用主机入池（#79，pool.tick 写的 pool.lend_view）：池里的清单直接放上来，此刻跑着 1 条
-            "lend": SELF_LEND,
             "health": {"state": "ok", "fails": 0, "since": None, "why": None}, "lease_end": NOW + 5 * 86400, "auto_res": {"at": NOW + 4 * 86400, "off": False}, "renew": None,
             "log": ["2026-11-07 07:37:49 开始 alpha_train_s1（GPU 0 GPU-aaaa-0），独占卡", "2026-11-07 07:40:01 等待 alpha_train_s2：显存不够"],
             "done": [_done("alpha_train_s0", "proj-a", "0", NOW - 5 * H, NOW - 4.5 * H, root_a, q_a, with_host=["beta_old"]),
@@ -244,16 +241,11 @@ def _server(sid: str, holder: str, state: str | None, **kw) -> dict:
             "last": NOW - 300, "error": None, "down": None, "fails": 0, "since": None, "started": NOW - 3 * 86400, "lease_end": NOW + 4 * 86400, "off": None,
             "last_job": NOW - 100, "state": state, "sample": sample, "strip": _strip(state or "idle"), "h0": int(NOW // 3600 * 3600) - 167 * 3600, "idle_h": 0,
             "s7": _stats(0.2, 0.7), "s30": _stats(0.3, 0.6), "guard": {"on": False, "status": "off", "since": None}, "borrow": None, "using": "",
-            "lend": {"on": False, "hours": None, "open": False, "say": "没入池"},          # 入池（pool.lend_view，#24）
             "reserve": {"vram": 2.0, "ram": 6.6, "cpu": 1.0, "peak": {"vram": 7.5, "ram": 9.2, "cpu": 1.5}, "n": 208, "bump": 1.0}}
     base.update(kw)
     base["lease_cut"] = base["lease_end"] - H if base["lease_end"] else None     # 对方租期截止（borrow.cutoff：到期前 1 小时）
     base["lw"] = local_writes(sample["root"], wrote) if sample else None         # fleet.server_lw
     return base
-
-
-SELF_LEND = {"on": True, "hours": None, "open": True, "lent": False, "returning": False, "rest": None, "say": "入池，全天；跑着池里 1 条清单",
-             "mine": True, "placed": 1, "bar": None, "holder": "ME"}
 
 
 def _fleet(mine_host: dict) -> dict:
@@ -277,12 +269,8 @@ def _fleet(mine_host: dict) -> dict:
         _server("srv-e", "PERSON4", "down", down="连不上：timeout", since=NOW - H, last=NOW - H, fails=3, lease_end=NOW + 2 * 86400, strip=[None] * 168,
                 guard={"on": True, "status": "fail", "fail": {"msg": "ssh 失败"}, "at": NOW + 600, "since": NOW - H}, reserve=None),
         _server("srv-f", "PERSON5", "off", off={"t": NOW - 86400, "holder": "PERSON5"}, lease_end=None, guard={"on": False, "status": "off", "since": None}, reserve=None, idle_h=0, strip=[None] * 168),
-        _server("srv-g", "PERSON6", "idle", pool="pool-private", public=False, guard={"on": True, "status": "wait", "since": NOW - 30 * 60, "at": NOW + 30 * 60},
-                lend={"on": True, "hours": "22:00-09:00", "open": False, "say": "入池，22:00 开始"}),
-        # 算力池借着的（#25）：持有人开了入池，看板自动借来跑池里的清单（borrow.pool，by 是「算力池」；lend.lent）
-        _server("srv-h", "PERSON7", "job", guard={"on": False, "status": "borrowed"}, reserve=None,
-                borrow={"since": NOW - 2 * H, "until": NOW + 8 * H, "for": None, "by": "算力池", "away": None, "returned": None, "pool": True},
-                lend={"on": True, "hours": None, "open": True, "lent": True, "returning": False, "rest": None, "say": "算力池借着"})]
+        _server("srv-g", "PERSON6", "idle", pool="pool-private", public=False, guard={"on": True, "status": "wait", "since": NOW - 30 * 60, "at": NOW + 30 * 60}),
+        _server("srv-h", "PERSON7", "job", guard={"on": False, "status": "off", "since": None}, reserve=None)]
     # 自用主机（#58）：字段与组内服务器同名，sample 与探针的 analyze 同形（fleet.from_worker 由 worker 状态换出：按任务归组、不带 pid、没有保活进程树单独的量）
     info = mine_host["status"]["info"]
     mine = [{"id": "srv-a", "holder": "ME", "job": "ME", "label": mine_host["label"], "pool": "pool-private", "ssh": "root@192.0.2.1", "port": 15155, "mine": True, "public": False,
@@ -297,7 +285,7 @@ def _fleet(mine_host: dict) -> dict:
                                  {"kind": "job", "label": "labmon 之外：jupyter", "mb": 150, "n": 1, "names": [], "etime": None, "cwd": None, "owner": "ME"},
                                  {"kind": "keepalive", "label": "保活", "mb": 700, "n": 1, "names": [], "etime": None, "cwd": None}]},
              "strip": _strip("job"), "h0": int(NOW // 3600 * 3600) - 167 * 3600, "idle_h": 0, "s7": _stats(0.9, 0.05), "s30": _stats(0.85, 0.1),
-             "lw": mine_host["lw"], "lend": mine_host.get("lend")}]
+             "lw": mine_host["lw"]}]
     holders = [{"holder": h, "servers": [s], **_stats(0.3, 0.6), "borrowed": [], "lent": []}
                for h, s in (("PERSON3", "srv-d"), ("PERSON4", "srv-e"), ("PERSON6", "srv-g"), ("GONE", "srv-z"))]
     # 借卡（#52）：ME 借 OWNER 的 srv-b 16 小时，OWNER 那边这段记成“借出”；ME 的自用主机 srv-a 也有用量
@@ -421,17 +409,6 @@ def overview() -> dict:
     d = {"generated": NOW, "hosts": [a, b], "colors": {"proj-a": "#7F77DD", "proj-b": "#D85A30"}, "notices": [],
             "lan": {"ok": True, "since": None, "checked": NOW}, "wake": [], "event_kinds": EVENT_KINDS, "event_cats": EVENT_CATS,
             "fleet": _fleet(a), "disk": _disk(), "occ": {"srv-a": occ_a, "srv-b": occ_b}, "regs": _regs(a, b),
-            # 算力池（pool.tick，#25）：各待放清单为什么还没放（键「目录|清单」）；在借着的主机上的 since 是这一轮的时刻，没有 why 的是这一轮正放出去
-            "pool": {"lists": {
-                "/data/me/proj-a/pq|jobs/p.txt": {"project": "proj-a", "root": "/data/me/proj-a/pq", "jobs": "jobs/p.txt", "host": "pool", "since": NOW - H,
-                                                  "why": "池里借着的服务器都放不下（srv-h：显存不够）；没有能借的入池服务器（srv-g 不在入池时段）"},
-                "/data/me/proj-b/pq2|jobs/p2.txt": {"project": "proj-b", "root": "/data/me/proj-b/pq2", "jobs": "jobs/p2.txt", "host": "srv-h", "since": NOW,
-                                                    "why": "池里借着的服务器都放不下（srv-h：内存不够）"},
-                "/data/me/proj-a/pq3|jobs/p3.txt": {"project": "proj-a", "root": "/data/me/proj-a/pq3", "jobs": "jobs/p3.txt", "host": "pool", "since": NOW - 5 * 60},
-                # 池里跑完了的（#86）：不算在等，抽屉里收在后面
-                "/data/me/proj-a/pq4|jobs/cpu.txt": {"project": "proj-a", "root": "/data/me/proj-a/pq4", "jobs": "jobs/cpu.txt", "host": "pool", "since": NOW - 3 * H,
-                                                     "why": "清单里的行都跑完了：不用了就 labmon worker rm pool 撤掉，往清单里加了行会接着放", "done": True}},
-                "gone": []},
             "rebalance": {"proj-a": dict(REBAL), "proj-b": {"why": ["srv-a 上本项目 11-10 22:59 后没活，接不了：srv-b 上 jobs/b3.txt 的队尾 hold_b 是占位任务，不挪"], "from": NOW + 9 * H}},
             "sched": {"cap_min": 30.0, "hl_h": 24.0, "use_sum": 22.1, "projects": [
                 {"id": "proj-a", "person": "amy", "pk": "5a1c0e7d9b2f", "puse": 22.1, "w": 1, "use": 18.9, "cards": 1.0, "queued": 2, "waiting": 2, "wait_avg": 12.5, "wait_n": 3, "focus": {"until": NOW + 6 * H, "hosts": None}, "paused": None},
@@ -458,7 +435,6 @@ def overview() -> dict:
                          {"id": "proj-older", "title": None, "t": NOW - 20 * 86400, "regs": [], "skipped": []}],
             "hostcheck": hostcheck(), "server": {"role": "primary", "id": "dashboard-host-a1b2c3", "since": NOW - 86400, "holder": None, "renew": None,
                                                  "until": None, "bad": None, "home": None, "say": ""}}
-    d["pool"]["summary"] = pool_summary(d, cfg={})
     return d
 
 
@@ -557,8 +533,6 @@ def overview_evil() -> dict:
     F["mine"][0]["sample"]["work"][0].update(label="任" + BAD, cwd="/d/" + BAD)
     F["mine"][0]["error"] = "错" + BAD
     F["servers"][2]["guard"]["fail"]["msg"] = "败" + BAD
-    F["servers"][-2]["lend"].update(say="池" + BAD, hours="22:00-" + BAD)     # 算力池（#76）：入池那一句与时段、池里等着的清单
-    d["pool"]["lists"]["坏|" + BAD] = {"project": "evil", "root": "/r/" + BAD, "jobs": "j/" + BAD, "host": "主" + BAD, "since": NOW - H, "why": "因" + BAD}
     F["unknown"][0]["label"] = "未知" + BAD
     me, owner = F["holders"][-2:]
     me["borrowed"][0]["from"] = "主" + BAD
@@ -651,8 +625,8 @@ def project() -> dict:
     lanes = [lane(la, "车道 1", "srv-a", "/data/me/proj-a/q1", "jobs/q1.txt", total=5, done=1, failed=1, unfinished=3, eta_ts=NOW + 7 * H),
              lane(lb, "车道 2", "srv-a", "/data/me/proj-a/q2", "jobs/q2.txt", paused="临时指令 pause", held="pause", holding=True, has_hold=True, total=2, unfinished=2),
              lane(lc, "车道 1", "srv-b", "/data/me/proj-a/b2", "jobs/b2.txt", waiting="等 beta_eval_s7 跑完", stuck="推演到 7 天后还没轮到", total=2, done=1, unfinished=1),
-             # 交给算力池、还没放到哪台的（#24，collect._lane 的 pool）：没有 worker 管，等着放到某台
-             lane("pq/jobs/p.txt", "车道 1", "pool", "/data/me/proj-a/pq", "jobs/p.txt", pool=True, waiting="在算力池里等着放到某台：池里借着的服务器都放不下（srv-h：显存不够）", pool_since=NOW - H,
+             # 交给算力池、还没放到哪台的（collect._lane 的 pool）：没有 worker 管，等着放到某台
+             lane("pq/jobs/p.txt", "车道 1", "pool", "/data/me/proj-a/pq", "jobs/p.txt", pool=True, waiting="在算力池里等着放到某台：池里主机都放不下（srv-h：显存不够）", pool_since=NOW - H,
                   fs_skew=None, total=1, unfinished=1),
              lane("ph/jobs/h.txt", "车道 1", "srv-h", "/data/me/proj-a/ph", "jobs/h.txt", alive=True, total=2, done=1, unfinished=1, eta_ts=NOW + 25 * 60)]
     gpu = lambda i, used, util: {"index": i, "name": "NVIDIA RTX A6000", "util": util, "mem_used": used, "mem_total": 46068.0, "temp": 51.0, "power": 87.5, "power_limit": 300.0}  # noqa: E731
@@ -669,13 +643,10 @@ def project() -> dict:
               "loadavg": [1.0, 1.0, 1.0], "cpu_pct": 6.9, "cpu": {"used": 1.1, "quota": None, "cpus": 16, "pct": 6.9}, "mounts": [], "checks": [],
               "borrow": {"holder": "OWNER", "since": NOW - 16 * H, "until": None, "for": ["proj-a"], "light": True, "cutoff": NOW + 6 * 86400, "why": "OWNER 的租期到期，提前 1 小时",
                          "returning": None, "now": False, "back": [], "tight": None, "overdue": False, "keep": {"vram": 2.0, "ram": 14.5, "cpu": 1.0, "bump": 1.0, "hold": False}, "swap": None}},
-             # 算力池借来的（#25、#78）：池放过去的清单在这台上跑，项目「主机」里有它
-             {"id": "srv-h", "label": "srv-h（池 · PERSON7）", "ok": True, "error": None, "gpus": [gpu(0, 12000.0, 80.0)], "busy": [{"i": 0, "now": 80.0, "m10": 80.0, "h1": 80.0, "cov": 3600, "d1": 40.0, "d1cov": 7200}],
+             {"id": "srv-h", "label": "srv-h", "ok": True, "error": None, "gpus": [gpu(0, 12000.0, 80.0)], "busy": [{"i": 0, "now": 80.0, "m10": 80.0, "h1": 80.0, "cov": 3600, "d1": 40.0, "d1cov": 7200}],
               "gpu_procs": [], "cgroup": {"cpu_quota": 8.0, "mem_used": 3e9, "mem_limit": 6.5e10, "mem_rss": 1e9},
-              "loadavg": [1.0, 1.0, 1.0], "cpu_pct": 3.0, "mounts": [], "checks": [],
-              "borrow": {"holder": "PERSON7", "since": NOW - 2 * H, "until": NOW + 8 * H, "for": None, "light": False, "cutoff": NOW + 8 * H, "why": "入池时段结束",
-                         "returning": None, "now": False, "back": [], "tight": None, "overdue": False, "keep": {"vram": 2.0, "ram": 4.0, "cpu": 1.0, "bump": 1.0, "hold": False}, "swap": None, "pool": True}},
-             {"id": "pool", "label": "算力池", "pool": True, "ok": True, "error": None}]        # 算力池（collect._hosts 的 pool，#24）：一张小卡
+              "loadavg": [1.0, 1.0, 1.0], "cpu_pct": 3.0, "mounts": [], "checks": [], "borrow": None},
+             {"id": "pool", "label": "算力池", "pool": True, "ok": True, "error": None}]        # 算力池（collect._hosts 的 pool）：一张小卡
     hist = []
     for k in range(144):
         t = NOW - (144 - k) * 300
@@ -1053,10 +1024,10 @@ def overview_user() -> dict:
 
 
 def overview_user_member() -> dict:
-    """#211：绑定组内人员 OWNER 且为算力池成员的普通用户快照（经真实 users.view 产出）。"""
+    """#211：绑定组内人员 OWNER 的普通用户快照（经真实 users.view 产出；PR 1 删旧池后 pool 为 None，本人服务器与共享盘正常）。"""
     from unittest.mock import patch
-    from labmon import pool as PO, users as U
-    with patch.object(U, "person_of", return_value=("OWNER", None)), patch.object(PO, "member", return_value=True):
+    from labmon import users as U
+    with patch.object(U, "person_of", return_value=("OWNER", None)):
         return view(Ident("amy", "user", frozenset({"read", "project"}), "session", "k"), overview(),
                     Access({"proj-a", "proj-old"}, {"srv-a"}, {"srv-a"}))
 

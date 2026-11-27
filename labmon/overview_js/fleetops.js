@@ -361,7 +361,7 @@ function renewDrawer(id) {
   const R = RPICK, lock = !ops || FCAP?.pop === "renew" || R.busy, {ids} = rpBody(R), need = sv.filter(x => ids.includes(x.id) && FRISKY(x) && !R.ack.has(x.id));
   const row = x => { const br = rpBorrowed(x), dis = x.off || !!br, on = R.sel.has(x.id) && !dis;
     const w = x.off ? ["已关机：要用就开机"]
-      : br ? [`${br.pool ? "正借给算力池：先在「借用」里点「收回」还掉" : "正借来在用：先在它的「借用」里还掉"}（若已被平台停掉连不上，先点「与平台核对」，确认作业不在运行后会自动归还）再续租`]
+      : br ? ["正借来在用：先在它的「借用」里还掉（若已被平台停掉连不上，先点「与平台核对」，确认作业不在运行后会自动归还）再续租"]
       : renewWarn(x), nm = x.mine ? x.label : x.holder;
     return `<div class="rp-row"><input type="checkbox" data-rsel="${esc(x.id)}" ${on ? "checked" : ""} ${dis || lock ? "disabled" : ""} aria-label="续租 ${esc(nm)}">
       <div class="rp-m"><div class="rp-h"><b>${esc(nm)}</b><span class="sm mut">${esc(x.id)} · ${fKind(x)}</span>${fState(x)}<span class="sp"></span><span class="sm nw">${x.lease_end ? leaseHtml(x.lease_end) : "—"}</span></div>

@@ -599,8 +599,8 @@ def preview(cfg: dict, kind: str, sid: str | None = None, person: str | None = N
     out.update(summary(c), spec=chosen_spec, spec_name=spec_name(specs, chosen_spec), nodes=nodes,
                sid=sid_of(nodes[0], port) if port and len(nodes) == 1 and same_spec else None, image_src=src, job=job_n)
     if kind == "move":
-        out["after"] = (f"换好后原自用主机 {old['id']} 标成已归还，新节点接入自用（照抄现有自用主机，不自动入池，worker 自动拉起；原来的队列登记可到新主机页接上）" if mine
-                        else f"换好后按新节点与端口重新登记（删掉旧的 {old['id']}，不带原入池设置），给出新的连接命令")
+        out["after"] = (f"换好后原自用主机 {old['id']} 标成已归还，新节点接入自用（照抄现有自用主机，worker 自动拉起；原来的队列登记可到新主机页接上）" if mine
+                        else f"换好后按新节点与端口重新登记（删掉旧的 {old['id']}），给出新的连接命令")
     elif mine and old and not old.get("mine"):
         out["after"] = "开好后接入自用：主机清单里这台从组内服务器移到自用主机（照抄现有自用主机，worker 自动拉起、开保活）"
     elif mine and not old:
@@ -613,7 +613,7 @@ def preview(cfg: dict, kind: str, sid: str | None = None, person: str | None = N
     elif (old or {}).get("mine"):
         out["after"] = f"开好后这台从 {old['holder']} 的自用主机移到组内服务器，交给 {name or '？'}（自用主机 {old['id']} 标成已归还）"
     elif old and chosen_spec and orig_spec and not same_spec:
-        out["after"] = f"改选了规格，开好后若落到新节点会按新 id 重新登记、删掉旧的 {old['id']}（不带原入池设置）"
+        out["after"] = f"改选了规格，开好后若落到新节点会按新 id 重新登记、删掉旧的 {old['id']}"
     known = info.get("images") or {}
     repo, tag = _repo_of(img or "")
     tags = next((v for k, v in known.items() if k == repo or repo.endswith("/" + k) or k.endswith("/" + repo)), None)

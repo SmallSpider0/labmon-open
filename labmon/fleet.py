@@ -25,8 +25,6 @@
     port = 15158
     pool = "pool-private"
     # guard = true                  # 保活守护开不开；不写的公用池开、专用池关（页面上「保活守护」里改）
-    # lend = true                   # 入池（#24）：持有人同意空着时给算力池用（页面上「我的账号 → 我的服务器」或抽屉的「入池设置」里改；换人时去掉）
-    # lend_hours = "22:00-09:00"    # 入池的时段：每天一段，可跨零点；不写是全天
 
     [[fleet.rules]]                 # 只写例外（可以一条都没有）：正则匹配 GPU 进程与各级父进程的命令行、工作目录
     match = "/root/demo_eval/"
@@ -74,7 +72,7 @@ from pathlib import Path
 
 from . import lan as L
 from . import lease as LS
-from .config import GIB, POOL, POOL_LABEL, ConfigError, _read_toml, all_hosts, fmt_time, guest_host, host_defaults, hosts_file, parse_time, set_fleet_keys
+from .config import GIB, LEGACY_POOL_KEYS, POOL, ConfigError, _read_toml, all_hosts, check_legacy_pool, fmt_time, guest_host, host_defaults, hosts_file, parse_time, set_fleet_keys  # noqa: F401
 from .health import container_step, lease_due, link_step
 from .health import lease_end as _lease_end
 from .records import log_events
@@ -149,12 +147,12 @@ def conf(path: Path | None = None) -> dict | None:
         s = {**s, "id": str(s["id"]), "holder": str(s["holder"])}
         if s["id"] == POOL:
             raise ConfigError(f"{hf} 的 [[fleet.servers]] 不能叫 {POOL}：它是算力池的保留 id")
-        _lend_check(hf, s)
+        _legacy_pool_check(hf, s)
         s["job"] = str(s.get("job") or s["holder"])          # 平台作业名：缺省就是名字，同名作业已在跑时加了后缀
         s.setdefault("label", s["holder"])
         c["servers"].append(s)
-    for h in d.get("hosts") or []:          # 自用主机也能入池（#79）：同样的两项、同一条校验
-        _lend_check(hf, {**h, "id": str(h.get("id"))})
+    for h in d.get("hosts") or []:
+        _legacy_pool_check(hf, {**h, "id": str(h.get("id"))})
     if len({s["id"] for s in c["servers"]}) != len(c["servers"]):
         raise ConfigError(f"{hf} 的 [[fleet.servers]] id 重复")
     c["rules"] = []
@@ -168,48 +166,12 @@ def conf(path: Path | None = None) -> dict | None:
     return c
 
 
-def _lend_check(hf, s: dict) -> None:
-    """入池的两项（lend、lend_hours）与可选共享分类（share）写得对不对：组内服务器与自用主机（#79）共用。"""
+def _legacy_pool_check(hf, s: dict) -> None:
+    """复用 config.check_legacy_pool 拦截旧借用型算力池字段（#212），并校验可选共享分类（share，#114）。"""
     from .config import SHARE_MODES
-    if "lend" in s and not isinstance(s["lend"], bool):
-        raise ConfigError(f"{hf} 里 {s['id']} 的 lend 要写 true 或 false")
-    if s.get("lend_hours") is not None and lend_span(s["lend_hours"]) is None:
-        raise ConfigError(f"{hf} 里 {s['id']} 的 lend_hours「{s['lend_hours']}」认不出：写成 \"22:00-09:00\" 这样（每天一段，可跨零点）")
+    check_legacy_pool(hf, s)
     if "share" in s and s["share"] is not None and (not isinstance(s["share"], str) or s["share"] not in SHARE_MODES):
         raise ConfigError(f"{hf} 里 {s['id']} 的 share 只能写 {' / '.join(SHARE_MODES)}，写的是 {s['share']!r}")
-
-
-LEND_RE = re.compile(r"\s*(\d{1,2}):(\d\d)\s*-\s*(\d{1,2}):(\d\d)\s*")
-
-
-def lend_span(v) -> tuple[int, int] | None:
-    """入池的时段（[[fleet.servers]] 的 lend_hours，#24）"HH:MM-HH:MM" → (起, 止) 一天里的分钟；可跨零点（起 > 止），起止相同算全天。
-    认不出为 None（fleet.conf 校验、页面提交都经它）。"""
-    m = LEND_RE.fullmatch(v) if isinstance(v, str) else None
-    if not m:
-        return None
-    a, b, c, d = (int(x) for x in m.groups())
-    if a > 23 or c > 24 or b > 59 or d > 59 or (c == 24 and d):
-        return None
-    return a * 60 + b, c * 60 + d
-
-
-def lend_open(s: dict, t: float) -> tuple[bool, float | None]:
-    """这台此刻在不在入池时段里与下一次变化的时刻（epoch 秒，按看板本机时间算；全天的为 None）：(在不在, 何时变)。
-    没开入池的为 (False, None)。「我的服务器」的状态与 C 的自动借（时段结束就是借用的截止）共用。"""
-    if not s.get("lend"):
-        return False, None
-    sp = lend_span(s.get("lend_hours")) if s.get("lend_hours") else None
-    if not sp or sp[0] == sp[1] % 1440:
-        return True, None
-    lt = time.localtime(t)
-    now = lt.tm_hour * 60 + lt.tm_min
-    a, b = sp
-    inside = a <= now < b if a < b else now >= a or now < b
-    nxt = b if inside else a
-    day0 = t - (now * 60 + lt.tm_sec)
-    at = day0 + nxt * 60
-    return inside, at if at > t else at + 86400
 
 
 def borrowed(s: dict) -> bool:
@@ -218,11 +180,10 @@ def borrowed(s: dict) -> bool:
 
 
 def borrower(s: dict, cfg: dict | None) -> str | None:
-    """这一台（这次或上一次）借给了谁：算力池自动借的（borrow_pool，#25）是「算力池」（POOL_LABEL，按人统计不把它当一个人），
-    其余是借的人（borrow_by；只有 #70 上线前的借用没有它）。"""
+    """这一台（这次或上一次）借给了谁（borrow_by；只有 #70 上线前的借用没有它）。"""
     if not s.get("borrow_since"):
         return None
-    return POOL_LABEL if s.get("borrow_pool") else s.get("borrow_by") or legacy_person(cfg)
+    return s.get("borrow_by") or legacy_person(cfg)
 
 
 def legacy_person(cfg: dict | None) -> str | None:
