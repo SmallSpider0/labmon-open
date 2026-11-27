@@ -2,7 +2,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>labmon 介绍</title>
 <meta name="claude:viewport-fit-sides" content="cover">
-<meta name="description" content="labmon 是什么、各部分怎么配合、看板上各块的意思、日常怎么用，以及准入、放行顺序、推演、依赖、成组起跑、估时、借用、保活、续租、掉线判定这些关键算法的图解。">
+<meta name="description" content="labmon 是什么、各部分怎么配合、看板上各块的意思、日常怎么用，以及准入、保底 CPU 核、放行顺序、推演、依赖、成组起跑、估时、借用、共有型算力池、普通用户与组员机自动接入、外部独立机（Linux/WSL2/macOS MPS）、Colab 临时主机、保活、续租、掉线判定这些关键机制的图解。">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Noto+Sans+SC:wght@400;500;700&display=swap">
@@ -14,6 +14,7 @@
   --link: #1d5c9e;
   --lab: #3a56b0; --lab-soft: #c9d3f0;     /* labmon 的任务；记账还没占上的 */
   --run: #127a69; --run-soft: #c6e6df;     /* 放行、在跑、跑得完 */
+  --cpu: #0d9488; --cpu-soft: #ccfbf1;     /* CPU 折线、纯 CPU 任务与保底核 */
   --oth: #a65a12; --oth-soft: #f1dcc4;     /* labmon 之外、对方 */
   --plat: #6a57a8;                         /* 平台 */
   --bad: #b8342c; --bad-soft: #f4d3cf;     /* 告警、让位、跑不完 */
@@ -22,11 +23,11 @@
 }
 @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
   --bg: #11161c; --surface: #19212a; --ink: #e3e9ee; --muted: #9ba7b2; --line: #2c3743; --soft: #212b35; --link: #7fb0ee;
-  --lab: #8aa3f2; --lab-soft: #2e3b63; --run: #43b9a3; --run-soft: #1d4740; --oth: #e39a55; --oth-soft: #4a3320;
+  --lab: #8aa3f2; --lab-soft: #2e3b63; --run: #43b9a3; --run-soft: #1d4740; --cpu: #2dd4bf; --cpu-soft: #134e4a; --oth: #e39a55; --oth-soft: #4a3320;
   --plat: #a897e3; --bad: #ef7a6f; --bad-soft: #4d2522; color-scheme: dark; } }
 :root[data-theme="dark"] {
   --bg: #11161c; --surface: #19212a; --ink: #e3e9ee; --muted: #9ba7b2; --line: #2c3743; --soft: #212b35; --link: #7fb0ee;
-  --lab: #8aa3f2; --lab-soft: #2e3b63; --run: #43b9a3; --run-soft: #1d4740; --oth: #e39a55; --oth-soft: #4a3320;
+  --lab: #8aa3f2; --lab-soft: #2e3b63; --run: #43b9a3; --run-soft: #1d4740; --cpu: #2dd4bf; --cpu-soft: #134e4a; --oth: #e39a55; --oth-soft: #4a3320;
   --plat: #a897e3; --bad: #ef7a6f; --bad-soft: #4d2522; color-scheme: dark; }
 
 body { margin: 0; background: var(--bg); color: var(--ink); font-family: var(--sans); font-size: 15px; line-height: 1.75; }
@@ -104,7 +105,7 @@ figure { margin: 14px 0 12px; }
 figcaption { font-size: 13px; color: var(--muted); margin-top: 8px; max-width: 44rem; }
 .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
 .legend i { display: inline-block; width: 11px; height: 11px; border-radius: 2px; margin-right: 6px; vertical-align: -1px; border: 1px solid transparent; }
-.lg-lab { background: var(--lab); } .lg-lab2 { background: var(--lab-soft); } .lg-run { background: var(--run); } .lg-run2 { background: var(--run-soft); }
+.lg-lab { background: var(--lab); } .lg-lab2 { background: var(--lab-soft); } .lg-run { background: var(--run); } .lg-run2 { background: var(--run-soft); } .lg-cpu { background: var(--cpu); } .lg-cpu2 { background: var(--cpu-soft); border-color: var(--cpu) !important; }
 .lg-oth { background: repeating-linear-gradient(135deg, var(--oth) 0 2px, var(--oth-soft) 2px 5px); }
 .lg-bad { background: var(--bad-soft); border-color: var(--bad) !important; border-style: dashed !important; }
 .lg-need { border-color: var(--ink) !important; }
@@ -146,6 +147,9 @@ svg .cut { stroke: var(--ink); stroke-width: 1.4; stroke-dasharray: 6 4; }
 svg .gate { stroke: var(--bad); stroke-width: 1.6; stroke-dasharray: 5 3; }
 svg .f-lab { fill: var(--lab); } svg .f-lab2 { fill: var(--lab-soft); }
 svg .f-run { fill: var(--run); } svg .f-run2 { fill: var(--run-soft); }
+svg .f-cpu { fill: var(--cpu); } svg .f-cpu2 { fill: var(--cpu-soft); } svg .s-cpu { stroke: var(--cpu); stroke-width: 1.8; fill: none; }
+svg .lbl-c { font-size: 12px; fill: var(--cpu); }
+svg .node-c { fill: var(--cpu-soft); stroke: var(--cpu); stroke-width: 1.2; }
 svg .f-oth2 { fill: var(--oth-soft); } svg .s-oth { stroke: var(--oth); stroke-width: 1.5; }
 svg .f-free { fill: none; stroke: var(--line); stroke-width: 1.2; }
 svg .f-cache { fill: var(--soft); stroke: var(--line); stroke-width: 1; stroke-dasharray: 3 3; }
@@ -175,13 +179,13 @@ html { scroll-behavior: smooth; }
 <header>
   <div class="kicker">labmon · 项目介绍 · 内容随当前源码版本维护</div>
   <h1>labmon 介绍</h1>
-  <p class="lede">labmon 让本机的几个科研项目共用实验室的 GPU 服务器：每台服务器上一个 worker 统一决定谁什么时候用哪张卡，本机一个看板把各项目、各主机、组里别人的服务器放在一处看，实验会话只管写清单和处理告警。</p>
+  <p class="lede">labmon 让多项目、多角色共用实验室 GPU 服务器、共有型算力池、外租或自有独立机（Linux / WSL2 / macOS MPS）与 Colab 临时实例：每台常驻机一个 worker 统一决定谁什么时候用哪张卡，一个看板把项目、主机、算力池与组内资源收在一处看，实验会话只管写清单和处理告警。</p>
   <p class="rule"><b>以规则文档为准。</b>本页给人看，概括功能与算法；和 <a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md">AGENTS.md</a> 与 <a href="https://github.com/SmallSpider0/labmon-open/tree/main/docs">docs/</a> 不一致时照它们。文中的数字（阈值、倍数、时长）都从代码里核对过，改了代码以代码为准。</p>
   <ul class="facts" aria-label="几个数">
-    <li><b>每台 1 个 worker · 10 秒一轮</b>单文件，只用 Python 3.8 标准库</li>
-    <li><b>工作台每分钟读一次</b>项目看板缺省 2 分钟；每台一条 ssh 长连接</li>
-    <li><b>推演往后排 7 天</b>排队任务的预计开始、结束都取它</li>
-    <li><b>组内服务器 10 分钟探一次</b>只读，动手只有三种例外</li>
+    <li><b>每台 1 个 worker · 10 秒一轮</b>单文件，只用 Python 3.8 标准库；支持 Linux / WSL2 / macOS</li>
+    <li><b>共有算力池 · 即时落机与窃取</b>多池隔离，<code>pool</code> / <code>pool:&lt;id&gt;</code> 入口，空闲窃取与自动撤离</li>
+    <li><b>推演往后排 7 天</b>真放行与推演共用同一份准入与公平份额</li>
+    <li><b>组内机 10 分钟一探 · 账号隔离</b>未开账号只读；已开账号组员机默认自动接入本人调度</li>
   </ul>
   <nav class="toc" aria-label="目录">
     <a href="#what">它是什么</a>
@@ -192,8 +196,8 @@ html { scroll-behavior: smooth; }
     <a href="#algos">关键算法</a>
     <a href="#bounds">不做的事</a>
     <a href="#docs">文档</a>
-    <div class="sub"><span>算法：</span>
-      <a href="#a-place">准入</a><a href="#a-order">放行顺序</a><a href="#a-sim">推演</a><a href="#a-dep">依赖与占位</a><a href="#a-gang">成组起跑</a><a href="#a-par">并行清单</a><a href="#a-est">估计与时长</a><a href="#a-eta">按进度估结束</a><a href="#a-io">CPU 与读写</a><a href="#a-borrow">借用</a><a href="#a-rebal">负载均衡提示</a><a href="#a-ka">保活</a><a href="#a-renew">续租</a><a href="#a-down">掉线判定</a><a href="#a-ephemeral">临时主机</a>
+    <div class="sub"><span>算法与机制：</span>
+      <a href="#a-place">准入</a><a href="#a-cpu">保底核与 CPU 视图</a><a href="#a-order">放行顺序</a><a href="#a-sim">推演</a><a href="#a-dep">依赖与占位</a><a href="#a-gang">成组起跑</a><a href="#a-par">并行清单</a><a href="#a-est">估计与时长</a><a href="#a-eta">按进度估结束</a><a href="#a-io">CPU 与读写</a><a href="#a-borrow">借用</a><a href="#a-rebal">负载均衡提示</a><a href="#a-pool">共有算力池</a><a href="#a-member">普通用户与组员机</a><a href="#a-ext">外部机与本地盘</a><a href="#a-ephemeral">Colab 临时主机</a><a href="#a-ka">保活</a><a href="#a-renew">续租</a><a href="#a-down">掉线判定</a>
     </div>
   </nav>
 </header>
@@ -210,85 +214,106 @@ html { scroll-behavior: smooth; }
   <h2>各部分怎么配合</h2>
   <figure>
     <div class="frame">
-      <svg viewBox="0 0 920 470" role="img" aria-label="本机上有实验会话、看板服务和维护者的浏览器；看板经 ssh 长连接读各服务器上 worker 写在共享盘上的状态，只读探测组里别人的服务器，经平台续租；实验会话经 ssh 登记队列、经 labmon wait 读告警">
+      <svg viewBox="0 0 920 540" role="img" aria-label="左侧为使用端与看板服务（实验会话、labmon serve 与管理员/普通用户浏览器）；右侧为实验室共享盘集群（自用与共有池主机、借来与已开账号组员机、未开账号组员机）、外部独立主机（Linux/WSL2/macOS MPS 零私钥 SSH）、Colab 临时实例（HTTPS Push）以及 SCM 平台">
         <defs>
           <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+          <marker id="a1r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head-r" d="M0,0 L10,5 L0,10 z"/></marker>
         </defs>
-        <rect class="region" x="16" y="16" width="330" height="438" rx="10"/>
-        <text class="m" x="32" y="38">本机（Mac）</text>
-        <rect class="region" x="520" y="16" width="384" height="356" rx="10"/>
-        <text class="m" x="536" y="38">实验室 GPU 服务器（平台上的容器）</text>
+        <rect class="region" x="16" y="16" width="320" height="508" rx="10"/>
+        <text class="m" x="32" y="38">使用端与看板服务</text>
+        <rect class="region" x="506" y="16" width="398" height="330" rx="10"/>
+        <text class="m" x="522" y="38">实验室集群（共享盘 /root/data1）</text>
 
-        <rect class="node" x="36" y="56" width="290" height="80" rx="6"/>
+        <rect class="node" x="36" y="56" width="280" height="86" rx="6"/>
         <text class="t" x="52" y="82">实验会话 + skill</text>
-        <text class="s" x="52" y="104">写清单、登记队列、挂 labmon wait</text>
-        <text class="s" x="52" y="122">用 labmon report 报给看板</text>
+        <text class="s" x="52" y="104">写清单、投单机或 pool / pool:&lt;id&gt;</text>
+        <text class="s" x="52" y="124">挂 labmon wait · 用 labmon report 报问题</text>
 
-        <rect class="node-k" x="36" y="172" width="290" height="150" rx="6"/>
-        <text class="t" x="52" y="198">看板服务 labmon serve</text>
-        <text class="s" x="52" y="220">launchd 或 systemd 常驻 · 要登录</text>
-        <text x="52" y="252">· 工作台 /（跨项目、跨主机）</text>
-        <text x="52" y="274">· 项目看板 /p/&lt;id&gt;/（每项目一张）</text>
-        <text x="52" y="296">· 组内服务器 #/fleet</text>
+        <rect class="node-k" x="36" y="182" width="280" height="176" rx="6"/>
+        <text class="t" x="52" y="208">看板服务 labmon serve</text>
+        <text class="s" x="52" y="228">systemd / launchd 常驻 · 内/公网双入口</text>
+        <text x="52" y="256">· 工作台 / · 共有算力池 #/pool</text>
+        <text x="52" y="278">· 项目看板 /p/&lt;id&gt;/ · 外部机抽屉</text>
+        <text x="52" y="300">· 组内 / 我的资源 #/fleet</text>
+        <text class="s" x="52" y="324">按登录账号隔离视图与权限</text>
+        <text class="s" x="52" y="344">服务租约保证仅“主”写与调度</text>
 
-        <rect class="node" x="36" y="358" width="290" height="80" rx="6"/>
-        <text class="t" x="52" y="384">你（维护者，浏览器）</text>
-        <text class="s" x="52" y="406">登录后看页面；点续租、借来用、改权重</text>
-        <text class="s" x="52" y="424">平台验证码由你输入</text>
+        <rect class="node" x="36" y="398" width="280" height="106" rx="6"/>
+        <text class="t" x="52" y="424">浏览器（管理员 / 普通用户）</text>
+        <text class="s" x="52" y="446">管理员：全组、续租、借还、池 GUI</text>
+        <text class="s" x="52" y="466">普通用户：本人项目/盘/机/池与外部机</text>
+        <text class="s" x="52" y="486">平台验证码由维护者亲手输入</text>
 
-        <path class="edge" d="M110,172 V138" marker-end="url(#a1)"/>
-        <text class="lbl" x="118" y="160">labmon wait 读告警</text>
-        <path class="edge" d="M180,324 V356" marker-end="url(#a1)"/>
-        <path class="edge" d="M200,356 V324" marker-end="url(#a1)"/>
-        <text class="lbl" x="210" y="345">页面与操作</text>
+        <path class="edge" d="M110,182 V144" marker-end="url(#a1)"/>
+        <text class="lbl" x="120" y="168">labmon wait / 命令行经 API</text>
+        <path class="edge" d="M168,358 V396" marker-end="url(#a1)"/>
+        <path class="edge" d="M188,396 V358" marker-end="url(#a1)"/>
+        <text class="lbl" x="198" y="382">登录后看页与操作</text>
 
-        <rect class="node-k" x="540" y="56" width="170" height="112" rx="6"/>
-        <text class="t" x="554" y="80">自用主机</text>
-        <text class="s" x="554" y="102">worker（每台一个）</text>
-        <text class="s" x="554" y="120">准入 · 放行 · 推演</text>
-        <text class="s" x="554" y="138">保活 · 记用量</text>
-        <text class="s" x="554" y="156">任务跑在固定的卡上</text>
-        <rect class="node-o" x="718" y="56" width="170" height="112" rx="6"/>
-        <text class="t" x="732" y="80">借来的主机</text>
-        <text class="s" x="732" y="102">同一个 worker</text>
-        <text class="s" x="732" y="120">给对方留余量</text>
-        <text class="s" x="732" y="138">约定前跑不完的不放</text>
-        <text class="s" x="732" y="156">跑完自动还</text>
+        <rect class="node-k" x="522" y="54" width="178" height="108" rx="6"/>
+        <text class="t" x="536" y="76">自用与共有池主机</text>
+        <text class="s" x="536" y="96">worker（每台 1 个）</text>
+        <text class="s" x="536" y="114">准入 · 保底核 · 推演</text>
+        <text class="s" x="536" y="132">池即时落机与空闲窃取</text>
+        <text class="s" x="536" y="150">保活 · 记用量</text>
 
-        <rect class="band" x="540" y="190" width="348" height="58" rx="6"/>
-        <text class="t" x="554" y="212">共享盘 /root/data1（NFS）</text>
-        <text class="s" x="554" y="234">status.json · usage.jsonl · events.jsonl，各台互读</text>
-        <path class="edge-d" d="M625,168 V190"/><path class="edge-d" d="M803,168 V190"/>
+        <rect class="node-o" x="710" y="54" width="178" height="108" rx="6"/>
+        <text class="t" x="724" y="76">借来 / 组员自用机</text>
+        <text class="s" x="724" y="96">借用：留余量、跑完自动还</text>
+        <text class="s" x="724" y="114">已开账号组员机：默认</text>
+        <text class="s" x="724" y="132">自动接入本人调度</text>
+        <text class="s" x="724" y="150">可一键切回「仅监控」</text>
 
-        <rect class="node-o" x="540" y="272" width="348" height="86" rx="6"/>
-        <text class="t" x="554" y="296">组内别人的服务器</text>
-        <text class="s" x="554" y="318">只读探针，每台 10 分钟一次</text>
-        <text class="s" x="554" y="338">动手只有：保活守护、平台操作、借用（都由你定）</text>
+        <rect class="band" x="522" y="182" width="366" height="54" rx="6"/>
+        <text class="t" x="536" y="204">共享盘 /root/data1（NFS）</text>
+        <text class="s" x="536" y="224">status.json · usage.jsonl · 池待放目录，各台互读</text>
+        <path class="edge-d" d="M611,162 V182"/><path class="edge-d" d="M799,162 V182"/>
 
-        <rect class="node-p" x="520" y="394" width="384" height="60" rx="6"/>
-        <text class="t" x="540" y="418">SCM 平台</text>
-        <text class="s" x="540" y="440">续租 · 开机 · 关机 · 换人 · 换节点 · 核对</text>
+        <rect class="node-o" x="522" y="254" width="366" height="76" rx="6"/>
+        <text class="t" x="536" y="276">未开账号组员机（严格只读）</text>
+        <text class="s" x="536" y="296">每 10 分钟只读探针 · 顺带低优扫本地盘元数据</text>
+        <text class="s" x="536" y="316">动手例外仅：保活守护、平台操作、手动借用</text>
 
-        <path class="edge" d="M326,96 H538" marker-end="url(#a1)"/>
-        <text class="lbl" x="340" y="88">worker add、pause（ssh）</text>
-        <path class="edge" d="M326,218 H538" marker-end="url(#a1)"/>
-        <text class="lbl" x="340" y="210">工作台每分钟读状态（长连接）</text>
-        <text class="lbl" x="340" y="238">写回 eta.json、sched.json</text>
-        <path class="edge" d="M326,300 H538" marker-end="url(#a1)"/>
-        <text class="lbl" x="340" y="292">只读探测、保活守护</text>
-        <path class="edge" d="M326,424 H518" marker-end="url(#a1)"/>
-        <text class="lbl" x="340" y="416">经看板：续租、换人</text>
+        <rect class="node-r" x="506" y="362" width="194" height="86" rx="6"/>
+        <text class="t" x="520" y="384">外部独立主机</text>
+        <text class="s" x="520" y="404">Linux / WSL2 / macOS MPS</text>
+        <text class="s" x="520" y="422">零私钥 SSH · 本地工作盘</text>
+        <text class="s" x="520" y="440">disk_gate · unacct_vram</text>
+
+        <rect class="node-c" x="710" y="362" width="194" height="86" rx="6"/>
+        <text class="t" x="724" y="384">Colab 临时实例</text>
+        <text class="s" x="724" y="404">零 SSH · labmon_ephemeral</text>
+        <text class="s" x="724" y="422">HTTPS Push 每 30s</text>
+        <text class="s" x="724" y="440">Google Drive 云盘分层</text>
+
+        <rect class="node-p" x="506" y="464" width="398" height="60" rx="6"/>
+        <text class="t" x="522" y="488">SCM 平台</text>
+        <text class="s" x="522" y="510">续租 · 开机 · 关机 · 换人 · 换节点 · 核对</text>
+
+        <path class="edge" d="M316,98 H520" marker-end="url(#a1)"/>
+        <text class="lbl" x="330" y="90">经看板 API → SSH 登记与控制</text>
+        <path class="edge" d="M316,216 H520" marker-end="url(#a1)"/>
+        <text class="lbl" x="330" y="208">工作台每分钟读状态（长连接）</text>
+        <text class="lbl" x="330" y="234">写回 eta / sched / 池调度</text>
+        <path class="edge" d="M316,292 H520" marker-end="url(#a1)"/>
+        <text class="lbl" x="330" y="284">只读探测、保活守护</text>
+        <path class="edge" d="M316,336 H420 V405 H504" marker-end="url(#a1)"/>
+        <text class="lbl" x="330" y="362">专用 Ed25519 SSH</text>
+        <path class="edge-r" d="M710,378 H450 V318 H318" marker-end="url(#a1r)"/>
+        <text class="lbl-r" x="458" y="356">Push</text>
+        <path class="edge" d="M316,494 H504" marker-end="url(#a1)"/>
+        <text class="lbl" x="330" y="486">经看板：续租、换人（管理员）</text>
       </svg>
     </div>
-    <figcaption>本机与服务器之间只有 ssh 长连接（每台一条，复用）。worker 之间不直接通信，靠共享盘上互相的状态文件：跨主机的公平份额、依赖都从这里读。</figcaption>
+    <figcaption>看板与实验室主机、外部独立机之间统一复用 SSH 长连接（每台一条）；Colab 临时实例无 SSH，改用项目令牌每 30 秒 HTTPS Push 上报。集群内 worker 之间不直连，靠共享盘互读状态；独立机则由看板下发裁剪历史 <code>hist_shared.json</code>。</figcaption>
   </figure>
   <div class="parts">
-    <div class="part"><h3>服务器端 worker</h3><div class="where">labmon/worker/ · labmon_worker.py</div><p>每台主机一个，调度这台上所有项目的队列：资源估计、准入、放行顺序、推演、保活、记用量。worker 被停或升级时任务照跑，新 worker 接管。</p></div>
-    <div class="part"><h3>工作台</h3><div class="where">/ · overview.html</div><p>各主机的资源与任务、跨项目的放行顺序与推演、调度卡、租期与续租、记录页。权重、优先、续租、借卡都在这里点。</p></div>
-    <div class="part"><h3>账号与两个入口</h3><p>管理员账号详情可开启公网平台操作，允许在公网续租、借还和管理保活；其余账号默认关闭。部署、冷备与账号管理只在内网入口。</p><div class="where">users.py · /login · #/fleet/people</div><p>看板一律要登录：浏览器用口令，脚本用令牌。管理员能做全部；普通用户管理自己的项目，在获准的主机上登记任务，名下最多 20 个项目（含已归档的），每天最多交 10 份问题报告，同时最多挂 8 个 <code>labmon wait</code>；还可在「我的资源」查看本人共享盘用量、自己持有的服务器状态与曲线，以及所属算力池的聚合概况（非池成员不可见；他人服务器、人员管理与平台操作仅管理员可用）。有一对一对应的账号与组内人员共用卡片和详情，可切换账号权限与服务器用量。内网入口在实验室内网（可配 HTTPS），公网入口经隧道挂在 TX 的 nginx 后面（随机路径前缀、要客户端证书），平台操作可在内网进行，管理员账号可另开启公网许可。TX 上的看门狗每 5 分钟探一次 <code>/healthz</code>，连不上或采集停了 15 分钟就推到手机。</p></div>
-    <div class="part"><h3>项目看板</h3><div class="where">/p/&lt;id&gt;/ · page.html</div><p>一个项目一张：时间线（已跑、在跑、推演的排队、依赖连线、空档原因）、计划项进度、运行中任务的速度与预计结束、告警。</p></div>
-    <div class="part"><h3>组内服务器</h3><div class="where">#/fleet · fleet.py、fleetops.py</div><p>组里别人的服务器只读轮探，逐小时攒记录（借用中且 worker 状态新鲜时，组内页实时状态改用 worker 状态，历史记录仍按探针间隔采样）；保活守护；平台上的核对、续租、开关机、换人、换节点；借来用与归还；共享盘按人统计。</p></div>
-    <div class="part"><h3>实验会话与 skill</h3><div class="where">skills/lab-experiments/SKILL.md</div><p>各项目的编码会话照这份规程接入项目、写清单、挂 <code>labmon wait</code> 等告警；租期、借卡、权重由你定，会话不碰。skill 随看板发的命令行一起装、一起更新；<code>labmon wait</code> 换了版本、skill 又有改动时叫醒会话一次，说改了哪几节、请它重读。</p></div>
+    <div class="part"><h3>服务器端 worker</h3><div class="where">labmon/worker/ · labmon_worker.py</div><p>每台常驻主机一个（兼容 Linux、WSL2 与 macOS），调度这台上所有项目的队列：资源估计、准入、GPU 保底核、放行顺序、推演、保活、记用量。worker 被停或升级时任务照跑，新 worker 接管。</p></div>
+    <div class="part"><h3>工作台与共有算力池</h3><div class="where">/ · #/pool · overview.html</div><p>各主机的资源与任务、总览 CPU 折线与纯 CPU 行、共有型算力池多池摘要与内网 GUI 管理、跨项目放行顺序与推演、调度卡、租期与续租、外部机接入抽屉与记录页。</p></div>
+    <div class="part"><h3>账号与两个入口</h3><div class="where">users.py · /login · #/fleet/people</div><p>看板一律要登录：浏览器用口令，脚本用令牌。管理员能做全部，并在账号详情可单独开启公网平台操作许可（续租、借还、保活守护；部署、冷备、账号与池管理始终只在内网）。普通用户管理自己的项目（最多 20 个含归档，每天最多 10 份报告，同时最多 8 个 <code>labmon wait</code>）、最多 3 台私有外部机，并在「我的资源」查看本人共享盘、本人持有服务器与所属算力池聚合概况（非池成员不可见；他人服务器、人员管理与平台操作仅管理员可用）。内网入口在实验室内网（可配 HTTPS），公网入口经隧道挂在反代之后（随机路径前缀 + 客户端证书），看门狗每 5 分钟探 <code>/healthz</code>。</p></div>
+    <div class="part"><h3>项目看板</h3><div class="where">/p/&lt;id&gt;/ · page.html</div><p>一个项目一张：时间线（已跑、在跑、推演的排队、依赖连线、空档原因、主机行 GPU + 青绿 CPU 双折线与纯 CPU 行）、计划项进度、运行中任务的速度与预计结束、告警与 Colab 引导。</p></div>
+    <div class="part"><h3>组内 / 我的资源</h3><div class="where">#/fleet · fleet.py、fleetops.py</div><p>管理员看全组，普通用户看「我的资源」。未开账号组员机只读轮探；已开账号组员机默认自动接入本人调度（可单台一键切「仅监控」）；借用中状态新鲜时实时切用 worker 状态；另含保活守护、平台操作、手动借还与共享盘按人统计。</p></div>
+    <div class="part"><h3>实验会话与 skill</h3><div class="where">skills/lab-experiments/SKILL.md</div><p>各项目的编码会话照这份规程接入项目、写清单、投单机或算力池、挂 <code>labmon wait</code> 等告警（含 Colab 按 <code>colab.md</code> 跑实验）；租期、借卡、权重由管理员定，会话不碰。skill 随客户端命令行一起更新，有改动时 <code>labmon wait</code> 会提醒重读。</p></div>
   </div>
 </section>
 
@@ -439,6 +464,69 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <li>请求一直因 CPU 被挡满 10 分钟才在等待项写 <code>cpu_wait</code>，看板据此报 <code>cpu:</code>。</li>
       </ul>
       <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/worker.md#准入">worker.md「准入」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/worker.md#独占">「独占」</a></p>
+    </div></details>
+  </div>
+
+  <!-- GPU 保底 CPU 核与 CPU 可视化 -->
+  <div class="algo" id="a-cpu">
+    <h3>GPU 保底 CPU 核、纯 CPU 降优与 CPU 可视化<span class="tag">cpu_limit · nice +10 · 双折线</span></h3>
+    <p class="prose">带 GPU 的主机上，如果纯 CPU 任务（<code>gpus=0</code>）把全部 CPU 配额吃满，空闲显卡就会因为拿不到哪怕 1–2 个驱动/加载核而干等。worker 为 GPU 任务划出保底核（每卡 2 核、至多总配额 1/4），对纯 CPU 自动封顶并降优先级（<code>nice +10</code>），在纯 CPU 实测挤满记账且 GPU 空闲时允许低核 GPU 任务在保底核内有限弹性放行；总览与项目页时间线则在主机行叠加青绿色整机 CPU 折线，并在有纯 CPU 任务时于卡行下方动态画出纯 CPU 行。</p>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 760 285" role="img" aria-label="上半部分：4 卡 32 核容器划出 8 核 GPU 保底与 24 核纯 CPU 上限，纯 CPU 声明 30 核自动封顶 24 核并降 nice +10，纯 CPU 挤满记账且 GPU 空闲时允许低核 GPU 任务在 8 核保底内有限弹性放行；下半部分：主机表头行以浅蓝 GPU 曲线同轴叠加青绿 CPU 折线，GPU 卡行下方动态加一行 CPU 显示纯 CPU 任务">
+          <defs>
+            <marker id="ac1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head-r" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <text class="m" x="20" y="24">带 GPU 主机 CPU 配额划分（例：4 卡 · 总配额 32 核）</text>
+
+          <rect class="f-cpu2" x="20" y="38" width="540" height="32" rx="4" stroke="var(--cpu)" stroke-width="1.2"/>
+          <text class="t" x="34" y="59">纯 CPU 上限：24 核</text>
+          <text class="s" x="196" y="59">gpus=0 声明 30 核 → 封顶 24 核 · nice +10</text>
+
+          <rect class="node-r" x="564" y="38" width="176" height="32" rx="4"/>
+          <text class="t" x="576" y="59">GPU 保底：8 核</text>
+
+          <text class="s" x="564" y="88">每卡 2 核，至多配额 1/4</text>
+          <text class="s" x="20" y="88">导出封顶后的 LABMON_CPUS；无 GPU 主机不扣保底核；GPU 上限仍为 32 核</text>
+
+          <rect class="node" x="20" y="102" width="720" height="44" rx="6"/>
+          <text class="t" x="34" y="122">低核 GPU 有限弹性放行</text>
+          <text class="s" x="210" y="122">当纯 CPU 实测超核挤满记账、但仍有空闲 GPU 时：仅对空闲卡放行低核 GPU 任务</text>
+          <text class="s" x="210" y="138">要求所有在跑 GPU 任务核数之和 ≤ 保底核（8 核），不无限超卖；纯 CPU 降 nice 让出时间片</text>
+
+          <text class="m" x="20" y="172">总览任务卡 / 项目时间线：双折线与纯 CPU 行可视化</text>
+          <rect class="node" x="20" y="182" width="720" height="90" rx="6"/>
+
+          <!-- 主机表头行：GPU 浅蓝 + CPU 青绿同轴 0-100% -->
+          <rect class="band" x="28" y="190" width="704" height="30" rx="4"/>
+          <text class="t" x="38" y="210">主机 A</text>
+          <text class="m" x="108" y="210">0–100%</text>
+          <polyline fill="none" stroke="var(--lab)" stroke-width="1.8" points="175,212 225,204 275,200 325,196 375,198 425,210 475,208 525,196 575,195"/>
+          <polyline class="s-cpu" points="175,214 225,208 275,202 325,194 375,193 425,194 475,196 525,198 575,200"/>
+          <line x1="600" y1="201" x2="618" y2="201" stroke="var(--lab)" stroke-width="2"/><text class="s" x="622" y="205">GPU</text>
+          <line x1="664" y1="201" x2="682" y2="201" class="s-cpu"/><text class="lbl-c" x="686" y="205">CPU</text>
+
+          <!-- GPU 卡行 -->
+          <text class="m" x="38" y="238">GPU 0</text>
+          <rect class="f-lab" x="108" y="226" width="210" height="16" rx="3"/><text class="t-on" x="116" y="238">train_s42（在跑）</text>
+          <rect class="f-lab2" x="324" y="226" width="150" height="16" rx="3"/><text x="332" y="238">eval_s42（排队）</text>
+
+          <!-- 动态纯 CPU 行 -->
+          <text class="lbl-c" x="38" y="261">CPU</text>
+          <rect class="f-cpu" x="108" y="248" width="290" height="16" rx="3"/><text class="t-on" x="116" y="260">prep_data（gpus=0 · nice +10）</text>
+          <text class="s" x="412" y="260">仅在有纯 CPU 任务时动态显示此行</text>
+        </svg>
+      </div>
+      <div class="legend"><span><i class="lg-lab"></i>GPU 利用率 / GPU 任务</span><span><i class="lg-cpu"></i>整机 CPU 折线 / 纯 CPU 任务</span><span><i class="lg-run2"></i>GPU 保底核</span></div>
+      <figcaption>项目页「别的项目」占用行同样区分 GPU 卡序号与纯 CPU，并严格排除他人自动接入组员机的实时数据；悬停主机表头折线可同时读出该时刻 GPU 与 CPU 双指标。</figcaption>
+    </figure>
+    <details><summary>细节：保底核公式、封顶规则与弹性边界</summary><div class="in">
+      <ul>
+        <li><b>保底核</b>：仅对带 GPU 主机生效，<code>reserve = min(卡数 × 2, floor(配额 / 4))</code>，纯 CPU 可用上限为 <code>配额 − reserve</code>；无 GPU 主机（如纯 CPU 独立机）不扣减。</li>
+        <li><b>纯 CPU 自动封顶与降优</b>：<code>gpus=0</code> 任务声明 <code>cpus=</code> 超过纯 CPU 上限但未超过容器总配额时，不报“放不下”，而是自动封顶到纯 CPU 上限并导出封顶后的 <code>LABMON_CPUS</code>（仍超过总配额才报放不下）；启动时自动加 <code>nice +10</code>，避免与 GPU 训练的数据加载线程争抢 CPU 时间片。</li>
+        <li><b>低核 GPU 有限弹性放行</b>：若纯 CPU 任务实测超核把总记账挤满、而机器仍有空闲 GPU，允许低核 GPU 任务在保底核内放行（要求放到空闲卡，且该机所有在跑 GPU 任务的 CPU 核数之和不超过保底核），防止空卡饿死又不无限超卖。</li>
+      </ul>
+      <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/worker.md#准入">worker.md「准入」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/workbench.md#工作台">workbench.md「工作台」</a></p>
     </div></details>
   </div>
 
@@ -986,6 +1074,213 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
     </div></details>
   </div>
 
+  <!-- 共有型算力池 -->
+  <div class="algo" id="a-pool">
+    <h3>共有型算力池：多池、即时落机、空闲窃取与自动撤离<span class="tag">pool.py · #/pool</span></h3>
+    <p class="prose">多台共用同一块共享盘的常驻集群主机可以组成一个或多个共有型算力池（<code>[pools.&lt;id&gt;]</code>），管理员可在内网入口 <code>#/pool</code> 直接可视化新建、编辑与删除（公网只读）。实验会话只需把清单交到统一入口 <code>pool</code>（单池自动指向）或 <code>pool:&lt;id&gt;</code>，由看板主服务按人公平份额即时落机、在出现空闲机时自动空闲窃取，并在主机故障、<code>drain</code> 或预备续租时自动撤离。旧“借用推广型”算力池已移除，借卡回归纯粹的手动借用。</p>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 760 286" role="img" aria-label="实验会话把清单交到 pool 或 pool:a100（独占池拦截直投单机）；看板主服务 pool.tick 按人公平份额即时落机到空闲或预计最早空出的主机；主机 B 空闲时经 Work-Stealing 窃取主机 A 上未跑的排队清单（10 分钟防抖）；主机 C 出现 drain、预备续租或失联满 10 分钟时经 reg_move 自动撤离到健康主机或池待放目录；底部标明管理员、池成员与非成员的视图隔离">
+          <defs>
+            <marker id="ap1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="ap-r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head-r" d="M0,0 L10,5 L0,10 z"/></marker>
+            <marker id="ap-b" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head-b" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <!-- 左：入口 -->
+          <rect class="node" x="16" y="34" width="156" height="84" rx="6"/>
+          <text class="t" x="28" y="58">实验会话提交</text>
+          <text class="m" x="28" y="78">worker add pool</text>
+          <text class="m" x="28" y="94">或 pool:&lt;id&gt;</text>
+          <text class="s" x="28" y="110">独占池禁直投单机</text>
+
+          <rect class="band" x="16" y="138" width="156" height="68" rx="6"/>
+          <text class="t" x="28" y="160">管理员内网 GUI</text>
+          <text class="s" x="28" y="178">#/pool 新建/编辑/删</text>
+          <text class="s" x="28" y="194">独占/开放 · 成员或 *</text>
+
+          <!-- 中：主服务调度器 -->
+          <rect class="node-k" x="208" y="34" width="186" height="172" rx="6"/>
+          <text class="t" x="222" y="58">看板主服务 pool.tick</text>
+          <text class="s" x="222" y="80">1. 合并各机 pool_heads</text>
+          <text class="s" x="222" y="100">2. 按人公平份额排序</text>
+          <text class="s" x="222" y="120">3. 即时落机（空机优先，</text>
+          <text class="s" x="236" y="136">全忙落最早空出拿 ETA）</text>
+          <text class="s" x="222" y="158">4. 每机每轮至多落 1 条</text>
+          <text class="s" x="222" y="178">5. 变更自动通知会话</text>
+          <text class="m" x="222" y="196">lease.primary 门控</text>
+
+          <path class="edge" d="M172,76 H206" marker-end="url(#ap1)"/>
+          <path class="edge-d" d="M172,172 H206" marker-end="url(#ap1)"/>
+
+          <!-- 右：三台同共享盘池主机 -->
+          <rect class="region" x="430" y="16" width="314" height="206" rx="8"/>
+          <text class="m" x="444" y="34">同共享盘共有池主机（单机单池互斥）</text>
+
+          <rect class="node" x="444" y="44" width="134" height="72" rx="6"/>
+          <text class="t" x="454" y="65">主机 A（忙碌）</text>
+          <text class="s" x="454" y="84">在跑 + 排队清单</text>
+          <text class="s" x="454" y="102">未跑清单可被窃取</text>
+
+          <rect class="node-r" x="598" y="44" width="134" height="72" rx="6"/>
+          <text class="t" x="608" y="65">主机 B（空闲）</text>
+          <text class="s" x="608" y="84">即时落机首选</text>
+          <text class="s" x="608" y="102">接收空闲窃取清单</text>
+
+          <path class="edge-r" d="M578,80 H596" marker-end="url(#ap-r)"/>
+          <text class="lbl-r" x="587" y="132" text-anchor="middle">Work-Stealing 空闲窃取（10m 防抖）</text>
+
+          <rect class="node-b" x="444" y="144" width="288" height="66" rx="6"/>
+          <text class="t" x="456" y="165">主机 C（drain / 续租 / 失联 10m）</text>
+          <text class="s" x="456" y="185">自动 reg_move 撤离到健康机或退回待放目录</text>
+          <text class="lbl-b" x="456" y="202">全池放不下队首 → 报 pool_wait:nofit</text>
+
+          <path class="edge" d="M394,80 H442" marker-end="url(#ap1)"/>
+          <path class="edge-b" d="M444,177 H396" marker-end="url(#ap-b)"/>
+
+          <!-- 底部权限条 -->
+          <rect class="band" x="16" y="236" width="728" height="36" rx="6"/>
+          <text class="t" x="30" y="259">权限视图</text>
+          <text class="s" x="108" y="259">管理员：全部池 + 成员 + 内网 GUI   ｜   池成员：所属池聚合 + 本人待放 + 只读池主机   ｜   非成员：不可见</text>
+        </svg>
+      </div>
+      <figcaption>独占模式（<code>exclusive = true</code>，缺省）禁止任何人绕过池入口直投池内单机，确保多机均衡；如需允许单机直投可改为开放模式（<code>exclusive = false</code>）。</figcaption>
+    </figure>
+    <details><summary>细节：强校验、入池清单规则与防抖参数</summary><div class="in">
+      <ul>
+        <li><b>强校验</b>：池内主机须为同 <code>worker_home</code>（同一共享盘）的常驻远端主机（不含本机、<code>standalone</code> 独立机与借用机），一台主机至多属一个池；池 id 不得与任何主机重名。</li>
+        <li><b>清单限制</b>：入池仅拒绝指定卡号（<code>--gpus</code>）与成组起跑（<code>gang=</code>）；默认停法 <code>boundary</code> 与占位任务 <code>hold_*</code> 均可入池。空清单连续 2 天同样自动休眠，改文件即唤醒。</li>
+        <li><b>空闲窃取与撤离</b>：窃取仅搬未在跑的排队清单，受 <code>600 秒</code>（10 分钟）冷却防抖保护防乒乓；主机离线或 worker 失联满 10 分钟（<code>POOL_DOWN_S</code>）、进入 <code>drain</code>、预备续租、归还或移出池配置时自动撤离，并向实验会话发送变更通知。</li>
+      </ul>
+      <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/fleet.md#算力池">fleet.md「算力池」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/api.md">api.md</a></p>
+    </div></details>
+  </div>
+
+  <!-- 普通用户入口与组员机自动接入 -->
+  <div class="algo" id="a-member">
+    <h3>普通用户入口与已开账号组员机自动接入<span class="tag">users.py · member_auto</span></h3>
+    <p class="prose">看板按登录账号严格划分可见范围：管理员看全组并做平台操作与池管理；普通用户在「我的资源」仅看本人共享盘、本人持有的服务器、所属算力池聚合与最多 3 台私有外部机。已开通看板账号且绑定持有人的组员，其名下组内服务器默认自动接入本人调度（<code>member_auto</code>），仅归本人私有、不动已有实验与用户自开保活，也可单台一键切回「仅监控」。</p>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 760 256" role="img" aria-label="左侧按账号区分管理员与普通用户视图边界；右侧展示组内服务器按持有人是否开通账号分流：未开账号的严格只读，已开账号的默认自动部署并拉起 worker 接入本人调度，支持单台一键切换为仅监控；底部列出五条安全护栏">
+          <defs>
+            <marker id="am1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <!-- 左：角色隔离 -->
+          <rect class="region" x="16" y="16" width="318" height="176" rx="8"/>
+          <text class="m" x="30" y="34">角色与视图隔离</text>
+
+          <rect class="node-k" x="30" y="44" width="290" height="58" rx="6"/>
+          <text class="t" x="44" y="66">管理员</text>
+          <text class="s" x="44" y="86">全组服务器 · 平台操作 · 人员与共有池管理</text>
+
+          <rect class="node-r" x="30" y="114" width="290" height="66" rx="6"/>
+          <text class="t" x="44" y="136">普通用户（我的资源）</text>
+          <text class="s" x="44" y="155">本人共享盘（他人脱敏）· 本人机 · 所属池聚合</text>
+          <text class="s" x="44" y="172">上限：20 项目 · 10 报告/天 · 8 wait · 3 外部机</text>
+
+          <!-- 右：组员机分流 -->
+          <rect class="region" x="354" y="16" width="390" height="176" rx="8"/>
+          <text class="m" x="368" y="34">组内服务器按账号分流</text>
+
+          <rect class="node-o" x="368" y="44" width="362" height="50" rx="6"/>
+          <text class="t" x="382" y="65">未开账号组员机 → 严格只读</text>
+          <text class="s" x="382" y="84">10 分钟只读探针；仅保活守护 / 平台操作 / 手动借用可动手</text>
+
+          <rect class="node-r" x="368" y="106" width="194" height="74" rx="6"/>
+          <text class="t" x="382" y="127">已开账号组员机</text>
+          <text class="s" x="382" y="146">主服务自动部署并拉起</text>
+          <text class="s" x="382" y="164">状态：已接入 / 受阻 / 失败</text>
+
+          <rect class="node" x="588" y="106" width="142" height="74" rx="6"/>
+          <text class="t" x="600" y="127">单台一键切换</text>
+          <text class="s" x="600" y="146">切「仅监控」停</text>
+          <text class="s" x="600" y="164">worker，随时重接</text>
+
+          <path class="edge" d="M562,135 H586" marker-end="url(#am1)"/>
+          <path class="edge" d="M586,153 H564" marker-end="url(#am1)"/>
+
+          <!-- 底部安全护栏 -->
+          <rect class="band" x="16" y="206" width="728" height="36" rx="6"/>
+          <text class="t" x="30" y="229">安全护栏</text>
+          <text class="s" x="108" y="229">仅归持有人私有（不混入管理员总览或他人项目页）· 不动已有实验 · 不动自开保活 · 不自动入池 · 换卡/重启自动跟随</text>
+        </svg>
+      </div>
+      <figcaption>入口在「我的账号 → 我的服务器」与「我的资源」卡片详情抽屉；本人服务器处于借出期间时，卡片显示借用人名并脱敏对方进程明细。</figcaption>
+    </figure>
+    <details><summary>细节：四态标记、隔离边界与自动恢复</summary><div class="in">
+      <ul>
+        <li><b>卡片状态</b>：已开账号组员机按当前连通与拉起结果标为「已接入调度」「接入受阻」「拉起失败」或「仅监控」；主机换卡、容器重启或历史 <code>stopped</code> 清理后，主服务自动跟随重新部署并拉起 worker（切「仅监控」的除外）。</li>
+        <li><b>强隔离</b>：<code>member_auto</code> 主机仅出现在持有人本人视角（总览、项目页与 <code>labmon host list</code>），不混入管理员总览主机表，也不向其他项目的「别的项目」占用行泄露实时状态。</li>
+      </ul>
+      <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/fleet.md">fleet.md</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/api.md">api.md</a></p>
+    </div></details>
+  </div>
+
+  <!-- 外部独立主机兼容与零私钥接入 -->
+  <div class="algo" id="a-ext">
+    <h3>外部独立主机兼容与零私钥接入<span class="tag">Linux · WSL2 · macOS MPS · disk_gate</span></h3>
+    <p class="prose">外租云主机、实验室之外的 Linux / Windows WSL2 工作站或 macOS（含 Apple Silicon MPS）无需挂实验室共享盘即可接入调度。通过总览或「我的账号 → 我的外部主机」抽屉（命令行 <code>labmon host add|edit|test|key|rm</code>）走<strong>零私钥上传</strong>流程：看板生成专用 Ed25519 公钥与一行授权命令，普通用户可自助管理最多 3 台本人私有外部机。</p>
+    <figure>
+      <div class="frame">
+        <svg viewBox="0 0 760 298" role="img" aria-label="上半部分：零私钥接入三步——看板生成专用 Ed25519 密钥对、复制一行 authorized_keys 命令到目标机、单次测试连通并支持轮换与删除销毁；下半部分：独立 Linux、Windows WSL2（unacct_vram 外部占卡暂停与 /mnt/c 9p 预警）、macOS（轻量 POSIX、桌面留 2 核、Apple Silicon MPS 单逻辑卡互斥）三平台适配，底部为本地工作盘 WorkDisk 与 disk_gate 闸门">
+          <defs>
+            <marker id="ae1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker>
+          </defs>
+          <text class="m" x="20" y="22">零私钥上传双入口（总览主机栏 / 我的账号 → 我的外部主机 · labmon host add）</text>
+
+          <rect class="node-k" x="20" y="32" width="220" height="58" rx="6"/>
+          <text class="t" x="34" y="54">1. 看板生成专用 Ed25519</text>
+          <text class="s" x="34" y="74">私钥留服务端，绝不上传个人私钥</text>
+
+          <rect class="node" x="270" y="32" width="220" height="58" rx="6"/>
+          <text class="t" x="284" y="54">2. 粘贴一行公钥授权命令</text>
+          <text class="s" x="284" y="74">写入目标机 authorized_keys</text>
+
+          <rect class="node-r" x="520" y="32" width="220" height="58" rx="6"/>
+          <text class="t" x="534" y="54">3. 测试连通 / 轮换 / 销毁</text>
+          <text class="s" x="534" y="74">下发独立配置与裁剪历史</text>
+
+          <path class="edge" d="M240,61 H268" marker-end="url(#ae1)"/>
+          <path class="edge" d="M490,61 H518" marker-end="url(#ae1)"/>
+
+          <text class="m" x="20" y="114">三平台 worker 兼容</text>
+
+          <rect class="node" x="20" y="124" width="224" height="100" rx="6"/>
+          <text class="t" x="34" y="146">独立 Linux</text>
+          <text class="s" x="34" y="166">· 完整 nvidia-smi + cgroup</text>
+          <text class="s" x="34" y="184">· 无共享盘依赖，独立记账</text>
+          <text class="s" x="34" y="202">· 看板下发 hist_shared.json</text>
+
+          <rect class="node-o" x="268" y="124" width="224" height="100" rx="6"/>
+          <text class="t" x="282" y="146">Windows WSL2</text>
+          <text class="s" x="282" y="166">· unacct_vram ≥1.5G / 利用率≥15%</text>
+          <text class="s" x="282" y="184">  整卡暂停放行（不杀任务不告警）</text>
+          <text class="s" x="282" y="202">· /mnt/c 等 9p 路径自动性能预警</text>
+
+          <rect class="node-c" x="516" y="124" width="224" height="100" rx="6"/>
+          <text class="t" x="530" y="146">macOS / Apple Silicon</text>
+          <text class="s" x="530" y="166">· 轻量 POSIX（ps/vm_stat/sysctl）</text>
+          <text class="s" x="530" y="184">· 桌面默认留 2 核 · 小内存缩余量</text>
+          <text class="s" x="530" y="202">· 单逻辑 MPS 卡默认互斥</text>
+
+          <!-- 底部本地工作盘与 disk_gate -->
+          <rect class="band" x="20" y="238" width="720" height="46" rx="6"/>
+          <text class="t" x="34" y="258">本地工作盘 WorkDisk 与 disk_gate 防撑爆防污染</text>
+          <text class="s" x="34" y="276">仅扫 data_root（不跟软链）｜ 余量 &lt;20 GiB 预警 · &lt;10 GiB 停放行（+2 GiB 滞回）｜ 主机页预览清理 .tmp/，绝不删 projects/</text>
+        </svg>
+      </div>
+      <figcaption>独立主机不支持跨主机依赖与成组起跑（会显式提示）；普通用户私有外部机严禁回环/内网保留地址或与组内机冲突，删除时同步销毁服务端私钥。</figcaption>
+    </figure>
+    <details><summary>细节：WSL2 外部占卡滞回、macOS MPS 口径与工作盘清理</summary><div class="in">
+      <ul>
+        <li><b>WSL2 外部占卡（<code>unacct_vram</code>）</b>：逐卡用总已用显存减可见 <code>compute-apps</code> 显存（过滤 &lt;512 MiB 驱动底噪）；差额 ≥1.5 GiB 或无可见进程时利用率 ≥15% 判外部占卡（滞回 1.0 GiB / 5%），默认整卡暂停放新任务、不成屏障、不挡纯 CPU、不杀已跑任务也不唤醒 <code>labmon wait</code>；确需共享可配 <code>allow_shared_gpu = true</code>（免重启生效）。</li>
+        <li><b>macOS 与 Apple Silicon MPS</b>：无 <code>/proc</code>、cgroup 与 <code>nvidia-smi</code>，改用 <code>run --daemon</code> 无 <code>setsid</code> 启动；桌面默认留 2 核（可经 <code>cpu_quota</code> 覆盖）；小内存机（&lt;64 GiB）内存余量按上限 12.5% 缩放（1–8 GiB）；Apple Silicon 暴露单逻辑 MPS 卡，保守容量 <code>min(0.65×总内存, 总内存−4 GiB)</code>（可经 <code>mps_vram_gb</code> 覆盖），默认单卡互斥、纯 CPU 照常并发，放行导出 <code>CUDA_VISIBLE_DEVICES=""</code> 与 <code>LABMON_ACCEL=mps</code>。</li>
+        <li><b>本地工作盘与历史转送</b>：<code>WorkDisk</code> 限速仅扫 <code>data_root</code>，<code>disk_gate</code> 达停放线只停放行不杀任务；主机页「预览清理缓存」只清理 <code>.tmp/{cache,jobs}</code> 且须勾选确认，绝不碰 <code>projects/</code>；看板下发的 <code>hist_shared.json</code> 仅喂资源估计与估时，与公平份额和盘统计隔离。</li>
+      </ul>
+      <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/worker.md">worker.md</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/workbench.md">workbench.md</a></p>
+    </div></details>
+  </div>
+
   <!-- 保活 -->
   <div class="algo" id="a-ka">
     <h3>保活与保活守护<span class="tag">keepalive · fleet_guard.sh</span></h3>
@@ -1122,40 +1417,40 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
   <!-- 推模式临时主机 -->
   <div class="algo" id="a-ephemeral">
     <h3>推模式临时主机（Colab 与云盘存储）<span class="tag">ephemeral.py · labmon_ephemeral.py</span></h3>
-    <p class="prose">Google Colab 等临时 GPU 实例没有 SSH 入口、不挂实验室共享盘，几小时就可能被回收。labmon 用推模式监控接入它们：在「我的账号 → 命令行」可下载零依赖的 <code>labmon_ephemeral.py</code> 并复制 Colab 启动片段（包装 CLI 命令或 Notebook 的 <code>track()</code>），每 30 秒携带项目令牌向 <code>POST /api/ephemeral/push</code> 上报 GPU、内存、任务进度、云盘产物路径 <code>artifact_dir</code> 与 <code>os.statvfs</code> 磁盘余量；看板把它们无缝画进工作台、项目时间线与 <code>labmon wait</code>。</p>
+    <p class="prose">Google Colab 等临时 GPU 实例没有 SSH 入口、不挂实验室共享盘，几小时就可能被回收。labmon 用推模式监控接入它们：在「我的账号 → 命令行」或项目页引导入口可下载零依赖的 <code>labmon_ephemeral.py</code> 并复制 Colab 启动片段（包装 CLI 命令或 Notebook 的 <code>track()</code>），每 30 秒携带项目令牌向 <code>POST /api/ephemeral/push</code> 上报 GPU、内存、任务进度、云盘产物路径 <code>artifact_dir</code> 与 <code>os.statvfs</code> 磁盘余量；看板把它们无缝画进工作台、项目时间线与 <code>labmon wait</code>。</p>
     <figure>
       <div class="frame">
-        <svg viewBox="0 0 760 190" role="img" aria-label="Colab 实例运行训练并把 checkpoint 原子写回 Google Drive，同时通过 labmon_ephemeral.py 每 30 秒推送心跳到看板；超过 180 秒无心跳则结转残留任务并发 ephemeral_down 告警，多实例撞车报 ephemeral_dup，云盘余量低于 1 GiB 标红并报 ephemeral_disk_low">
+        <svg viewBox="0 0 760 202" role="img" aria-label="Colab 实例运行训练并把 checkpoint 原子写回 Google Drive，同时通过 labmon_ephemeral.py 每 30 秒推送心跳到看板；超过 180 秒无心跳则结转残留任务并发 ephemeral_down 告警，多实例撞车报 ephemeral_dup，云盘余量低于 1 GiB 标红并报 ephemeral_disk_low">
           <defs><marker id="a13" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="head" d="M0,0 L10,5 L0,10 z"/></marker></defs>
-          <rect class="node-o" x="20" y="28" width="210" height="84" rx="6"/>
-          <text class="t" x="34" y="52">Colab 临时实例</text>
-          <text class="s" x="34" y="72">labmon_ephemeral.py（零依赖）</text>
-          <text class="s" x="34" y="90">本地 /content 跑 · statvfs 读余量</text>
+          <rect class="node-o" x="20" y="22" width="210" height="84" rx="6"/>
+          <text class="t" x="34" y="46">Colab 临时实例</text>
+          <text class="s" x="34" y="66">labmon_ephemeral.py（零依赖）</text>
+          <text class="s" x="34" y="84">本地 /content 跑 · statvfs 读余量</text>
 
-          <rect class="band" x="20" y="130" width="210" height="44" rx="6"/>
-          <text class="t" x="34" y="150">Google Drive 云盘</text>
-          <text class="s" x="34" y="166">数据、checkpoint、artifact_dir</text>
-          <path class="edge-d" d="M125,112 V130"/>
+          <rect class="band" x="20" y="124" width="210" height="50" rx="6"/>
+          <text class="t" x="34" y="145">Google Drive 准共享盘</text>
+          <text class="s" x="34" y="164">数据、checkpoint、artifact_dir</text>
+          <path class="edge-d" d="M125,106 V124"/>
 
-          <rect class="node-k" x="295" y="28" width="210" height="146" rx="6"/>
-          <text class="t" x="309" y="52">看板 ephemeral.py</text>
-          <text class="s" x="309" y="74">overview/ephemeral/*.json</text>
-          <text class="s" x="309" y="94">不写 hosts.toml · 不污染 disk.py</text>
-          <text class="s" x="309" y="114">TTL 180s 超时自动结转 failed</text>
-          <text class="s" x="309" y="134">多实例同 job_id → ephemeral_dup</text>
-          <text class="s" x="309" y="154">云盘 &lt; 1 GiB → 标红 + 告警</text>
+          <rect class="node-k" x="295" y="22" width="210" height="152" rx="6"/>
+          <text class="t" x="309" y="46">看板 ephemeral.py</text>
+          <text class="s" x="309" y="68">overview/ephemeral/*.json</text>
+          <text class="s" x="309" y="88">不写 hosts.toml · 不污染 disk.py</text>
+          <text class="s" x="309" y="108">TTL 180s 超时自动结转 failed</text>
+          <text class="s" x="309" y="128">多实例同 job_id → ephemeral_dup</text>
+          <text class="s" x="309" y="148">云盘 &lt; 1 GiB → 标红 + 告警</text>
 
-          <rect class="node-r" x="550" y="28" width="190" height="146" rx="6"/>
-          <text class="t" x="564" y="52">统一视图与等待</text>
-          <text class="s" x="564" y="76">· 工作台标「临时」</text>
-          <text class="s" x="564" y="98">· 项目时间线与进度外推</text>
-          <text class="s" x="564" y="120">· labmon wait --job 唤醒</text>
-          <text class="s" x="564" y="142">· status / disk 独立分区</text>
+          <rect class="node-r" x="550" y="22" width="190" height="152" rx="6"/>
+          <text class="t" x="564" y="46">统一视图与等待</text>
+          <text class="s" x="564" y="70">· 工作台标「临时」</text>
+          <text class="s" x="564" y="92">· 项目时间线与进度外推</text>
+          <text class="s" x="564" y="114">· labmon wait --job 唤醒</text>
+          <text class="s" x="564" y="136">· status / disk 独立分区</text>
 
-          <path class="edge" d="M230,70 H293" marker-end="url(#a13)"/>
-          <text class="lbl" x="261" y="60" text-anchor="middle">HTTPS Push</text>
-          <text class="s" x="261" y="86" text-anchor="middle">每 30s</text>
-          <path class="edge" d="M505,100 H548" marker-end="url(#a13)"/>
+          <path class="edge" d="M230,64 H293" marker-end="url(#a13)"/>
+          <text class="lbl" x="261" y="54" text-anchor="middle">HTTPS Push</text>
+          <text class="s" x="261" y="80" text-anchor="middle">每 30s</text>
+          <path class="edge" d="M505,96 H548" marker-end="url(#a13)"/>
         </svg>
       </div>
       <figcaption>不另建远程队列调度、文件传输或源码同步服务：代码、环境与 Google Drive 读写仍由实验会话按 <code>skills/lab-experiments/colab.md</code> 管，labmon 只负责状态汇聚、时间线、余量提醒与断连告警。</figcaption>
@@ -1178,10 +1473,10 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
     <li><b>不抢占在跑的任务</b>暂停、drain、截止都只挡新的放行；要停正在跑的只有 <code>pause --now</code>、借用的“现在停”，按登记的停法停。</li>
     <li><b>内存闸门只停放行</b>被 cgroup 杀掉比等一会儿代价大得多，所以撞线只停放行、不杀任务。</li>
     <li><b>不直接 kill 保活</b>保活只经 worker 或 <code>ka.sh</code> 停启。</li>
-    <li><b>别人的服务器只读</b>例外只有保活守护、平台操作、借用，都由你在页面上点了才动；在跑实验的那台要勾“已说好”。本地盘的路径只在平常的探测里顺带读元数据，不在对方盘上写。</li>
+    <li><b>未开账号的别人服务器只读</b>例外只有保活守护、平台操作、手动借用，都由管理员点了才动；在跑实验的那台要勾“已说好”。已开账号组员机仅自动接入持有人本人调度，不动已有实验与自开保活。本地盘路径只在平常探测里顺带读元数据，不在对方盘上写。</li>
     <li><b>验证码不自动填</b>平台只做像人的操作：不试错验证码、不反复登录、不连刷列表、出错不自动重试。</li>
-    <li><b>不替你挪任务</b>清单绑定主机；排得不匀时看板只给挪法（<code>rebalance:</code>），剪行、追加由实验会话做。</li>
-    <li><b>不冗余扫盘</b>共享盘用量只有一处在扫，自己数元数据操作限速；临时文件放容器的 <code>/tmp</code>。</li>
+    <li><b>单机清单不替你挪任务</b>登记到单台主机的清单绑定该机，排得不匀时看板只给挪法（<code>rebalance:</code>），剪行、追加由实验会话做；交给共有型算力池（<code>pool</code> / <code>pool:&lt;id&gt;</code>）的清单才由池调度自动落机、空闲窃取与撤离。</li>
+    <li><b>不冗余扫盘</b>共享盘用量只有一处在扫，自己数元数据操作限速；临时文件放容器的 <code>/tmp</code>（独立机放 <code>data_root/.tmp</code>）。</li>
   </ul>
   <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/AGENTS.md#只守真会出事的规则">AGENTS.md「只守真会出事的规则」</a></p>
 </section>
