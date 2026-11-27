@@ -2683,7 +2683,9 @@ t("auth", "「我的账号」：角色、入口、能做什么；改口令表单
   has(tok, BADESC, "令牌名转义"); has(tok, 'data-acc="rv"');
   run(U, 'accAct("open-tok")');
   tok = page(U, "#/me/tokens");
-  has(tok, '<option value="read" selected>只读', "普通用户只能建只读令牌"); ok(!tok.includes('value="admin"'), "普通用户的选项里有 admin");
+  has(tok, 'type="radio" name="acs" data-pop-field="toks" value="read" checked', "普通用户只能建只读令牌");
+  has(tok, "<b>只读</b>", "令牌权限单选行应显示标签");
+  ok(!tok.includes('value="admin"'), "普通用户的选项里有 admin");
   const tb = run(U, `(() => { const n = navModel(route()); return tabbar(route()) + morePanel(route()); })()`);
   has(tb, 'href="#/me"', "窄屏「更多」里的「我」");
 });
@@ -2702,7 +2704,7 @@ ta("auth", "「我的账号」：改口令两遍不一样不发；建令牌发 /
   await run(U, `accAct("pw")`);
   ok(run(U, `JSON.stringify(SF[0])`) === JSON.stringify(["api/password", {old: "old-pass", new: "new-pass-1"}]), "改口令：" + run(U, "JSON.stringify(SF[0])"));
   page(U, "#/me/tokens"); run(U, 'accAct("open-tok")');
-  el(U, "acn").value = "部署"; el(U, "acs").value = "read";
+  el(U, "acn").value = "部署"; run(U, 'POP.draft.toks = "read"');
   await run(U, `accAct("tok")`);
   ok(run(U, `JSON.stringify(SF.find(x => x[0] === "api/tokens/add")[1])`) === JSON.stringify({name: "部署", scopes: ["read"]}), "建令牌的请求体");
   const h = page(U, "#/me/tokens"); has(h, "lm_原文只此一次"); has(h, 'data-copy="lm_原文只此一次"'); has(h, 'data-acc="showx"');
@@ -2724,7 +2726,7 @@ ta("auth", "令牌创建响应晚到时，切走再回来也不显示原文", as
     ? new Promise(resolve => { ANSWER = resolve; })
     : Promise.resolve({ok: true, status: 200, json: async () => ME});`);
   page(U, "#/me/tokens"); run(U, 'accAct("open-tok")');
-  el(U, "acn").value = "脚本"; el(U, "acs").value = "read";
+  el(U, "acn").value = "脚本"; run(U, 'POP.draft.toks = "read"');
   const req = run(U, 'accAct("tok")');
   page(U, "#/me/security"); page(U, "#/me/tokens");
   run(U, 'ANSWER({ok: true, status: 200, json: async () => ({name: "脚本", token: "lm_晚到原文"})})');
@@ -3057,10 +3059,12 @@ t("project", "项目页 CPU 占用监控（#208）：顶部 CPU 卡片展示核�
   run(C, "drawTimeline()");
   const tl = el(C, "tlbox").innerHTML, tk = el(C, "tlkey").innerHTML;
   has(tl, 'stroke="var(--accent)"', "时间线应保留蓝色 GPU 折线");
-  has(tl, 'stroke="var(--cpu)"', "时间线主机行应同轴叠画橙色 CPU 折线");
+  has(tl, 'stroke="var(--cpu)"', "时间线主机行应同轴叠画青绿色 CPU 折线");
   has(tl, 'class="tl-h" data-thost="srv-a"', "时间线主机行应有折线悬停命中层");
-  has(tk, "整机 GPU 利用率（蓝底蓝线", "图例应写明 GPU 折线颜色");
-  has(tk, "整机 CPU 占用率（橙线", "图例应写明 CPU 折线颜色");
+  has(tk, "GPU 利用率", "图例应精简为短词 GPU 利用率");
+  has(tk, "整机 GPU 利用率（蓝底蓝线", "图例悬停应含 GPU 折线颜色说明");
+  has(tk, "CPU 占用（青绿线）", "图例应写明 CPU 折线为青绿线");
+  has(tk, "整机 CPU 占用率（青绿线", "图例悬停应写明 CPU 折线详细说明");
   // 悬停主机表头折线区域应返回 GPU + CPU 读数
   const hov = run(C, '(() => { const b = document.getElementById("tlbox"); b.getBoundingClientRect = () => ({left: 0, width: 800}); return tlHostHover({dataset: {thost: "srv-a"}}, {clientX: TL.g.L + TL.g.PW * 0.25}); })()');
   has(hov, "GPU 利用率", "悬停应含 GPU 读数"); has(hov, "CPU 占用", "悬停应含 CPU 读数"); has(hov, "此刻 CPU 12.4/17 核（73%）", "悬停应含此刻 CPU 读数");
@@ -3521,6 +3525,98 @@ t("overview", "macOS Apple Silicon MPS 逻辑卡、统一内存与桌面留核�
   // 恶意芯片名在项目页 chip 里也必须转义
   PS.hosts[0].gpus[0].name = "Apple M4 " + BAD;
   clean(run(mkCtx(pgSrc, PS, {filename: "page.js"}), "resourcesCard()"), "项目页 MPS 恶意芯片名转义");
+});
+
+t("overview", "前端 UI 打磨（#237）：分段按钮组、外部机抽屉重构、窄屏磁盘徽标、算力池标题与告警折叠等 10 项回归", () => {
+  // P0-1 & P0-2：推送方式、开通账号角色、外部机平台/密钥分段按钮组；外部机抽屉固定底栏、高级选项默认折叠/非默认展开、独立危险区 popConfirm
+  const A = accCtx(OV, ADMIN_ME, "#/me/push"); run(A, "ACC.at.me = 1; ACC.at.users = 1; ACC.users = " + JSON.stringify(USERS));
+  run(A, 'accAct("push")');
+  const pushH = page(A, "#/me/push");
+  has(pushH, 'class="seg form-seg"', "推送方式应改用分段按钮组");
+  has(pushH, 'data-pushkind="bark"'); has(pushH, 'data-pushkind="ntfy"');
+  ok(!pushH.includes("<select"), "推送配置弹窗不应再包含 select");
+  run(A, 'accAct("open-onboard", {n:"OWNER"})');
+  const obH = run(A, 'onboardPop("OWNER")');
+  has(obH, 'data-pop-seg="ur" data-val="user"'); has(obH, 'data-pop-seg="ur" data-val="admin"');
+  ok(!obH.includes('<select class="ain" id="acur"'), "开通账号角色不应再是 select");
+  // 外部主机新增抽屉：默认高级选项折叠、固定底栏、无 <select>、无英文 managed/system 选项
+  const extNew = page(A, "#/ext/new");
+  has(extNew, '<footer class="dft">', "外部机抽屉主操作应固定在底部 dft");
+  has(extNew, 'class="aform ext-grid"', "外部机抽屉应使用 2 列栅格");
+  has(extNew, '<details class="dfold" data-extadv>', "默认参数时高级选项应折叠");
+  has(extNew, 'data-extseg="platform_kind"'); has(extNew, 'data-extseg="ssh_key"');
+  ok(!extNew.includes("<select"), "外部机抽屉不应再包含 select");
+  ok(!extNew.includes("（managed"), "SSH 密钥选项应去掉英文词");
+  // 触发 /mnt/c 时高级选项自动展开
+  run(A, 'EXT.form.data_root = "/mnt/c/work"; render(false)');
+  has(el(A, "drwp").innerHTML, '<details class="dfold" data-extadv open>', "触发 9p 警告时高级选项应自动展开");
+  // 编辑态抽屉：独立危险区 .card.dz + popConfirm 删除
+  const S = JSON.parse(JSON.stringify(OV));
+  const ext = JSON.parse(JSON.stringify(OV.hosts[0]));
+  Object.assign(ext, {id: "ext-4090", label: "ext-4090", standalone: true, platform: null, platform_kind: "other", owner: "admin",
+    work_disk: {root: "/home/u/work", total: 500 * 2 ** 30, free: 8 * 2 ** 30, work_b: 120 * 2 ** 30, warn_gb: 20, stop_gb: 10, low: true,
+      disk_gate: {on: true, why: "剩余不足"}, dirs: [], projects: {}, reclaimable: [{u: "projects/old"}]}});
+  ext.status.disk_gate = ext.work_disk.disk_gate;
+  S.hosts.push(ext);
+  const C = accCtx(S, ADMIN_ME, "#/ext/ext-4090"); run(C, "ACC.at.me = 1");
+  const extEd = page(C, "#/ext/ext-4090");
+  has(extEd, '<section class="card dz">', "编辑态外部机抽屉应有独立危险区");
+  run(C, 'extAct("delask")');
+  has(el(C, "drwp").innerHTML, 'data-ext="delgo"', "点击删除应弹出 popConfirm 确认删除");
+  // P1-5：本地工作盘徽标在 .v 中（不被窄屏隐藏），workDiskBlock 有复制按钮
+  const hp = page(C, "#/host/ext-4090");
+  const wdb = run(C, '(() => { const h = D.hosts.find(x => x.id === "ext-4090"); return workDiskBlock(h.work_disk, h); })()');
+  has(wdb, 'data-copy="labmon worker clean ext-4090"', "workDiskBlock 清理命令旁应有复制按钮");
+  const wdRes = run(C, 'resCard(D.hosts.find(x => x.id === "ext-4090"))');
+  has(wdRes, '<span class="badge b-bad">已暂停放新任务</span></span><div class="spk"><span class="sm mut">持久保存</span></div>', "本地工作盘告警徽标应位于 .v 数值列而非隐藏的 .spk");
+  // P1-6：总览算力池副标题说人话，共有池待放清单显示项目标题
+  const SP = JSON.parse(JSON.stringify(OV));
+  SP.pool = {pools: [{id: "p1", label: "共有池", host_id: "pool:p1", exclusive: true, online: 1, total: 1, free_gpus: 1, gpus: 2, running: 1, queued: 0, placed: 1, pending: 1, members: ["*"], hosts: []}],
+    lists: {l1: {pool: "p1", project: "proj-a", root: "/r", jobs: "j.txt", head: "h1", n: 2, since: NOW - 60, why: "等待落机"}}};
+  const CP = ovCtx(SP, RR);
+  const homeP = page(CP, "#/");
+  has(homeP, "按人公平份额自动挑机", "总览算力池副标题应说人话");
+  const poolP = page(CP, "#/pool");
+  has(poolP, SP.projects[0].title, "共有池待放清单应显示项目标题");
+  // P1-8：主机页「给项目用」紧凑单行与抽屉项目运行/排队简况
+  const SA = JSON.parse(JSON.stringify(OV));
+  SA.hosts[0].status.queues = []; SA.regs = SA.regs.map(r => r.host === "srv-a" ? {...r, queues: []} : r);
+  const CA = accCtx(SA, ADMIN_ME, "#/host/srv-a");
+  const hAsg = page(CA, "#/host/srv-a");
+  has(hAsg, '<div class="card assign"><div class="row wrap"', "给项目用应合并为紧凑单行提示条");
+  const dAsg = page(CA, "#/host/srv-a/assign");
+  ok(/运行 \d+|排队 \d+|空闲|暂时没实验/.test(dAsg), "给项目用抽屉列表应含项目运行/排队简况");
+  // P2-10：总览超 5 条告警默认折叠可展开；storage.js 归属 select 补紧凑样式；project.js 归属表单包入 .aform
+  const SAL = JSON.parse(JSON.stringify(OV));
+  SAL.projects[0].alert_msgs = ["告警1", "告警2", "告警3", "告警4", "告警5", "告警6", "告警7"];
+  const CAL = ovCtx(SAL, RR);
+  const hFold = page(CAL, "#/");
+  has(hFold, 'class="al-extra" hidden', "超 5 条告警默认应折叠");
+  has(hFold, 'data-alexp aria-expanded="false"');
+  run(CAL, "AL_EXP = true; render(false)");
+  const hOpen = el(CAL, "view").innerHTML;
+  has(hOpen, 'data-alexp aria-expanded="true"');
+  has(hOpen, "收起告警");
+  // storage.js select 样式与 project.js 归属表单 .aform
+  const dOwn = run(A, 'diskOwner("ME")');
+  if (dOwn.includes("data-dkown")) has(dOwn, 'class="ain sm-sel" data-dkown');
+  page(A, "#/p/proj-a/manage"); run(A, 'pjAct("owner", "proj-a")');
+  has(el(A, "drwp").innerHTML, '<div class="aform acc-pop-form"><label>归属给谁<select class="ain" data-owner', "归属表单应包入 .aform");
+  // 总览时间线 GPU/CPU 分车道紧凑密度：单行高 15px、同主机行零间隙
+  const OT = ovCtx(clone(OV), RR); page(OT, "#/");
+  run(OT, `D.occ["srv-a"].push({p: "proj-a", n: "cpu_job", lane: "CPU", t0: ${NOW - 1800}, t1: ${NOW + 1800}, g: [], st: "run"}); drawTimeline()`);
+  const tlH = Number((el(OT, "tlbox").innerHTML.match(/<svg[^>]*height="([^"]+)"/) || [])[1]);
+  ok(run(OT, "OCC_CARD_LAY.base") === 15 && tlH > 0 && tlH < 120, `总览时间线应紧凑：base=${run(OT, "OCC_CARD_LAY.base")}, svgH=${tlH}`);
+  // 账号表单 data-pop-field 的 change 事件：文本框失焦不触发重绘，radio 仅更新草稿不重绘
+  const AT = accCtx(OV, ADMIN_ME, "#/me/tokens"); run(AT, "ACC.at.me = 1");
+  page(AT, "#/me/tokens"); run(AT, 'accAct("open-tok")');
+  run(AT, "RN = 0; ORIG_R = render; render = (...a) => { RN++; return ORIG_R(...a); }");
+  fire(AT, "change", {type: "text", value: "新名称", dataset: {popField: "tokn"}, classList: {contains: () => false}});
+  const rText = run(AT, "RN");
+  fire(AT, "change", {type: "radio", value: "admin", dataset: {popField: "toks"}, classList: {contains: () => false}});
+  const rRadio = run(AT, "RN"), toks = run(AT, "POP.draft.toks");
+  run(AT, "render = ORIG_R");
+  ok(rText === 0 && rRadio === 0 && toks === "admin", `data-pop-field change 不应重建表单且应更新 radio 草稿：rText=${rText}, rRadio=${rRadio}, toks=${toks}`);
 });
 
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));

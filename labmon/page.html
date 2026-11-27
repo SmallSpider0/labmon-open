@@ -8,11 +8,11 @@
 <style>
 :root {
   --bg: #f4f5f7; --card: #ffffff; --fg: #1d2330; --muted: #6b7280; --faint: #9aa1ab; --line: #e4e7ec; --soft: #eef0f3;
-  --ok: #1a7f4b; --warn: #a86400; --bad: #c62828; --accent: #2f6fdd; --cpu: #d97706;
+  --ok: #1a7f4b; --warn: #a86400; --bad: #c62828; --accent: #2f6fdd; --cpu: #0d9488;
 }
 @media (prefers-color-scheme: dark) {
   :root { --bg: #121519; --card: #1b1f26; --fg: #e6e8ec; --muted: #9aa3ae; --faint: #6b7380; --line: #2b3139; --soft: #242a32;
-          --ok: #4cc38a; --warn: #f0a640; --bad: #ff6b6b; --accent: #6ea0ff; --cpu: #f59e0b; }
+          --ok: #4cc38a; --warn: #f0a640; --bad: #ff6b6b; --accent: #6ea0ff; --cpu: #2dd4bf; }
 }
 * { box-sizing: border-box; }
 body { margin: 0; padding: 14px 20px 30px; background: var(--bg); color: var(--fg);
@@ -46,7 +46,7 @@ body { margin: 0; padding: 14px 20px 30px; background: var(--bg); color: var(--f
 .kpi .k { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .kpi .v { font-size: 20px; font-weight: 650; line-height: 1.25; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .kpi .v small { font-size: 12px; font-weight: 400; color: var(--muted); }
-.kpi .s { font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.kpi .s { font-size: 11.5px; color: var(--muted); line-height: 1.4; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; overflow: hidden; }
 .meter { height: 6px; background: var(--soft); border-radius: 3px; position: relative; margin: 5px 0 4px; display: flex; gap: 2px; }
 .meter > i { display: block; height: 100%; border-radius: 3px; }
 .segs { display: flex; gap: 3px; margin: 5px 0 4px; }
@@ -356,7 +356,7 @@ function kpis() {
       + "\n" + (procs.map(p => `${multi ? hostShort(p.host) + " " : ""}PID ${p.pid}  ${f1(p.mem / 1024)} GiB  ${(p.cmd || "").slice(0, 60)}`).join("\n") || "无 GPU 进程"))}>
       <div class="k">显存${gl.length > 1 ? " · 逐卡" : ""} · 整机</div><div class="v">${f1(used, 0)}<small> / ${f1(tot, 0)} GiB</small></div>
       <div class="segs">${segs}</div>
-      <div class="s">${gl.length > 1 ? gl.map((g, k) => dot(k, `${esc(gname(g))} 余 ${f1((g.mem_total - g.mem_used) / 1024, 0)}`)).join(" · ") + " GiB"
+      <div class="s">${gl.length > 1 ? gl.map((g, k) => dot(k, `${esc(gname(g))} 余${f1((g.mem_total - g.mem_used) / 1024, 0)}G`)).join(" · ")
         : `${procs.length} 个进程 · 余 ${f1(tot - used, 0)} GiB`}</div></div>`);
   }
   // CPU 占用：整机容器 CPU 实时核数/配额与百分比，限流或高占用给出清晰颜色提示（#208）
@@ -376,7 +376,8 @@ function kpis() {
     const item = ({h, c}, k) => {
       const tag = c.thrStr ? ` <span style="color:var(--${c.level || "warn"});font-weight:600">${esc(c.thrStr)}</span>`
         : c.high ? ` <span style="color:var(--warn);font-weight:600">高占用</span>` : "";
-      const txt = `${cl.length > 1 ? esc(hostShort(h)) + " " : "CPU "}<span style="${c.level ? `color:var(--${c.level})` : ""}">${esc(c.short)}</span>${tag}`;
+      const val = cl.length > 1 ? (c.pctStr || c.core || "—") : c.short;
+      const txt = `${cl.length > 1 ? esc(hostShort(h)) + " " : "CPU "}<span style="${c.level ? `color:var(--${c.level})` : ""}">${esc(val)}</span>${tag}`;
       return cl.length > 1 ? dot(k, txt) : txt;
     };
     const ctip = "整台主机的容器 CPU 占用（含同机别的项目与 labmon 之外的进程）；按容器配额换算，无配额时按可用核数换算\n\n"
@@ -527,28 +528,30 @@ const tickLine = (x, y, h) => `<line x1="${x}" x2="${x}" y1="${y}" y2="${y + h}"
 // 失败的尝试：常常只跑几秒，长度看不出来，所以底边细红条之外再画一个红色圆标（挨在一起的几次合成一个，写次数）
 const attemptMark = (x, y, n, a = "") => `<g ${a}><circle cx="${x}" cy="${y}" r="6" fill="var(--bad)" stroke="var(--card)" stroke-width="1.5"/>`
   + `<text x="${x}" y="${y + 3.5}" text-anchor="middle" style="font-size:${n > 9 ? 8 : 9.5}px;font-weight:700;fill:#fff;pointer-events:none">${n > 1 ? n : "!"}</text></g>`;
-// 时间线下方图例的条目（tlShow 只列图上出现了的；样例用图上第一个组的颜色）
+// 时间线下方图例的条目（tlShow 只列图上出现了的；样例用图上第一个组的颜色；第 4 项详述放入悬停）
 function tlItems(c) {
   const sw = tlSw;
   return [
     ["done", "完成", sw(jobBar("done", false, 0, 1, 22, 10, c))],
-    ["running", "运行中（填色到现在）", sw(jobBar("running", false, 0, 1, 22, 10, c, .45))],
-    ["queued", "排队（worker 推演的预计时间，同机各项目一起排）", sw(jobBar("queued", false, 0, 1, 22, 10, c))],
+    ["running", "运行中", sw(jobBar("running", false, 0, 1, 22, 10, c, .45)), "运行中（填色到现在，右端是预计结束）"],
+    ["queued", "排队", sw(jobBar("queued", false, 0, 1, 22, 10, c)), "排队（worker 推演的预计时间，同机各项目一起排）"],
     ["hold", "暂停占位", sw(jobBar("done", true, 0, 1, 22, 10, c))],
     ["failed", "失败", sw(jobBar("failed", false, 0, 1, 22, 10, "var(--bad)"))],
     ["killed", "被停下", sw(jobBar("failed", false, 0, 1, 22, 10, "var(--warn)"))],
-    ["attempt", "失败的尝试（数字是挨在一起的次数）", sw(`<rect x="0" y="8" width="22" height="3" rx="1" fill="var(--bad)"/>` + attemptMark(11, 6, 1), 22)],
-    ["dep", "依赖（after=）：跨车道的从等的任务结束连到它开始，同车道的、能经别的依赖推出来的不画；悬停（触屏点一下）任务看它的整条上下游",
-      sw(`<path d="M1 2H5V7H16V9" fill="none" stroke="var(--fg)" stroke-opacity=".5"/><path d="M13 8L16 12L19 8Z" fill="var(--fg)" fill-opacity=".6"/>`)],
-    ["gap", "空档（标原因；往后的写推演里在等谁）", sw(`<line x1="0" x2="22" y1="6" y2="6" stroke="var(--faint)" stroke-dasharray="2 3"/>`)],
-    ...occItems("var(--faint)", "同机别的项目："),
-    ["util", "整机 GPU 利用率（蓝底蓝线：近 10 分钟平均，保活按 0 算，0–100%）", sw(`<path d="M0 11L5 4L10 6L15 2L22 7L22 12L0 12Z" fill="var(--accent)" fill-opacity=".13"/><path d="M0 11L5 4L10 6L15 2L22 7" fill="none" stroke="var(--accent)" stroke-opacity=".7"/>`)],
-    ["cpu", "整机 CPU 占用率（橙线：按容器配额，无配额按可用核数，0–100%）", sw(`<path d="M0 9L5 6L10 7L15 3L22 5" fill="none" stroke="var(--cpu)" stroke-width="1.5"/>`)],
+    ["attempt", "失败尝试", sw(`<rect x="0" y="8" width="22" height="3" rx="1" fill="var(--bad)"/>` + attemptMark(11, 6, 1), 22), "失败的尝试（数字是挨在一起的次数）"],
+    ["dep", "依赖", sw(`<path d="M1 2H5V7H16V9" fill="none" stroke="var(--fg)" stroke-opacity=".5"/><path d="M13 8L16 12L19 8Z" fill="var(--fg)" fill-opacity=".6"/>`),
+      "依赖（after=）：跨车道的从等的任务结束连到它开始，同车道的、能经别的依赖推出来的不画；悬停（触屏点一下）任务看它的整条上下游"],
+    ["gap", "空档", sw(`<line x1="0" x2="22" y1="6" y2="6" stroke="var(--faint)" stroke-dasharray="2 3"/>`), "空档（标原因；往后的写推演里在等谁）"],
+    ...occItems("var(--faint)", "他项"),
+    ["util", "GPU 利用率", sw(`<path d="M0 11L5 4L10 6L15 2L22 7L22 12L0 12Z" fill="var(--accent)" fill-opacity=".13"/><path d="M0 11L5 4L10 6L15 2L22 7" fill="none" stroke="var(--accent)" stroke-opacity=".7"/>`),
+      "整机 GPU 利用率（蓝底蓝线：近 10 分钟平均，保活按 0 算，0–100%）"],
+    ["cpu", "CPU 占用（青绿线）", sw(`<path d="M0 9L5 6L10 7L15 3L22 5" fill="none" stroke="var(--cpu)" stroke-width="1.5"/>`),
+      "整机 CPU 占用率（青绿线：按容器配额，无配额按可用核数，0–100%）"],
     ["down", "连不上", sw(bandRect("down", 0, 2, 22, 8))],
-    ["warn", "drain、暂停、续租截止", sw(bandRect("warn", 0, 2, 22, 8))],
-    ["ret", "跑完就还（画到预计归还）", sw(bandRect("ret", 0, 2, 22, 8))],
-    ["nospan", "labmon 没在采集", sw(bandRect("nospan", 0, 2, 22, 8))],
-    ["restart", "换容器、续租、作废重排", sw(tickLine(6, 0, 12), 12)]];
+    ["warn", "暂停/drain/续租", sw(bandRect("warn", 0, 2, 22, 8)), "drain、暂停、续租截止"],
+    ["ret", "跑完就还", sw(bandRect("ret", 0, 2, 22, 8)), "跑完就还（画到预计归还）"],
+    ["nospan", "未采集", sw(bandRect("nospan", 0, 2, 22, 8)), "labmon 没在采集"],
+    ["restart", "重开/重排", sw(tickLine(6, 0, 12), 12), "换容器、续租、作废重排"]];
 }
 function timelineCard() {
   return `<div class="card" style="margin-top:10px"><div class="row" style="flex-wrap:wrap"><span class="hd">时间线</span><span class="sm mut" id="tllegend"></span><span class="sp"></span>
@@ -702,7 +705,7 @@ function tlHostHover(rect, e) {
   if (cv.has) lines.push(`此刻 CPU ${cv.short}${cv.thrStr ? " · " + cv.thrStr : ""}`);
   return lines.join("\n");
 }
-// 主机表头一行（上面有分隔线，这台的车道缩进挂在下面）：主机短名；整机 GPU 利用率画成浅蓝底，同轴叠加橙色 CPU 占用折线（0–100%，#208）；
+// 主机表头一行（上面有分隔线，这台的车道缩进挂在下面）：主机短名；整机 GPU 利用率画成浅蓝底，同轴叠加青绿色 CPU 占用折线（0–100%，#208）；
 // ev 时底边一条事件色带（连不上、drain、暂停、续租截止、没在采集），竖线是换容器、续租与作废重排
 function hostRow(host, hb, ev, y, h, c) {
   // 逐次采样只留 24 小时：更早的、或看的区间超过一天半时用每小时平均（保留 30 天）
@@ -711,7 +714,7 @@ function hostRow(host, hb, ev, y, h, c) {
   const cpuS = hostSeries(H.filter(p => p.cpu_pct != null), D.cpu_hourly?.[host.id], p => p.cpu_pct, c, long);
   const ub = y + (ev ? h - 11 : h - 2), Y = v => ub - (ub - y - 3) * v / 100;     // 利用率的底边与高度（GPU 与 CPU 同轴 0–100%）
   const cv = cpuView(host);
-  let s = `<text class="lab" x="0" y="${y + (ub - y) / 2 + 5}" style="font-weight:600" ${tip(`${host.label}\n蓝底蓝线：整机 GPU 平均利用率（含同机别的项目${long ? "，每小时平均" : ""}）\n橙线：整机 CPU 占用率（同轴，按容器配额或可用核数换算）`
+  let s = `<text class="lab" x="0" y="${y + (ub - y) / 2 + 5}" style="font-weight:600" ${tip(`${host.label}\n蓝底蓝线：整机 GPU 平均利用率（含同机别的项目${long ? "，每小时平均" : ""}）\n青绿线：整机 CPU 占用率（同轴，按容器配额或可用核数换算）`
     + (cv.has ? `\n此刻 CPU ${cv.short}${cv.thrStr ? " · " + cv.thrStr : ""}` : "")
     + (ev ? "\n底边色带：连不上、drain、暂停、续租截止、labmon 没在采集；竖线是换容器、续租与作废重排" : ""))}>${esc(fit(hostShort(host), c.L - 6))}</text>`;
   s += `<g clip-path="url(#tlclip)">`;

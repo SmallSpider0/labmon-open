@@ -570,7 +570,8 @@ function tlSvg(box, rows, o = {}) {
   TL.g = {L, PW, t0, t1};
   const X = t => L + PW * (t - t0) / (t1 - t0);
   const c = {t0, t1, W, L, R, PW, narrow, X, cl: t => Math.max(L, Math.min(W - R, X(t))), win: (a, b) => a != null && b != null && b > t0 && a < t1, seen};
-  const top = 14, H = top + rows.reduce((acc, r) => acc + r.h + 2, 0) + 18, tk = tlTicks(t0, t1, Math.min(10, PW / 64));
+  const rowGap = (r, i) => !i ? 0 : r.sep ? (o.sepGap ?? 4) : (r.gap ?? 2);
+  const top = 14, H = top + rows.reduce((acc, r, i) => acc + rowGap(r, i) + r.h, 0) + 18, tk = tlTicks(t0, t1, Math.min(10, PW / 64));
   let s = "", y = top;
   for (const t of tk.out) {
     const d = new Date(t * 1000), mid = !d.getHours() && !d.getMinutes();
@@ -578,9 +579,11 @@ function tlSvg(box, rows, o = {}) {
     s += `<line x1="${X(t)}" x2="${X(t)}" y1="${top - 2}" y2="${H - 16}" stroke="var(--line)"/><text x="${X(t)}" y="${H - 3}" text-anchor="middle" style="${mid && tk.st < 1440 ? "fill:var(--fg)" : ""}">${lab}</text>`;
   }
   let body = "";
-  for (const r of rows) {
-    if (r.sep && y > top) body += `<line x1="0" x2="${W}" y1="${y - 1}" y2="${y - 1}" stroke="var(--muted)" stroke-opacity=".4"/>`;
-    body += r.draw(y, r.h, c); y += r.h + 2;
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i], g = rowGap(r, i);
+    y += g;
+    if (r.sep && i) body += `<line x1="0" x2="${W}" y1="${y - g / 2}" y2="${y - g / 2}" stroke="var(--muted)" stroke-opacity=".4"/>`;
+    body += r.draw(y, r.h, c); y += r.h;
   }
   s += (o.under ? o.under(c) : "") + body;     // 压在各行下面的（项目页的依赖连线：行里把条的位置记进 c，画完各行再连，插到各行前面，条盖住线）
   const ms = o.markers || [], off = ms.filter(m => m.ts > t1);
@@ -593,17 +596,17 @@ function tlSvg(box, rows, o = {}) {
   if (TL.cur) { TL.last = TL.cur; TL.cur = null; }
   return `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}">${TL_DEFS}<defs><clipPath id="tlclip"><rect x="${L}" y="0" width="${PW}" height="${H}"/></clipPath></defs>${s}</svg>`;
 }
-// 画进页面：#tlbox 放图（下面接 o.more），#tlkey 放图例，#tlbar 放按钮。o.items(seen) 在画完后调，给图例条目 [[画法, 说明, 样例]]，
+// 画进页面：#tlbox 放图（下面接 o.more），#tlkey 放图例，#tlbar 放按钮。o.items(seen) 在画完后调，给图例条目 [[画法, 说明, 样例, 可选悬停详述]]，
 // 只列图上出现了的（seen）；里程碑与现在线各页都有，接在最后
 function tlShow(box, rows, o = {}) {
   const seen = new Set();
-  box.innerHTML = tlSvg(box, rows, {markers: o.markers, seen, under: o.under, lw: o.lw}) + (o.more || "");
+  box.innerHTML = tlSvg(box, rows, {markers: o.markers, seen, under: o.under, lw: o.lw, sepGap: o.sepGap}) + (o.more || "");
   const items = [...(o.items ? o.items(seen) : []),
     ["marker", "里程碑", tlSw(`<line x1="6" x2="6" y1="0" y2="12" stroke="var(--fg)" stroke-dasharray="4 3" stroke-opacity=".6"/>`, 12)],
     ["now", "现在", tlSw(`<line x1="6" x2="6" y1="0" y2="12" stroke="var(--bad)" stroke-width="1.5"/>`, 12)]];
   const key = document.getElementById("tlkey");
   if (key) {
-    key.innerHTML = `<button class="btn tlkey-b" data-tlkey>${TL.key ? "收起图例" : "图例"}</button><div class="tlkey-l">${items.filter(([k]) => seen.has(k)).map(([, t, sw]) => `<span>${sw}${t}</span>`).join("")}
+    key.innerHTML = `<button class="btn tlkey-b" data-tlkey>${TL.key ? "收起图例" : "图例"}</button><div class="tlkey-l">${items.filter(([k]) => seen.has(k)).map(([, t, sw, h]) => `<span${h ? " " + tip(h) : ""}>${sw}${t}</span>`).join("")}
       <span class="mut ops">拖动平移 · ⌘/Ctrl＋滚轮或双指捏合缩放 · 双击放大，Shift＋双击缩小</span></div>`;
     key.classList.toggle("open", TL.key);
   }
@@ -633,7 +636,7 @@ function tlPack(items) {
 }
 // 单行道数与行高布局（#178）：totalN 是全量分道数；cap 是该行上限（不超过整行高度 maxH 按 minStep 放得下的道数）。
 // 1..hi 道用舒适步长（base + step*(n-1)，封顶 softH）；超 hi 道压细到 minStep（如 8px），总高封顶 maxH。totalN > cap 时 over=true，多出来的在最后一道经 tlOverflow 聚合，不叠在同一位置
-const OCC_CARD_LAY = {base: 20, step: 14, hi: 3, softH: 40, maxH: 52, pad: 4, minStep: 8, cap: 6};
+const OCC_CARD_LAY = {base: 15, step: 10, hi: 3, softH: 32, maxH: 44, pad: 2, minStep: 7, cap: 6};
 const OCC_OTHER_LAY = {base: 18, step: 10, hi: 4, softH: 44, maxH: 52, pad: 4, minStep: 8, cap: 6};
 function tlRowLayout(totalN, o) {
   const pad = o.pad ?? 4, ms = o.minStep || 8, hi = o.hi || 4;
@@ -641,7 +644,7 @@ function tlRowLayout(totalN, o) {
   const n = Math.max(1, Math.min(totalN || 1, cap)), over = cap >= 2 && totalN > cap;
   const soft = o.softH ?? (o.base + o.step * (hi - 1));
   const h = n <= hi ? Math.min(soft, o.base + o.step * (n - 1)) : Math.min(o.maxH, Math.max(soft, pad + ms * n));
-  return {n, total: Math.max(1, totalN || 1), cap, over, h};
+  return {n, total: Math.max(1, totalN || 1), cap, over, h, pad};
 }
 // 溢出到最后一道（k >= cap - 1）的可见条按像素区间合并成互不相交的簇：单条照常画，多条合成「+N 个」聚合条（tlMoreBar），任何时候不重叠（#178）
 function tlOverflow(items, c, gap = 1) {
@@ -674,19 +677,19 @@ const afterText = (af, self) => af.map(([p, n]) => p === self ? n : `${p} 的 ${
 // 占用条的图例条目（接进 tlShow 的 items）；pre 是说明前缀
 const occItems = (c, pre = "") => [
   ["occ_done", pre + "已跑", tlSw(jobBar("done", false, 0, 1, 22, 10, c))],
-  ["occ_run", pre + "在跑（填色到现在，右端是预计结束）", tlSw(jobBar("running", false, 0, 1, 22, 10, c, .45))],
-  ["occ_plan", pre + "排队（worker 按放行规则推演，同机各项目一起排）", tlSw(jobBar("queued", false, 0, 1, 22, 10, c))],
+  ["occ_run", pre + "在跑", tlSw(jobBar("running", false, 0, 1, 22, 10, c, .45)), pre + "在跑（填色到现在，右端是预计结束）"],
+  ["occ_plan", pre + "排队", tlSw(jobBar("queued", false, 0, 1, 22, 10, c)), pre + "排队（worker 按放行规则推演，同机各项目一起排）"],
   ["occ_failed", pre + "失败", tlSw(jobBar("failed", false, 0, 1, 22, 10, "var(--bad)"))],
   ["occ_stop", pre + "停下重排", tlSw(jobBar("failed", false, 0, 1, 22, 10, "var(--warn)"))]];
 function occBars(items, y, h, c, o) {
   const lay = o.layout || {n: Math.max(1, ...items.map(x => (x.k || 0) + 1)), over: false};
-  const th = (h - 4) / lay.n, bh = Math.max(4, th - 1), now = TL.cfg.now();
+  const pad = lay.pad ?? 4, th = (h - pad) / lay.n, bh = Math.max(4, th - 1), now = TL.cfg.now();
   const drawOne = (x, k) => {
-    const xa = c.cl(x.t0), w = Math.max(1.5, c.cl(x.t1) - xa - 1), yy = y + 2 + k * th, st = OCC_BAR[x.st] || "done";
+    const xa = c.cl(x.t0), w = Math.max(1.5, c.cl(x.t1) - xa - 1), yy = y + pad / 2 + k * th, st = OCC_BAR[x.st] || "done";
     c.seen.add("occ_" + x.st);
     let r = jobBar(st, false, xa, yy, w, bh, x.st === "failed" ? "var(--bad)" : x.st === "stop" ? "var(--warn)" : o.color(x.p),
       st === "running" ? (c.cl(now) - xa) / w : 0, tip(o.text(x)));
-    if (w > 56 && th >= 13) r += `<text x="${xa + 4}" y="${yy + th / 2 + 3}" style="font-size:10px;pointer-events:none;fill:${st === "done" ? "#fff" : "var(--fg)"}">${esc(fit(o.label(x), w - 8, o.pre ? o.pre(x) : true))}</text>`;
+    if (w > 56 && th >= 11.5) r += `<text x="${xa + 4}" y="${yy + bh / 2 + 3.5}" style="font-size:10px;pointer-events:none;fill:${st === "done" ? "#fff" : "var(--fg)"}">${esc(fit(o.label(x), w - 8, o.pre ? o.pre(x) : true))}</text>`;
     return r;
   };
   let s = "";
@@ -697,7 +700,7 @@ function occBars(items, y, h, c, o) {
     else s += drawOne(x, x.k || 0);
   }
   if (over.length) {
-    const yy = y + 2 + (lay.n - 1) * th;
+    const yy = y + pad / 2 + (lay.n - 1) * th;
     for (const m of tlOverflow(over, c, 1)) {
       if (m.items.length === 1) s += drawOne(m.items[0], lay.n - 1);
       else s += tlMoreBar(m.xa, yy, Math.max(1.5, m.xe - m.xa), bh,

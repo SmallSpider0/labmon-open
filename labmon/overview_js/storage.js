@@ -204,7 +204,7 @@ function diskOwner(n, manage = true) {
       <span class="sm mut">GiB</span>${fopBtn("dklim", "保存")}<span class="sm mut">超过只在页面上标红、记事件，不弹通知</span></div>` : o?.limit ? `<div class="sm mut">提醒线 ${o.limit} GiB</div>` : "";
   if (!o) return `<div class="empty">共享盘上没有归到 ${esc(n)} 的目录。</div>${lim}`;
   const names = [...new Set([...(K.names || []), "公共"])];
-  const own = d => edit ? `<select data-dkown="${esc(d)}" aria-label="${esc(d)}/ 归给谁"><option value="">按名字（缺省）</option>${names.map(m => `<option value="${esc(m)}"${K.owners_set?.[d] === m ? " selected" : ""}>${esc(m)}</option>`).join("")}</select>` : "";
+  const own = d => edit ? `<select class="ain sm-sel" data-dkown="${esc(d)}" aria-label="${esc(d)}/ 归给谁"><option value="">按名字（缺省）</option>${names.map(m => `<option value="${esc(m)}"${K.owners_set?.[d] === m ? " selected" : ""}>${esc(m)}</option>`).join("")}</select>` : "";
   const units = o.units.map(u => { const h = u.b == null ? null : diskHeat(u);
     return `<tr${h ? ` class="heat-${h.lv}"` : ""}><td class="sm" ${tip([u.u, ...(u.top || []).map(([k, b]) => `${k}  ${GB(b)} GiB`)].join("\n"))}><code>${esc(u.u).replaceAll("/", "/<wbr>")}</code>${u.err ? ` <span style="color:var(--bad)" ${tip(u.err)}>出错</span>` : ""}${heatTag(h)}</td>
       ${u.b == null ? `<td class="r mut">还没扫</td><td></td><td></td><td></td>` : `<td class="r">${GB(u.b)}</td><td class="r">${heatNum(h, dGB(u.d24))}</td><td class="r">${GB(u.cold)}</td><td class="r sm">${ago(u.m)}</td>`}
@@ -257,7 +257,8 @@ function workDiskBlock(wd, h) {
   }).join("");
   const localCache = h.status?.storage?.local || {};
   const cacheBytes = Object.values(localCache).reduce((a, v) => a + (v.cache || 0) + (v.scratch || 0), 0);
-  const foot = `<div class="sm mut" style="margin-top:6px">自管缓存与单格临时（<code>.tmp/</code>）：${G(cacheBytes)} · 预览清理：<code>labmon worker clean ${esc(h.id)}</code>（仅清自管缓存，需显式 <code>--yes</code> 才删）${wd.pending ? ` · 还有 ${wd.pending} 个目录待扫` : ""}</div>`;
+  const cleanCmd = `labmon worker clean ${h.id}`;
+  const foot = `<div class="sm mut" style="margin-top:6px">自管缓存与单格临时（<code>.tmp/</code>）：${G(cacheBytes)} · 预览清理：<code>${esc(cleanCmd)}</code><button class="btn mini-btn ml-sm" type="button" data-copy="${esc(cleanCmd)}">复制</button>（仅清自管缓存，需显式 <code>--yes</code> 才删）${wd.pending ? ` · 还有 ${wd.pending} 个目录待扫` : ""}</div>`;
   return head + workDiskBar(wd, false)
     + (rows ? `<div class="scroll" style="margin-top:8px"><table class="dku"><tr><th>工作目录</th><th class="r">大小</th><th class="r">24 小时</th><th class="r">最近修改</th></tr>${rows}</table></div>` : `<div class="empty" style="margin-top:6px">工作目录下还没有已统计的子目录。</div>`)
     + foot;

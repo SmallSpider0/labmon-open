@@ -79,8 +79,10 @@ function stepDrw(dir) {
   if (k >= 0 && ids.length > 1) nav(DH[d.k](ids[(k + dir + ids.length) % ids.length]));
 }
 
-function projCell(j) {
-  const name = visibleProject(j.link) ? `<a href="#/p/${encodeURIComponent(j.link)}">${esc(j.project)}</a>` : esc(j.project);
+function projCell(j, {title = false} = {}) {
+  const lbl = title ? pname(j.project) : j.project;
+  const ht = title && lbl !== j.project ? " " + tip(j.project) : "";
+  const name = visibleProject(j.link) ? `<a href="#/p/${encodeURIComponent(j.link)}"${ht}>${esc(lbl)}</a>` : ht ? `<span${ht}>${esc(lbl)}</span>` : esc(lbl);
   return `<span class="nw"><span class="dot" style="background:${color(j.project)}"></span> ${name}</span>`;
 }
 
