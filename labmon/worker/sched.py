@@ -490,6 +490,26 @@ def _place(x, S, t, pre=None):
             S["holds"][x["key"]] = {"cards": ["*"], "until": hold_until(S, None, t)}
             return None, w("xhost_wait", names="、".join(ours)), True
         S["holds"].pop(x["key"], None)
+
+    def ext_detail(cs):
+        bits = []
+        for c in cs:
+            mb = c.get("unacct_mb") or 0.0
+            why = c.get("unacct_why") or ""
+            if mb >= _C.UNACCT_VRAM_MB:
+                bits.append("约 %.1f GiB，本环境不可见其进程" % (mb / 1024.0))
+            elif "（" in why and "）" in why:
+                bits.append(why.split("（", 1)[1].rsplit("）", 1)[0])
+            else:
+                bits.append("本环境不可见其进程")
+        return "；".join(dict.fromkeys(bits))
+
+    ext_cards = [c for c in allowed_cards if c["uuid"] in unacct_set] if x["ngpu"] > 0 else []
+    # 外部占卡导致可用卡数不足：先于内存/CPU 检查返回，避免与内存/CPU 紧缺叠加时变成 bar=True 屏障挡住后续纯 CPU 任务
+    if x["ngpu"] > 0 and S["cards"] and ext_cards and len(allowed_cards) - len(ext_cards) < x["ngpu"]:
+        S["holds"].pop(x["key"], None)
+        return None, w("ext_gpu", idx=",".join(str(c["i"]) for c in ext_cards), note=ext_detail(ext_cards)), False
+
     room_gib = ram_free(S)
     ram, rsrc = ram_need(x, S)
     if room_gib is not None and ram + S["margin"] > room_gib:
@@ -506,25 +526,8 @@ def _place(x, S, t, pre=None):
             return None, w(code, held=held, cpus=n, src=src, left=max(0.0, cores), cap=S["cpu_cap"], warm=_C.CPU_WARM_S // 60), True
     kept = "，已扣给对方的预留" if S["kept"] else ""
 
-    def ext_detail(cs):
-        bits = []
-        for c in cs:
-            mb = c.get("unacct_mb") or 0.0
-            why = c.get("unacct_why") or ""
-            if mb >= _C.UNACCT_VRAM_MB:
-                bits.append("约 %.1f GiB，本环境不可见其进程" % (mb / 1024.0))
-            elif "（" in why and "）" in why:
-                bits.append(why.split("（", 1)[1].rsplit("）", 1)[0])
-            else:
-                bits.append("本环境不可见其进程")
-        return "；".join(dict.fromkeys(bits))
-
     if x["excl"] == "gpu" and x["ngpu"] > 0:
         if not mine:
-            ext_cards = [c for c in allowed_cards if c["uuid"] in unacct_set]
-            if ext_cards and len(ext_cards) == len(allowed_cards):
-                S["holds"].pop(x["key"], None)
-                return None, w("ext_gpu", idx=",".join(str(c["i"]) for c in ext_cards), note=ext_detail(ext_cards)), False
             return None, w("xgpu_none"), True
         free = card_free(S)                                  # MB
         occ = {c["uuid"]: _C.intruders("gpu", [c["uuid"]], all_jobs, S["gp"], None, unacct=unacct_info) for c in mine}
@@ -555,9 +558,6 @@ def _place(x, S, t, pre=None):
         return ok[:x["ngpu"]], None, False
     if not S["cards"]:                        # 不是资源等待，不成屏障：不然 30 分钟后连不用卡的任务也让位
         return None, w("no_gpu"), False
-    ext_cards = [c for c in allowed_cards if c["uuid"] in unacct_set]
-    if ext_cards and len(allowed_cards) - len(ext_cards) < x["ngpu"]:
-        return None, w("ext_gpu", idx=",".join(str(c["i"]) for c in ext_cards), note=ext_detail(ext_cards)), False
     ka = ",".join(str(c["i"]) for c in S["cards"] if c["uuid"] in S["owner"] and c["ka"])        # 停不了的保活不是对方在用，分开说
     owner = ",".join(str(c["i"]) for c in S["cards"] if c["uuid"] in S["owner"] and not c["ka"])
     ext_s = "；卡 %s 有外部（如宿主机）占卡暂停放行" % ",".join(str(c["i"]) for c in ext_cards) if ext_cards else ""

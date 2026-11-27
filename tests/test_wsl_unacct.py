@@ -341,6 +341,90 @@ class Wsl2SchedulingE2ETest(unittest.TestCase):
                 w2.sample([])
                 self.assertTrue(w2.info["gpus"][0]["unacct_busy"])
 
+    def test_gpu_procs_query_failure_does_not_trigger_unacct_or_void(self):
+        """回归（Codex 审查）：compute-apps 查询超时/失败时，绝不把我方在跑任务显存误判为外部占卡，也不作废独占实验。"""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            m, w, dr = self._mk_worker(d)
+            now = time.time()
+            # 我方正在跑一个独占 GPU 实验，卡总显存已用 6 GiB
+            ex_j = {
+                "key": "ex1", "kind": "queue", "project": "proj-a", "name": "ex_job",
+                "root": str(dr / "projects/proj-a/ex"), "queue": "jobs.txt", "pid": os.getpid(),
+                "gpus": ["GPU-wsl-0"], "ngpu": 1, "excl": "gpu", "t0": now - 120,
+                "est": {"vram": 6.0, "ram": 1.0, "cpus": 1}, "acct": {"vram": 6144.0, "ram": 1.0, "cpu": 1},
+                "use": {}, "stop": None,
+            }
+            w.running["ex1"] = ex_j
+            meas_mod = m.Worker.sample.__globals__["_M"]
+            with mock.patch.dict(os.environ, {"LABMON_GPUS": "GPU-wsl-0:18432:24576:80"}):
+                os.environ.pop("LABMON_GPU_APPS", None)
+                # 连续两轮模拟 nvidia-smi --query-compute-apps 超时（with_ok 返回 False）
+                with mock.patch.object(meas_mod, "gpu_procs", return_value=([], False)), \
+                        mock.patch.object(w, "void_job") as vj:
+                    w.sample([])
+                    w.sample([])
+                    self.assertFalse(w.info["gpus"][0].get("unacct_busy"))
+                    self.assertEqual(w.other["unacct"], {})
+                    self.assertFalse(ex_j.get("void_n"))
+                    vj.assert_not_called()
+
+            # smi() 本身在 returncode != 0 或超时时返回 ([], False)
+            bad_proc = mock.Mock(returncode=1, stdout="", stderr="NVML timeout")
+            with mock.patch.dict(os.environ, {}, clear=False):
+                os.environ.pop("LABMON_GPUS", None)
+                os.environ.pop("LABMON_GPU_APPS", None)
+                with mock.patch("subprocess.run", return_value=bad_proc):
+                    self.assertEqual(m.gpu_procs(with_ok=True), ([], False))
+
+    def test_ext_gpu_takes_precedence_over_ram_and_cpu_barrier(self):
+        """回归（Codex 审查）：外部占卡暂停与内存/CPU 紧缺叠加时，仍返回 ext_gpu（bar=False），绝不成屏障挡住纯 CPU 任务。"""
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            m, w, _ = self._mk_worker(d)
+            now = time.time()
+            with mock.patch.dict(os.environ, {"LABMON_GPUS": "GPU-wsl-0:18432:24576:30"}):
+                w.sample([])
+                S = w.snapshot({})
+                # 容器内存上限 40 GiB / 配额 8 核（1 卡预留 2 核），在跑任务占 30 GiB 与 5 核：
+                # GPU 请求（12 GiB / 4 核）不触发 nofit，但同时缺内存与 CPU；纯 CPU 请求（1 GiB / 1 核）资源刚好够
+                S["room"], S["margin"], S["limit"] = 40.0, 2.0, 40.0
+                S["cpu_cap"], S["cpu_room"] = 8, 8.0
+                S["jobs"] = [{"key": "run0", "project": "proj-x", "name": "busy_cpu", "t0": now - 60, "t1": now + 600,
+                              "gpus": [], "vram": {}, "ram": 30.0, "cpu": 5.0, "excl": None, "tag": None, "hold": False, "ngpu": 0, "use": {}, "cards": 0.0}]
+
+                req_gpu = {"key": "k_gpu", "kind": "queue", "project": "proj-a", "name": "gpu_big_ram", "ngpu": 1, "allowed": None,
+                           "excl": None, "vram": 4.0, "src": "提示值", "ram": 12.0, "ram_src": "提示值",
+                           "cpus": 4, "cpu_src": "提示值", "tag": None, "hold": False, "dur": 20.0}
+                pick, why, bar = m.place(req_gpu, S, now)
+                self.assertIsNone(pick)
+                self.assertFalse(bar)
+                self.assertEqual(S["code"], "ext_gpu")
+                self.assertIn("外部（如宿主机）占卡", why)
+
+                # 等满 wait_cap（>30 分钟）后走 admit()，排在后面的 1 GiB / 1 核纯 CPU 任务绝不被挡住
+                req_cpu = {"key": "k_cpu", "kind": "queue", "project": "proj-b", "name": "cpu_small", "ngpu": 0, "allowed": None,
+                           "excl": None, "vram": 0.0, "src": "提示值", "ram": 1.0, "ram_src": "提示值",
+                           "cpus": 1, "cpu_src": "提示值", "tag": None, "hold": False, "dur": 5.0}
+                reqs = [
+                    dict(req_gpu, since=now - 3600, charge=0.5),
+                    dict(req_cpu, since=now - 60, charge=0.0),
+                ]
+                launched = []
+
+                def do_place(r):
+                    cs, why_, bar_ = m.place(r, S, now)
+                    if cs is not None:
+                        launched.append(r["name"])
+                        return None
+                    return why_, bar_
+
+                waits = m.admit(reqs, set(), m.POLICY, {}, now, do_place, shadow=lambda r: None)
+                self.assertEqual(launched, ["cpu_small"])
+                self.assertEqual(len(waits), 1)
+                self.assertEqual(waits[0][0]["name"], "gpu_big_ram")
+                self.assertFalse((waits[0][2] or {}).get("barrier"))
+
 
 class Wsl2BackendIntegrationTest(unittest.TestCase):
     """看板后端集成：worker_env、_to_worker、exthost、api.check/status、collect._hosts 与 gpu_idle 豁免。"""

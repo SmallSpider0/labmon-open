@@ -722,7 +722,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         步骤：读主机（host_info、压力 press）→ 认旧 gpu_queue.sh 的任务（ext_jobs）→ 各任务的进程（job_procs）→ GPU 进程归属（gpu_owners）
         → 各卡利用率窗口（util_window）→ 逐任务量用量（measure）→ labmon 之外的用量、作废、借来主机的几项判定 → 内存闸门事件（mem_events）。"""
         t = _C.time.time()
-        procs, gpus, apps = _M.scan_procs(), _M.gpu_table(), _M.gpu_procs()
+        procs, gpus = _M.scan_procs(), _M.gpu_table()
+        apps, apps_ok = _M.gpu_procs(with_ok=True)
         h = _M.host_info(gpus, _C.DATA_ROOT)
         h["press"] = self.press(t)
         self.slow = h["press"]["nfs"] if (h["press"]["nfs"] or {}).get("slow") else None
@@ -741,9 +742,15 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if g["owner"] == "other":
                 ovram[g["uuid"]] = ovram.get(g["uuid"], 0.0) + g["mb"]
                 ogid.setdefault(g["uuid"], set()).add(g["hpid"])
-        prev_busy = {u for u, v in (self.other.get("unacct") or {}).items() if v.get("busy")}
+        prev_unacct = self.other.get("unacct") or {}
+        prev_busy = {u for u, v in prev_unacct.items() if v.get("busy")}
         run_cards = {u for j in jobs for u in (j.get("gpus") or [])}
-        unacct = _M.unacct_vram(gpus, gp, running_cards=run_cards, prev_busy=prev_busy)
+        if apps_ok:
+            unacct = _M.unacct_vram(gpus, gp, running_cards=run_cards, prev_busy=prev_busy)
+        else:
+            # compute-apps 查询超时/失败：跳过本轮差额判定并保守沿用上一轮，不把我方在跑任务误判成外部占卡
+            cur_u = {g["uuid"] for g in gpus}
+            unacct = {u: dict(v) for u, v in prev_unacct.items() if u in cur_u}
         for g in gpus:
             u = unacct.get(g["uuid"])
             if not u:
@@ -755,7 +762,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 g["unacct_busy"] = True
                 g["unacct_why"] = u["why"]
         now_busy = {u for u, v in unacct.items() if v.get("busy")}
-        if now_busy != prev_busy:
+        if apps_ok and now_busy != prev_busy:
             idx = {g["uuid"]: g["i"] for g in gpus}
             for u in sorted(now_busy - prev_busy):
                 self.wlog("卡 %s 检测到%s%s" % (idx.get(u, u), unacct[u]["why"],
@@ -765,7 +772,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         cards_on = {}                             # 各任务此刻所用的卡（独占任务据此看同卡、同机有没有别的，作废）
         for j in jobs:
             if mine[id(j)]:
-                cards_on[id(j)] = self.measure(j, mine[id(j)], procs, gp, util, ovram, jobs, t, unacct=unacct)
+                cards_on[id(j)] = self.measure(j, mine[id(j)], procs, gp, util, ovram, jobs, t, unacct=unacct if apps_ok else None)
         self.info = h
         for d in h.get("disk") or []:
             if isinstance(d, dict):
@@ -804,7 +811,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.other = {"vram": ovram, "cpu": None if extra is None else max(0.0, extra - ka_cpu), "ka": ka_ext, "gid": ogid, "ka_cpu": ka_x,
                       "unacct": unacct,
                       "ram": max(0.0, m["anon"] - sum((j.get("use") or {}).get("ram") or 0.0 for j in jobs) - ka_ram) if m else None}
-        self.void_check(jobs, cards_on, gp, extra, unacct=unacct)
+        self.void_check(jobs, cards_on, gp, extra, unacct=unacct if apps_ok else None)
         self.guest_scan(t)
         self.oom_check(t)
         self.guest_tight(t)

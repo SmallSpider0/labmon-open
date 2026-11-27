@@ -26,19 +26,24 @@ def oom_of(j, rc):
     return None
 
 
-def smi(query, fields, *, strict=False):
+def smi(query, fields, *, strict=False, with_ok=False):
     try:
-        out = subprocess.run(["nvidia-smi", "--query-%s=%s" % (query, fields), "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=8 if strict else 30, check=strict).stdout
+        r = subprocess.run(["nvidia-smi", "--query-%s=%s" % (query, fields), "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=8 if strict else 30, check=strict)
     except (OSError, subprocess.TimeoutExpired):
         if strict:
             raise
-        return []
+        return ([], False) if with_ok else []
+    if r.returncode != 0:
+        return ([], False) if with_ok else []
+    out = r.stdout
     n = fields.count(",") + 1
     lines = out.strip().splitlines()
-    if strict and any(l.count(",") != n - 1 for l in lines):
+    bad = any(l.count(",") != n - 1 for l in lines)
+    if strict and bad:
         raise ValueError("GPU 查询返回了无法识别的行")
-    return [[c.strip() for c in l.split(",")] for l in lines if l.count(",") == n - 1]
+    rows = [[c.strip() for c in l.split(",")] for l in lines if l.count(",") == n - 1]
+    return (rows, not bad) if with_ok else rows
 
 
 def num(s, default=None):
@@ -70,16 +75,24 @@ def query_gpus():
     return [(g["i"], g["uuid"], g["free"]) for g in gpu_table()]
 
 
-def gpu_procs(*, strict=False):
+def gpu_procs(*, strict=False, with_ok=False):
     """GPU 上的计算进程（任何人的）：[(宿主机 PID, 显存 MB, UUID)]。
+    with_ok=True 时返回 (列表, 查询是否成功)，供 unacct_vram 区分“确实无进程”与“nvidia-smi 超时/失败”。
     测试时用 LABMON_GPU_APPS="pid[:mb[:uuid]],…" 代替 nvidia-smi。"""
     fake = None if strict else os.environ.get("LABMON_GPU_APPS")
     if fake is not None:
-        return [(int(p[0]), num(p[1], 0.0), p[2]) for p in (x.split(":") + [None, None] for x in fake.split(",") if x)]
-    rows = smi("compute-apps", "pid,used_memory,gpu_uuid", strict=strict)
+        rows = [(int(p[0]), num(p[1], 0.0), p[2]) for p in (x.split(":") + [None, None] for x in fake.split(",") if x)]
+        return (rows, True) if with_ok else rows
+    if not strict and os.environ.get("LABMON_GPUS") is not None:
+        return ([], True) if with_ok else []
+    if with_ok:
+        rows, ok = smi("compute-apps", "pid,used_memory,gpu_uuid", strict=strict, with_ok=True)
+    else:
+        rows, ok = smi("compute-apps", "pid,used_memory,gpu_uuid", strict=strict), True
     if strict and any(not pid.isdigit() or num(mem, -1) < 0 or not math.isfinite(num(mem, -1)) or not gpu for pid, mem, gpu in rows):
         raise ValueError("GPU 进程列表无法识别")
-    return [(int(r[0]), num(r[1], 0.0), r[2]) for r in rows if r[0].isdigit()]
+    out = [(int(r[0]), num(r[1], 0.0), r[2]) for r in rows if r[0].isdigit()]
+    return (out, ok) if with_ok else out
 
 
 def gpu_apps():
