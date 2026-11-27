@@ -399,7 +399,7 @@ def project_host_for_owner(h: dict, owner=None) -> dict:
     out = {
         "id": str(h["id"]),
         "label": h.get("label") or str(h["id"]),
-        "returned": h.get("returned") or h.get("borrow_returned") or "1970-01-01 00:00",
+        "returned": h.get("returned") or h.get("borrow_returned") or "1970-01-02 00:00",
         "other_member_auto": True,
     }
     for k in ("data_root", "worker_home", "shared", "standalone", "platform_kind"):

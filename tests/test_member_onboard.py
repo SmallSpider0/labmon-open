@@ -894,6 +894,37 @@ pool = "pool-public"
         self.assertTrue(h_alice.get("member_auto"))
         self.assertEqual(h_alice.get("ssh"), "root@192.0.2.10")
 
+        # 4. 无 borrow_returned 历史借用记录且在 UTC 时区下，归还占位时间戳仍严格大于 0（不误判为在用主机）
+        C.set_fleet_keys({"borrow_since": None, "borrow_returned": None}, "清借用记录", sid="srv-alice")
+        (PJ.cfg_file("p-admin")).write_text(
+            'id = "p-admin"\ntitle = "p-admin"\n'
+            '[[hosts]]\nid = "srv-alice"\n'
+        )
+        old_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "UTC"
+            time.tzset()
+            cfg_utc = PJ.load_cfg("p-admin")
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+        h_utc = next(h for h in cfg_utc["hosts"] if h["id"] == "srv-alice")
+        self.assertTrue(bool(h_utc["returned"]) and h_utc["returned"] > 0)
+        self.assertIsNone(h_utc["ssh"])
+
+        # 5. 项目转交给主机持有人 alice 后，Project._reload 感知 owner 变化并重新解析出本人可用的 srv-alice
+        proj = S.Project("p-admin")
+        self.assertTrue(bool(proj.cfg["hosts"][0]["returned"]))
+        PJ.set_owner("p-admin", "alice", "admin")
+        proj._reload()
+        h_after = next(h for h in proj.cfg["hosts"] if h["id"] == "srv-alice")
+        self.assertIsNone(h_after["returned"])
+        self.assertTrue(h_after.get("member_auto"))
+        self.assertEqual(h_after.get("ssh"), "root@192.0.2.10")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -237,8 +237,8 @@ class Project(_Collector):
         return self.interval_arg or self.cfg["interval"]
 
     def _mtimes(self) -> tuple:
-        # 项目配置与用户级主机清单任一改动都重读；主机清单是后来才建的也算
-        return tuple(file_sig(p) for p in sources(self.cfg)) + (hosts_file().exists(),)
+        # 项目配置、用户级主机清单与项目主人（meta.json / users.owner_of，#244）任一改动都重读；主机清单是后来才建的也算
+        return tuple(file_sig(p) for p in sources(self.cfg)) + (hosts_file().exists(), U.owner_of(self.id))
 
     def _reload(self) -> None:
         try:
