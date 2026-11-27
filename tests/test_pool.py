@@ -1289,6 +1289,40 @@ pool = "P"
         self.assertTrue(res["changed"])
         self.assertEqual(res["pool"]["worker_home"], "/data/other/labmon")
 
+    def test_pool_activity_excludes_done_pending_regs(self):
+        """Codex 第 2 轮 P2：pool.lists 已确认 done=True 的待放登记（regs 文件本身无 empty/sleeping 字段）不计入待放数，不阻断删池或切域。"""
+        CF.save_pool("a100", label="A100 池", hosts=["h1"], members=["alice"], create=True, by="boss")
+        snap_done = {
+            "pool": {"lists": {
+                "a100|/data/lab/pa|jobs/done.txt": {
+                    "pool": "a100", "root": "/data/lab/pa", "jobs": "jobs/done.txt", "done": True, "sleeping": False,
+                },
+            }},
+            "regs": [
+                {"host": "pool:a100", "state": "pool", "home": "/data/lab/labmon", "queues": [
+                    {"root": "/data/lab/pa", "jobs": "jobs/done.txt", "project": "pa"},
+                ]},
+            ],
+        }
+        self.assertEqual(P.pool_activity("a100", snap=snap_done), {"pending": 0, "placed": 0})
+        # 允许无阻碍切共享域与非强制删除
+        res = CF.save_pool("a100", label="A100 池", hosts=["h3"], members=["alice"], create=False, by="boss", snap=snap_done)
+        self.assertEqual(res["pool"]["worker_home"], "/data/other/labmon")
+        # 尚未被 worker 读到的新登记（不在 pool.lists 中）仍保守计入待放
+        snap_unread = {
+            "pool": {"lists": snap_done["pool"]["lists"]},
+            "regs": [
+                {"host": "pool:a100", "state": "pool", "home": "/data/other/labmon", "queues": [
+                    {"root": "/data/lab/pa", "jobs": "jobs/done.txt", "project": "pa"},
+                    {"root": "/data/other/pa", "jobs": "jobs/new.txt", "project": "pa"},
+                ]},
+            ],
+        }
+        self.assertEqual(P.pool_activity("a100", snap=snap_unread), {"pending": 1, "placed": 0})
+        # done-only 快照允许非强制删除
+        msg = CF.remove_pool("a100", force=False, by="boss", snap=snap_done)
+        self.assertIn("已删除", msg)
+
     def test_worker_rm_deleted_named_pool_pending_list(self):
         """Codex P2-2：强制删除命名池后，仍可经 worker rm pool:<id> 按快照 home 精准撤回待放清单（含普通用户撤自己项目），而未知池名仍报错。"""
         import urllib.error

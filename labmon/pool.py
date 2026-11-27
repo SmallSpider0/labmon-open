@@ -677,9 +677,14 @@ def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dic
     if pid == POOL or len(pool_map) <= 1:
         match_phids.add(POOL)
     pend_keys: set[str] = set()
+    done_keys: set[str] = set()
     for v in ((snap.get("pool") or {}).get("lists") or {}).values():
-        if isinstance(v, dict) and v.get("pool") == pid and not v.get("done") and v.get("root") and v.get("jobs"):
-            pend_keys.add(key(v["root"], v["jobs"]))
+        if isinstance(v, dict) and v.get("pool") == pid and v.get("root") and v.get("jobs"):
+            rk = key(v["root"], v["jobs"])
+            if v.get("done") or v.get("sleeping"):
+                done_keys.add(rk)
+            else:
+                pend_keys.add(rk)
     placed = 0
     for x in snap.get("regs") or []:
         xh = str(x.get("host") or "")
@@ -687,7 +692,9 @@ def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dic
         if xh in match_phids:
             for q in qs:
                 if q.get("root") and q.get("jobs") and not q.get("empty") and not q.get("sleeping"):
-                    pend_keys.add(key(q["root"], q["jobs"]))
+                    rk = key(q["root"], q["jobs"])
+                    if rk not in done_keys:
+                        pend_keys.add(rk)
             continue
         if is_pool_id(xh):
             continue
