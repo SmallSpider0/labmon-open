@@ -277,16 +277,16 @@ function drawTimeline() {
       const xs = oc.filter(x => x.g?.includes(g.i)).map(x => ({...x}));     // 多卡任务每张卡各画一条，各自分道
       xs.forEach(x => { if (x.t1 > t0 && x.t0 < t1) used.add(x.p); });
       const lay = tlRowLayout(tlPack(xs), OCC_CARD_LAY);
-      rows.push({key: `card:${h.id}:${g.i}`, h: lay.h, sep: sep && !k, draw: (y, hh, c) => cardRow(h, g, xs, lay, y, hh, c)});
+      rows.push({key: `card:${h.id}:${g.i}`, h: lay.h, gap: 0, sep: sep && !k, draw: (y, hh, c) => cardRow(h, g, xs, lay, y, hh, c)});
     }
     if (cpu.length) {
       cpu.forEach(x => { if (x.t1 > t0 && x.t0 < t1) used.add(x.p); });
       const lay = tlRowLayout(tlPack(cpu), OCC_CARD_LAY);
-      rows.push({key: `cpu:${h.id}`, h: lay.h, sep: sep && !gs.length, draw: (y, hh, c) => cardRow(h, null, cpu, lay, y, hh, c)});
+      rows.push({key: `cpu:${h.id}`, h: lay.h, gap: 0, sep: sep && !gs.length, draw: (y, hh, c) => cardRow(h, null, cpu, lay, y, hh, c)});
     }
   }
   const marks = [...new Map(D.projects.flatMap(p => p.markers || []).map(m => [m.label + m.ts, m])).values()];
-  tlShow(box, rows, {markers: marks, items: () => [...occItems(color([...used][0])),
+  tlShow(box, rows, {markers: marks, sepGap: 5, items: () => [...occItems(color([...used][0])),
     ["lease", "租期到期", tlSw(`<line x1="6" x2="6" y1="0" y2="12" stroke="var(--bad)" stroke-dasharray="3 2" stroke-width="1.5"/>`, 12)]]});
   const lg = document.getElementById("tllegend");
   if (lg) lg.innerHTML = [...used].map(p => projName(p, {always: true})).join(" &nbsp;");     // 只列这段时间图上有的
@@ -296,7 +296,7 @@ function cardRow(h, g, xs, lay, y, hh, c) {
   const rowTip = g ? `${h.label} GPU ${g.i}：现在 ${mb2g(g.used)} / ${mb2g(g.total)} GiB`
     : `${h.label} 纯 CPU 任务${info?.cpu_used != null && q ? `：现在 CPU ${g1(info.cpu_used)} / ${g1(q)} 核` : ""}`;
   const lab = (TLH.showHost ? hostShort(h) + " " : "") + (g ? "卡 " + g.i : "CPU");
-  let s = `<text x="0" y="${y + hh / 2 + 4}" ${tip(rowTip)}>${esc(fit(lab, c.L - 6))}</text>`;
+  let s = `<text x="0" y="${y + hh / 2 + 3.5}" style="font-size:10.5px" ${tip(rowTip)}>${esc(fit(lab, c.L - 6))}</text>`;
   s += `<rect x="${c.L}" y="${y + hh / 2 - .5}" width="${c.PW}" height="1" fill="var(--line)"/>`;
   s += occBars(xs, y, hh, c, {layout: lay, color, label: x => x.n,
     text: x => `${projName(x.p, {always: true, plain: true})}${x.lane ? x.lane + " · " : ""}${x.n}\n${occState(x)} · ${ts(x.t0)} → ${ts(x.t1)}（${dur(x.t1 - x.t0)}）· ${x.g?.length ? "卡 " + x.g.join(",") : "纯 CPU"}`

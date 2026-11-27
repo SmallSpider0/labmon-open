@@ -3602,6 +3602,11 @@ t("overview", "前端 UI 打磨（#237）：分段按钮组、外部机抽屉重
   if (dOwn.includes("data-dkown")) has(dOwn, 'class="ain sm-sel" data-dkown');
   page(A, "#/p/proj-a/manage"); run(A, 'pjAct("owner", "proj-a")');
   has(el(A, "drwp").innerHTML, '<div class="aform acc-pop-form"><label>归属给谁<select class="ain" data-owner', "归属表单应包入 .aform");
+  // 总览时间线 GPU/CPU 分车道紧凑密度：单行高 15px、同主机行零间隙
+  const OT = ovCtx(clone(OV), RR); page(OT, "#/");
+  run(OT, `D.occ["srv-a"].push({p: "proj-a", n: "cpu_job", lane: "CPU", t0: ${NOW - 1800}, t1: ${NOW + 1800}, g: [], st: "run"}); drawTimeline()`);
+  const tlH = Number((el(OT, "tlbox").innerHTML.match(/<svg[^>]*height="([^"]+)"/) || [])[1]);
+  ok(run(OT, "OCC_CARD_LAY.base") === 15 && tlH > 0 && tlH < 120, `总览时间线应紧凑：base=${run(OT, "OCC_CARD_LAY.base")}, svgH=${tlH}`);
 });
 
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));
