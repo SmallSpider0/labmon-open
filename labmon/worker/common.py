@@ -75,6 +75,21 @@ DISK_STOP_GB = 10.0      # 独立主机本地盘准入停止线（GiB，0 关闭
 DISK_HYST_GB = 2.0       # 磁盘闸门滞回恢复带宽（GiB）：余量回升至 stop+2 且占用降至 quota-2 才自动解除
 
 
+UNACCT_VRAM_MB = 512.0   # 未归因显存差额扣减门槛（MB，#114）：>= 512 MB 才扣进 other["vram"]，过滤驱动/桌面合成器底噪
+
+
+UNACCT_BUSY_MB = 1536.0  # 外部活跃占卡显存触发门槛（MB，1.5 GiB，#114）：达到即视为外部活跃占卡，默认整卡暂停放新任务
+
+
+UNACCT_CLEAR_MB = 1024.0 # 外部活跃占卡显存滞回解除门槛（MB，1.0 GiB，#114）：降至其下且利用率冷却才解除，防边缘抖动
+
+
+UNACCT_UTIL_HOT = 15.0   # 无可见 GPU 进程时外部活跃占卡利用率触发门槛（%，#114）
+
+
+UNACCT_UTIL_COOL = 5.0   # 外部活跃占卡利用率滞回解除门槛（%，#114）
+
+
 WAIT_CAP_S = 1800        # 缺省：请求卡在资源上等了这么久，排在它后面的就不能再越过它，只能回填（预计在它放行前跑完的才放）；sched.json 的 wait_cap_min 可改
 
 
@@ -462,10 +477,11 @@ def gp_label(g):
                         "PID %d（%s）" % (g["hpid"], g["comm"] or "labmon 之外"))
 
 
-def intruders(scope, cards, jobs, gp, cpu, me=None):
+def intruders(scope, cards, jobs, gp, cpu, me=None, unacct=None):
     """独占任务会被谁打扰（scope 为 gpu 看 cards 这几张卡，host 看整台主机），分两类返回：
     labmon 的（别的任务、GPU 保活：会跑完或由 worker 停下，等腾空时值得留卡）与 labmon 之外的（借来的主机上多半是对方，留卡也不会走）。
-    放行前（等腾空）与运行中（作废）共用：同卡（整机：同机）别的任务与 GPU 进程，整机另算 labmon 之外的进程占 VOID_CPU 核以上（cpu）。
+    放行前（等腾空）与运行中（作废）共用：同卡（整机：同机）别的任务与 GPU 进程，未归因外部活跃占卡（unacct，#114），
+    整机另算 labmon 之外的进程占 VOID_CPU 核以上（cpu）。
     gp 是 sample 认过归属的 GPU 进程，me 是这个任务自己。"""
     on = set(cards)
     ours = {o["name"] for o in jobs if o is not me and not is_hold(o["name"]) and not idle_job(o)
@@ -474,6 +490,9 @@ def intruders(scope, cards, jobs, gp, cpu, me=None):
     for g in gp:
         if (me is None or g["_j"] is not me) and (scope == "host" or g["uuid"] in on):
             (theirs if g["owner"] == "other" else ours).add(gp_label(g))
+    for uu, u in (unacct or {}).items():
+        if u and u.get("busy") and (scope == "host" or uu in on):
+            theirs.add(u.get("why") or "外部（如宿主机）占卡")
     if scope == "host" and cpu is not None and cpu > VOID_CPU:
         theirs.add("labmon 之外的进程占 %.1f 核" % cpu)
     return sorted(ours), sorted(theirs)

@@ -45,10 +45,10 @@ worker 装在主机的 `worker_home`（缺省 `<data_root>/labmon`，`data_root`
 | `worker.log` | 文字日志（主机页的「worker 日志」）；出错崩掉时出错位置在这里 |
 | `overrides.json` | 临时指令；`overrides.json.lock`、`events.jsonl.lock` 是读改写的文件锁 |
 | `limits.json` | tag 上限（`labmon worker limit`） |
-| `eta.json`、`sched.json`、`returned.json`、`hist_shared.json` | 看板写来的（经同一条 SSH 的 stdin 管道落盘，避开 `ARG_MAX`）：运行中任务的预计结束（`jobs`）与其中真正按日志进度外推的任务键（`prog`，#149）；调度设置（主机清单的 `[sched]`，加上各项目算在谁名下的 `owner`，独立机另含 `standalone` 与 `disk_*`）；主机清单里已归还的主机（`offers` 不让它们挡）；独立主机专用的跨机裁剪历史 `hist_shared.json`（仅喂 `estimate`/`duration`，与公平份额、依赖、盘写入统计严格隔离，#114） |
+| `eta.json`、`sched.json`、`returned.json`、`hist_shared.json` | 看板写来的（经同一条 SSH 的 stdin 管道落盘，避开 `ARG_MAX`）：运行中任务的预计结束（`jobs`）与其中真正按日志进度外推的任务键（`prog`，#149）；调度设置（主机清单的 `[sched]`，加上各项目算在谁名下的 `owner`，独立机另含 `standalone`、`disk_*`、`cpu_quota` 与 `allow_shared_gpu`）；主机清单里已归还的主机（`offers` 不让它们挡）；独立主机专用的跨机裁剪历史 `hist_shared.json`（仅喂 `estimate`/`duration`，与公平份额、依赖、盘写入统计严格隔离，#114） |
 | `stopped` | `labmon worker stop` 的标记：看板见到它不自动拉起 |
 
-容器本地盘上 labmon 管的目录是 `/tmp/labmon/`（独立主机缺省 `<data_root>/.tmp/`）：单格临时目录、项目缓存、单元申请的交换文件（见下）。独立主机另用 `WorkDisk`（复用 `Disk` 限速与 `follow_symlinks=False`）仅扫描 `<data_root>`，并开启 `disk_gate` 准入闸门（默认预警 `20 GiB`、停止线 `10 GiB` + `2 GiB` 滞回，触发时只拦新任务、不杀在跑任务）；独立模式下 `peers()` 不扫别机，`dep_block`/`gang_block` 显式提示不支持跨主机依赖与成组。
+容器本地盘上 labmon 管的目录是 `/tmp/labmon/`（独立主机缺省 `<data_root>/.tmp/`）：单格临时目录、项目缓存、单元申请的交换文件（见下）。独立主机另用 `WorkDisk`（复用 `Disk` 限速与 `follow_symlinks=False`）仅扫描 `<data_root>`，并开启 `disk_gate` 准入闸门（默认预警 `20 GiB`、停止线 `10 GiB` + `2 GiB` 滞回，触发时只拦新任务、不杀在跑任务）；独立模式下 `peers()` 不扫别机，`dep_block`/`gang_block` 显式提示不支持跨主机依赖与成组。在 WSL2 下检测到 `data_root` 落在 `/mnt/[a-z]/`（Windows 9p 挂载）时，`worker status`、`labmon check`、`labmon host test` 与外部主机抽屉会给出性能风险提醒并建议迁到 Linux ext4 目录（不硬阻断）。
 
 ## 清单与状态
 
@@ -366,6 +366,10 @@ worker 每轮现读主机容量（各卡显存与利用率、cgroup 内存上限
   “CPU 不够”的括号里写核被谁记着：在跑几个、共记几核，其中几个还没回收（开跑不满 10 分钟、记的是估计）又记账比此刻实测多 0.5 核以上（与它们的实测；已回收的记的是近 10 分钟窗口核数的峰值，此刻低于它不算），labmon 之外（借来的主机上连同给对方的预留）占多少，纯 CPU 任务被保底核挡住时另写“为 GPU 预留 X 核”。
   把这几个多记的加回去就够的，代码是 `cpu_est`（句尾写“实际空着的够，是在跑的记账比实测多”），否则是 `cpu`（核真被我们自己的任务用着）。
 - **内存闸门**：收不回的内存（`anon`，不算页缓存）超过上限 90% 时停止放行并记事件，不杀任务。
+- **外部占卡（未归因显存差额 `unacct_vram`，#114）**：WSL2 宿主机跑游戏/桌面/本地大模型或容器 PID/MIG 隔离时，`nvidia-smi --query-compute-apps` 看不到外部进程，但卡总已用显存会升高。worker 每轮逐卡用 `used − sum(可见 compute-apps 显存)` 计算未归因显存差额（存在可见进程且驱动报 `[N/A]` 即 `mb <= 0` 时不求差，避免误判己方进程；`< 512 MiB` 按驱动/合成器底噪过滤，不扣减）：
+  - **触发与滞回**：差额 `>= 1.5 GiB`（`1536 MiB`），或该卡无可见 GPU 进程且无我方在跑任务时利用率 `>= 15%`，视为外部活跃占卡；解除需差额 `< 1.0 GiB`（`1024 MiB`）且（有可见/我方进程或利用率 `< 5%`），防止边缘抖动，重启接管（`load_prev`）继承滞回态；
+  - **默认策略（整卡暂停放新任务）**：外部活跃占卡时，默认对该卡暂停放行新 GPU 任务（等待原因写「外部（如宿主机）占卡暂停放行」，代码 `ext_gpu`）：**不成屏障、不挡纯 CPU 任务、不杀已跑非独占任务、保活自动让路、不进告警也不唤醒 `labmon wait`**；宿主机释放后下一轮自动恢复。多卡机上仅暂停被外占的那张卡，其余空闲卡照常放行；独占任务（`exclusive=gpu|host`）准入不留卡，运行中所在卡连着两轮出现外部活跃占卡按 `void_check` 作废重排；
+  - **可选共享模式**：在 `hosts.toml` 对应主机（或外部主机抽屉 / `labmon host edit --allow-shared-gpu`）设 `allow_shared_gpu = true`（随 `sched.json` 免重启即时生效）后，不整卡暂停，改为把未归因显存差额（`>= 512 MiB`）扣进卡可用显存，按剩余显存共享调度；真放行 `place`、推演 `simulate`/`forecast`、`fit`、`offers` 全链路统一遵循同一口径。
 - **放不下**：labmon 的任务全停也放不下的请求（`ram=` 写的加余量超过容器内存，GPU 卡数或满足显存要求的卡数不足，或 `cpus=` 写的核数超过配额）等待原因写“放不下”；GPU 会区分主机卡数、清单选卡限制和单卡显存。每轮照样再试，但不算卡在资源上、不成屏障，免得整台主机所有项目都停住。
   `cpus=` 没超配额、只是 labmon 之外与给对方的预留此刻占着、全停也不够的，写“CPU 不够：…labmon 之外与给对方的预留此刻占 x 核…先等它们退下”（代码 `cpu_other`），同样不成屏障：留着它们也不会走。
 - **CPU 被挡的告警**：`place` 给出原因代码（快照的 `code`），worker 记每个请求从何时起一直因 CPU 被挡、而且该告警（`CPU_ALERT_CODES`：记账比实测多挡住的 `cpu_est`、labmon 之外占着、要的比配额还多），满 10 分钟（`CPU_ALERT_S`）才在等待项写 `cpu_wait`（秒）；

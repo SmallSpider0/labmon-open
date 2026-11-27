@@ -662,7 +662,19 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
             alerts.append(alert(f"ssh_fail:{h['id']}", "user", f"{h['label']}：探针连续失败 {hs['fails']} 次（{fmt_time(hs['since'], date=False)} 起：{err}）"))
         rec = {"t": t, "host": h["id"], "ok": hd["ok"]}
         if p:
-            gp = p.get("gpu") or []
+            gp = [dict(g) for g in (p.get("gpu") or [])]
+            we = w_hosts.get(h["id"])
+            wst = we.get("status") if we and we.get("worker_up") else None
+            if wst and gp:
+                wgs = {g.get("i"): g for g in (wst.get("info") or {}).get("gpus") or []}
+                ru = set((wst.get("room") or {}).get("unacct") or ())
+                for g in gp:
+                    wg = wgs.get(g.get("index"))
+                    if wg:
+                        if wg.get("unacct_mb"):
+                            g["unacct_mb"] = wg["unacct_mb"]
+                        if wg.get("uuid") in ru:
+                            g["unacct_paused"] = True
             cg = p.get("cgroup") or {}
             hd.update(gpus=gp, gpu_procs=p.get("gpu_procs") or [], cgroup=cg, loadavg=p.get("loadavg"))
             bi = {b["i"]: b for b in busy.get(h["id"]) or []}
@@ -1022,7 +1034,9 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
         # 每次采样看各卡近 10 分钟的吃满程度（busy：只有保活时按 0，#51），不看瞬时值：数据加载的空档不会误报，保活也挡不住；
         # 没有 worker 的主机（采样里没有 busy）只有探针的瞬时值
         hs = hstate.setdefault(hd["id"], {})
-        idle_gpu = bool(unfinished and hd.get("gpus") and recent and t - recent[0]["t"] >= win - 150 and
+        # 外部活跃占卡默认整卡暂停放新任务（#114）：不报 gpu_idle 异常，免得反复叫醒 labmon wait
+        all_unacct = bool(hd.get("gpus")) and all(g.get("unacct_paused") for g in hd["gpus"])
+        idle_gpu = bool(unfinished and hd.get("gpus") and not all_unacct and recent and t - recent[0]["t"] >= win - 150 and
                         all(max([u or 0 for u in x.get("busy") or x.get("util") or [0]]) < al_cfg["gpu_idle_util"] for x in recent))
         used = bool(recent) and max([u or 0 for u in recent[-1].get("busy") or recent[-1].get("util") or [0]]) >= al_cfg["gpu_idle_util"]
         since = _idle_stretch(hs, idle_gpu, used, win, t)
@@ -1083,6 +1097,7 @@ def _host_alerts(cfg: dict, snap: dict, state: dict, hist: list, glob_snap: dict
         ids = {ln["id"] for ln in lanes}
         wrun = (st or {}).get("running") or []
         busy = (any(ln.get("alive") for ln in lanes) or bool(hd.get("gpu_procs")) or any(not j.get("hold") for j in wrun)
+                or any(g.get("unacct_paused") for g in hd.get("gpus") or [])
                 or any(j["status"] == "running" and not j["hold"] and j["lane"] in ids for j in snap["jobs"]))
         hcfg = next(h for h in cfg["hosts"] if h["id"] == hd["id"])
         idle = [c for c, cd in zip(hcfg["checks"], hd.get("checks") or []) if c.get("when_idle") and cd.get("state") == "fail" and not busy]

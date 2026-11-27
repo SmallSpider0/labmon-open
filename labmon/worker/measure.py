@@ -26,19 +26,24 @@ def oom_of(j, rc):
     return None
 
 
-def smi(query, fields, *, strict=False):
+def smi(query, fields, *, strict=False, with_ok=False):
     try:
-        out = subprocess.run(["nvidia-smi", "--query-%s=%s" % (query, fields), "--format=csv,noheader,nounits"],
-                             capture_output=True, text=True, timeout=8 if strict else 30, check=strict).stdout
+        r = subprocess.run(["nvidia-smi", "--query-%s=%s" % (query, fields), "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=8 if strict else 30, check=strict)
     except (OSError, subprocess.TimeoutExpired):
         if strict:
             raise
-        return []
+        return ([], False) if with_ok else []
+    if r.returncode != 0:
+        return ([], False) if with_ok else []
+    out = r.stdout
     n = fields.count(",") + 1
     lines = out.strip().splitlines()
-    if strict and any(l.count(",") != n - 1 for l in lines):
+    bad = any(l.count(",") != n - 1 for l in lines)
+    if strict and bad:
         raise ValueError("GPU 查询返回了无法识别的行")
-    return [[c.strip() for c in l.split(",")] for l in lines if l.count(",") == n - 1]
+    rows = [[c.strip() for c in l.split(",")] for l in lines if l.count(",") == n - 1]
+    return (rows, not bad) if with_ok else rows
 
 
 def num(s, default=None):
@@ -70,21 +75,114 @@ def query_gpus():
     return [(g["i"], g["uuid"], g["free"]) for g in gpu_table()]
 
 
-def gpu_procs(*, strict=False):
+def gpu_procs(*, strict=False, with_ok=False):
     """GPU 上的计算进程（任何人的）：[(宿主机 PID, 显存 MB, UUID)]。
+    with_ok=True 时返回 (列表, 查询是否成功)，供 unacct_vram 区分“确实无进程”与“nvidia-smi 超时/失败”。
     测试时用 LABMON_GPU_APPS="pid[:mb[:uuid]],…" 代替 nvidia-smi。"""
     fake = None if strict else os.environ.get("LABMON_GPU_APPS")
     if fake is not None:
-        return [(int(p[0]), num(p[1], 0.0), p[2]) for p in (x.split(":") + [None, None] for x in fake.split(",") if x)]
-    rows = smi("compute-apps", "pid,used_memory,gpu_uuid", strict=strict)
+        rows = [(int(p[0]), num(p[1], 0.0), p[2]) for p in (x.split(":") + [None, None] for x in fake.split(",") if x)]
+        return (rows, True) if with_ok else rows
+    if not strict and os.environ.get("LABMON_GPUS") is not None:
+        return ([], True) if with_ok else []
+    if with_ok:
+        rows, ok = smi("compute-apps", "pid,used_memory,gpu_uuid", strict=strict, with_ok=True)
+    else:
+        rows, ok = smi("compute-apps", "pid,used_memory,gpu_uuid", strict=strict), True
     if strict and any(not pid.isdigit() or num(mem, -1) < 0 or not math.isfinite(num(mem, -1)) or not gpu for pid, mem, gpu in rows):
         raise ValueError("GPU 进程列表无法识别")
-    return [(int(r[0]), num(r[1], 0.0), r[2]) for r in rows if r[0].isdigit()]
+    out = [(int(r[0]), num(r[1], 0.0), r[2]) for r in rows if r[0].isdigit()]
+    return (out, ok) if with_ok else out
 
 
 def gpu_apps():
     """GPU 上在跑的计算进程 PID（任何人的）。"""
     return [str(p) for p, _, _ in gpu_procs()]
+
+
+def is_wsl():
+    """当前环境是否是 WSL（读 PROC/sys/kernel/osrelease 或 PROC/version；测试可经 LABMON_PROC 注入，#114）。"""
+    for rel in ("sys/kernel/osrelease", "version"):
+        txt = (_C.read(os.path.join(_C.PROC, rel), "") or "").lower()
+        if "microsoft" in txt or "wsl" in txt:
+            return True
+    return False
+
+
+def _unacct_why(mb, util, busy):
+    parts = []
+    if mb >= _C.UNACCT_VRAM_MB:
+        parts.append("约 %.1f GiB 显存" % (mb / 1024.0))
+    if util is not None and ((busy and mb < _C.UNACCT_BUSY_MB) or util >= _C.UNACCT_UTIL_HOT):
+        parts.append("利用率 %.0f%%" % util)
+    detail = "、".join(parts) or "显存/算力活跃"
+    return "外部（如宿主机）占卡（%s，本环境不可见其进程）" % detail if busy else "外部（如宿主机）占%s" % detail
+
+
+def unacct_vram(gpus, gp, running_cards=(), prev_busy=()):
+    """未归因显存差额识别与外部活跃占卡判定（通用机制，覆盖 WSL2 宿主机占卡与容器 PID/MIG 隔离场景，#114）：
+    逐卡计算 raw_mb = max(0, card.used - sum(可见 compute-apps 显存))：
+    - 若该卡存在可见进程且驱动未上报单进程显存（mb <= 0，如旧 WDDM 返回 [N/A]），无法可靠求差，不按差额误判；
+    - 显存容量扣减（deduct）：raw_mb >= UNACCT_VRAM_MB（512 MB）时记入，过滤驱动与桌面合成器底噪；
+    - 外部活跃占卡（busy，带滞回防边缘抖动）：
+      * 触发：raw_mb >= UNACCT_BUSY_MB（1536 MB / 1.5 GiB），或该卡无可见 GPU 进程且无我方在跑任务时 util >= UNACCT_UTIL_HOT（15%）；
+      * 解除：raw_mb < UNACCT_CLEAR_MB（1024 MB / 1.0 GiB）且（存在可见/我方进程 或 util is None 或 util < UNACCT_UTIL_COOL（5%））；
+      外部程序释放显存后下一轮即自动恢复放行。
+    返回 {uuid: {"mb", "deduct", "util", "busy", "why"}}（仅包含有扣减或活跃占卡的卡）。"""
+    running = set(running_cards or ())
+    prev = set(prev_busy or ())
+    by_uuid = {}
+    for g in gp or ():
+        uu = g.get("uuid")
+        if uu:
+            by_uuid.setdefault(uu, []).append(g)
+    out = {}
+    for c in gpus or ():
+        uu = c.get("uuid")
+        if not uu:
+            continue
+        card_gp = by_uuid.get(uu) or []
+        has_vis = bool(card_gp)
+        has_ours = uu in running
+        # 驱动对可见进程未上报单进程显存（[N/A] 解析为 0）时无法可靠求差，避免把己方进程误判成外部占卡
+        has_unknown_mb = any((g.get("mb") or 0.0) <= 0.0 for g in card_gp)
+        used = float(c.get("used") or 0.0)
+        vis_mb = sum(float(g.get("mb") or 0.0) for g in card_gp)
+        raw_mb = 0.0 if has_unknown_mb else max(0.0, used - vis_mb)
+        deduct = round(raw_mb, 1) if raw_mb >= _C.UNACCT_VRAM_MB else 0.0
+        util = c.get("util")
+        was = uu in prev
+        if not was:
+            busy = raw_mb >= _C.UNACCT_BUSY_MB or (not has_vis and not has_ours and util is not None and util >= _C.UNACCT_UTIL_HOT)
+        else:
+            vram_clear = raw_mb < _C.UNACCT_CLEAR_MB
+            util_clear = has_vis or has_ours or util is None or util < _C.UNACCT_UTIL_COOL
+            busy = not (vram_clear and util_clear)
+        if deduct > 0.0 or busy:
+            out[uu] = {"mb": round(raw_mb, 1), "deduct": deduct, "util": util, "busy": busy,
+                       "why": _unacct_why(raw_mb, util, busy)}
+    return out
+
+
+def unacct_lines(st):
+    """status.json 里各卡外部（如宿主机）未归因显存占用说明（labmon worker status 与看板 labmon status 共用，#114）。"""
+    info = (st or {}).get("info") or {}
+    paused = set(((st or {}).get("room") or {}).get("unacct") or ())
+    out = []
+    for g in info.get("gpus") or []:
+        uu = g.get("uuid")
+        mb = g.get("unacct_mb") or 0.0
+        busy = bool(g.get("unacct_busy"))
+        if not (mb >= _C.UNACCT_VRAM_MB or busy or uu in paused):
+            continue
+        why = g.get("unacct_why") or ("外部（如宿主机）占约 %.1f GiB 显存" % (mb / 1024.0) if mb >= _C.UNACCT_VRAM_MB else "外部（如宿主机）占卡")
+        if uu in paused:
+            out.append("GPU %d：%s，默认整卡暂停放新任务（释放后自动恢复）" % (g.get("i", 0), why))
+        elif busy:
+            out.append("GPU %d：%s（已开启共享放行，按剩余显存调度）" % (g.get("i", 0), why))
+        else:
+            out.append("GPU %d：%s（已从可用显存与推演中扣除）" % (g.get("i", 0), why))
+    return out
 
 
 # ---- 用量统计（只读 /proc 与 cgroup；读不到就留空，不影响调度）----
@@ -357,6 +455,8 @@ def host_info(gpus, data_root):
         pass
     h["started"] = _C.started_at(1)          # 容器启动时间 = PID 1 的启动时刻（服务器"重启"多半只是重启容器）
     h["rootfs"] = rootfs_info()
+    if is_wsl():
+        h["wsl"] = True
     return h
 
 
@@ -581,7 +681,7 @@ class MeasureMixin:
                       **({"ka": self.bka[k]} if k in self.bka else {})}
         return out
 
-    def measure(self, j, pids, procs, gp, util, ovram, jobs, t):
+    def measure(self, j, pids, procs, gp, util, ovram, jobs, t, unacct=None):
         """量一个任务这一轮的用量（写进 j["use"]）：内存（PSS 之和）与峰值、核数与累计 CPU、读写（进程树 /proc/<pid>/io 之和：此刻 MiB/s、
         累计字节 rd_b / wr_b）、核数与读写的 1 分钟峰值（PEAK_WIN 秒一个窗口）、近 CPU_WARM_S 内各 1 分钟窗口的核数 pks [[窗口结束时刻, 核数]]
         与从何时起量它的 pk0（CPU 记账的回收按它们，cpu_warm、Worker.acct）、同卡并行数 conc、显存（按卡）与峰值、所用卡的平均利用率，
@@ -635,7 +735,7 @@ class MeasureMixin:
             u.pop("sus_on", None)
         u.update(t=t, ticks=ticks, rchar=rd, wchar=wr, nproc=len(pids), ram=round(ram, 2), ram_peak=round(max(ram, u.get("ram_peak") or 0), 2),
                  vram=vram, vram_peak=max(vram, u.get("vram_peak") or 0), vram_by=vb)
-        card, host = (sum(_C.intruders(s, on, jobs, gp, None, j), []) for s in ("gpu", "host"))
+        card, host = (sum(_C.intruders(s, on, jobs, gp, None, j, unacct=unacct), []) for s in ("gpu", "host"))
         u["with_host"] = sorted(set(u.get("with_host", [])) | set(host))[:8]
         u["with_gpu"] = sorted(set(u.get("with_gpu", [])) | set(card))[:8]
         return on

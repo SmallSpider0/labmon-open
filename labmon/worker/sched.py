@@ -204,7 +204,7 @@ def gpu_cpu_flex(x, S, n, blocked=()):
             | {u for j in S["ext"] for u in j.get("gpus") or []}
             | {g["uuid"] for g in S["gp"] if g.get("owner") == "other"}
             | {c["uuid"] for c in S["cards"] if c.get("other", 0) > 0}
-            | set(S["owner"]) | set(blocked))
+            | set(S["owner"]) | set(S.get("unacct") or ()) | set(blocked))
     free = card_free(S)
     idle = {c["uuid"] for c in S["cards"]
             if (x["allowed"] is None or c["i"] in x["allowed"])
@@ -326,10 +326,12 @@ WHY = {
     "xgpu_nofit": ("独占：没有放得下的卡", "独占：没有放得下的卡（要显存 %(vram).0f GiB，另留 1 GiB%(kept)s）"),
     "xgpu_wait": ("独占：等卡腾空", "独占：等卡 %(idx)s 腾空（还在跑：%(names)s）"),
     "no_gpu": ("看不到 GPU（nvidia-smi 无输出）", "看不到 GPU（nvidia-smi 无输出）"),
+    "ext_gpu": ("外部（如宿主机）占卡暂停放行",
+                "卡 %(idx)s 有外部（如宿主机）占卡（%(note)s），默认整卡暂停放新任务；释放后自动恢复"),
     "gang_hold": ("成组 %(gang)s：已留好资源，等一起开跑",
                   "成组 %(gang)s：资源已留好，等同组的一起开跑（预计 %(at)s）；这之前跑得完的任务照样用这份资源"),
     "gang_unk": ("成组 %(gang)s：同组有成员不知道何时能放行", "成组 %(gang)s：放得下，但同组有成员说不出何时能放行，先不留资源"),
-    "vram": ("显存不够%(ka_s)s", "没有可用显存够 %(vram).0f GiB 的卡（%(src)s，另留 1 GiB%(kept)s）%(held)s%(ka)s%(owner)s"),
+    "vram": ("显存不够%(ka_s)s", "没有可用显存够 %(vram).0f GiB 的卡（%(src)s，另留 1 GiB%(kept)s）%(held)s%(ka)s%(owner)s%(note)s"),
 }
 
 
@@ -473,11 +475,14 @@ def _place(x, S, t, pre=None):
         return None, w("xhost_hold", note="预计 %s 腾空，这之前跑得完的才放" % _C.now_str(max(until))[5:16] if None not in until
                        else "上面有任务不知道要跑多久，不回填"), True
     held = {u for v in rsv.values() for u in v["cards"] if u != "*"}
-    blocked = held | S["owner"] | {u for j in jobs if j["excl"] == "gpu" for u in j["gpus"]}
-    mine = [c for c in S["cards"] if (x["allowed"] is None or c["i"] in x["allowed"]) and c["uuid"] not in blocked]
+    unacct_set = set(S.get("unacct") or ())
+    unacct_info = S.get("unacct_info") or {}
+    blocked = held | S["owner"] | unacct_set | {u for j in jobs if j["excl"] == "gpu" for u in j["gpus"]}
+    allowed_cards = [c for c in S["cards"] if x["allowed"] is None or c["i"] in x["allowed"]]
+    mine = [c for c in allowed_cards if c["uuid"] not in blocked]
     all_jobs = S["jobs"] + S["ext"]
     if x["excl"] == "host":
-        ours, theirs = _C.intruders("host", (), all_jobs, S["gp"], S["cpu"])
+        ours, theirs = _C.intruders("host", (), all_jobs, S["gp"], S["cpu"], unacct=unacct_info)
         if theirs:
             S["holds"].pop(x["key"], None)
             return None, w("xhost_theirs", who=S["who"], names="、".join(theirs[:3])), False
@@ -485,6 +490,26 @@ def _place(x, S, t, pre=None):
             S["holds"][x["key"]] = {"cards": ["*"], "until": hold_until(S, None, t)}
             return None, w("xhost_wait", names="、".join(ours)), True
         S["holds"].pop(x["key"], None)
+
+    def ext_detail(cs):
+        bits = []
+        for c in cs:
+            mb = c.get("unacct_mb") or 0.0
+            why = c.get("unacct_why") or ""
+            if mb >= _C.UNACCT_VRAM_MB:
+                bits.append("约 %.1f GiB，本环境不可见其进程" % (mb / 1024.0))
+            elif "（" in why and "）" in why:
+                bits.append(why.split("（", 1)[1].rsplit("）", 1)[0])
+            else:
+                bits.append("本环境不可见其进程")
+        return "；".join(dict.fromkeys(bits))
+
+    ext_cards = [c for c in allowed_cards if c["uuid"] in unacct_set] if x["ngpu"] > 0 else []
+    # 外部占卡导致可用卡数不足：先于内存/CPU 检查返回，避免与内存/CPU 紧缺叠加时变成 bar=True 屏障挡住后续纯 CPU 任务
+    if x["ngpu"] > 0 and S["cards"] and ext_cards and len(allowed_cards) - len(ext_cards) < x["ngpu"]:
+        S["holds"].pop(x["key"], None)
+        return None, w("ext_gpu", idx=",".join(str(c["i"]) for c in ext_cards), note=ext_detail(ext_cards)), False
+
     room_gib = ram_free(S)
     ram, rsrc = ram_need(x, S)
     if room_gib is not None and ram + S["margin"] > room_gib:
@@ -500,11 +525,12 @@ def _place(x, S, t, pre=None):
             code, held = cpu_held(S, cores, n, rsv_left)
             return None, w(code, held=held, cpus=n, src=src, left=max(0.0, cores), cap=S["cpu_cap"], warm=_C.CPU_WARM_S // 60), True
     kept = "，已扣给对方的预留" if S["kept"] else ""
+
     if x["excl"] == "gpu" and x["ngpu"] > 0:
         if not mine:
             return None, w("xgpu_none"), True
         free = card_free(S)                                  # MB
-        occ = {c["uuid"]: _C.intruders("gpu", [c["uuid"]], all_jobs, S["gp"], None) for c in mine}
+        occ = {c["uuid"]: _C.intruders("gpu", [c["uuid"]], all_jobs, S["gp"], None, unacct=unacct_info) for c in mine}
         # 候选：没有 labmon 之外的进程、扣掉给对方的预留也放得下；上面只有我们的任务时留着等腾空
         cand = [c for c in mine if not occ[c["uuid"]][1] and c["total"] - c["keep"] >= card_need(x, c)]
         keep = [u for u in (S["holds"].get(x["key"]) or {}).get("cards", []) if u in {c["uuid"] for c in cand}]
@@ -534,9 +560,10 @@ def _place(x, S, t, pre=None):
         return None, w("no_gpu"), False
     ka = ",".join(str(c["i"]) for c in S["cards"] if c["uuid"] in S["owner"] and c["ka"])        # 停不了的保活不是对方在用，分开说
     owner = ",".join(str(c["i"]) for c in S["cards"] if c["uuid"] in S["owner"] and not c["ka"])
-    return None, w("vram", vram=x["vram"], src=x["src"], kept=kept, held="；有卡留给独占任务" if blocked - S["owner"] else "",
+    ext_s = "；卡 %s 有外部（如宿主机）占卡暂停放行" % ",".join(str(c["i"]) for c in ext_cards) if ext_cards else ""
+    return None, w("vram", vram=x["vram"], src=x["src"], kept=kept, held="；有卡留给独占任务" if blocked - S["owner"] - unacct_set else "",
                    ka="；卡 %s 上有对方另起、ka.sh 停不了的保活，不放（要停请对方停）" % ka if ka else "", ka_s="（卡 %s 有停不了的保活）" % ka if ka else "",
-                   owner="；对方在用卡 %s（超出预留或刚回落，%d 分钟内不放）" % (owner, _C.GUEST_QUIET_S / 60) if owner else ""), True
+                   owner="；对方在用卡 %s（超出预留或刚回落，%d 分钟内不放）" % (owner, _C.GUEST_QUIET_S / 60) if owner else "", note=ext_s), True
 
 
 def fair_key(r, focus, pol, use, tot=None):
@@ -1028,13 +1055,21 @@ class SchedMixin:
         for g in self.gp if self.ka_stuck() else ():
             if g["owner"] == "keepalive":
                 stuck[g["uuid"]] = stuck.get(g["uuid"], 0.0) + g["mb"]
+        unacct = self.other.get("unacct") or {}
+        unacct_busy = {u for u, v in unacct.items() if v.get("busy")}
+        block_unacct = set() if self.allow_shared_gpu() else unacct_busy
         cards = [{"i": i, "uuid": u, "total": (info.get(u) or {}).get("total") or 0.0, "keep": self.keep_left(i, u),
-                  "other": self.other["vram"].get(u, 0.0) + stuck.get(u, 0.0), "free": f - self.keep_left(i, u) + seen.get(u, 0.0), "ka": bool(self.other["ka"].get(u))}
+                  "other": self.other["vram"].get(u, 0.0) + stuck.get(u, 0.0), "free": f - self.keep_left(i, u) + seen.get(u, 0.0),
+                  "ka": bool(self.other["ka"].get(u)),
+                  "unacct_mb": (unacct.get(u) or {}).get("deduct") or 0.0,
+                  "unacct_busy": u in unacct_busy,
+                  "unacct_why": (unacct.get(u) or {}).get("why") or ""}
                  for i, u, f in gpus]
         return {"cards": cards, "ngpus": max(len(info), len(cards)), "limit": m.get("limit"), "room": self.mem_room(), "margin": ram_margin(m["limit"]) if m.get("limit") else None,
                 "cpu_cap": _M.cpu_cap(self.info.get("cpu_quota")), "cpu_room": self.cpu_room(),
                 "jobs": jobs, "ext": list(self.ext.values()), "gp": list(gp), "cpu": self.other["cpu"] if self.cpu_n >= 2 else None,
                 "holds": self.excl_hold, "tags": limits.get("tags") or {}, "owner": {u for u in self.back_last if u not in ("ram", "cpu")},
+                "unacct": block_unacct, "unacct_info": {u: unacct[u] for u in unacct_busy},
                 "who": "对方" if self.guest() else "labmon 之外的进程", "kept": self.held(), "cut": None, "brief": False,
                 # 成组（#180）：gholds 就是 gang_hold 本身（place 在里面留、放、让）；gangs 组里何时能一起开跑（gang_sync 的 gsim）；gfirst 这一轮最早放得下的时刻（推演里用）
                 "gholds": self.gang_hold, "gangs": self.gsim, "gfirst": {}}
@@ -1211,11 +1246,18 @@ class SchedMixin:
                "w": {str(k): float(v) for k, v in (d.get("weight") or {}).items()},
                "own": {str(k): str(v) for k, v in own.items() if v}}
         env_cq = os.environ.get("LABMON_CPU_QUOTA")
-        if st or any(k in d for k in ("standalone", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "cpu_quota")) or env_cq:
+        env_sg = os.environ.get("LABMON_ALLOW_SHARED_GPU") == "1"
+        if "allow_shared_gpu" in d:
+            self._allow_shared_gpu = bool(d.get("allow_shared_gpu"))
+        else:
+            self._allow_shared_gpu = env_sg
+        if st or any(k in d for k in ("standalone", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "cpu_quota", "allow_shared_gpu")) or env_cq or env_sg:
             out["standalone"] = st
             out["disk_warn_gb"] = _opt_num("disk_warn_gb", _C.DISK_WARN_GB if st else None)
             out["disk_stop_gb"] = _opt_num("disk_stop_gb", _C.DISK_STOP_GB if st else None)
             out["disk_quota_gb"] = _opt_num("disk_quota_gb", None)
+            if "allow_shared_gpu" in d or env_sg:
+                out["allow_shared_gpu"] = bool(self._allow_shared_gpu)
             # 区分看板显式清除（"cpu_quota" in d 且为 null）与尚未收到下发（回退启动时的 LABMON_CPU_QUOTA）
             if "cpu_quota" in d:
                 cq = _opt_num("cpu_quota", None)

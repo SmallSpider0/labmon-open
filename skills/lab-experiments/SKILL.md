@@ -86,7 +86,7 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 - **防开发仓污染（硬规）**：先跑 `labmon project init <主机> <项目>` 在 `<data_root>/projects/<项目>/` 下建目录，**严禁直接对正在编辑的源码仓执行 `worker add`**（默认拦截 `<data_root>` 之外的清单目录）：
   - **本机 Mac（APFS）**：在 `<data_root>/projects/<项目>/code` 用 `git worktree add --detach` 或 APFS 零拷贝 `cp -cR` 隔离运行副本；
   - **大数据集与权重**：统一放 `<data_root>/{datasets,weights}`，项目目录内**只读软链接**引用，不重复拷贝；
-  - **WSL2**：`data_root` 必须落在 Linux ext4（如 `~/.local/share/labmon/work`），禁止放 `/mnt/c`（IO 极慢且锁语义不完整）；
+  - **WSL2**：`data_root` 必须落在 Linux ext4（如 `~/.local/share/labmon/work`），禁止放 `/mnt/c` 等 Windows 9p 盘（IO 极慢且锁语义不完整；`labmon check` / `worker status` / `host test` 命中 `/mnt/[a-z]/` 会提示风险）；当 Windows 宿主机在用 GPU 时，worker 通过未归因显存差额（`unacct_vram`）识别外部活跃占卡并**默认整卡暂停放新任务**（等待原因写「外部（如宿主机）占卡暂停放行」），**属于正常让路、不是异常**，不杀在跑任务、不报异常也不唤醒 `labmon wait`，宿主机释放后下一轮自动恢复；若用户明确希望按剩余显存共享，可在主机设置开 `allow_shared_gpu = true`（`labmon host edit <id> --allow-shared-gpu`）；
   - **产物与日志**：实验输出统一落 `<data_root>/projects/<项目>/runs/` 与 `logs/`，不写回源码仓。
 - **空间防爆与清理**：独立主机默认剩 `20 GiB` 预警、剩 `10 GiB` 触发 `disk_gate` 磁盘闸门（停止放新任务，不杀在跑任务，含 `+2 GiB` 滞回恢复）。查看占用与 14 天闲置可回收目录用 `labmon disk`；清自管缓存与已结束单格临时用 `labmon worker clean <主机> [--project <id>]`（默认预览，显式 `--yes` 才删）；`projects/` 下的旧产物由用户确认后手动删除。
 - **跨机语义限制**：独立主机不支持跨主机 `after=` 依赖、`gang=` 多机成组、借用、算力池与跨盘「搬登记」；但看板会自动把同名项目的历史用量裁剪下发（`hist_shared.json`），新机首次即可复用估时与显存/内存估计。

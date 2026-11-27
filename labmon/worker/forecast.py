@@ -15,8 +15,16 @@ def sim_snapshot(S, cut, gangs=None, first=None):
     - 没有旧 gpu_queue.sh 的任务、GPU 进程与外来 CPU 占用（它们是此刻的实况，不在时间轴上）；独占留卡与成组留的资源从空的开始，各自推各自的；
       成组的组（gangs，同 Worker.gsim；不给为没有）照真放行的给，成员最早何时放得下记进 first（gfirst，place 写）；
     - 截止（cut）按时刻在时间轴上判断（真放行由 override_hit 在排队前挡住）；原因只要短的。"""
-    return dict(S, cards=[dict(c, total=cap, free=cap, keep=0.0, other=0.0) for c in S["cards"] for cap in [c["total"] - c["other"] - c["keep"]]],
-                jobs=[dict(j) for j in S["jobs"]], ext=[], gp=[], cpu=None, holds={}, owner={c["uuid"] for c in S["cards"] if c["ka"]}, cut=cut, brief=True,
+    unacct = set(S.get("unacct") or ())
+    cards = []
+    for c in S["cards"]:
+        cap = max(0.0, c["total"] - c["other"] - c["keep"])
+        # 外部活跃占卡整卡暂停放行时，total 保留硬件总显存以免误报 nofit_vram，仍由 unacct 拦截给出“外部占卡暂停放行”
+        tot = c["total"] if c["uuid"] in unacct else cap
+        cards.append(dict(c, total=tot, free=cap, keep=0.0, other=0.0))
+    return dict(S, cards=cards,
+                jobs=[dict(j) for j in S["jobs"]], ext=[], gp=[], cpu=None, holds={}, owner={c["uuid"] for c in S["cards"] if c["ka"]},
+                unacct=unacct, unacct_info=dict(S.get("unacct_info") or {}), cut=cut, brief=True,
                 gholds={}, gangs=gangs or {}, gfirst={} if first is None else first)
 
 
@@ -202,6 +210,9 @@ class ForecastMixin:
                peer_key,
                json.dumps(self.todo),         # 还会跑的行（删了 .failed 重跑时清单与队首都没变）：plan 与写进状态的 todo 同一轮对得上（#25）
                frozenset(self.other["ka"]),   # 借来的主机上有停不了的保活的卡（推演不放它，#45）：出现、消失当轮重推
+               # 未归因外部占卡（#114）：显存扣减、占卡态或共享配置变了当轮重推，对齐真放行
+               tuple(sorted((u, round((v.get("deduct") or 0.0) / 128), bool(v.get("busy"))) for u, v in (self.other.get("unacct") or {}).items())),
+               bool(self.allow_shared_gpu()),
                # 成组：别的主机上的成员预计何时能一起开跑（此刻就能的记 0，不随时钟变）、本机成员在不在队首
                tuple((gk, g["at"] and (0 if g["at"] <= now else round(g["at"] / 60)), tuple(sorted((k, n, e and e <= now) for (k, n), e in g["local"].items())))
                      for gk, g in sorted(self.gsim.items())))

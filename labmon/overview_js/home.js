@@ -128,7 +128,13 @@ function home() {
     <tr><th>主机</th><th>worker</th><th style="min-width:180px" ${tip("每张卡一行：条是显存，数字是显存占比 · GPU 近 1 小时平均利用率（保活按 0 算）")}>显存 · 利用率</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("集群主机显示共享盘；独立主机显示本地工作盘（含低水位/配额闸门）；红线是告警/停止线")}>磁盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
     (D.hosts.map(h => {
       const info = h.status?.info, gs = info?.gpus || [], m = info?.mem;
-      const gb = gs.map(g => { const U = utilText(gpuBusy(h, g.i), g.util); return `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB\n${U.tip}`)}><div class="bar thin" style="flex:1"><i style="width:${100 * g.used / g.total}%;background:var(--accent)"></i></div><span class="sm num nw">${pct(g.used, g.total)}%<span class="mut"> · ${U.big}</span></span></div>`; }).join("");
+      const gb = gs.map(g => {
+        const U = utilText(gpuBusy(h, g.i), g.util), up = unacctPaused(h, g), umb = g.unacct_mb || 0;
+        const utip = up ? `\n外部（如宿主机）占卡暂停放行${umb ? `（约 ${mb2g(umb)} GiB）` : ""}${g.unacct_why ? `：${g.unacct_why}` : ""}`
+          : umb >= 512 ? `\n外部（如宿主机）未归因显存约 ${mb2g(umb)} GiB（已扣减可放显存）` : "";
+        const utag = up ? ` <span class="badge b-warn">外部占卡</span>` : umb >= 512 ? `<span class="mut"> · 外部 ${mb2g(umb)}G</span>` : "";
+        return `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB\n${U.tip}${utip}`)}><div class="bar thin" style="flex:1"><i style="width:${100 * g.used / g.total}%;background:${up ? "var(--warn)" : "var(--accent)"}"></i></div><span class="sm num nw">${pct(g.used, g.total)}%<span class="mut"> · ${U.big}</span>${utag}</span></div>`;
+      }).join("");
       const sx = (h.ephemeral || h.standalone) ? null : sharedParts(), wd = h.standalone ? h.work_disk : null;
       const ephSto = h.ephemeral ? (h.storage || []).map(x => {
         const low = x.kind === "cloud" && x.avail_gb < 1;
@@ -405,9 +411,11 @@ function doneTable(d, showHost) {
 
 /* ---------- 主机页 ---------- */
 const seg = (w, bg, t, label = "", cls = "") => `<i class="${cls}" style="width:${w}%;background:${bg}" ${tip(t)}>${label && w >= 12 ? `<span>${esc(label)}</span>` : ""}</i>`;
+// 该卡此刻是否因外部（如宿主机）活跃占卡暂停放新任务（仅读 worker 写进 room.unacct 的判定，页面不另写门槛）
+const unacctPaused = (h, g) => (h.status?.room?.unacct || []).includes(g.uuid);
 
 function gpuSegs(h, g) {
-  // 各任务实测（够宽就写任务名）＋记账还没占上的预留（斜纹淡色）＋labmon 之外的进程
+  // 各任务实测（够宽就写任务名）＋记账还没占上的预留（斜纹淡色）＋labmon 之外的进程＋不可见的外部占卡显存差额
   const procs = h.status.gpu_procs || [], jobs = jobsOf(h), mine = procs.filter(p => p.uuid === g.uuid);
   let s = "";
   for (const j of jobs) {
@@ -422,7 +430,18 @@ function gpuSegs(h, g) {
     s += seg(100 * p.mb / g.total, p.owner === "keepalive" ? "var(--faint)" : "var(--muted)", `${lab}\n${mb2g(p.mb)} GiB`, p.owner === "keepalive" ? "保活" : p.comm || "", "hatch");
   }
   const rest = g.used - mine.reduce((a, p) => a + p.mb, 0);
-  if (rest > 256) s += seg(100 * rest / g.total, "var(--line)", `没有对应进程的显存 ${mb2g(rest)} GiB（驱动与上下文开销等）`);
+  const up = unacctPaused(h, g), umb = g.unacct_mb || 0;
+  if (up || umb >= 512 || g.unacct_busy) {
+    const show = umb > 0 ? umb : Math.max(0, rest);
+    if (show > 0) {
+      const desc = up
+        ? `外部（如宿主机）占卡暂停放行（约 ${mb2g(show)} GiB，本环境不可见其进程）${g.unacct_why ? `\n${g.unacct_why}` : ""}\n默认整卡暂停放新任务且不杀已跑任务，释放后自动恢复`
+        : `外部（如宿主机）未归因显存约 ${mb2g(show)} GiB（本环境不可见其进程）\n已从可放显存中扣减${g.unacct_busy ? "（已开启允许与外部共享 GPU）" : ""}`;
+      s += seg(100 * show / g.total, "var(--warn)", desc, "外部占卡", "hatch");
+    }
+  } else if (rest > 256) {
+    s += seg(100 * rest / g.total, "var(--line)", `没有对应进程的显存 ${mb2g(rest)} GiB（驱动与上下文开销等）`);
+  }
   return s;
 }
 
@@ -475,7 +494,12 @@ function resCard(h) {
   let s = "";
   gs.forEach((g, k) => {
     const room = st.room?.gpus?.[g.uuid], nm = gs.length > 1 ? `GPU ${g.i} ` : "GPU ";
-    s += row(nm + "显存", big(gpuSegs(h, g)), `${mb2g(g.used)} / ${mb2g(g.total)} GiB${room != null ? `<span class="mut" ${tip("按记账还能放（空闲 − 运行中任务还没占上的预留）")}>可放 ${mb2g(room)}</span>` : ""}`,
+    const up = unacctPaused(h, g), umb = g.unacct_mb || 0;
+    const uNote = up
+      ? ` <span class="badge b-warn" ${tip(`外部（如宿主机）占卡暂停放行${umb ? `（约 ${mb2g(umb)} GiB）` : ""}${g.unacct_why ? `：${g.unacct_why}` : ""}\n不报异常、不杀已跑任务，释放后自动恢复`)}>外部占卡暂停放行</span>`
+      : (room != null ? `<span class="mut" ${tip("按记账还能放（空闲 − 运行中任务还没占上的预留）")}>可放 ${mb2g(room)}</span>` : "")
+        + (umb >= 512 ? `<span class="mut" ${tip(`外部（如宿主机）未归因显存约 ${mb2g(umb)} GiB，已从可放显存扣减${g.unacct_busy ? "（已开启允许与外部共享 GPU）" : ""}`)}>外部占 ${mb2g(umb)} GiB</span>` : "");
+    s += row(nm + "显存", big(gpuSegs(h, g)), `${mb2g(g.used)} / ${mb2g(g.total)} GiB${uNote}`,
       sp(r => r.gpu?.[k] ? 100 * r.gpu[k][0] / r.gpu[k][1] : null), `GPU ${g.i}：${g.name || ""}`);
     const U = utilText(gpuBusy(h, g.i), g.util);      // 吃满程度（只有保活时按 0，#51）：条与数是近 1 小时平均，小曲线是近 10 分钟平均（series 卡的第 4 项）
     s += row(nm + "利用率", big(`<i style="width:${U.v ?? 0}%;background:var(--accent);opacity:.6"></i>`), `${U.big}${U.sub ? `<span class="mut">${esc(U.sub)}</span>` : ""}`,

@@ -20,8 +20,8 @@ from . import projects as PJ
 from . import users as U
 from . import workerctl as W
 from .config import GIB, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, host_platform, host_pool, host_share, host_ssh_key, hosts_file, is_pool_id, is_standalone, pools, resolve_pool, set_returned, set_sched_ovr, user_hosts
-from .worker import cpu_line, ka_lines
-from .worker.pure import other_load, other_load_text
+from .worker import cpu_line, ka_lines, unacct_lines
+from .worker.pure import is_wsl_mnt, other_load, other_load_text, wsl_mnt_warn
 from .records import EVENT_KINDS, project_rows
 from .state import load_json, snapshot
 
@@ -77,7 +77,7 @@ def hosts() -> dict:
     hf = hosts_file()
     if not hf.exists():
         return {"missing": str(hf), "hosts": [], "pools": []}
-    keys = ("id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until", "python", "cpu_quota", "mps_vram_gb")
+    keys = ("id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until", "python", "cpu_quota", "mps_vram_gb", "allow_shared_gpu")
     act, full = active_hosts(), {str(h["id"]): h for h in all_hosts()}
     try:
         pm = pools()
@@ -338,6 +338,15 @@ def check(pid: str, text: str, may=None, *, probe: bool = False) -> dict:
     glob = snapshot() or {}
     sa_ids = {h["id"] for h in cfg["hosts"] if is_standalone(h)}
     if sa_ids:
+        by_id = {he.get("id"): he for he in glob.get("hosts") or []}
+        for h in cfg["hosts"]:
+            if h["id"] not in sa_ids or (may is not None and not may(h["id"])):
+                continue
+            dr = h.get("data_root")
+            if is_wsl_mnt(dr):
+                info = ((by_id.get(h["id"]) or {}).get("status") or {}).get("info") or {}
+                if not info or info.get("wsl"):
+                    after.append(f"[labmon] 警告：{wsl_mnt_warn(dr, h['id'])}")
         job_hosts: dict[tuple, set[str]] = {}
         for he in glob.get("hosts") or []:
             for ln in (he.get("status") or {}).get("todo") or []:
@@ -456,7 +465,7 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
         hst = (wst.get(h["id"]) or {}) if h.get("ok") else {}
         other = other_load_text(other_load(hst, pid)) if hst else ""
         o.p(f"  {name}：{st}" + (f"；{cards}" if cards else "") + (f"；{other}" if other else "") + (f"；{borrow_text(h['borrow'])}" if h.get("borrow") else ""))
-        for ln in ka_lines(hst) + [cpu_line(hst)] if hst else []:   # 这台的 GPU 保活（#61：nvidia-smi 里哪个进程是 labmon 的保活）与 CPU 配额、已记的核（#112）
+        for ln in ka_lines(hst) + unacct_lines(hst) + [cpu_line(hst)] if hst else []:   # 这台的 GPU 保活（#61）、外部占卡（#114）与 CPU 配额、已记的核（#112）
             if ln:
                 o.p(f"    {ln}")
     lanes = {ln["id"]: ln for ln in snap.get("lanes") or []}

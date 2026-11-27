@@ -528,6 +528,9 @@ def _to_worker(projects: list[dict], t: float, sw: dict, snap: dict | None = Non
         # 独立主机或配置了 cpu_quota 时显式下发 cpu_quota（清空为 null 也能覆盖启动环境变量 LABMON_CPU_QUOTA）
         if standalone or h.get("cpu_quota") is not None:
             sh["cpu_quota"] = h.get("cpu_quota")
+        # 独立主机或显式配置了 allow_shared_gpu 时随 sched.json 下发（改配置免重启 worker 即时生效，#114）
+        if standalone or "allow_shared_gpu" in h:
+            sh["allow_shared_gpu"] = bool(h.get("allow_shared_gpu"))
         out = {"eta.json": {"t": round(t + _CLOCK.get(h["id"], 0)), "jobs": h_jobs, "prog": h_prog},
                "sched.json": sh, "returned.json": {"hosts": []} if standalone else gone}
         hp = _hist_payload(h, projects, t, snap)

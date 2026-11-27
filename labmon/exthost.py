@@ -32,6 +32,7 @@ from .config import (
     server as server_conf, shell_path, user_hosts,
 )
 from .state import snapshot
+from .worker.pure import is_wsl_mnt, wsl_mnt_warn
 
 HOST_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 RESERVED_IDS = frozenset({"pool", "new", "all", "local-reserved"})
@@ -329,6 +330,16 @@ def _norm_fields(data: dict, who: U.Ident, *, existing: dict | None = None) -> d
     quota_gb = _norm_num(data, "disk_quota_gb", "磁盘软配额", lo=0, hi=100000) if "disk_quota_gb" in data else (existing.get("disk_quota_gb") if existing else None)
     cpu_quota = _norm_num(data, "cpu_quota", "CPU 核数配额", lo=0, hi=4096) if "cpu_quota" in data else (existing.get("cpu_quota") if existing else None)
     mps_vram_gb = _norm_num(data, "mps_vram_gb", "Apple Silicon 显存上限", lo=0, hi=4096) if "mps_vram_gb" in data else (existing.get("mps_vram_gb") if existing else None)
+    if "allow_shared_gpu" in data:
+        raw_asg = data.get("allow_shared_gpu")
+        if raw_asg is None or raw_asg == "":
+            allow_shared_gpu = False
+        elif isinstance(raw_asg, bool):
+            allow_shared_gpu = raw_asg
+        else:
+            raise U.Denied(400, "allow_shared_gpu 必须是布尔值（true 或 false）")
+    else:
+        allow_shared_gpu = bool(existing.get("allow_shared_gpu")) if existing else False
 
     eff_warn = DISK_WARN_GB if warn_gb is None else warn_gb
     eff_stop = DISK_STOP_GB if stop_gb is None else stop_gb
@@ -354,6 +365,7 @@ def _norm_fields(data: dict, who: U.Ident, *, existing: dict | None = None) -> d
         "disk_quota_gb": quota_gb,
         "cpu_quota": cpu_quota,
         "mps_vram_gb": mps_vram_gb,
+        "allow_shared_gpu": True if allow_shared_gpu else None,
     }
 
 
@@ -387,6 +399,7 @@ def _host_view(h: dict, key_info: dict | None = None) -> dict:
         "disk_quota_gb": d.get("disk_quota_gb"),
         "cpu_quota": d.get("cpu_quota"),
         "mps_vram_gb": d.get("mps_vram_gb"),
+        "allow_shared_gpu": bool(d.get("allow_shared_gpu")),
         "ssh_key_fp": info.get("fingerprint") if info else None,
     }
     return out
@@ -562,9 +575,13 @@ def test_external(hid: str, who: U.Ident) -> dict:
         return {"ok": False, "id": hid, "error": f"探测返回无法解析：{(r.stdout or '')[:200]}", "hint": "检查远端 shell 启动脚本是否打印了额外输出"}
     gpus = info.get("gpus") or []
     os_name = "WSL2 (Linux)" if info.get("is_wsl") else f"{info.get('os', '?')} ({info.get('arch', '?')})"
+    dr_eff = info.get("data_root") or dr
+    warn = wsl_mnt_warn(dr_eff, hid) if info.get("is_wsl") and is_wsl_mnt(dr_eff) else None
     msg = (f"连通正常：{os_name}，Python {info.get('py', '?')}，"
            f"GPU：{('、'.join(gpus) if gpus else '无 / 未检测到')}，"
            f"工作目录 {info.get('data_root')} 可用 {info.get('free_gb')} GiB"
-           + ("" if info.get("writable") else "（警告：不可写！）"))
+           + ("" if info.get("writable") else "（警告：不可写！）")
+           + (f"\n提示：{warn}" if warn else ""))
     return {"ok": bool(info.get("writable", True)), "id": hid, "info": info, "msg": msg,
+            **({"warn": warn} if warn else {}),
             **({} if info.get("writable", True) else {"error": f"工作目录 {info.get('data_root')} 不可写"})}

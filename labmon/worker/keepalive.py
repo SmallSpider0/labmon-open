@@ -450,7 +450,8 @@ class KeepaliveMixin:
         self.ka_checked = _C.time.time()
         if self.ka_groups() is not None:
             busy = [_C.gp_label(g) for g in self.gp if g["owner"] != "keepalive"]
-            if busy:                          # 有了别的 GPU 进程（借来的主机上多半是对方回来用）：保活让路，同保活守护；空下来再按下面的规则开
+            busy += [v["why"] for v in (self.other.get("unacct") or {}).values() if v.get("busy")]
+            if busy:                          # 有了别的 GPU 进程（借来的主机上多半是对方回来用，或 WSL2 宿主机占卡）：保活让路，同保活守护；空下来再按下面的规则开
                 why = self.ka_stop()
                 self.wlog("GPU 上有了 %s，停保活让路" % "、".join(busy) + ("" if why is None else "，没停成（%s）" % why))
                 self.ka_note(why)
@@ -460,8 +461,10 @@ class KeepaliveMixin:
             self.ka_note(None)                # 停不了的保活空闲时没了（有人停了）：清掉，免得一直误报、下一段失败沿用旧的起点（#102）
         others = self.ka_others()
         apps = _M.gpu_apps()
+        ext_busy = [v["why"] for v in (self.other.get("unacct") or {}).values() if v.get("busy")]
         why = ("别的队列登记在跑（%s）" % ", ".join(others) if others else
-               "还有进程在用 GPU（PID %s）" % ", ".join(apps) if apps else None)
+               "还有进程在用 GPU（PID %s）" % ", ".join(apps) if apps else
+               "、".join(ext_busy) if ext_busy else None)
         if why:
             if why != self.ka_why:
                 self.wlog("没有任务要卡，但%s，不拉起保活" % why)

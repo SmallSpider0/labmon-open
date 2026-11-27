@@ -45,13 +45,21 @@ def fit_snapshot(st):
     by = {j["name"]: j for j in jobs}
     gp = [dict(g, _j=by.get(g.get("job")) if g.get("owner") == "job" else None) for g in st.get("gpu_procs") or []   # 独占的判断（intruders）要看卡上有谁；
           if g.get("owner") != "keepalive"]                     # worker 停得了的保活放任务前先停（卡的空闲已加回），停不了的是 other、照算
-    cards = [{"i": g["i"], "uuid": g["uuid"], "total": g.get("total") or 0.0, "keep": (room.get("keep") or {}).get(g["uuid"], 0.0), "other": 0.0, "ka": False,
+    unacct_set = set(room.get("unacct") or ())
+    unacct_info = {g["uuid"]: {"mb": g.get("unacct_mb") or 0.0, "util": g.get("util"), "busy": True,
+                               "why": g.get("unacct_why") or "外部（如宿主机）占卡"}
+                   for g in info.get("gpus") or [] if g.get("unacct_busy") or g.get("uuid") in unacct_set}
+    cards = [{"i": g["i"], "uuid": g["uuid"], "total": g.get("total") or 0.0, "keep": (room.get("keep") or {}).get(g["uuid"], 0.0),
+              "other": g.get("unacct_mb") or 0.0, "ka": False,
+              "unacct_mb": g.get("unacct_mb") or 0.0, "unacct_busy": bool(g.get("unacct_busy") or g.get("uuid") in unacct_set),
+              "unacct_why": g.get("unacct_why") or "",
               "free": (room.get("gpus") or {}).get(g["uuid"], g.get("free") or 0.0) + ka.get(g["uuid"], 0.0)} for g in info.get("gpus") or []]
     return {"cards": cards, "ngpus": len(cards), "limit": (info.get("mem") or {}).get("limit"),
             "room": None if room.get("ram") is None else room["ram"] + sum(j["ram"] for j in jobs), "margin": room.get("margin") or 0,
             "cpu_cap": room.get("cpu_cap"), "cpu_room": None if room.get("cpu") is None else room["cpu"] + sum(j["cpu"] for j in jobs),
             "jobs": jobs, "ext": st.get("external") or [], "gp": gp, "cpu": room.get("other_cpu"), "holds": {}, "tags": (st.get("limits") or {}).get("tags") or {},
-            "owner": set(room.get("owner") or []), "who": "对方" if st.get("guest") else "labmon 之外的进程",
+            "owner": set(room.get("owner") or []), "unacct": unacct_set, "unacct_info": unacct_info,
+            "who": "对方" if st.get("guest") else "labmon 之外的进程",
             "kept": bool((st.get("guest") or {}).get("keep")), "cut": None, "brief": False, "gholds": {}, "gangs": {}, "gfirst": {}}
 
 
@@ -89,9 +97,14 @@ class FitHost:
             b = self.slack["bound"].get(c["uuid"])
             if b and by_proj is not None:
                 b = [(n if by_proj.get(n) == project else "他项任务", avg, cap) for n, avg, cap in b]
-            out.append("卡 %d：可用 %.1f GiB，近 10 分钟利用率 %s%s%s" % (
+            ext_note = ""
+            if c["uuid"] in (self.S.get("unacct") or ()):
+                ext_note = "；外部（如宿主机）占卡暂停放行" + ("（约 %.1f GiB）" % (c["unacct_mb"] / 1024) if c.get("unacct_mb", 0) >= _C.UNACCT_VRAM_MB else "")
+            elif c.get("unacct_mb", 0) >= _C.UNACCT_VRAM_MB:
+                ext_note = "；外部占约 %.1f GiB" % (c["unacct_mb"] / 1024)
+            out.append("卡 %d：可用 %.1f GiB，近 10 分钟利用率 %s%s%s%s" % (
                 c["i"], max(0.0, free[c["uuid"]]) / 1024, "%d%%" % c["util"] if c["util"] is not None else "—（样本不够）",
-                on_card,
+                on_card, ext_note,
                 "；%s 跑满了给的核（CPU 受限）" % "、".join("%s %.1f/%d 核" % x for x in b) if b else ""))
         if _S.cpu_line(self.st):
             out.append(_S.cpu_line(self.st))
@@ -149,9 +162,10 @@ class FitHost:
             return None, "这次已把没有实测的 %s 分到这台（只在这台没有别的 labmon 任务时开） → 不再与它同开" % self.solo_host
         S, gpu = self.S, x["ngpu"] > 0
         hint = e["src" if gpu else "ram_src"] == "提示值"
-        # 有别的任务的卡：labmon 在跑的、旧 gpu_queue.sh 的、卡上 labmon 之外的进程（保活不算：放任务前 worker 先停它）
+        # 有别的任务的卡：labmon 在跑的、旧 gpu_queue.sh 的、卡上 labmon 之外的进程与外部未归因占卡（保活不算：放任务前 worker 先停它）
         busy = ({u for j in S["jobs"] if not j["hold"] for u in j["gpus"]} | {u for j in S["ext"] for u in j.get("gpus") or []}
-                | {g["uuid"] for g in self.st.get("gpu_procs") or [] if g.get("owner") != "keepalive"})
+                | {g["uuid"] for g in self.st.get("gpu_procs") or [] if g.get("owner") != "keepalive"}
+                | {c["uuid"] for c in S["cards"] if c.get("unacct_busy") or c.get("unacct_mb", 0) >= _C.UNACCT_VRAM_MB})
         free = _S.card_free(S)
         S0 = dict(S, holds={})
         full = _S.place(dict(x), S0, t)
