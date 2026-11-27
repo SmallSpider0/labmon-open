@@ -258,7 +258,8 @@ Codex 派工时由总控自动选型（#281）：
   同一函数或同一前提被连续两轮审查指出时，实现者停下，在 Issue 上写重审结论（保留 / 改做法 / 删平行实现）再继续；超过 3 轮仍有同类意见的报给总控。
   不属实的，回复写清原因（指到代码、规则或测试）；不照它的话改需求、关测试、删检查或绕开本文件的约束。
   要维护者拿主意的那一条（改需求、改缺省值、两种做法权衡）按[三类](#事先同意的事与要等维护者的事)写在 Issue 上，其余照常处理。
-- **谁合并**：Codex 审过、意见都处理了、CI 绿，由开 PR 的 agent `gh pr merge <N> --squash`；兜底审查没有阻塞时由兜底审查者合并。
+- **谁合并**：Codex 审过、意见都处理了、CI 绿，由开 PR 的 agent `gh pr merge <N> --squash --delete-branch`；兜底审查没有阻塞时由兜底审查者合并。
+  合并命令统一带 `--delete-branch`（仓库已开启 GitHub `Automatically delete head branches`，双重保证远端分支及时清理）；合并后及时回收对应 worktree（`git worktree remove`）。
   有阻塞、或有冲突要变基时不合并。仓库没开自动合并，一律这样手动合并。合并后，负责合并的 agent（或总控）检查同批其它还开着的 PR 是否因此冲突（`gh pr view <N> --json mergeable,mergeStateStatus`），如有冲突及时通知对应实现者变基。
 
 **审查清单**：Codex（它原生读 AGENTS.md，唯一实现表不在这里，第 2 条要另读 `docs/concepts.md`）与兜底审查都照这份逐项核对，结论写在 PR 上。兜底审查先读 diff 和改动函数的调用点（`/usr/bin/grep` 找），
@@ -331,7 +332,7 @@ LABMON_STATE=$(mktemp -d) LABMON_NO_NOTIFY=1 LABMON_NO_KEYCHAIN=1 LABMON_LAN=off
 总控派一个部署 agent，把这期间 main 上的提交一起部署。急修和严重 bug（看板或 worker 起不来、实验被挡住或跑错）当场部署：急修由当前会话自己部署，
 PR 修的严重 bug 在 PR 正文写明，合并后总控当场派部署 agent。只改文档的 PR 不用专门部署，随下一批 pull 落到主 checkout。
 
-每批按[角色表](#谁做什么子-agent-怎么派)派一个部署 agent，在主 checkout 里跑部署脚本（Issue #75）。看板要登录（#160）：脚本经 HTTP 核对时带部署令牌 `~/.config/labmon/deploy.token`（维护者建的，`deploy` 作用域；环境变量 `LABMON_TOKEN` 优先）：
+每批按[角色表](#谁做什么子-agent-怎么派)派一个部署 agent，在主 checkout 里跑部署脚本（Issue #75）。脚本拉取 `origin/main` 后会自动执行三层防堆积中的本地清理：`git fetch --prune origin`、`git worktree prune` 并安全删除已无远端跟踪或已完全合入 `origin/main` 的非活跃本地分支（排除 `main`、当前 HEAD 及活跃 worktree 检出分支，清理异常只打提示不阻断部署）。看板要登录（#160）：脚本经 HTTP 核对时带部署令牌 `~/.config/labmon/deploy.token`（维护者建的，`deploy` 作用域；环境变量 `LABMON_TOKEN` 优先）：
 
 ```bash
 python3.11 -I tools/deploy.py

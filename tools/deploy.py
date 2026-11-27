@@ -30,6 +30,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -115,6 +116,93 @@ def git(*args: str) -> str:
         last = (r.stderr or r.stdout).strip().splitlines()
         raise Stop(f"git {' '.join(args)} 失败：{last[-1] if last else r.returncode}")
     return r.stdout.strip()
+
+
+def parse_worktree_branches(porcelain_output: str) -> set[str]:
+    """从 git worktree list --porcelain 输出中提取所有 worktree 正在检出的分支名。"""
+    active = set()
+    for line in porcelain_output.splitlines():
+        line = line.strip()
+        if line.startswith("branch refs/heads/"):
+            active.add(line[len("branch refs/heads/"):])
+    return active
+
+
+def parse_merged_branches(merged_output: str) -> set[str]:
+    """从 git branch --merged <base> 输出中提取分支名。"""
+    branches = set()
+    for line in merged_output.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        if line[0] in ("*", "+"):
+            line = line[1:].strip()
+        if line:
+            branches.add(line)
+    return branches
+
+
+def parse_gone_branches(branch_vv_output: str) -> set[str]:
+    """从 git branch -vv 输出中提取远端跟踪分支已失效（: gone] 或 : gone, ...）的分支名。"""
+    branches = set()
+    for line in branch_vv_output.splitlines():
+        line = line.strip()
+        if not line or ": gone" not in line:
+            continue
+        # 匹配 [remote/branch: gone] 或 [remote/branch: gone, ahead 1]
+        if not re.search(r"\[[^\]]*:\s*gone(?:,\s*[^\]]+)?\]", line):
+            continue
+        cleaned = line.lstrip("*+ ")
+        parts = cleaned.split()
+        if parts:
+            branches.add(parts[0])
+    return branches
+
+
+def filter_cleanup_branches(
+    gone_branches: set[str],
+    merged_branches: set[str],
+    active_branches: set[str],
+    head_branch: str | None = None,
+    keep_branches: set[str] | None = None,
+) -> list[str]:
+    """计算可安全删除的本地分支列表：排除 main/master、当前 HEAD、所有活跃 worktree 正在使用的分支。"""
+    keep = {"main", "master"}
+    if head_branch:
+        keep.add(head_branch)
+    if keep_branches:
+        keep.update(keep_branches)
+    keep.update(active_branches)
+    candidates = (gone_branches | merged_branches) - keep
+    return sorted(candidates)
+
+
+def auto_clean_branches() -> int:
+    """部署后顺手清理已合并/已失效本地分支与过期 worktree 引用；异常只打一行提示、绝不阻断部署。"""
+    try:
+        git("fetch", "--prune", "origin")
+        git("worktree", "prune")
+        porcelain = git("worktree", "list", "--porcelain")
+        active = parse_worktree_branches(porcelain)
+        head_br = git("rev-parse", "--abbrev-ref", "HEAD")
+        merged_out = git("branch", "--merged", f"origin/{D.BRANCH}")
+        merged = parse_merged_branches(merged_out)
+        branch_vv = git("branch", "-vv")
+        gone = parse_gone_branches(branch_vv)
+        to_del = filter_cleanup_branches(gone, merged, active, head_branch=head_br)
+        deleted = 0
+        for br in to_del:
+            try:
+                git("branch", "-D", br)
+                deleted += 1
+            except Exception as e:
+                say(f"清理分支 {br} 跳过：{e}")
+        if deleted:
+            say(f"自动清理了 {deleted} 个已合并/已失效本地分支")
+        return deleted
+    except Exception as e:
+        say(f"自动清理分支跳过（不影响部署）：{e}")
+        return 0
 
 
 def token() -> str | None:
@@ -361,6 +449,7 @@ def _update_local(wait_min: float, checks: list) -> dict:
     old = git("rev-parse", "--short", "HEAD")
     say("git pull --ff-only")
     git("pull", "--ff-only")
+    auto_clean_branches()
     new = git("rev-parse", "--short", "HEAD")
     commits = git("log", "--oneline", "--no-decorate", f"{old}..{new}").splitlines() if old != new else []
     files = git("diff", "--name-only", old, new).splitlines() if commits else []
@@ -405,6 +494,7 @@ def _update_remote(wait_min: float, checks: list) -> dict:
     """远端：本地 main 与 origin/main 一致 → 按服务端 checkout 的提交打 bundle 上传 → 要重启的等服务端报出新提交。"""
     say("git pull --ff-only")
     git("pull", "--ff-only")
+    auto_clean_branches()
     new = git("rev-parse", D.BRANCH)
     if new != git("rev-parse", f"origin/{D.BRANCH}"):
         raise Stop(f"本地 {D.BRANCH} 与 origin/{D.BRANCH} 不一致（有没推的提交？）：只部署推到 GitHub 的 main")
