@@ -59,7 +59,11 @@ const freeCards = h => { const gs = h?.status?.info?.gpus || [], busy = new Set(
 // info 是给人挑的：空着几张卡、租期
 function regTo(x, pid) {
   if (x.standalone) return [];
-  return (D.regs || []).filter(y => y.state === "active" && !y.standalone && y.host !== x.host && canUseHost(y.host) && nrm(y.home) === nrm(x.home)).map(y => {        // 独立主机不列：不共享 worker 目录
+  return (D.regs || []).filter(y => {
+    if (y.state !== "active" || y.standalone || y.host === x.host || !canUseHost(y.host) || nrm(y.home) !== nrm(x.home)) return false;
+    const h = D.hosts.find(e => e.id === y.host);
+    return !h?.pool_exclusive;       // 独占共有算力池内的单台主机不能手动搬过去（请改用池入口）
+  }).map(y => {        // 独立主机不列：不共享 worker 目录
     const h = D.hosts.find(e => e.id === y.host), b = h?.borrow, ov = h?.status?.overrides || [];
     const no = b?.for?.length && !b.for.includes(pid) ? `借来的，只给 ${b.for.join("、")} 用` : "";
     const note = no || [ov.some(o => o.kind === "drain") ? "drain 中，不放行" : "", !h?.worker_up ? "worker 没在跑，拉起后放行" : ""].filter(Boolean).join("，");
@@ -126,7 +130,7 @@ const regMsg = () => RMSG ? `<div class="rn-state">${esc(RMSG)}</div>` : "";
 // 借来的主机只能勾“只给谁用”里的项目。勾选记在 ADOPT（换了主机就重来）
 let ADOPT = null;                                         // {host, sel: {登记 id: 勾没勾}, busy, err}
 function adoptSrc(h) {
-  if (h.ephemeral) return null;
+  if (h.ephemeral || h.pool_exclusive) return null;
   const me = (D.regs || []).find(x => x.host === h.id);
   if (!canWrite() || !me || me.standalone || h.standalone || me.state !== "active" || me.stale || !Array.isArray(me.queues) || me.queues.length || !h.status) return null;
   const src = D.regs.filter(x => !x.standalone && (x.state === "returned" || x.state === "unlisted") && nrm(x.home) === nrm(me.home) && (x.queues || []).some(q => q.project));
@@ -182,7 +186,7 @@ async function adoptGo(hid) {
 // 单项目用短确认浮窗（popConfirm）；多项目用右侧抽屉（#/host/<id>/assign，窄屏底部升起，底部固定操作栏，AGENTS.md「页面二级操作」）。
 let AMSG = null, APICK = null;                            // AMSG：{host, msg}（一分钟后收起）；APICK：{host, to, busy, err}（抽屉内选择状态）
 function assignSrc(h) {
-  if (h.ephemeral || !LIVE || !canUseHost(h.id) || (h.borrow && !h.borrow.swap) || !h.status) return null;
+  if (h.ephemeral || h.pool_exclusive || !LIVE || !canUseHost(h.id) || (h.borrow && !h.borrow.swap) || !h.status) return null;
   if ((h.status.queues || []).length) return null;
   const me = (D.regs || []).find(x => x.host === h.id);
   if (me && (me.state !== "active" || me.stale || (me.queues || []).length)) return null;
@@ -257,8 +261,10 @@ function projRegSec(p) {
   const hn = id => { const h = D.hosts.find(e => e.id === id); return h ? hostShort(h) : R.find(x => x.host === id)?.label || id; };
   let s = grp.map(({x, qs}) => {
     const pool = x.state === "pool", off = x.state !== "active" && !pool, h = !off && D.hosts.find(e => e.id === x.host), n = regTally(x, qs, p);
-    const name = h ? `<a href="#/host/${encodeURIComponent(x.host)}" ${tip(h.label)}>${esc(hostShort(h))}</a>` : `<span ${tip(x.host)}>${esc(x.label || x.host)}</span>`;
-    const tags = [pool ? `<span class="badge b-acc" ${tip("交给算力池、还没放到哪台的清单：看板挑一台算力池服务器放过去")}>等着放到某台</span>` : x.state === "unlisted" ? `<span class="badge b-mute" ${tip("主机清单里已经没有这一台，它的清单记录还留在共享盘上")}>主机清单里没有</span>`
+    const name = h ? `<a href="#/host/${encodeURIComponent(x.host)}" ${tip(h.label)}>${esc(hostShort(h))}</a>`
+      : pool ? `<a href="#/pool" ${tip(x.host)}>${esc(x.label || x.host)}</a>`
+      : `<span ${tip(x.host)}>${esc(x.label || x.host)}</span>`;
+    const tags = [pool ? `<span class="badge b-acc" ${tip("交给共有算力池、还没落到单台的清单：看板挑一台算力池服务器放过去")}>等着放到某台</span>` : x.state === "unlisted" ? `<span class="badge b-mute" ${tip("主机清单里已经没有这一台，它的清单记录还留在共享盘上")}>主机清单里没有</span>`
       : off ? `<span class="badge b-mute">已归还${x.returned ? " " + esc(ts(x.returned)) : ""}</span>` : "",
       x.stale ? `<span class="badge b-warn" ${tip(off ? "代读它的那台在用主机这一轮没连上，或本机不在内网" : "这台这一轮没读到状态")}>这轮没读到，用的是 ${x.t ? esc(ts(x.t)) : "上一轮"} 的</span>` : ""].filter(Boolean);
     const shown = qs.filter(q => !regQuiet(p, x, q)), hid = qs.length - shown.length;

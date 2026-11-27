@@ -10,9 +10,9 @@ DOWN_S = 150                   # 连不上持续这么久（约 3 轮采集）�
 LEASE_WARN_H = (24, 6)         # 租期到期前这么多小时各提醒一次
 
 
-def link_step(hs: dict, ok: bool | None, t: float) -> str | None:
+def link_step(hs: dict, ok: bool | None, t: float, down_s: float = DOWN_S) -> str | None:
     """连通状态（唯一一处）：记下这一次探测，返回 "down"（这次刚够掉线：连续至少 2 次、
-    持续 DOWN_S 秒连不上）、"up"（掉线后这次连上了）或 None。判掉线后由调用方写 hs["down"] = 原因；since 留到恢复后再清。
+    持续 down_s 秒连不上，缺省 DOWN_S）、"up"（掉线后这次连上了）或 None。判掉线后由调用方写 hs["down"] = 原因；since 留到恢复后再清。
     ok 为 None 是这次没探（本机不在内网）：不计连不上，还没判掉线的计数清零（离开内网前那一次连不上不算数，回来后重新计）。"""
     if ok is None:
         if not hs.get("down"):
@@ -25,7 +25,7 @@ def link_step(hs: dict, ok: bool | None, t: float) -> str | None:
     hs["fails"] = hs.get("fails", 0) + 1
     if hs["fails"] == 1:
         hs["since"] = t
-    return "down" if hs["fails"] >= 2 and t - hs["since"] >= DOWN_S and not hs.get("down") else None
+    return "down" if hs["fails"] >= 2 and t - hs["since"] >= down_s and not hs.get("down") else None
 
 
 def lease_end(started: float | None, days, until=None) -> float | None:

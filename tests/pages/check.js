@@ -61,7 +61,7 @@ function page(O, hash) {                 // 按路由整页渲染（顶栏 + 正
   run(O, "render(true)");
   return [el(O, "top").innerHTML, el(O, "view").innerHTML, run(O, 'DKEY ? document.getElementById("drwp").innerHTML : ""')].join("\n");
 }
-const ROUTES = ["#/", "#/host/srv-a", "#/host/srv-b", "#/host/没有的主机", "#/log", "#/log?host=srv-a&cat=op&q=x", "#/fleet", "#/fleet/people", "#/fleet/disk",
+const ROUTES = ["#/", "#/pool", "#/host/srv-a", "#/host/srv-b", "#/host/没有的主机", "#/log", "#/log?host=srv-a&cat=op&q=x", "#/fleet", "#/fleet/people", "#/fleet/disk",
   "#/fleet/srv/srv-a", "#/fleet/srv/srv-b", "#/fleet/srv/srv-d", "#/fleet/srv/srv-e", "#/fleet/srv/srv-f", "#/fleet/srv/srv-g", "#/fleet/srv/gone",
   "#/fleet/people/OWNER", "#/fleet/people/ME", "#/fleet/people/NEWBIE", "#/fleet/people/GONE", "#/fleet/people/+", "#/fleet/new/pool-public", "#/fleet/guard",
   "#/fleet/srv/srv-h", "#/fleet/renew", "#/fleet/renew/srv-d", "#/p/proj-a", "#/p/proj-a/manage", "#/p/proj-b/manage", "#/p/没有的项目/manage", "#/archived"];
@@ -2417,7 +2417,7 @@ ta("project", "项目页打开时 events.json 连不上（#177，Codex 审查 #1
 });
 
 /* ---------- 看板账号（#160）：普通用户、从公网入口来的管理员看到什么；「我的账号」「管理 → 账号」；会话失效回登录页；登录页 ---------- */
-const OVU = J("overview_user.json"), OVUM = J("overview_user_member.json"), lgSrc = rd("login.js"), lgHtml = rd("login.html");
+const OVU = J("overview_user.json"), OVUM = J("overview_user_member.json"), OVUP = J("overview_user_pool.json"), lgSrc = rd("login.js"), lgHtml = rd("login.html");
 const USER_ME = {...ADMIN_ME, name: "amy", role: "user", role_name: "普通用户", scopes: ["read"], admin: false, ops: false, write: false, token_scopes: ["read"],
   sessions: [{id: "s1", t: NOW - 86400, seen: NOW - 60, until: NOW + 29 * 86400, entry: "lan", entry_name: "内网入口", ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit Safari/605", this: true},
              {id: "s2", t: NOW - 3 * 86400, seen: NOW - 7200, until: NOW + 27 * 86400, entry: "public", entry_name: "公网入口", ua: BAD}],
@@ -2435,13 +2435,18 @@ function accCtx(snap, me, hash = "#/", extra = {}) {
   return O;
 }
 
-t("auth", "旧算力池入口已删除：侧栏、路由与项目管理抽屉都不再出现（#12）；交给新算力池的清单列在「主机与队列」里（#24）", () => {
-  const O = accCtx(OV, {...ADMIN_ME, pool_access: true});
-  ok(!side(O).includes('href="#/pool"'), "侧栏不该再有算力池");
+t("auth", "共有型算力池入口与旧借用池隔离（#212）：有共有池时侧栏与 #/pool 正常展示，无池快照不显示入口；项目管理抽屉不再出现旧池字样", () => {
+  const O = accCtx(OV, ADMIN_ME);
+  has(side(O), 'href="#/pool"', "有共有池时侧栏该有算力池入口");
   const html = page(O, "#/p/proj-a/manage");
   for (const word of ["运行资源", "池任务记录"]) ok(!html.includes(word), "项目管理抽屉不该再有" + word);
   has(html, "等着放到某台"); has(html, "从算力池撤回");
-  ok(!page(O, "#/pool").includes("算力池"), "#/pool 不再是算力池页");
+  const pp = page(O, "#/pool"); clean(pp, "管理员 #/pool");
+  has(pp, "共有算力池"); has(pp, "amy、bob"); has(pp, "alpha_pool_s1");
+  // 无共有池的快照（sparse）不显示侧栏算力池入口，直接访问 #/pool 给出空提示
+  const S = accCtx(OVS, ADMIN_ME);
+  ok(!side(S).includes('href="#/pool"'), "无共有池时侧栏不该出现算力池");
+  has(page(S, "#/pool"), "没有可用的共有型算力池");
 });
 
 t("auth", "普通用户：侧栏没有组内服务器与「管理」，有「我」；没有立即采集、调度按钮与平台操作；组内页只说要管理员；记录没有平台操作这类", () => {
@@ -3200,6 +3205,51 @@ t("project", "项目页临时主机与云盘存储（#213）：资源卡区隔�
   badPj.hosts.find(x => x.id === "colab-t4-01").mounts[0].label = "云" + BAD;
   badPj.jobs.find(j => j.id === "colab_s1").artifact_dir = "/p/" + BAD;
   clean(app(pjCtx(badPj, EVN)), "ephemeral evil project");
+});
+ta("auth", "共有型算力池前端权限隔离、独占池屏蔽与首页 noHost 提示收口（#212）", async () => {
+  // 1. 普通池成员（OVUP）：侧栏见「算力池」，#/pool 见所属池与本人待放清单，绝不泄露 members 或他人待放任务
+  const P_ME = {...OWNER_ME, hosts: [], pools: ["pool"], pool_member: true};
+  const UP = accCtx(OVUP, P_ME);
+  has(side(UP), 'href="#/pool"', "池成员侧栏应有算力池入口");
+  const pp = page(UP, "#/pool"); clean(pp, "池成员 #/pool");
+  has(pp, "共有算力池"); has(pp, "alpha_pool_s1");
+  for (const bad of ["amy、bob", "beta_secret_job", "jobs/pb.txt"]) ok(!pp.includes(bad), "池成员 #/pool 泄露：" + bad);
+  // 2. 非池成员（OVU）：侧栏无算力池入口，#/pool 提示无可用共有池
+  const UN = accCtx(OVU, {...OWNER_ME, pools: [], pool_member: false});
+  ok(!side(UN).includes('href="#/pool"'), "非池成员侧栏不该出现算力池");
+  has(page(UN, "#/pool"), "没有可用的共有型算力池");
+  // 3. 首页 noHost 收口：① 算力池成员（无单独分配主机、D.hosts 为空）不算缺主机，不弹“你的账号还没有能用的主机”
+  const poolOnlySnap = {...JSON.parse(JSON.stringify(OVUP)), hosts: [], projects: []};
+  const hpPool = page(accCtx(poolOnlySnap, P_ME), "#/"); clean(hpPool, "仅池成员首页");
+  ok(!hpPool.includes("你的账号还没有能用的主机"), "池成员不该弹无可用主机提示");
+  has(hpPool, "共有算力池");
+  // 4. 首页 noHost 收口：② 无分配主机、不在共有池，但名下持有 1 台组内服务器时给明确提示
+  const fleetOnlySnap = {...JSON.parse(JSON.stringify(OVUM)), hosts: [], projects: [], pool: null};
+  const hpFleet = page(accCtx(fleetOnlySnap, {...OWNER_ME, hosts: [], pools: [], pool_member: false}), "#/"); clean(hpFleet, "仅名下有组内服务器首页");
+  has(hpFleet, "你名下有 1 台组内服务器（可在<a href=\"#/fleet\">我的服务器</a>查看），但尚未分配可调度主机或加入算力池");
+  ok(!hpFleet.includes("你的账号还没有能用的主机"), "名下有组内服务器时不该再笼统说没有能用的主机");
+  // 5. 首页 noHost 收口：③ 既无主机、不在池、名下也无组内服务器时保留原提示并补充加入共有池引导
+  const emptySnap = {...JSON.parse(JSON.stringify(OVU)), hosts: [], projects: [], pool: null, fleet: null};
+  const hpEmpty = page(accCtx(emptySnap, {...OWNER_ME, hosts: [], pools: [], pool_member: false}), "#/");
+  has(hpEmpty, "你的账号还没有能用的主机"); has(hpEmpty, "加入共有算力池");
+  // 6. 独占共有池主机：regTo / assignSrc / adoptSrc 全部屏蔽单台直投
+  const exSnap = JSON.parse(JSON.stringify(OV));
+  exSnap.hosts[0].pool_id = "shared"; exSnap.hosts[0].pool_label = "共有池"; exSnap.hosts[0].pool_exclusive = true;
+  exSnap.hosts[0].status.queues = []; exSnap.regs[0].queues = [];
+  const EX = accCtx(exSnap, ADMIN_ME);
+  ok(run(EX, 'assignSrc(D.hosts[0])') === null, "独占池单台主机不应出给项目用");
+  ok(run(EX, 'adoptSrc(D.hosts[0])') === null, "独占池单台主机不应出接上卡");
+  ok(!run(EX, 'regTo(D.regs[1], "proj-b").some(t => t.id === "srv-a")'), "独占池单台主机不应出现在换到目标列表");
+  has(page(EX, "#/host/srv-a"), "独占 · 请经池入口提交");
+  // 7. canUseHost 多池与单池别名 + evil 转义 + poll 同步 access.pools
+  const M1 = accCtx(OVUP, {...OWNER_ME, pools: ["pool:a100"], pool_member: true});
+  ok(run(M1, 'canUseHost("pool:a100") && canUseHost("pool") && !canUseHost("pool:other")'), "单命名池权限判定不对");
+  const M2 = accCtx(OVUP, {...OWNER_ME, pools: ["pool:a100", "pool:4090"], pool_member: true});
+  ok(run(M2, 'canUseHost("pool:a100") && canUseHost("pool:4090") && !canUseHost("pool")'), "多命名池权限判定不对");
+  clean(page(ovCtx(OVE, RRE), "#/pool"), "evil #/pool");
+  run(UN, `fetch = () => Promise.resolve({ok: true, json: async () => (${JSON.stringify(OVUP)})});`);
+  await run(UN, "poll()");
+  ok(run(UN, 'ME.pool_member === true && JSON.stringify(ME.pools) === JSON.stringify(["pool"])'), "poll 未同步 D.access.pools 到 ME");
 });
 
 t("overview", "独立主机本地工作盘、磁盘闸门、可回收目录与外部主机右侧抽屉（#114 P2）", () => {

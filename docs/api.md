@@ -126,22 +126,22 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 - `/` 与 `/overview.json`：按白名单取（`users.view`，#17、#211），快照以后新加的字段默认不给普通用户。原样给 `generated`、`lan`、`event_kinds`、`sched`；`hosts`、`projects`、`archived`、`rebalance`、`regs`、`occ` 按可见范围过滤；`colors` 只留自己的项目；`server` 只给 `role` 和一句通用的备用提示；
   - `disk`（`disk.person_storage`）：保留总盘概况、历史、提醒线、扫描进度与总盘告警（`low`、`soon`），并补充本人名下目录（`owners`）、本人颜色与本人告警（`burst:<人>`、`over:<人>`）；`ours` 只留自己项目的目录与按项目的汇总（`ours.projects`，#53），扫盘的主机可见时才给 `scanner`；屏蔽他人目录、公共目录明细、全组名单 `names`、归属表 `owners_set` 与正在扫的路径 `now`；
   - `fleet`（`users._self_fleet`）：账号绑定了组内人员且名下持有服务器时，下发 `scope = "self"`、仅含本人持有的 `servers` 与 `mine`，`ops = None`、`holders = []`、`quota = None`；借出期间保留借用人名（`borrow.by`）及时间，屏蔽对方项目（`borrow.for`）、`away`、`reserve`、`using`、`lease_cut`，并脱敏借用方任务的进程命令行、路径与 PID；未绑人或名下无服务器时为 `null`；
-  - `pool`：当前恒为 `null`（旧借用推广型算力池已移除，待新共有池接入）；
+  - `pool`（`pool.summary`，#212）：账号属于至少一个共有型算力池时，下发所属池的聚合概况（在线主机/GPU/运行排队/已落机与待放数，剥离 `members` 列表）与本人项目的待放清单；非池成员为 `null`；
   - `notices`（给系统通知的提醒）、`wake`（给实验会话的消息）、`hostcheck`（看板服务所在机的体检，#166）给空值。`/` 现渲染（`collect.render_page`），不发磁盘上带全量数据的 `index.html`。
 - 可见主机的主机项整项照给，包括这台上别人任务的命令行、日志末尾与资源用量。同一台主机上的任务用共享的系统账号跑，能在这台上跑任务的人本来就能看到这些；所以开一台主机给谁，就等于让谁看到这台上所有任务的命令行与日志。不想让人看到的任务，不要放在开给这人的主机上。
-- `/records.json`：去掉平台操作、保活、借用、共享盘、账号、看板服务体检这几类，组内服务器的掉线与恢复，以及与组内某人有关（`who`）的（`users.visible`）。
-- 工作台只列自己的项目（含已归档的项目）和获准使用或自己的项目有车道的主机。登记视图只列自己的清单。调度卡保留各项目的份额行，按钮和项目链接只在自己的行上；可见主机上别人的任务照常显示。
+- `/records.json`：去掉平台操作、保活、借用、共享盘、账号、看板服务体检这几类，组内服务器的掉线与恢复，以及与组内某人有关（`who`）的（`users.visible`）；其中共有池调度事件（`kind = "pool"`，归入 `sched` 调度分类）严格按 `project` 归属本人项目过滤，绝不经池内主机泄露他人的迁移记录。
+- 工作台只列自己的项目（含已归档的项目）和获准使用、所属共有池或自己的项目有车道的主机。登记视图只列自己的清单。调度卡保留各项目的份额行，按钮和项目链接只在自己的行上；可见主机上别人的任务照常显示。
 - 记录再按相关项目或主机过滤。两样都未标记的全局记录仅供管理员查看。
 
 ### 普通用户的对象权限
 
 - 第一次推一个新项目时成为项目主人。已登记项目的读取、推送、等待、立即采集、项目级暂停与优先、配置、归档和恢复都要核对主人。没有有效主人账号的项目归管理员。管理员改主人后，下一次请求按新主人核对。
 - 主机清单的自用主机项可写 `users = ["账号名"]`，按账号名授权。带主机的调度指令及 `worker status`、`fit`、`project init` 都要通过主机权限核对。只能开放经 SSH 访问的远端主机。本机执行型主机和回环 SSH 主机仅供管理员使用。同一台远端主机上的任务以共享的系统账号运行，只给可以相互信任的人开这台主机。获准的已归还主机可通过代办移除该账号自己项目的登记。
-- 主机 `pool`（算力池保留 id）按池成员核对（`pool.member`，当前仅管理员，[fleet.md「算力池」](fleet.md#算力池)）。
+- 共有型算力池入口 `pool`（默认池或单池自动指向）与 `pool:<id>` 按池成员核对（`pool.member`，[fleet.md「算力池」](fleet.md#算力池)）；池成员同时获准只读查看所属池内主机（`status`/`fit` 与页面主机页），当池为 `exclusive = true`（缺省）时，`worker add <单台>`、`POST /reg/move` 与 `POST /host/assign` 对所有人（含管理员）一律拦截并引导改用池入口。
 - 增加、搬动登记还要核对项目主人、目标主机及清单是否已登记在别的项目名下。移除登记要能在看板上查到这条登记属于自己的项目。刚登记的清单还未采集到时，等下一轮再试。普通用户增加、移除、搬动登记或归档时，远端 worker 也要核对登记归属。旧版 worker 会拒绝这些操作，请管理员更新。
 - 整台主机或全局的操作仍由管理员执行。
 
-页面知道“我是谁”：看板服务发页面时把 `users.me` 的结果填进 `let ME = …`（与 `GET /api/me` 同一份），页面上按它藏按钮（`common.js` 的 `canOps`、`canWrite`、`canWeight`）。
+页面知道“我是谁”：看板服务发页面时把 `users.me` 的结果填进 `let ME = …`（与 `GET /api/me` 同一份），页面上按它藏按钮（`common.js` 的 `canOps`、`canWrite`、`canWeight`、`canUseHost`）。
 
 ## 账号接口（JSON，都过防跨站检查）
 
@@ -150,7 +150,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/login {"name", "password"}` | 种会话 Cookie，`{"name", "msg"}` |
 | `POST /api/setup {"name", "code", "password"}` | 用设置码设口令并登录，同上 |
 | `POST /api/logout` | 删掉这个会话、清 Cookie |
-| `GET /api/me` | `{"name", "role", "role_name", "scopes", "via", "entry", "entry_name", "admin", "ops", "write", "account", "fleet_person"（本账号绑定的组内人员名，#211）, "commit"（在跑的代码是哪个提交，#164）, "started"（服务启动时刻）}`；普通用户另有 `own`（项目 id）和 `hosts`（获准使用的主机 id）；`pool_member`（是否为算力池成员）；浏览器会话另有 `sessions`、`tokens`、`token_scopes`、`scope_info`、`push`（打码的推送摘要） |
+| `GET /api/me` | `{"name", "role", "role_name", "scopes", "via", "entry", "entry_name", "admin", "ops", "write", "account", "fleet_person"（本账号绑定的组内人员名，#211）, "commit"（在跑的代码是哪个提交，#164）, "started"（服务启动时刻）}`；普通用户另有 `own`（项目 id）、`hosts`（获准使用的主机 id）、`pools`（所属有主机共有池的入口列表，如 `["pool"]` 或 `["pool:a100"]`）与 `pool_member`（是否为算力池成员）；浏览器会话另有 `sessions`、`tokens`、`token_scopes`、`scope_info`、`push`（打码的推送摘要） |
 | `POST /api/password {"old", "new"}` | 改口令：别的浏览器都要重新登录，这个不用；令牌不受影响 |
 | `POST /api/tokens/add {"name", "scopes": [...]}` | `{"token"（原文，只这一次）, "id", "name", "scopes", "until", "msg", "commit"}` |
 | `POST /api/revoke {"id"}` | 吊销自己的一个会话或令牌（`id` 是列表里给的前 12 位） |

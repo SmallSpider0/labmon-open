@@ -434,7 +434,17 @@ def overview() -> dict:
                           "skipped": ["srv-x（登记没读到）"]},
                          {"id": "proj-older", "title": None, "t": NOW - 20 * 86400, "regs": [], "skipped": []}],
             "hostcheck": hostcheck(), "server": {"role": "primary", "id": "dashboard-host-a1b2c3", "since": NOW - 86400, "holder": None, "renew": None,
-                                                 "until": None, "bad": None, "home": None, "say": ""}}
+                                                 "until": None, "bad": None, "home": None, "say": ""},
+            "pool": {"pools": [{"id": "shared", "host_id": "pool", "label": "共有算力池", "exclusive": False,
+                                "members": ["amy", "bob"], "online": 1, "total": 1, "gpus": 2, "free_gpus": 1,
+                                "running": 3, "queued": 5, "pending": 1, "placed": 1,
+                                "hosts": [{"id": "srv-a", "label": a["label"], "online": True, "returned": False,
+                                           "drain": False, "deadline": False, "gpus": 2, "free_gpus": 1,
+                                           "running": 3, "queued": 5, "lease_end": a["lease_end"]}]}],
+                     "lists": {"/data/me/proj-a/pq|jobs/p.txt": {
+                         "pool": "shared", "pool_host": "pool", "project": "proj-a", "root": "/data/me/proj-a/pq",
+                         "jobs": "jobs/p.txt", "head": "alpha_pool_s1", "n": 1, "since": int(NOW - H),
+                         "why": "srv-a：显存不够", "nofit": False, "done": False}}}}
     return d
 
 
@@ -555,6 +565,9 @@ def overview_evil() -> dict:
     hc["warn"]["tunnel"] = "隧道" + BAD
     d["server"] = {"role": "standby", "id": "mac-" + BAD, "since": NOW - 600, "holder": "dashboard-host-" + BAD, "renew": NOW - 120, "until": NOW + 480,
                    "bad": None, "home": "/data/" + BAD, "say": "主是 " + BAD}          # 备用（服务租约，#163）：各页顶上的横幅
+    d["pool"]["pools"][0].update(label="池" + BAD, members=["员" + BAD])
+    d["pool"]["pools"][0]["hosts"][0]["label"] = "机" + BAD
+    d["pool"]["lists"]["/data/me/proj-a/pq|jobs/p.txt"].update(head="首" + BAD, why="因" + BAD, jobs="jobs/" + BAD)
     return d
 
 
@@ -1024,12 +1037,35 @@ def overview_user() -> dict:
 
 
 def overview_user_member() -> dict:
-    """#211：绑定组内人员 OWNER 的普通用户快照（经真实 users.view 产出；PR 1 删旧池后 pool 为 None，本人服务器与共享盘正常）。"""
+    """#211：绑定组内人员 OWNER 的普通用户快照（经真实 users.view 产出；非共有池成员，本人服务器与共享盘正常）。"""
     from unittest.mock import patch
     from labmon import users as U
     with patch.object(U, "person_of", return_value=("OWNER", None)):
         return view(Ident("amy", "user", frozenset({"read", "project"}), "session", "k"), overview(),
                     Access({"proj-a", "proj-old"}, {"srv-a"}, {"srv-a"}))
+
+
+def overview_user_pool() -> dict:
+    """#212：绑定 OWNER 且属于共有算力池 shared 的普通用户快照（经真实 users.view + pool.summary 产出，剥离 members 与他人待放清单）。"""
+    from unittest.mock import patch
+    from labmon import pool as PO
+    from labmon import users as U
+    d = overview()
+    d["pool"]["lists"]["/data/me/proj-b/pb|jobs/pb.txt"] = {
+        "pool": "shared", "pool_host": "pool", "project": "proj-b", "root": "/data/me/proj-b/pb",
+        "jobs": "jobs/pb.txt", "head": "beta_secret_job", "n": 2, "since": int(NOW - 300),
+        "why": "全池放不下", "nofit": True, "done": False,
+    }
+    pm = {"shared": {"id": "shared", "host_id": "pool", "label": "共有算力池", "hosts": ["srv-a"],
+                     "active_hosts": ["srv-a"], "members": ["amy", "bob"], "exclusive": False, "worker_home": "/data/me/labmon"}}
+    with patch.object(U, "person_of", return_value=("OWNER", None)), \
+            patch.object(PO, "user_pools", return_value=pm), \
+            patch.object(PO, "summary", wraps=lambda sp, who, acc=None: PO._summary_test_proxy(sp, who, acc, pm) if hasattr(PO, "_summary_test_proxy") else None):
+        out = view(Ident("amy", "user", frozenset({"read", "project"}), "session", "k"), d,
+                   Access({"proj-a", "proj-old"}, set(), {"srv-a"}))
+    out["pool"] = PO.summary(d["pool"], Ident("amy", "user", frozenset({"read", "project"}), "session", "k"),
+                             Access({"proj-a", "proj-old"}, set(), {"srv-a"}), pool_map=pm)
+    return out
 
 
 def overview_ephemeral() -> dict:
@@ -1183,7 +1219,7 @@ def project_ephemeral() -> dict:
     return d
 
 
-EXTRA = {"overview_user": overview_user, "overview_user_member": overview_user_member, "records": records, "records_evil": records_evil,
+EXTRA = {"overview_user": overview_user, "overview_user_member": overview_user_member, "overview_user_pool": overview_user_pool, "records": records, "records_evil": records_evil,
          "events": project_events, "events_evil": project_events_evil,
          "project_overdue": project_overdue, "project_longq": project_longq, "project_moved": project_moved, "project_pool_back": project_pool_back, "events_overdue": project_events_overdue,
          "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many,

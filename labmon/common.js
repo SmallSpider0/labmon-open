@@ -189,7 +189,9 @@ const sendJSON = (method, url, body = {}, how) => api(url, {method, headers: {"C
 const canOps = () => LIVE && !!ME?.ops;
 const canWrite = pid => LIVE && !!ME?.write && (!!ME.admin || !!ME.own?.includes(pid));
 const canWeight = () => canWrite();
-const canUseHost = id => LIVE && (!!ME?.admin || !!ME?.hosts?.includes(id) || id === "pool" && !!ME?.pool_member);   // pool：算力池（#24），池成员能交、能撤
+const isPoolId = id => id === "pool" || String(id || "").startsWith("pool:");
+const canUseHost = id => LIVE && (!!ME?.admin || !!ME?.hosts?.includes(id)
+  || (isPoolId(id) && (ME?.pools ? ME.pools.includes(id) || (id === "pool" && ME.pools.length === 1) : !!ME?.pool_member)));   // 共有型算力池（#212）：池成员能交、能撤
 const OPS_NOTE = "请从内网入口操作，或为此管理员开启公网平台操作";
 const opsNote = (cls = "sm mut") => LIVE && ME?.admin && !ME.ops ? `<span class="${cls} opsn">${OPS_NOTE}</span>` : "";
 function toLogin() {

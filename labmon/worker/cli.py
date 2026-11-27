@@ -275,7 +275,7 @@ def main(argv=None):
     ap.add_argument("--gpus", help="add：只用这些卡（nvidia-smi 序号，逗号分隔）")
     ap.add_argument("--project", help="add：看板的项目 id（必写）；fit：按这个项目的历史估（缺省取同名任务最近一次的项目）；clean：仅清理该项目")
     ap.add_argument("--expect-project", help="add / rm：在登记锁内核对这条清单所属的项目")
-    ap.add_argument("--pool", action="store_true", help="add：算力池放过来的（登记里记 pool，用于区分池放的清单）")
+    ap.add_argument("--pool", nargs="?", const=_P.POOL, default=None, help="add：算力池放过来的（登记里记池 id，用于区分池放的清单）")
     ap.add_argument("--expect-from", help="add：在登记锁内核对这条清单此刻还登记在这台（算力池搬清单用，#25：会话已撤回、已搬走的不再重新登记）")
     ap.add_argument("--stop", help="add：暂停时怎么停：boundary（缺省，等当前任务跑完）/ term / file:<相对 ROOT 的路径>")
     ap.add_argument("--until", type=float, help="override add：到期时刻（epoch 秒）")
@@ -354,12 +354,11 @@ def main(argv=None):
             if not os.path.exists(os.path.join(root, a.args[1])):
                 print("清单不存在：%s/%s" % (root, a.args[1]), file=sys.stderr)
                 return 2
-            if a.host == _C.POOL:
+            if _P.is_pool_id(a.host):
                 bad = _Q.pool_refuse(os.path.join(root, a.args[1]), a.stop, a.gpus)
                 if bad:
                     print(bad, file=sys.stderr)
                     return 2
-                a.stop = a.stop or "term"         # 池里的清单收回时要停得下来：缺省按 term 停
             guest = next((o for o in json.loads(_C.read(p.overrides, "[]") or "[]") if o.get("kind") == "guest" and o.get("target")), None)
             if guest and a.project not in guest["target"].split(","):
                 print("主机 %s 是借来的，只给 %s 用（这条队列的项目是 %s）" % (a.host, "、".join(guest["target"].split(",")), a.project), file=sys.stderr)
@@ -374,8 +373,8 @@ def main(argv=None):
                 reg["gpus"] = [int(x) for x in a.gpus.split(",")]
             if a.stop:
                 reg["stop"] = a.stop
-            if a.pool and a.host != _C.POOL:
-                reg["pool"] = 1
+            if a.pool and not _P.is_pool_id(a.host):
+                reg["pool"] = a.pool
             # 两条队列共用状态目录：current、lock、完成标记会互相覆盖。各主机共用同一块盘，别的主机上登记的也算
             st = _Q.load_queue(dict(reg, _slug="new"))["state"]
             if a.idle and os.path.exists(os.path.join(st, "current")):

@@ -13,7 +13,9 @@ labmon worker fit 29 <任务名>…                            # 单独评估具
 labmon worker limit 29 heavy=2                           # 限制同 tag 任务并发上限（整机共用；项目独占 tag 需带项目名）
 labmon worker clean ext-4090 [--project <id>] [--cache|--scratch] [--yes]   # 仅清理自管缓存与已结束单格临时（默认 --dry-run 预览，绝不动 projects/）
 labmon worker rm 29 <目录> <清单> / labmon worker stop 29
-labmon worker add pool <目录> <清单> --project <id>    # 提交给算力池；撤回用 worker rm pool <目录> <清单>
+labmon worker add pool[:<池id>] <目录> <清单> --project <id>    # 提交给共有算力池（单池直接写 pool）；撤回用 worker rm pool[:<池id>] <目录> <清单>
+labmon worker status pool[:<池id>]                              # 查看共有算力池各机余量与待放清单
+labmon worker fit pool[:<池id>] <目录> <清单> --list --project <id>   # 评估该清单在共有池各机可开车道
 ```
 
 - 统一使用 labmon worker 管理队列，不自建旧式脚本。

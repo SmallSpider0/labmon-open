@@ -35,12 +35,13 @@ from . import fleetview as FV
 from . import hostcheck as HC
 from . import lan as L
 from . import lease as LS
+from . import pool as PO
 from . import rebalance as RB
 from . import renew as R
 from . import users as U
 from .projects import archived_rows, registered
 from .collect import eta_by_progress, write_page
-from .config import POOL, POOL_LABEL, STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, home_key, host_platform, host_share, is_standalone, parse_time, pause_by, pick_color, sched, shell_path, user_hosts
+from .config import POOL, POOL_LABEL, STALE_S, ConfigError, active_hosts, all_hosts, expire_sched, fmt_time, home_host, home_key, host_platform, host_pool, host_share, is_pool_id, is_standalone, parse_time, pause_by, pick_color, pool_id_of, pools, sched, shell_path, user_hosts
 from .health import container_step, lease_due, lease_end, link_step
 from .records import EVENT_CATS, EVENT_KINDS, log_events, told
 from .state import append_row, load_json, load_rows, parse_rows, save_json, snapshot, state_dir, usage_file, usage_hosts, write_atomic
@@ -144,8 +145,11 @@ REG_KEYS = ("root", "jobs", "project", "stop", "gpus")     # 登记的全局视�
 
 
 def _pool_mark(reg: dict) -> dict:
-    """算力池放过来的登记（worker add --pool，#79）在全局视图里带 pool: true，别的不带这个键。"""
-    return {"pool": True} if reg.get("pool") else {}
+    """共有池落机登记（worker add --pool <池id>，#212）在全局视图里带 pool: "<池id>"（兼容旧 True → "pool"），别的不带这个键。"""
+    v = reg.get("pool")
+    if isinstance(v, str) and v:
+        return {"pool": v}
+    return {"pool": POOL} if v else {}
 
 
 def _parse_regs(text: str, *, strict: bool = False) -> dict:
@@ -211,11 +215,20 @@ def _regs(hosts: list[dict], by: dict, got: dict, old: dict, t: float, fleet_cfg
             x.update(t=None, queues=None)
         out.append(x)
     act, known = {e["id"] for e in hosts}, {str(h["id"]): h for h in all_hosts()}
-    # 算力池（#24）：保留 id pool 下的登记是交给池、还没放到哪台的清单（state 为 pool）
-    tag = lambda hid: {"label": POOL_LABEL, "state": "pool", "returned": None, "standalone": False} if hid == POOL else {   # noqa: E731
-        "label": known[hid]["label"] if hid in known else hid, "state": "returned" if hid in known else "unlisted",
-        "standalone": is_standalone(known[hid]) if hid in known else False,
-        "returned": parse_time(str(known[hid]["returned"])) if hid in known and known[hid].get("returned") else None}
+    try:
+        pm = pools()
+    except ConfigError:
+        pm = {}
+    p_by_hid = {p["host_id"]: p for p in pm.values()}
+    # 算力池（#24、#212）：保留 id pool 与 pool:<id> 下的登记是交给池、还没放到哪台的清单（state 为 pool）
+    def tag(hid):
+        if is_pool_id(hid):
+            p = p_by_hid.get(hid)
+            return {"label": p["label"] if p else (POOL_LABEL if hid == POOL else hid), "state": "pool",
+                    "pool_id": p["id"] if p else pool_id_of(hid), "returned": None, "standalone": False}
+        return {"label": known[hid]["label"] if hid in known else hid, "state": "returned" if hid in known else "unlisted",
+                "standalone": is_standalone(known[hid]) if hid in known else False,
+                "returned": parse_time(str(known[hid]["returned"])) if hid in known and known[hid].get("returned") else None}
     rest = [{"host": hid, **tag(hid), "home": home, "stale": False, "t": t, "queues": qs} for hid, (home, qs) in files.items() if hid not in act]
     seen = {x["host"] for x in rest}
     def _prev_key(hid: str, x: dict) -> tuple:
@@ -658,11 +671,16 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
         if not use_ssh:
             item["ssh"] = None
         by[h["id"]] = item
+    old_hosts = {x["id"]: x for x in old.get("hosts", [])}
     by_key: dict[tuple, list[dict]] = {}
     for h in by.values():
         by_key.setdefault(home_key(h), []).append(h)
-    for hk, group in by_key.items():                        # 每个共享域（home_key）挑第一台顺带读同域主机目录里的登记（_regs）
-        group[0]["regs"] = [group[0]["id"]] if hk[0] == "host" else list(by)
+    reg_pick: dict[tuple, dict] = {}
+    for hk, group in by_key.items():                        # 每个共享域（home_key）挑一台（优先上一轮无错的）顺带读同域主机目录里的登记（_regs）
+        pick = (group[0] if hk[0] == "host" else
+                min(group, key=lambda x: 0 if (old_hosts.get(x["id"]) and not old_hosts[x["id"]].get("error")) else 1))
+        pick["regs"] = [pick["id"]] if hk[0] == "host" else list(by)
+        reg_pick[hk] = pick
     by_lease = {k: v for k, v in by.items() if k in lease_ids}
     by_other = {k: v for k, v in by.items() if k not in lease_ids}
     lan, got = L.gather(by_lease, fetch, lambda k: bool(by_lease[k].get("ssh")), t) if by_lease else ({"ok": True, "since": None}, {})
@@ -675,6 +693,20 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
         got.update(got2)
         if not by_lease or (lan["ok"] and not lan2["ok"]):
             lan = lan2
+    if lan["ok"]:                                          # 共享域首选登记代读节点本轮失联时，立即切换到同域本轮可达节点补读登记（#212）
+        for hk, group in by_key.items():
+            if hk[0] == "host":
+                continue
+            pick = reg_pick[hk]
+            if got.get(pick["id"], (None,))[0] is not None:
+                continue
+            alt = next((x for x in group if x["id"] != pick["id"] and got.get(x["id"], (None,))[0] is not None), None)
+            if alt is not None:
+                r2 = fetch(dict(alt, regs=list(by), put=None, lease=None))
+                if r2[0] is not None:
+                    pick.pop("regs", None)
+                    alt["regs"] = list(by)
+                    got[alt["id"]] = r2
     _expire(t)
     prev = {} if lan["ok"] else {x["id"]: x for x in old.get("hosts", [])}
     hosts = []
@@ -690,14 +722,28 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
     notices, wake, disk, fleet, fleet_cfg = _notices(hosts, hcfg, t, per_host)
     if lan["ok"]:
         RB.keep_offers(hosts, old, t)                 # 这一轮读失败的主机沿用上一轮的 offers（挪法建议不消失一轮再出现）
+    regs = _regs(hosts, {k: v for k, v in by.items() if k in hcfg}, got, old, t, fleet_cfg)
+    try:
+        pm = pools()
+        for e in hosts:
+            hp = host_pool(e["id"], pm)
+            if hp:
+                e["pool_id"], e["pool_label"], e["pool_exclusive"] = hp["id"], hp["label"], bool(hp["exclusive"])
+        pool_data = PO.tick(hosts, regs, sw, t, lan_ok=lan["ok"], use_ssh=use_ssh, pool_map=pm)
+    except ConfigError as ex:
+        notices.append(f"共有算力池配置错误：{ex}")
+        pool_data = {"error": str(ex), "pools": [], "lists": {}}
+    except Exception as ex:  # noqa: BLE001
+        notices.append(f"共有算力池调度出错：{ex}")
+        pool_data = {"error": str(ex), "pools": [], "lists": {}}
     all_view_hosts = hosts + eph_hosts                # 临时主机（#213）：只进入快照主机表与时间线 occupancy，不碰 health/renew/borrow/disk/fleet/rebalance/sched_view/regs
     snap = {"generated": t, "hosts": all_view_hosts, "colors": colors, "notices": notices, "lan": lan, "wake": wake,
             "host_notices": per_host,                 # 各主机这一轮的掉线、恢复（serve.Overview.once 另推给能用这台的人，#167）
             # 各项目的挪法建议（worker 的 offers 汇的；项目看板据此告警）；不在内网时沿用上一轮的，回来后不重复叫醒
             "rebalance": RB.suggest(hosts, old.get("rebalance"), t) if lan["ok"] else old.get("rebalance") or {},
             "event_kinds": EVENT_KINDS, "event_cats": EVENT_CATS,
-            "fleet": fleet, "disk": disk, "occ": occupancy(all_view_hosts, projects, t - KEEP_S), "sched": sched_view(hosts, projects, t, sw, people),
-            "regs": _regs(hosts, {k: v for k, v in by.items() if k in hcfg}, got, old, t, fleet_cfg),   # 登记的全局视图：项目「管理」抽屉的主机与队列
+            "fleet": fleet, "disk": disk, "pool": pool_data, "occ": occupancy(all_view_hosts, projects, t - KEEP_S), "sched": sched_view(hosts, projects, t, sw, people),
+            "regs": regs,   # 登记的全局视图：项目「管理」抽屉的主机与队列
             # 各项目的摘要：页面要的字段只在 serve.Overview.proj_info 一处定，这里照带；running 只给 _to_worker 写 eta.json，不进快照（#139）
             "projects": [{k: v for k, v in p.items() if k != "running"} for p in projects],
             "archived": archived_rows(),     # 已归档的项目（projects.json，新的在前）：侧栏「已归档」与它的抽屉

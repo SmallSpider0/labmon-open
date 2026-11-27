@@ -21,7 +21,7 @@ from pathlib import Path, PurePosixPath
 
 from .records import log_events
 from .state import state_root, write_atomic
-from .worker.pure import GIB, GROUP_RE as AUTO_GROUP_RE, HOLD_RE, POOL, STALE_S  # noqa: F401 — 与 worker 共用唯一实现
+from .worker.pure import GIB, GROUP_RE as AUTO_GROUP_RE, HOLD_RE, POOL, POOL_ID_RE, POOL_PREFIX, STALE_S, is_pool_id, pool_host_id, pool_id_of  # noqa: F401 — 与 worker 共用唯一实现
 
 # 计划项（分组）、项目、共享盘上各人的配色顺序；配置里写 color 可覆盖
 PALETTE = ["#7F77DD", "#1D9E75", "#D85A30", "#378ADD", "#D4537E", "#BA7517", "#639922", "#888780"]
@@ -319,8 +319,9 @@ def user_hosts() -> list[dict]:
         return []
     d = _read_toml(hf)
     hosts = [dict(h) for h in d.get("hosts", [])]
-    if any(str(h.get("id")) == POOL for h in hosts):
-        raise ConfigError(f"{hf} 的 [[hosts]] 不能叫 {POOL}：它是算力池的保留 id")
+    if any(is_pool_id(str(h.get("id"))) for h in hosts):
+        bad = next(str(h.get("id")) for h in hosts if is_pool_id(str(h.get("id"))))
+        raise ConfigError(f"{hf} 的 [[hosts]] 不能叫 {bad}：它是算力池的保留 id")
     for h in hosts:
         check_legacy_pool(hf, h)
         if h.get("borrow_until"):
@@ -424,6 +425,43 @@ def set_host_users(name: str, hosts: list[str], by: str) -> str:
     what = "；".join(x for x in (f"能用 {'、'.join(sorted(add))}" if add else "", f"不再能用 {'、'.join(sorted(rm))}" if rm else "") if x)
     _write_checked(p, "".join(lines), f"{by} 改了 {name} 能用的主机：{what}")
     return f"{name} {what}"
+
+
+@_hosts_edit
+def remove_pool_member(name: str, by: str) -> list[str]:
+    """删除账号时同步移除主机清单 [pools.*].members 里显式列出的该账号（#212，users.remove 调）：
+    不触碰 "*" 通配项；无改动时不写文件。返回移除过该账号的共有池 id 列表。"""
+    p, low = hosts_file(), name.strip().lower()
+    if not low or not p.exists():
+        return []
+    raw_pools = _read_toml(p).get("pools")
+    if not isinstance(raw_pools, dict) or not raw_pools:
+        return []
+    lines = p.read_text().splitlines(keepends=True)
+    targets: list[tuple[int, int, str, list[str]]] = []
+    for pid, cfg in raw_pools.items():
+        if not isinstance(cfg, dict) or not isinstance(cfg.get("members"), list):
+            continue
+        cur = [str(x) for x in cfg["members"]]
+        new = [x for x in cur if x.strip().lower() != low]
+        if len(new) == len(cur):
+            continue
+        bl = (_blocks(lines, f"[pools.{pid}]")
+              or _blocks(lines, f'[pools."{pid}"]')
+              or _blocks(lines, f"[pools.'{pid}']"))
+        if not bl:
+            continue
+        s, end, _ = bl[0]
+        targets.append((s, end, str(pid), new))
+    if not targets:
+        return []
+    rm: list[str] = []
+    for s, end, pid, new in sorted(targets, key=lambda x: -x[0]):
+        lines = lines[:s + 1] + _set_keys(lines[s + 1:end], {"members": new}) + lines[end:]
+        rm.append(pid)
+    rm.sort()
+    _write_checked(p, "".join(lines), f"{by} 删账号 {name} 时移除共有池成员：{'、'.join(rm)}")
+    return rm
 
 
 HOST_RE = re.compile(r"(\[[0-9a-f:.]+\]|[a-z0-9.\-]+)(?::(\d{1,5}))?")    # Host 头与 [server] 里的“主机[:端口]”：名字或 IP（IPv6 带方括号），可带端口
@@ -629,9 +667,154 @@ def _guest_tpl(hosts: list[dict]) -> dict:
     return next((h for h in cand if not h.get("returned") and not h.get("borrow")), cand[0] if cand else {})
 
 
-def pool_home(hosts: list[dict] | None = None) -> str | None:
-    """算力池登记所在的 worker_home（#24）：池里的清单将来放到借来的组内服务器上跑，那些主机的 worker_home 照抄模板主机（guest_host），
-    池登记就放在同一个 worker_home 下（hosts/pool/queues/）。hosts 缺省读主机清单的 [[hosts]]；没有自用主机为 None。"""
+POOL_KEYS = ("label", "hosts", "members", "exclusive")
+
+
+def pools(data: dict | None = None) -> dict[str, dict]:
+    """共有型算力池配置解析与强校验唯一实现（hosts.toml 的 [pools.<id>]，#212，热读取免重启）。
+    返回 {pid: {id, host_id, label, hosts, active_hosts, members, exclusive, worker_home}}（保序）。
+    强校验：
+    - 池 id 匹配 POOL_ID_RE，且不得与任何 [[hosts]] 或 [[fleet.servers]] 的 id 重名；
+    - hosts 必选非空，每台须在 [[hosts]] 声明、满足 share_host（非看板本机与回环 SSH）、非独立主机、非借用主机；
+    - 同池所有主机必须共用同一个 worker_home（同一共享盘域）；
+    - 一台主机至多属于一个共有池（互斥）。"""
+    hf = hosts_file()
+    if data is None:
+        if not hf.exists():
+            return {}
+        data = _read_toml(hf)
+    raw_pools = data.get("pools")
+    if raw_pools is None:
+        return {}
+    if not isinstance(raw_pools, dict):
+        raise ConfigError(f"{hf} 的 [pools] 要写成 [pools.<id>] 表")
+    raw_hosts = [dict(h) for h in data.get("hosts", [])]
+    for h in raw_hosts:
+        check_legacy_pool(hf, h)
+        if h.get("borrow_until"):
+            h["borrow"] = {"holder": h.get("borrow_from"), "swap": True}
+    fleet_srvs = (data.get("fleet") or {}).get("servers", []) or []
+    for s in fleet_srvs:
+        check_legacy_pool(hf, s)
+    host_by = {str(h["id"]): host_defaults(h) for h in raw_hosts if "id" in h}
+    fleet_ids = {str(s["id"]) for s in fleet_srvs if isinstance(s, dict) and "id" in s}
+    taken_ids = set(host_by) | fleet_ids
+    seen_host: dict[str, str] = {}
+    out: dict[str, dict] = {}
+    for pid, sec in raw_pools.items():
+        pid = str(pid)
+        if not POOL_ID_RE.fullmatch(pid):
+            raise ConfigError(f"{hf} 的 [pools.{pid}] 池 id 不合法：须字母开头，仅含字母、数字、_ 或 -，最多 32 位")
+        if pid in taken_ids:
+            raise ConfigError(f"{hf} 的 [pools.{pid}] 与已有主机或组内服务器 {pid} 重名")
+        if not isinstance(sec, dict):
+            raise ConfigError(f"{hf} 的 [pools.{pid}] 要是一节表")
+        bad = sorted(set(sec) - set(POOL_KEYS))
+        if bad:
+            raise ConfigError(f"{hf} 的 [pools.{pid}] 不认识 {'、'.join(bad)}（能写的：{'、'.join(POOL_KEYS)}）")
+        raw_h = sec.get("hosts")
+        if not isinstance(raw_h, list) or not raw_h or not all(isinstance(x, str) and x.strip() for x in raw_h):
+            raise ConfigError(f"{hf} 的 [pools.{pid}] 必须写非空 hosts = [\"主机 id\", ...]")
+        hids = list(dict.fromkeys(x.strip() for x in raw_h))
+        homes: dict[str, tuple] = {}
+        active_hids = []
+        for hid in hids:
+            if hid in fleet_ids and hid not in host_by:
+                raise ConfigError(f"{hf} 的 [pools.{pid}] 主机 {hid} 是借用的组内服务器，共有池只能包含常驻 [[hosts]]")
+            h = host_by.get(hid)
+            if h is None:
+                raise ConfigError(f"{hf} 的 [pools.{pid}] 主机 {hid} 不在 [[hosts]] 里")
+            if h.get("borrow"):
+                raise ConfigError(f"{hf} 的 [pools.{pid}] 主机 {hid} 是借用主机，不能配入共有池")
+            if not share_host(h):
+                raise ConfigError(f"{hf} 的 [pools.{pid}] 主机 {hid} 是看板本机或回环 SSH，不能配入共有池")
+            if is_standalone(h):
+                raise ConfigError(f"{hf} 的 [pools.{pid}] 主机 {hid} 是独立主机，不共享 worker_home，不能配入共有池")
+            if hid in seen_host:
+                raise ConfigError(f"{hf} 的主机 {hid} 同时出现在 [pools.{seen_host[hid]}] 与 [pools.{pid}]：一台主机至多属于一个共有池")
+            seen_host[hid] = pid
+            homes[hid] = home_key(h)
+            if not h.get("returned"):
+                active_hids.append(hid)
+        uniq_homes = set(homes.values())
+        if len(uniq_homes) > 1:
+            detail = "；".join(f"{hid}={host_by[hid]['worker_home']}" for hid in hids)
+            raise ConfigError(f"{hf} 的 [pools.{pid}] 主机必须共用同一个 worker_home（当前：{detail}）")
+        wh = host_by[hids[0]]["worker_home"]
+        raw_m = sec.get("members", [])
+        if not isinstance(raw_m, list) or not all(isinstance(x, str) and x.strip() for x in raw_m):
+            raise ConfigError(f"{hf} 的 [pools.{pid}] members 要写成字符串列表（账号名或 \"*\"）")
+        members = list(dict.fromkeys(x.strip().lower() for x in raw_m))
+        excl = sec.get("exclusive", True)
+        if not isinstance(excl, bool):
+            raise ConfigError(f"{hf} 的 [pools.{pid}] exclusive 要写 true 或 false")
+        lbl = sec.get("label")
+        if lbl is not None and (not isinstance(lbl, str) or not lbl.strip()):
+            raise ConfigError(f"{hf} 的 [pools.{pid}] label 要写非空字符串")
+        label = lbl.strip() if isinstance(lbl, str) else (POOL_LABEL if pid == POOL else pid)
+        out[pid] = {
+            "id": pid,
+            "host_id": pool_host_id(pid),
+            "label": label,
+            "hosts": hids,
+            "active_hosts": active_hids,
+            "members": members,
+            "exclusive": excl,
+            "worker_home": wh,
+        }
+    return out
+
+
+def resolve_pool(hid: str, pool_map: dict[str, dict] | None = None) -> dict | None:
+    """将命令行/接口中的池入口（pool 或 pool:<id>）解析为共有池配置 dict；非池入口返回 None。
+    全配置仅 1 个池时，默认入口 pool 自动指向该池；多池且未配 [pools.pool] 时报错提示显式写 pool:<id>。"""
+    if not isinstance(hid, str):
+        return None
+    if hid != POOL and not hid.startswith(POOL_PREFIX):
+        return None
+    pm = pools() if pool_map is None else pool_map
+    if hid == POOL:
+        if POOL in pm:
+            return pm[POOL]
+        if len(pm) == 1:
+            return next(iter(pm.values()))
+        if len(pm) > 1:
+            choices = "、".join(p["host_id"] for p in pm.values())
+            raise ConfigError(f"当前配置了多个算力池，请明确指定池入口：{choices}")
+        return None
+    pid = pool_id_of(hid)
+    if not pid or pid not in pm:
+        known = f"（可用：{'、'.join(p['host_id'] for p in pm.values())}）" if pm else "（hosts.toml 尚未配置 [pools.<id>]）"
+        raise ConfigError(f"找不到算力池 {hid}{known}")
+    return pm[pid]
+
+
+def host_pool(hid: str, pool_map: dict[str, dict] | None = None) -> dict | None:
+    """一台常驻主机所属的共有池配置 dict；不属于任何共有池返回 None。"""
+    pm = pools() if pool_map is None else pool_map
+    hid = str(hid)
+    return next((p for p in pm.values() if hid in p["hosts"]), None)
+
+
+def pool_home(pid_or_hid: str | None = None, hosts: list[dict] | None = None) -> str | None:
+    """算力池登记所在的 worker_home（#24、#212）：优先取 [pools.<id>] 对应池的 worker_home；
+    尚未配置 [pools.*] 或清理已删池的历史待放目录时，回退到自用模板主机的 worker_home。"""
+    try:
+        pm = pools()
+    except ConfigError:
+        pm = {}
+    if pid_or_hid:
+        if pid_or_hid in pm:
+            return pm[pid_or_hid]["worker_home"]
+        pid = pool_id_of(pid_or_hid)
+        if pid and pid in pm:
+            return pm[pid]["worker_home"]
+        if pid_or_hid == POOL and len(pm) == 1:
+            return next(iter(pm.values()))["worker_home"]
+    elif pm:
+        p = pm.get(POOL) or (next(iter(pm.values())) if len(pm) == 1 else None)
+        if p:
+            return p["worker_home"]
     if hosts is None:
         hf = hosts_file()
         hosts = [dict(h) for h in _read_toml(hf).get("hosts", [])] if hf.exists() else []
@@ -1300,11 +1483,21 @@ def with_queues(cfg: dict, queues: list[dict]) -> dict:
     for q in queues:
         if q.get("host") is not None and q["host"] not in ids:
             add(q["host"])
-    home = pool_home() if any(q.get("host") == POOL for q in queues) and POOL not in ids else None
-    if home:                                          # 算力池（#24）：一台不探测的合成主机，池车道由同 worker_home 的在用主机只读代读
-        hosts.append(_norm_host({"id": POOL, "label": POOL_LABEL, "pool": True, "worker_home": home}))
-        ids.add(POOL)
-        if _reader({"host": POOL}, hosts) is None and (r := home_host(home, [h for h in more() if not h["returned"]])):
+    pm = {}
+    if any(is_pool_id(q.get("host")) for q in queues):
+        try:
+            pm = pools()
+        except ConfigError:
+            pm = {}
+    for phid in list(dict.fromkeys(q["host"] for q in queues if is_pool_id(q.get("host")) and q["host"] not in ids)):
+        p = next((x for x in pm.values() if x["host_id"] == phid), None)
+        home = p["worker_home"] if p else pool_home(phid)
+        if not home:
+            continue
+        lbl = p["label"] if p else (POOL_LABEL if phid == POOL else phid)
+        hosts.append(_norm_host({"id": phid, "label": lbl, "pool": True, "pool_id": p["id"] if p else pool_id_of(phid), "worker_home": home}))
+        ids.add(phid)
+        if _reader({"host": phid}, hosts) is None and (r := home_host(home, [h for h in more() if not h["returned"]])):
             hosts.append(dict(r, reader_only=True))   # 不是本项目的主机，只替池代读：不进项目快照（collect._hosts）
             ids.add(r["id"])
     for q in queues:

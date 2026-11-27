@@ -63,7 +63,7 @@ function render(how) {
     return fitPops();                                   // 项目页的「管理」抽屉里也有弹窗（#143：以前这条路不量，靠右的伸出屏幕）
   }
   FRAME = null; view.hidden = false; frames.hidden = true; TLH = null;
-  const html = standbyBar() + lanBar() + (r.kind === "host" ? hostPage(r.id) : r.kind === "fleet" ? fleetPage() : r.kind === "log" ? logPage(r.f)
+  const html = standbyBar() + lanBar() + (r.kind === "host" ? hostPage(r.id) : r.kind === "pool" ? poolPage() : r.kind === "fleet" ? fleetPage() : r.kind === "log" ? logPage(r.f)
     : r.kind === "me" ? `<div class="account-content">${mePage(r.tab)}</div>` : home());
   if (how || html !== LAST) {
     const m = document.getElementById("main"), y = m.scrollTop;
@@ -438,9 +438,11 @@ async function poll() {
     const a = D.access;                                 // 普通用户的授权与概览由同一次请求取得
     if (ME && (ME.admin ? !!a : !a)) return location.reload();   // 角色变了，重新载入完整的身份与入口（以 D.access 严格区分管理员与普通用户快照）
     if (ME && a) {
-      if (JSON.stringify(ME.own) !== JSON.stringify(a.own) || JSON.stringify(ME.hosts) !== JSON.stringify(a.hosts)) {
-        ME = {...ME, own: a.own, hosts: a.hosts};
-        if (ACC.me) ACC.me = {...ACC.me, own: a.own, hosts: a.hosts};
+      const pools = a.pools || [];
+      if (JSON.stringify(ME.own) !== JSON.stringify(a.own) || JSON.stringify(ME.hosts) !== JSON.stringify(a.hosts)
+          || JSON.stringify(ME.pools || []) !== JSON.stringify(pools)) {
+        ME = {...ME, own: a.own, hosts: a.hosts, pools, pool_member: pools.length > 0};
+        if (ACC.me) ACC.me = {...ACC.me, own: a.own, hosts: a.hosts, pools, pool_member: pools.length > 0};
         for (const f of [...document.getElementById("frames").children]) {
           if (f.dataset.p && !a.own.includes(f.dataset.p)) f.remove();
         }

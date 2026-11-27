@@ -89,7 +89,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.reg_cache = {}                   # 本机登记文件 {路径: (fsig, st_mtime, reg 或 Exception)}：未变时不重读 JSON
         self.reg_idle = {}                    # 空置计时与休眠态 {队列 key: {since, sig, sleep}}（#164；重启经 load_prev 找回）
         self.sleep_marks = {}                 # 休眠队列的标记快照 {队列 key: {任务名: done|failed}}（转休眠时记，list_state 零 I/O 合入）
-        self.pool_reg_cache = {}              # 算力池登记文件缓存 {路径: (fsig, st_mtime, reg)}（pool_todo 用）
+        self.pool_reg_cache = {}              # 算力池登记文件缓存 {池登记目录: {路径: (fsig, st_mtime, reg)}}（pool_todo 按池目录隔离）
         self.pool_idle = {}                   # 算力池待放清单的空置计时与休眠态 {队列 key: {since, sig, sleep}}（#164）
         self.opars = {}                       # 算力池清单并行数缓存 {路径: (fsig, par)}（pool_todo 用）
         self.peer_regs = {}                   # 别的在用主机（peer_st）登记的清单 {(目录, 清单): [(登记文件修改时间, 主机)]}（peers 一起读，registry 认同一条清单归谁，#95）
@@ -1315,7 +1315,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                      "cpu": _S.cpu_free(S), "cpu_cap": S["cpu_cap"], "other_cpu": S["cpu"],   # other_cpu：认得准的 labmon 之外的核数（fit 判整机独占，同 intruders）
                      "keep": {c["uuid"]: round(c["keep"]) for c in S["cards"] if c["keep"]},   # 各卡给对方留着的 MB（keep_left）：fit 的整卡封顶 card_need 照它
                      "owner": sorted(S["owner"])},        # 不放的卡（对方超出预留或刚回落、有停不了的保活）：fit 的快照照它（fit_snapshot）
-            "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"], **({"pool": True} if q.get("pool") else {}),
+            "queues": [{"root": q["root"], "jobs": q["jobs"], "gpus": q["gpus"], "project": q["project"], "stop": q["stop"], **({"pool": q["pool"]} if q.get("pool") else {}),
                         "empty": q.get("empty", False), "sleeping": bool(q.get("sleeping")), "empty_since": q.get("empty_since"),
                         "added_t": q.get("added_t"), "dur": self.durs.get(q["key"], {}),
                         "par": q.get("par") or 1} for q in queues],   # 清单声明的并行数（list_par，#147）：看板车道写“并行 k/N”

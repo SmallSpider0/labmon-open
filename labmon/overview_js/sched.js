@@ -108,6 +108,78 @@ function personBar(ps) {
     `${who(ps[0])} 名下近期用量合计 ${g1(use)} 卡·时（含已归档的项目），占 ${Math.round(u)}%；份额按人算，近期在用的 ${n} 人各应得 ${Math.round(d)}%\n竖线是应得的位置`)}><i style="width:${u}%;background:var(--muted)"></i><b class="due" style="left:${d}%"></b></div>
     <span class="sm num nw">${Math.round(u)}% <span class="mut">/ ${Math.round(d)}%</span></span></div>`;
 }
+// 共有型算力池：总览紧凑卡片（poolSummaryCard）与独立页（poolPage，#/pool）。数据来自全局快照的 D.pool（pool.tick / pool.summary）；
+// 非池成员的 D.pool 为 null（不可见），普通池成员仅见所属池聚合与本人待放清单（不含 members 列表）。
+function poolSummaryCard() {
+  const P = D.pool;
+  if (!P) return "";
+  if (P.error) return `<div class="alerts"><div>⚠ 共有算力池配置错误：${esc(P.error)}</div></div>`;
+  const ps = P.pools || [];
+  if (!ps.length) return "";
+  const rows = ps.map(p => {
+    const nofit = Object.values(P.lists || {}).filter(v => v.pool === p.id && !v.done && v.nofit).length;
+    return `<tr class="link" tabindex="0" data-go="#/pool">
+      <td><b>${esc(p.label)}</b> <code class="sm">${esc(p.host_id)}</code> ${p.exclusive ? `<span class="badge b-mute" ${tip("独占模式：禁止对池内单台主机直接 worker add，请经池入口提交")}>独占</span>` : `<span class="badge b-ok" ${tip("开放模式：既可经池入口提交也可直投单台")}>开放</span>`}</td>
+      <td class="r">${p.online} / ${p.total}</td>
+      <td class="r">${p.free_gpus} / ${p.gpus}</td>
+      <td class="r">${p.running} / ${p.queued}</td>
+      <td class="r">${p.placed}</td>
+      <td class="r">${p.pending}${nofit ? ` <span class="badge b-bad">${nofit} 放不下</span>` : ""}</td></tr>`;
+  }).join("");
+  return `<div class="card"><div class="chd wrap"><b>共有算力池</b><span class="sm mut">统一经 <code>labmon worker add pool</code>（或 <code>pool:&lt;id&gt;</code>）提交，按人公平份额即时落机与空闲窃取</span><span class="sp"></span><a class="sm" href="#/pool">详情 →</a></div>
+    <div class="scroll"><table><tr><th>算力池</th><th class="r">在线主机</th><th class="r">空闲 / 总 GPU</th><th class="r">运行 / 排队</th><th class="r">已落机清单</th><th class="r">待放清单</th></tr>${rows}</table></div></div>`;
+}
+
+function poolPage() {
+  const P = D.pool;
+  if (!P) return `<div class="card empty">当前没有可用的共有型算力池（或你的账号不在任何共有池成员列表中）。</div>`;
+  if (P.error) return `<div class="alerts"><div>⚠ 共有算力池配置错误：${esc(P.error)}</div></div>`;
+  const ps = P.pools || [], lists = Object.values(P.lists || {}).filter(v => !v.done), now = D.generated;
+  if (!ps.length) return `<div class="card empty">hosts.toml 中尚未配置共有型算力池（<code>[pools.&lt;id&gt;]</code>）。</div>`;
+  const totOnline = ps.reduce((a, p) => a + (p.online || 0), 0), totHosts = ps.reduce((a, p) => a + (p.total || 0), 0);
+  const totFree = ps.reduce((a, p) => a + (p.free_gpus || 0), 0), totGpus = ps.reduce((a, p) => a + (p.gpus || 0), 0);
+  const totRun = ps.reduce((a, p) => a + (p.running || 0), 0), totQ = ps.reduce((a, p) => a + (p.queued || 0), 0);
+  const totPend = lists.length, nofitN = lists.filter(v => v.nofit).length;
+  let s = `<div class="kpis">
+    <div class="kpi"><div class="k">共有算力池</div><div class="v">${ps.length}<small> 个</small></div><div class="s">${ps.map(p => esc(p.host_id)).join(" · ")}</div></div>
+    <div class="kpi"><div class="k">在线主机</div><div class="v">${totOnline}<small> / ${totHosts} 台</small></div><div class="s">运行 ${totRun} · 排队 ${totQ}</div></div>
+    <div class="kpi"><div class="k">空闲 GPU</div><div class="v">${totFree}<small> / ${totGpus} 张</small></div><div class="s">空闲主机自动触发空闲窃取</div></div>
+    <div class="kpi"><div class="k">待放清单</div><div class="v" style="${nofitN ? "color:var(--bad)" : ""}">${totPend}<small> 条</small></div><div class="s">${nofitN ? `其中 ${nofitN} 条全池放不下` : "新提交清单下一轮即时落机"}</div></div></div>`;
+  for (const p of ps) {
+    const pLists = lists.filter(v => v.pool === p.id).sort((a, b) => (a.since || 0) - (b.since || 0));
+    const memTag = Array.isArray(p.members)
+      ? `<span class="sm mut">成员：${p.members.includes("*") ? "全部用户（*）" : esc(p.members.join("、") || "无")}</span>` : "";
+    const modeTag = p.exclusive
+      ? `<span class="badge b-mute" ${tip("独占模式：禁止对池内单台主机直接 worker add，请经池入口提交")}>独占 · 仅经 ${esc(p.host_id)}</span>`
+      : `<span class="badge b-ok" ${tip("开放模式：既可经池入口提交也可直投单台")}>开放 · 允许直投</span>`;
+    const hRows = (p.hosts || []).map(h => {
+      const stBadge = h.returned ? `<span class="badge b-mute">已归还</span>`
+        : !h.online ? `<span class="badge b-bad">离线</span>`
+        : h.drain ? `<span class="badge b-warn">drain</span>`
+        : h.deadline ? `<span class="badge b-warn">预备续租</span>`
+        : `<span class="badge b-ok">在线</span>`;
+      const go = D.hosts.some(x => x.id === h.id) ? ` class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"` : "";
+      return `<tr${go}><td><b>${esc(h.label || h.id)}</b> <span class="sm mut">${esc(h.id)}</span></td>
+        <td>${stBadge}</td><td class="r">${h.online ? `${h.free_gpus} / ${h.gpus}` : "—"}</td>
+        <td class="r">${h.online ? h.running : "—"}</td><td class="r">${h.online ? h.queued : "—"}</td>
+        <td class="sm nw">${h.lease_end ? leaseHtml(h.lease_end, "租期") : "—"}</td></tr>`;
+    }).join("") || `<tr><td colspan="6" class="empty">这个池里还没有配置主机。</td></tr>`;
+    const lRows = pLists.map(v => {
+      const link = D.projects.some(x => x.id === v.project) ? v.project : null;
+      const st = v.nofit ? `<span class="badge b-bad">全池放不下</span> ${esc(v.why || "")}` : esc(v.why || "等待下一轮落机");
+      return `<tr><td>${projCell({project: v.project, link})}</td><td class="sm"><code>${esc(v.root)}/<b>${esc(v.jobs)}</b></code></td>
+        <td class="sm">${esc(v.head || "—")}</td><td class="r sm">${v.n || "—"}</td>
+        <td class="r sm nw">${v.since ? dur(now - v.since) : "—"}</td><td class="sm mut">${st}</td></tr>`;
+    }).join("");
+    s += `<div class="card"><div class="chd wrap"><b>${esc(p.label)}</b><code class="sm">${esc(p.host_id)}</code>${modeTag}${memTag}<span class="sp"></span>
+      <span class="sm mut">在线 ${p.online}/${p.total} 台 · 空 ${p.free_gpus}/${p.gpus} 卡 · 已落机 ${p.placed} 条 · 待放 ${p.pending} 条</span></div>
+      <div class="scroll"><table><tr><th>主机</th><th>状态</th><th class="r">空闲 / 总 GPU</th><th class="r">运行</th><th class="r">排队</th><th>租期</th></tr>${hRows}</table></div>
+      ${pLists.length ? `<div class="sub">待放清单（${pLists.length} 条）</div><div class="scroll"><table><tr><th>项目</th><th>清单</th><th>队首</th><th class="r">待跑</th><th class="r">已等</th><th>状态 / 原因</th></tr>${lRows}</table></div>`
+        : `<div class="sm mut" style="margin-top:8px">当前没有待放清单。提交命令：<code>labmon worker add ${esc(p.host_id)} ROOT JOBS --project &lt;项目&gt;</code></div>`}</div>`;
+  }
+  return s + schedCard();
+}
+
 function schedCard() {
   const S = D.sched;
   if (!S) return "";
@@ -233,7 +305,7 @@ function recSlice(f, n, empty = "还没有记录。") {
 const recNote = (f, n) => { const r = recs(recQ(f, n)).rows; return r?.length ? tsHM(r[0].t) : r ? "无" : "…"; };
 // 一串记录（记录页、总览的记录卡、主机页、抽屉里的片段同用）。合成事：一次平台操作（开始到完成或停下；平台操作一次只做一个）
 // 连同期间与结束后 5 分钟里这几台的连接、平台类记录合成一条；挨着的同一类、同一台的合成一条（×N）。点 ×N 展开
-const RCAT = {link: "wifi", op: "cloud", config: "gear", lease: "hourglass", keepalive: "shield", disk: "db", queue: "list", board: "dash"};
+const RCAT = {link: "wifi", op: "cloud", config: "gear", lease: "hourglass", keepalive: "shield", disk: "db", sched: "zap", queue: "list", board: "dash"};
 const REXP = new Set();            // 展开着的合并记录（按其中最新一条的 rowKey）
 const hostsOf = e => e.hosts || (e.host ? [e.host] : []);
 function recGroup(rows) {

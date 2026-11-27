@@ -70,6 +70,7 @@ class FitHost:
         self.slack = _S.gpu_slack(self.cards, st.get("running") or [], st.get("throttle"), self.S["cpu_cap"])
         self.lanes, self.say, self.why = [], [], None     # 这次假设开的 [(任务, 卡号)] 与各行的说明；最近一行没开成的原因
         self.solo, self.solo_host = {}, None              # 这次分给只有提示值的行的卡 {uuid: 任务}（之后哪一行都不与它同卡）；不用卡的那种占了整台：任务名
+        self.last_nofit = False                           # 最近一次 open 是否因整机硬件放不下（nofit）拒放
 
     def card_lines(self, project=None):
         """各卡此刻的样子（可用显存、利用率、在跑谁、CPU 受限）、这台的 CPU 配额与记账（cpu_line，#112）与限流：fit 先列出来。
@@ -139,6 +140,7 @@ class FitHost:
         判断就是 place；fit 只多两条：估计只有提示值的（没有实测）只放空卡、不与别的任务同卡（不用卡的只在这台没有 labmon 任务时开；
         这次 fit 先分了它，后面的行也不与它同卡、同台：solo）；
         利用率低的卡上在跑的任务被 CPU 卡住时不在那张卡上开（gpu_slack）。"""
+        self.last_nofit = False
         why = self.blocked(x["project"])
         hit = None if why else self.w.override_hit(x, ("deadline",), lasting=True)    # 续租、约定归还的截止前跑不完的不放（同真放行，按这一行的预计时长）
         if why or hit:
@@ -154,6 +156,7 @@ class FitHost:
         S0 = dict(S, holds={})
         full = _S.place(dict(x), S0, t)
         if full[0] is None and (S0["code"] or "").startswith("nofit"):    # labmon 全停也放不下（nofit）：这台跑不了，排在已有车道后面也不会跑（#94）
+            self.last_nofit = True
             return None, full[1] + " → 这台跑不了"
         if gpu:
             sel = [c["i"] for c in S["cards"] if (x["allowed"] is None or c["i"] in x["allowed"])
@@ -301,8 +304,11 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
             print("这条清单还没登记：写 --project <看板项目 id>")
             return 2
         q = _Q.load_queue({"_slug": _Q.qslug(root, jobs), "root": root, "jobs": jobs, "project": project})
+    if not q.get("_env_ok", True):
+        print("读不到环境文件 %s" % _Q.env_path(q["root"], q["jobs"]))
+        return 2
     rows = _Q.list_jobs(q)
-    if not rows and not os.path.exists(q["jobs_path"]):
+    if not q.get("_jobs_ok", True) or (not rows and not os.path.exists(q["jobs_path"])):
         print("读不到清单 %s" % path)
         return 2
     hist, fhs, skip = _C.load_hist({}, host=p.host) or [], [], {}
@@ -329,7 +335,10 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
     for cur in _Q.read_current(q["state"]):          # 状态目录里在跑的（并行清单有几行，#147）：放它的主机状态过期了（worker 停了、崩了）任务照样可能在跑，不能再分
         if not (cur[3] and cur[3] in gone):       # 放它的主机已归还的不算（算力池借的主机换了容器、清单回池里，#25；同 run_elsewhere）
             running.add(cur[0])
-    _, pend = _Q.rows_left(q["state"], rows, None)
+    ms, pend = _Q.rows_left(q["state"], rows, None)
+    if ms is None and os.path.exists(q["state"]):
+        print("读不到状态目录 %s" % q["state"])
+        return 2
     pend = _Q.first_rows(pend)
     pend = [(n, c) for n, c in pend.items() if n not in running]
     if as_json:
@@ -405,15 +414,31 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
 
 def fit_head(q, head, fhs, skip, hist, now):
     """fit --list --json 的那一行（fit_list）：清单 q 的队首 head（(任务名, 命令)，没有为 None）要多少、在各台（fhs：FitHost，skip：没算的 {主机: 原因}）放不放得下。
-    need 不看哪台（没有能算的主机也给）：按一台空的 FitHost 拼请求（与真放行同一个 job_spec，只是没有型号与在跑同类）。"""
+    need 不看哪台（没有能算的主机也给）：按一台空的 FitHost 拼请求（与真放行同一个 job_spec，只是没有型号与在跑同类）。
+    每台在 fhs 中的主机另返回 nofit（整机硬件放不下）、load（复用 pure.other_load 统计整机聚合负载）、free_cards（空闲卡数）、
+    free_vram（各卡可用显存之和 MiB）与 same_proj（该台已有同项目任务或队列，供 $LABMON_CACHE 亲和打分，#212）。"""
     if head is None:
-        return {"head": None, "need": None, "dur": None, "hosts": {h: {"ok": False, "why": "清单里没有还要跑的行"} for h in [f.host for f in fhs] + list(skip)}}
+        return {"head": None, "need": None, "dur": None,
+                "hosts": {h: {"ok": False, "why": "清单里没有还要跑的行", "nofit": False} for h in [f.host for f in fhs] + list(skip)}}
     n, c = head
     r, e, x = FitHost(q.get("_host") or "", {}, hist, {}).req(q, n, c, None)
     out = {"head": n, "need": {"ngpu": x["ngpu"], "vram": round(x["vram"] or 0.0, 2), "src": x["src"], "ram": round(x["ram"] or 0.0, 2), "cpus": x["cpus"]},
-           "dur": x["dur"] and round(x["dur"]), "hosts": {h: {"ok": False, "why": why} for h, why in skip.items()}}
+           "dur": x["dur"] and round(x["dur"]),
+           "hosts": {h: {"ok": False, "why": why, "nofit": False, "skip": True} for h, why in skip.items()}}
     for fh in fhs:
+        S = fh.S
+        busy = ({u for j in S["jobs"] if not j["hold"] for u in j["gpus"]} | {u for j in S["ext"] for u in j.get("gpus") or []}
+                | {g["uuid"] for g in fh.st.get("gpu_procs") or [] if g.get("owner") != "keepalive"})
+        free_cards = sum(1 for card in S["cards"] if card["uuid"] not in busy)
+        free_vram = round(sum(max(0.0, v) for v in _S.card_free(S).values()), 1)
+        load = _P.other_load(fh.st, None)
+        proj = q.get("project")
+        same_proj = bool(proj) and (
+            any(j.get("project") == proj for j in fh.st.get("running") or [])
+            or any(qq.get("project") == proj for qq in fh.st.get("queues") or [])
+        )
         r, e, x = fh.req(q, n, c, None)
         say, why = fh.open(r, e, x, now)
-        out["hosts"][fh.host] = {"ok": bool(say), "why": say or why}
+        out["hosts"][fh.host] = {"ok": bool(say), "why": say or why, "nofit": bool(fh.last_nofit),
+                                 "load": load, "free_cards": free_cards, "free_vram": free_vram, "same_proj": same_proj}
     return out

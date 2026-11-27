@@ -107,10 +107,11 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 
 ## 交给算力池
 
-用户授权且为池成员时，可交给算力池：`labmon worker add pool <目录> <清单> --project <id>`，由看板调度（[docs/fleet.md「算力池」](../../docs/fleet.md#算力池)）。
-- 清单任务须能随时中断重排（禁止 `--gpus`、`--stop boundary`、`gang=` 及占位任务），代码与数据须在共享盘。
-- 交付后照常挂 `labmon wait`，调度迁移不打扰会话；满 2 小时未调度报 `pool_wait:` 时可考虑转回自用主机。
-- 撤回用 `labmon worker rm pool <目录> <清单>`；转回自用主机直接在自用主机 `worker add`。禁止直接向借给池的主机登记或执行 fit。
+用户授权且为共有算力池成员时，统一经池入口提交：`labmon worker add pool <目录> <清单> --project <id>`（多池时用 `pool:<id>`；单池时 `pool` 自动指向该池），由看板按人公平份额即时落机与空闲窃取（[docs/fleet.md「算力池」](../../docs/fleet.md#算力池)）。
+- 仅禁止 `--gpus` 与成组起跑 `gang=`（默认 `--stop boundary` 与占位任务 `hold_*` 均可入池）；代码与数据须放在该池共用的共享盘。
+- 独占共有池（缺省 `exclusive = true`）禁止直接对池内单台主机执行 `worker add`；可通过 `labmon worker status pool[:<id>]`、`labmon worker fit pool[:<id>] <目录> <清单> --list --project <id>` 与 `labmon host list` 查看池状态。
+- 交付后照常挂 `labmon wait`，池内自动落机、窃取与撤离不打扰会话；若全池放不下（`pool_wait:...:nofit`）或等待超 2 小时（`pool_wait:`），再按需转回自用主机。
+- 撤回用 `labmon worker rm pool[:<id>] <目录> <清单>`；转回自用主机直接在自用主机 `worker add`。
 
 ## 临时算力（Colab 等无共享盘主机）
 

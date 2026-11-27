@@ -72,7 +72,7 @@ from pathlib import Path
 
 from . import lan as L
 from . import lease as LS
-from .config import GIB, LEGACY_POOL_KEYS, POOL, ConfigError, _read_toml, all_hosts, check_legacy_pool, fmt_time, guest_host, host_defaults, hosts_file, parse_time, set_fleet_keys  # noqa: F401
+from .config import GIB, LEGACY_POOL_KEYS, POOL, ConfigError, _read_toml, all_hosts, check_legacy_pool, fmt_time, guest_host, host_defaults, hosts_file, is_pool_id, parse_time, set_fleet_keys  # noqa: F401
 from .health import container_step, lease_due, link_step
 from .health import lease_end as _lease_end
 from .records import log_events
@@ -145,8 +145,8 @@ def conf(path: Path | None = None) -> dict | None:
         if miss:
             raise ConfigError(f"{hf} 的 [[fleet.servers]] 缺 {'、'.join(miss)}：{s}")
         s = {**s, "id": str(s["id"]), "holder": str(s["holder"])}
-        if s["id"] == POOL:
-            raise ConfigError(f"{hf} 的 [[fleet.servers]] 不能叫 {POOL}：它是算力池的保留 id")
+        if is_pool_id(s["id"]):
+            raise ConfigError(f"{hf} 的 [[fleet.servers]] 不能叫 {s['id']}：它是算力池的保留 id")
         _legacy_pool_check(hf, s)
         s["job"] = str(s.get("job") or s["holder"])          # 平台作业名：缺省就是名字，同名作业已在跑时加了后缀
         s.setdefault("label", s["holder"])

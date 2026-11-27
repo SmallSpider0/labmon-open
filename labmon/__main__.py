@@ -22,10 +22,10 @@
     labmon host edit|test|rm|key <id> [...]                 外部主机双入口：增删改查、连通测试与专用公钥查看/轮换（零私钥上传）
     labmon borrow [<组内服务器> [--until "明天 18:30"] [--for a1,b] [--away]]   借来给自己的项目跑（见 borrow.py；--away 对方说好约定前不用；要 admin 令牌）；不给参数列出在借的
     labmon borrow <自用主机> --until … [--from 名字]             换给自己借来的：记下约定还的时间（--until none 去掉）
-    labmon worker start|stop|status <id> | add|rm <id> ROOT JOBS [--gpus 0] [--project P] [--stop term] | limit <id> tag=N
+    labmon worker start|stop|status <id|pool[:<池id>]> | add|rm <id|pool[:<池id>]> ROOT JOBS [--gpus 0] [--project P] [--stop term] | limit <id> tag=N
     labmon worker clean <id> [--project P] [--cache] [--scratch] [--dry-run] [--yes]   仅清理本地自管缓存与已结束临时目录（默认预览，绝不动 projects/ 产物）
     labmon worker fit <id> 任务名… [--project P]               开并行车道前：放不放得下（与真放行同一份准入）、卡吃不满是不是 CPU 受限
-    labmon worker fit <id> ROOT JOBS --list --project P        一条清单还会跑的行此刻能在共用 worker 目录的几台上再开几条车道
+    labmon worker fit <id|pool[:<池id>]> ROOT JOBS --list --project P  一条清单还会跑的行此刻能在共用 worker 目录（或该共有池）的几台上再开几条车道
                                                             服务器端队列执行器（见 workerctl.py；start、stop、limit 要 admin 令牌）
     labmon pause|resume|focus|unfocus <项目> [--host id] [--until 11-10|+3h] [--now]  临时指令（项目的不带 --host 记在主机清单、所有主机生效；--now 只用于 pause）
     labmon drain|undrain <主机> [--until …]                  这台主机不再放行新任务（要 admin 令牌）
@@ -126,7 +126,8 @@ def cmd_host(argv: list[str]) -> int:
             if h.get("standalone"):
                 tag = "外部机" + (f" · {h['owner']}" if h.get("owner") else "")
                 extra = f"{tag}{' ' + extra if extra else ''}"
-            print(f"  {h['id']:<10} {st:<22} {h.get('ssh') or '本机'}:{h.get('port', 22)}  {h.get('label') or ''}  {extra}".rstrip())
+            ptag = f"  [共有池 {h['pool_host_id']}{'·独占' if h.get('pool_exclusive') else ''}]" if h.get("pool_host_id") else ""
+            print(f"  {h['id']:<10} {st:<22} {h.get('ssh') or '本机'}:{h.get('port', 22)}  {h.get('label') or ''}  {extra}{ptag}".rstrip())
         groups: dict = {}                   # 共用 worker 目录的在用主机按目录分组（#35 A；旧看板没有 home_with 时不打）
         for h in r["hosts"]:
             if h.get("home_with") and not h.get("returned"):
@@ -134,6 +135,10 @@ def cmd_host(argv: list[str]) -> int:
         for home, ids in groups.items():
             order = [str(h["id"]) for h in r["hosts"] if str(h["id"]) in ids]
             print(f"  共用 worker 目录 {home}（同一块共享盘，放在这块盘上的文件各台都读得到）：{'、'.join(order)}")
+        for p in r.get("pools") or []:
+            mode = "独占，仅经池入口提交" if p.get("exclusive", True) else "开放，允许直投单台"
+            hs = "、".join(p.get("active_hosts") or []) or "暂无在用主机"
+            print(f"  共有算力池 {p['host_id']}（{p.get('label') or p['id']}，{mode}）：主机 {hs}")
         return 0
     if sub in ("return", "restore"):
         ap = argparse.ArgumentParser(prog=f"labmon host {sub}")
@@ -750,7 +755,7 @@ def cmd_read(argv: list[str]) -> int:
         ap.add_argument("--me", action="store_true", help="查看本人在共享盘的用量汇总与总盘余量（经 GET /api/disk）")
     if what == "records":
         ap.add_argument("--host", help="只看这台主机的")
-        ap.add_argument("--cat", help="只看这一类：link 连接、op 平台操作、config 配置改动、lease 租期、borrow 借用、disk 共享盘、queue 队列……")
+        ap.add_argument("--cat", help="只看这一类：link 连接、op 平台操作、config 配置改动、lease 租期、borrow 借用、sched 调度、disk 共享盘、queue 队列……")
         ap.add_argument("-q", help="按词搜（空格分开的几个词都要出现）")
         ap.add_argument("-n", type=int, default=30, help="最多几条（缺省 30）")
     a = ap.parse_args(argv[1:])
