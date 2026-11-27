@@ -187,11 +187,18 @@ function clientSec(M) {
   const base = new URL(".", location.href).href;
   const url = `api/client/install.sh?base=${encodeURIComponent(base)}`;
   const cmd = "sh ~/Downloads/labmon-install.sh";
+  const ephBase = base.replace(/\/$/, "");
+  const ephCmd = `import os; from google.colab import userdata; os.environ["LABMON_TOKEN"] = userdata.get("LABMON_TOKEN")\n!python3 labmon_ephemeral.py run --url ${ephBase} --project <项目ID> --job <任务名> -- python3 train.py`;
   return dSec("命令行", `<div class="account-install">
     <a class="btn" href="${esc(url)}" download="labmon-install.sh">下载安装脚本</a>
     <div class="account-command"><code tabindex="0" aria-label="安装命令">${cmd}</code><button class="btn mini-btn" data-copy="${cmd}">复制命令</button></div>
     <p class="sm mut">运行脚本后执行 <code>labmon login</code>。以后用 <code>labmon update</code> 更新。</p>
     ${M.entry === "public" ? '<p class="sm mut">公网连接需向管理员申请客户端证书，并把证书和私钥路径填进 client.toml。</p>' : ""}
+    <div class="account-install" style="width:100%;border-top:1px solid var(--line);padding-top:10px;margin-top:4px">
+      <div class="row wrap" style="gap:8px;align-items:center"><b class="sm">Colab / 临时上报</b><a class="btn mini-btn" href="api/client/ephemeral.py" download="labmon_ephemeral.py">下载 labmon_ephemeral.py</a></div>
+      <div class="account-command"><code tabindex="0" aria-label="Colab 启动命令" style="white-space:pre-wrap">${esc(ephCmd)}</code><button type="button" class="btn mini-btn" data-copy="${esc(ephCmd)}">复制命令</button></div>
+      <p class="sm mut">先在 Colab Secrets 设置 <code>LABMON_TOKEN</code>（令牌可在<a href="#/me/tokens">令牌</a>页签创建，切勿硬编码进 Notebook），经上方第一行在内核导出后再启动子进程；挂载 Google Drive 可加 <code>--drive-root</code> 与 <code>--artifact-dir</code>。</p>
+    </div>
     </div>`,
     M.commit ? `<span class="sm mut">看板版本 <code>${esc(M.commit.slice(0, 7))}</code></span>` : "");
 }

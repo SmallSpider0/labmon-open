@@ -239,6 +239,89 @@ function workDiskBar(wd, thin = false) {
   else if (wd.warn_gb > 0 && wd.warn_gb < T) marks += `<b style="left:${100 - P(wd.warn_gb)}%" ${tip(`剩余低于 ${wd.warn_gb} GiB 告警`)}></b>`;
   return `<div class="bar ${thin ? "thin" : "big"}" style="flex:1;overflow:hidden">${s}${marks}</div>`;
 }
+let WCLEAN_MSG = null, WCLEAN_T = 0, WCLEAN_SEQ = 0;
+const wcleanMsg = (host, msg) => { WCLEAN_MSG = {host, msg}; clearTimeout(WCLEAN_T); WCLEAN_T = setTimeout(() => { WCLEAN_MSG = null; render(false); }, 30000); };
+// 独立主机本地工作盘清理（POST /api/worker/clean，#241）：先 dry_run 预览 .tmp/{cache,jobs} 清单与体积，再二次确认 yes: true 清理；绝不触碰 projects/
+function cleanProjectsOf(h) {
+  const own = ME?.own || [];
+  const pref = own.filter(p => h?.work_disk?.projects?.[p] || h?.status?.storage?.local?.[p]);
+  return pref.length ? [...pref, ...own.filter(p => !pref.includes(p))] : own;
+}
+function canWorkClean(h) {
+  if (!LIVE || !ME?.write || !h?.standalone) return false;
+  if (ME.admin) return true;
+  return canUseHost(h.id) && cleanProjectsOf(h).length > 0;
+}
+function workCleanPop(h, where = "block") {
+  if (!canWorkClean(h)) return "";
+  const off = !h.worker_up || !!h.error;
+  if (off) return `<button type="button" class="btn mini-btn" disabled ${tip("worker 未运行或主机离线，无法清理缓存")}>预览清理缓存</button>`;
+  const key = `${h.id}:${where}`, open = popIs("wclean", key);
+  const btn = `<button type="button" class="btn mini-btn" data-wclean="open" data-host="${esc(h.id)}" data-where="${esc(where)}" aria-haspopup="dialog" aria-expanded="${open}" ${tip("先预览 .tmp/{cache,jobs} 可释放项数与体积，确认后再清理；绝不触碰 projects/")}>预览清理缓存</button>`;
+  let body = "", go = "";
+  if (open) {
+    const projs = ME.admin ? [] : cleanProjectsOf(h);
+    const pick = projs.length > 1
+      ? `<div class="field" style="margin:6px 0"><span class="sm mut">项目</span><div class="seg form-seg" role="radiogroup" aria-label="选择清理项目">${projs.map(p => `<button type="button" role="radio" aria-checked="${POP.project === p}" class="${POP.project === p ? "on" : ""}" data-wclean="proj" data-host="${esc(h.id)}" data-where="${esc(where)}" data-p="${esc(p)}" ${POP.busy ? "disabled" : ""}>${esc(p)}</button>`).join("")}</div></div>`
+      : projs.length === 1 ? `<div class="sm mut" style="margin:4px 0">范围：项目 <code>${esc(POP.project)}</code></div>` : "";
+    const status = POP.busy && !POP.out ? `<div class="sm mut" style="margin:6px 0">正在扫描 <code>.tmp/{cache,jobs}</code>…</div>`
+      : POP.out ? `<pre style="margin:6px 0;max-height:180px;overflow:auto;font-size:11px;white-space:pre-wrap">${esc(POP.out)}</pre>` : "";
+    const scope = ME.admin ? "此主机全部项目的" : `项目 <code>${esc(POP.project)}</code> 的`;
+    const ack = POP.hasTargets && !POP.busy ? `<label class="ack"><input type="checkbox" data-pack ${POP.ack ? "checked" : ""}><span>我已核对上方清空范围，确认删除不可恢复</span></label>` : "";
+    body = `<b>清理 ${esc(hostShort(h))} 自管缓存</b>${pick}${status}
+      <div class="rn-note">清空范围：${scope} <code>.tmp/{cache,jobs}</code>。删除后不可恢复；单格临时会跳过在跑任务，但 <code>cache/</code> 目录会直接删除（若在跑任务正读取缓存将受影响），绝不触碰 <code>projects/</code> 下的产物与日志。</div>
+      ${ack}${POP.err ? `<div class="rn-err">${esc(POP.err)}</div>` : ""}`;
+    go = `<button type="button" class="btn pri dz" data-wclean="go" data-host="${esc(h.id)}" data-where="${esc(where)}" ${POP.busy || !POP.hasTargets || !POP.ack ? "disabled" : ""}>${POP.busy && POP.running ? "清理中…" : "确认清理"}</button>`;
+  }
+  return popConfirm(btn, open, body, go, true);
+}
+async function wcleanFetch(host, key, project, yes) {
+  const seq = ++WCLEAN_SEQ;
+  if (!popIs("wclean", key)) return;
+  POP.busy = true; POP.running = yes; POP.err = null; POP.project = project || null;
+  if (!yes) { POP.out = null; POP.hasTargets = false; POP.ack = false; }
+  render(false);
+  try {
+    const body = {host, ...(project ? {project} : {}), ...(yes ? {yes: true} : {dry_run: true})};
+    const r = await postJSON("api/worker/clean", body);
+    const j = await r.json().catch(() => ({}));
+    if (!popIs("wclean", key) || WCLEAN_SEQ !== seq) return;
+    if (!r.ok || (j.rc != null && j.rc !== 0)) throw new Error(j.error || (j.err || j.out || "").trim() || ("HTTP " + r.status));
+    const out = (j.out || "").trim();
+    if (yes) {
+      wcleanMsg(host, out || "已完成自管缓存清理");
+      POP = null;
+      return collectNow(true);
+    }
+    POP.busy = false; POP.running = false; POP.out = out || "没有可清理的自管缓存或已结束单格临时目录";
+    POP.hasTargets = !!out && !/没有可清理的/.test(out);
+  } catch (e) {
+    if (!popIs("wclean", key) || WCLEAN_SEQ !== seq) return;
+    POP.busy = false; POP.running = false; POP.err = e.message || String(e);
+  }
+  render(false);
+}
+function wcleanAct(act, d = {}) {
+  const host = d.host || "", where = d.where || "block", h = D.hosts.find(x => x.id === host);
+  if (!h || !canWorkClean(h) || !h.worker_up || h.error) return;
+  const key = `${host}:${where}`;
+  if (act === "open") {
+    const same = popIs("wclean", key);
+    popToggle("wclean", key, {busy: false, running: false, project: ME.admin ? null : cleanProjectsOf(h)[0] || null, out: null, err: null, hasTargets: false});
+    if (same) return render(false);
+    return wcleanFetch(host, key, POP.project, false);
+  }
+  if (act === "proj") {
+    if (!popIs("wclean", key) || POP.busy) return;
+    const p = d.p || "";
+    if (!cleanProjectsOf(h).includes(p)) return;
+    return wcleanFetch(host, key, p, false);
+  }
+  if (act === "go") {
+    if (!popIs("wclean", key) || POP.busy || !POP.hasTargets || !POP.ack) return;
+    return wcleanFetch(host, key, POP.project, true);
+  }
+}
 function workDiskBlock(wd, h) {
   if (!wd) return `<div class="empty">还没读到这台独立主机的本地工作盘（等待 worker 下一轮上报）。</div>`;
   const gateOn = !!(wd.disk_gate?.on || h?.status?.disk_gate?.on);
@@ -258,7 +341,9 @@ function workDiskBlock(wd, h) {
   const localCache = h.status?.storage?.local || {};
   const cacheBytes = Object.values(localCache).reduce((a, v) => a + (v.cache || 0) + (v.scratch || 0), 0);
   const cleanCmd = `labmon worker clean ${h.id}`;
-  const foot = `<div class="sm mut" style="margin-top:6px">自管缓存与单格临时（<code>.tmp/</code>）：${G(cacheBytes)} · 预览清理：<code>${esc(cleanCmd)}</code><button class="btn mini-btn ml-sm" type="button" data-copy="${esc(cleanCmd)}">复制</button>（仅清自管缓存，需显式 <code>--yes</code> 才删）${wd.pending ? ` · 还有 ${wd.pending} 个目录待扫` : ""}</div>`;
+  const cleanBtn = workCleanPop(h, "block");
+  const msg = WCLEAN_MSG?.host === h.id ? `<div class="rn-state" style="margin-top:6px">${esc(WCLEAN_MSG.msg)}</div>` : "";
+  const foot = `<div class="row wrap" style="margin-top:6px;gap:8px;align-items:center"><span class="sm mut">自管缓存与单格临时（<code>.tmp/</code>）：${G(cacheBytes)} · 预览清理：<code>${esc(cleanCmd)}</code><button class="btn mini-btn ml-sm" type="button" data-copy="${esc(cleanCmd)}">复制</button>（仅清自管缓存，需显式 <code>--yes</code> 才删）${wd.pending ? ` · 还有 ${wd.pending} 个目录待扫` : ""}</span>${cleanBtn}</div>${msg}`;
   return head + workDiskBar(wd, false)
     + (rows ? `<div class="scroll" style="margin-top:8px"><table class="dku"><tr><th>工作目录</th><th class="r">大小</th><th class="r">24 小时</th><th class="r">最近修改</th></tr>${rows}</table></div>` : `<div class="empty" style="margin-top:6px">工作目录下还没有已统计的子目录。</div>`)
     + foot;
