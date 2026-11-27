@@ -185,8 +185,9 @@ def project_ids() -> list[str]:
 
 
 def load_cfg(pid: str) -> dict:
-    """看板上这个项目的配置（done_when 的文件取登记目录 files/ 里的）。"""
-    return load(cfg_file(pid), files=files_dir(pid))
+    """看板上这个项目的配置（done_when 的文件取登记目录 files/ 里的）；按项目主人排除他人 member_auto 主机（#244）。"""
+    from .users import owner_of
+    return load(cfg_file(pid), files=files_dir(pid), owner=owner_of(pid))
 
 
 def _files(pid: str) -> dict:

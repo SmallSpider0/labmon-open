@@ -376,6 +376,38 @@ def own_hosts(who=None, *, hosts: list[dict] | None = None) -> list[dict]:
     return [h for h in src if not is_other_member_auto(h, who)]
 
 
+_UNSET = object()
+
+
+def _project_owner(pid: str | None, owner=_UNSET):
+    """解析项目配置/采集应核对的项目主人：调用方显式传了 owner（含 None）直接用，未传时按项目 id 查 users.owner_of。"""
+    if owner is not _UNSET:
+        return owner
+    if not pid:
+        return None
+    from .users import owner_of
+    return owner_of(str(pid))
+
+
+def project_host_for_owner(h: dict, owner=None) -> dict:
+    """将用户级主机清单里的主机适配为某项目（主人为 owner）视角的主机条目（唯一实现，#244）：
+    - 非他人 member_auto 主机原样返回；
+    - 属于他人的 member_auto 主机（例如项目历史上曾借用、现已归还并由持有人自动接入）一律降级为已归还态，
+      剥离 SSH/探针/实时字段（保留历史 borrow_returned 与共享盘代读所需字段），绝不当成本项目在用主机采集或计入 KPI。"""
+    if not is_other_member_auto(h, owner):
+        return h
+    out = {
+        "id": str(h["id"]),
+        "label": h.get("label") or str(h["id"]),
+        "returned": h.get("returned") or h.get("borrow_returned") or "1970-01-02 00:00",
+        "other_member_auto": True,
+    }
+    for k in ("data_root", "worker_home", "shared", "standalone", "platform_kind"):
+        if k in h:
+            out[k] = h[k]
+    return out
+
+
 def stopped_blocks_relaunch(stopped: str | None, *, member_auto: bool = False) -> bool:
     """hosts/<id>/stopped 标记是否应阻止看板自动拉起 worker（唯一实现，#236）：
     - 空值或 auto:*（切仅监控 / 删账号 / 借用归还等生命周期停机）：不阻断自动拉起；
@@ -507,6 +539,8 @@ def member_host(s: dict, hosts: list[dict], acct: str, fleet_cfg: dict | None = 
            "member_account": acct, "member_restrict": (acc or {}).get("role") != "admin"}
     if fcfg.get("lease_days") is not None:
         out["lease_days"] = fcfg["lease_days"]
+    if s.get("borrow_returned"):
+        out["borrow_returned"] = s["borrow_returned"]
     return out
 
 
@@ -1256,8 +1290,10 @@ def _merge_host(base: dict, proj: dict) -> dict:
     return h
 
 
-def _resolve_hosts(cfg: dict) -> None:
-    """项目的 [[hosts]] 与用户级主机清单合并；队列引用了但项目没列的主机直接取用户级的。"""
+def _resolve_hosts(cfg: dict, owner=_UNSET) -> None:
+    """项目的 [[hosts]] 与用户级主机清单合并；队列引用了但项目没列的主机直接取用户级的。
+    对非本项目主人归属的他人 member_auto 主机统一经 project_host_for_owner 降级为已归还态（#244）。"""
+    eff_owner = _project_owner(cfg.get("id"), owner)
     hf = hosts_file()
     user = {}
     if hf.exists():
@@ -1270,14 +1306,21 @@ def _resolve_hosts(cfg: dict) -> None:
     for h in cfg.get("hosts", []):
         if "id" not in h:
             raise ConfigError("[[hosts]] 缺 id")
-        hosts.append(_merge_host(user.get(str(h["id"]), {}), h))
+        raw = user.get(str(h["id"]), {})
+        if is_other_member_auto(raw, eff_owner):
+            base = project_host_for_owner(raw, eff_owner)
+            merged = _merge_host(base, {k: v for k, v in h.items() if k not in ("ssh", "port", "checks", "mounts", "worker", "returned")})
+            merged["returned"] = base["returned"]
+            hosts.append(merged)
+        else:
+            hosts.append(_merge_host(raw, h))
     listed = {h["id"] for h in hosts}
     for q in cfg.get("queues", []):
         if q.get("host") is not None:
             q["host"] = str(q["host"])             # 写成 host = 29（TOML 整数）的也按 "29" 认
         hid = q.get("host")
         if hid is not None and hid not in listed and hid in user:
-            hosts.append(_merge_host(user[hid], {}))
+            hosts.append(_merge_host(project_host_for_owner(user[hid], eff_owner), {}))
             listed.add(hid)
     cfg["hosts"] = hosts
 
@@ -1856,17 +1899,19 @@ def _norm_queue(q: dict, hosts: list[dict], hide: float = 24) -> dict:
     return q
 
 
-def with_queues(cfg: dict, queues: list[dict]) -> dict:
+def with_queues(cfg: dict, queues: list[dict], owner=_UNSET) -> dict:
     """项目配置换一组队列（collect.reg_queues 按 worker 登记拼的），返回新配置、不改原来的：队列用到、项目里还没有的主机
-    从用户级主机清单取（同 _resolve_hosts），已在的主机不动；队列在已归还的主机上、项目里又没有能代读它的在用主机时，
+    从用户级主机清单取（同 _resolve_hosts，他人 member_auto 按项目主人降级为已归还态，#244），已在的主机不动；队列在已归还的主机上、项目里又没有能代读它的在用主机时，
     也从清单里补一台（_reader 的规则）；队列补全同 load（主机换了，代读的主机跟着重算）。用户级主机清单里也没有的主机，它的队列丢掉。
     算力池里的登记（host 为 POOL，#24）：补一台合成主机 {id: pool, pool: true}（不探测），代读它的在用主机项目里没有时补进来、标 reader_only。"""
-    hosts, ids = list(cfg["hosts"]), {h["id"] for h in cfg["hosts"]}
+    eff_owner = _project_owner(cfg.get("id"), owner)
+    hosts = [_norm_host(project_host_for_owner(h, eff_owner)) if is_other_member_auto(h, eff_owner) else h for h in cfg["hosts"]]
+    ids = {h["id"] for h in hosts}
     pool: list = []                                   # 用户级主机清单里、项目还没有的主机（补全过），要用时才读
 
     def more() -> list:
         if not pool:
-            pool.extend(_norm_host(_merge_host(h, {})) for h in user_hosts() if "id" in h and str(h["id"]) not in ids)
+            pool.extend(_norm_host(_merge_host(project_host_for_owner(h, eff_owner), {})) for h in user_hosts() if "id" in h and str(h["id"]) not in ids)
         return [h for h in pool if h["id"] not in ids]
 
     def add(hid: str) -> None:
@@ -1946,9 +1991,10 @@ def brief(path: str | Path, text: str | None = None) -> dict:
             "stale_min": num(al.get("stale_min"), ALERT_KEYS["stale_min"]), "done": done}
 
 
-def load(path: str | Path, text: str | None = None, files: Path | None = None) -> dict:
+def load(path: str | Path, text: str | None = None, files: Path | None = None, owner=_UNSET) -> dict:
     """读项目配置并补全缺省值、校验（不对抛 ConfigError）。text 给了就按它、不读文件（页面上改配置、推上来的配置先校验文本）。
     files：看板上登记的项目（projects.load_cfg）给 files/ 目录，done_when 的文件取那里的（done_key）；不给按配置文件所在目录找（项目目录里的工作副本）。
+    owner：项目主人（缺省按项目 id 查 users.owner_of，供 _resolve_hosts 隔离他人 member_auto 主机）。
     out_dir 与 [local] 不再生效（#161：输出目录固定在登记目录的 out/；「本机」一栏 #164 删了）：读到了从配置里拿掉、记进 ignored，labmon check 提示。"""
     path = Path(path).expanduser().resolve()
     if text is None:
@@ -1961,11 +2007,11 @@ def load(path: str | Path, text: str | None = None, files: Path | None = None) -
     base = path.parent
     cfg["config_path"] = str(path)
     cfg["base_dir"] = str(base)
-    _resolve_hosts(cfg)
+    cfg["id"] = _proj_id(cfg, base)
+    _resolve_hosts(cfg, owner=owner)
     for k in ("title", "interval", "refresh", "hide_done_hours", "auto_groups"):   # 缺省值都在 PROJ_KEYS、ALERT_KEYS（页面经 cfg_info 的 spec 取同一份）
         cfg.setdefault(k, PROJ_KEYS[k][4])
     cfg["ignored"] = [k for k in ("out_dir", "local") if k in cfg]
-    cfg["id"] = _proj_id(cfg, base)
     cfg.pop("out_dir", None)
     cfg.pop("local", None)
     cfg.setdefault("history_hours", 24)      # interval 采集间隔（秒）、refresh 页面自刷新间隔（秒）；hide_done_hours：不是 monitor.toml 写明的车道跑完这么久没动就收起，[[queues]] 里单条写的优先

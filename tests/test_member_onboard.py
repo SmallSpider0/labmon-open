@@ -831,6 +831,100 @@ pool = "pool-public"
         cands_skip, _, _ = W._cleanup_candidates("srv-alice", skip={"srv-alice"})
         self.assertEqual(cands_skip[0]["id"], "fixed-a")
 
+    def test_project_excludes_other_member_auto_and_keeps_owner_project(self):
+        """Issue #244：历史借用机归还并变为他人 member_auto 后，原项目不将其当在用主机采集实时状态或进 KPI；归属人本人项目照常可用。"""
+        from labmon import collect as CO
+        from labmon import projects as PJ
+
+        # 给 srv-alice 写上历史借用并已归还的记录，再由 alice 账号自动接入（member_auto=True）
+        C.set_fleet_keys({"borrow_since": "2026-11-18 10:00", "borrow_returned": "2026-11-20 18:00"}, "测试借用归还", sid="srv-alice")
+        hs = {h["id"]: h for h in C.user_hosts()}
+        self.assertTrue(hs["srv-alice"].get("member_auto"))
+        self.assertEqual(hs["srv-alice"].get("borrow_returned"), "2026-11-20 18:00")
+
+        # 1. 管理员项目 p-admin 在 monitor.toml 中历史引用 srv-alice：load_cfg 后应降级为已归还态，无 ssh、非 member_auto
+        (PJ.cfg_file("p-admin")).write_text(
+            'id = "p-admin"\ntitle = "p-admin"\n'
+            '[[hosts]]\nid = "srv-alice"\n'
+            '[[queues]]\nid = "q1"\nhost = "srv-alice"\nroot = "/data/labmon/p-admin"\njobs = "jobs.txt"\n'
+        )
+        cfg_adm = PJ.load_cfg("p-admin")
+        h_adm = next(h for h in cfg_adm["hosts"] if h["id"] == "srv-alice")
+        self.assertEqual(h_adm["returned"], C.parse_time("2026-11-20 18:00"))
+        self.assertIsNone(h_adm["ssh"])
+        self.assertFalse(h_adm.get("member_auto"))
+        # 绝不把他人 member_auto 选成代读主机
+        self.assertNotEqual(cfg_adm["queues"][0]["read_via"], "srv-alice")
+
+        # 2. 通过 collect.lanes_cfg（历史 reg_lanes / glob_snap.regs）与 collect.collect 采集：不连 srv-alice，快照中按已归还展示、不含实时 GPU/CPU
+        (PJ.cfg_file("p-admin")).write_text('id = "p-admin"\ntitle = "p-admin"\n')
+        now = time.time()
+        glob_snap = {
+            "generated": now,
+            "hosts": [
+                {"id": "srv-alice", "label": "10（ALICE）", "member_auto": True, "member_account": "alice", "worker_up": True,
+                 "status": {"t": now, "info": {"gpus": [{"i": 0, "uuid": "G0", "util": 95, "used": 20000, "total": 24000}], "cpu_used": 8.0, "cpu_quota": 16}}},
+            ],
+            "regs": [
+                {"host": "srv-alice", "state": "active", "queues": [
+                    {"project": "p-admin", "root": "/data/labmon/p-admin", "jobs": "old.txt", "added_t": now - 600}
+                ]},
+            ],
+        }
+        save_json(state_dir() / "snapshot.json", glob_snap)
+        probed = []
+        with mock.patch.object(CO, "run_probe", side_effect=lambda cfg, h: (probed.append(h["id"]), ({}, None))[1]):
+            snap = CO.collect(PJ.load_cfg("p-admin"), out_dir=PJ.out_dir("p-admin"), use_ssh=True)
+        self.assertNotIn("srv-alice", probed)
+        sh = next(h for h in snap["hosts"] if h["id"] == "srv-alice")
+        self.assertFalse(sh["ok"])
+        self.assertEqual(sh["returned"], C.parse_time("2026-11-20 18:00"))
+        self.assertEqual(sh["error"], "已归还")
+        self.assertNotIn("gpus", sh)
+        self.assertNotIn("cpu", sh)
+
+        # 3. 归属人本人项目 p-alice 引用 srv-alice：照常作为在用主机保留 ssh 与 member_auto
+        (PJ.cfg_file("p-alice")).write_text(
+            'id = "p-alice"\ntitle = "p-alice"\n'
+            '[[hosts]]\nid = "srv-alice"\n'
+        )
+        cfg_alice = PJ.load_cfg("p-alice")
+        h_alice = next(h for h in cfg_alice["hosts"] if h["id"] == "srv-alice")
+        self.assertIsNone(h_alice["returned"])
+        self.assertTrue(h_alice.get("member_auto"))
+        self.assertEqual(h_alice.get("ssh"), "root@192.0.2.10")
+
+        # 4. 无 borrow_returned 历史借用记录且在 UTC 时区下，归还占位时间戳仍严格大于 0（不误判为在用主机）
+        C.set_fleet_keys({"borrow_since": None, "borrow_returned": None}, "清借用记录", sid="srv-alice")
+        (PJ.cfg_file("p-admin")).write_text(
+            'id = "p-admin"\ntitle = "p-admin"\n'
+            '[[hosts]]\nid = "srv-alice"\n'
+        )
+        old_tz = os.environ.get("TZ")
+        try:
+            os.environ["TZ"] = "UTC"
+            time.tzset()
+            cfg_utc = PJ.load_cfg("p-admin")
+        finally:
+            if old_tz is None:
+                os.environ.pop("TZ", None)
+            else:
+                os.environ["TZ"] = old_tz
+            time.tzset()
+        h_utc = next(h for h in cfg_utc["hosts"] if h["id"] == "srv-alice")
+        self.assertTrue(bool(h_utc["returned"]) and h_utc["returned"] > 0)
+        self.assertIsNone(h_utc["ssh"])
+
+        # 5. 项目转交给主机持有人 alice 后，Project._reload 感知 owner 变化并重新解析出本人可用的 srv-alice
+        proj = S.Project("p-admin")
+        self.assertTrue(bool(proj.cfg["hosts"][0]["returned"]))
+        PJ.set_owner("p-admin", "alice", "admin")
+        proj._reload()
+        h_after = next(h for h in proj.cfg["hosts"] if h["id"] == "srv-alice")
+        self.assertIsNone(h_after["returned"])
+        self.assertTrue(h_after.get("member_auto"))
+        self.assertEqual(h_after.get("ssh"), "root@192.0.2.10")
+
 
 if __name__ == "__main__":
     unittest.main()

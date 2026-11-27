@@ -2598,6 +2598,47 @@ class StateFilesTest(unittest.TestCase):
         occ = O.occupancy([{"id": "h", "status": {"info": {"gpus": [{"i": 3, "uuid": "GPU-new"}]}}}], [], 0)
         self.assertEqual([(r["n"], r["g"]) for r in occ["h"]], [("old", [1]), ("cur", [3])])
 
+    def test_proj_events_includes_other_cpu_and_excludes_other_member_auto(self):
+        # #244：项目页 events.json 的 occ 包含同机其他项目纯 CPU 任务（与 GPU 任务对称），并排除他人 member_auto 主机的实时占用
+        now = time.time()
+        f = state_dir() / "usage" / "h.jsonl"
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(json.dumps({"t": now - 100, "s": now - 300, "n": "cpu_done", "p": "b", "g": [], "st": "done"}) + "\n")
+        save_json(state_dir() / "snapshot.json", {
+            "hosts": [
+                {"id": "h", "status": {
+                    "info": {"gpus": [{"i": 0, "uuid": "G0"}]},
+                    "plan": {"lanes": [
+                        {"root": "/r", "queue": "q.txt", "project": "a", "jobs": [{"name": "a_gpu", "t0": now - 60, "t1": now + 60, "gpus": [0], "run": True}]},
+                        {"root": "/o", "queue": "q.txt", "project": "b", "jobs": [
+                            {"name": "b_cpu_run", "t0": now - 50, "t1": now + 50, "gpus": [], "run": True},
+                            {"name": "b_gpu_plan", "t0": now + 60, "t1": now + 180, "gpus": [0]},
+                            {"name": "hold_b", "t0": now, "t1": now + 30, "gpus": []},
+                        ]},
+                    ]},
+                }},
+                {"id": "srv-alice", "member_auto": True, "member_account": "alice", "status": {
+                    "info": {"gpus": [{"i": 0, "uuid": "GA"}]},
+                    "plan": {"lanes": [{"root": "/a", "queue": "q.txt", "project": "p-alice", "jobs": [
+                        {"name": "alice_priv", "t0": now - 20, "t1": now + 80, "gpus": [0], "run": True}
+                    ]}]},
+                }},
+            ],
+            "projects": [{"id": "b", "lanes": [{"host": "h", "root": "/o", "queue": "q.txt", "label": "车道 1"}]}],
+            "colors": {"a": "#7F77DD", "b": "#D85A30"},
+        })
+
+        class FakeProj:
+            id = "a"
+
+            def snapshot(self):
+                return {"hosts": [{"id": "h"}, {"id": "srv-alice", "returned": now - 3600}]}
+
+        ev = S.proj_events(FakeProj())
+        self.assertEqual([(r["n"], r["g"], r["st"]) for r in ev["occ"]["h"]],
+                         [("cpu_done", [], "done"), ("b_cpu_run", [], "run"), ("b_gpu_plan", [0], "plan")])
+        self.assertNotIn("srv-alice", ev["occ"])
+
     def test_write_page_escapes_all_lt(self):
         # 数据里同时有 <!-- 与 <script：浏览器会把 <!-- 之后的 </script> 当注释里的，脚本整段失效；< 一律转义
         f = Path(self.tmp.name) / "x.html"

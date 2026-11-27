@@ -2196,6 +2196,23 @@ t("timeline", "#207 总览与主机页时间线：有纯 CPU 任务的主机动�
   has(tips(h0), "cpu_only_job", "仅纯 CPU 主机应含任务条");
   has(tips(h0), "· 纯 CPU", "仅纯 CPU 主机悬停应写「纯 CPU」");
 });
+t("timeline", "#244 项目页「别的项目」行包含纯 CPU 任务，条标签与悬停清晰区分纯 CPU 与 GPU 卡号", () => {
+  const oc = [
+    {p: "proj-b", n: "beta_gpu_s0", lane: "车道 1", t0: NOW - 3 * H, t1: NOW - H, g: [0], st: "done"},
+    {p: "proj-b", n: "beta_cpu_s1", lane: "车道 2", t0: NOW - H, t1: NOW + 2 * H, g: [], st: "run"},
+  ];
+  const P = pjCtx(clone(PJ), {...EVN, occ: {"srv-a": oc}});
+  run(P, `TL.v = {a: ${-3 * H}, b: ${3 * H}}; drawTimeline()`);
+  const tl = el(P, "tlbox").innerHTML, tp = tips(tl);
+  clean(tl, "项目页别的项目含纯 CPU 任务");
+  has(tl, "proj-b [CPU] beta_cpu_s1", "项目页别的项目行纯 CPU 任务条应标 [CPU]");
+  has(tp, "含 GPU 与纯 CPU 任务", "项目页别的项目行标题悬停应注明含纯 CPU 任务");
+  has(tp, "beta_gpu_s0", "项目页别的项目行应含 GPU 任务悬停");
+  has(tp, "· 卡 0", "项目页别的项目行 GPU 任务悬停应写卡序号");
+  has(tp, "beta_cpu_s1", "项目页别的项目行应含纯 CPU 任务悬停");
+  has(tp, "· 纯 CPU", "项目页别的项目行纯 CPU 任务悬停应写「纯 CPU」");
+  ok(!tp.includes("· 卡 \n") && !tp.endsWith("· 卡 "), "项目页别的项目行纯 CPU 任务悬停不该出现空的「卡 」");
+});
 t("escape", "恶意项目快照与事件：转义", () => {
   const E = pjCtx(PJE, EVE); run(E, 'LS.get = (k, d) => k === "filter" ? "all" : d; render()');
   const h = app(E); ok(!raw(h), "项目页没转义"); has(h, BADESC);

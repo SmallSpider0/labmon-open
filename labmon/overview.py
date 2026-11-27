@@ -1027,7 +1027,7 @@ def _keep_usage(sd: Path, hid: str, rows: list[dict], t: float, idx: dict) -> No
 
 def occupancy(hosts: list[dict], projects: list[dict], since: float, skip: str | None = None, *, cpu: bool | None = None) -> dict:
     """各主机各卡（及非占位纯 CPU 任务）被谁占着（时间线用）：已跑的取本机存的用量记录（_keep_usage），在跑与排队的取 worker 推演（status.plan）。
-    占位任务（is_hold）不画；skip：不给这个项目的（项目页只看同机别的项目占卡，cpu 缺省随 skip is None，不破坏项目页 othersRow）。
+    占位任务（is_hold）不画；skip：不给这个项目的（cpu 缺省随 skip is None；项目页经 serve.proj_events 传 cpu=True 以对称显示其他项目的纯 CPU 任务，#244）。
     返回 {主机: [{p 项目, n 任务, lane 车道名, t0, t1, g [卡序号，纯 CPU 为空列表], st done/failed/stop/run/plan, after}]}；
     车道名取登记它的项目看板定的（projects 的 lanes），单元申请没有。"""
     include_cpu = (skip is None) if cpu is None else cpu
