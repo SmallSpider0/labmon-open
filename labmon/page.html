@@ -269,6 +269,8 @@ function chartHover(svg, e) {
 }
 
 /* ---------- 顶栏与告警 ---------- */
+// 共有算力池小徽标（#251）：顶栏主机项与资源卡标题共用唯一实现
+const poolBadge = h => h.pool_label ? `<span class="badge b-mute" ${tip(`所属共有算力池：${h.pool_label}`)}>池 · ${esc(h.pool_label)}</span>` : "";
 // 告警按受众分（#142，common.js 的 forUser、alertBox）：给用户的算条数、进红框，只给实验会话的折在下面一行
 function topline() {
   const al = forUser(D.alerts);
@@ -286,7 +288,8 @@ function topline() {
       return `<span class="nw" ${tip(h.ok ? "临时主机在线" + (cv?.has ? "\n" + cv.tip : "") : h.error || "临时主机已离线")}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--faint)"}"></span> ${esc(h.label)} <span class="badge b-mute">临时</span></span>`;
     }
     const cv = h.ok ? cpuView(h) : null;
-    return `<span class="nw" ${tip(h.ok ? "探针正常" + (cv?.has ? "\n" + cv.tip : "") : h.error || "失败")}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}"></span> ${esc(h.label)}</span>${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}`;
+    const pt = h.pool_label ? `\n所属共有算力池：${h.pool_label}` : "";
+    return `<span class="nw" ${tip((h.ok ? "探针正常" + (cv?.has ? "\n" + cv.tip : "") : h.error || "失败") + pt)}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--bad)"}"></span> ${esc(h.label)}</span>${h.pool_label ? " " + poolBadge(h) : ""}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}`;
   }).join(" ")
     + (gone.length ? ` <span class="nw mut" ${tip(gone.map(h => `${h.label}：${ts(h.returned)} 归还`).join("\n") + "\n它们的车道照常显示结果")}>已还 ${gone.length} 台</span>` : "");
   // 嵌在看板里：标题、更新时间、立即采集与连不上的提示都在看板顶栏上（看板经 embedState 取），这里只留主机与告警
@@ -698,7 +701,7 @@ function tlHostHover(rect, e) {
   // 按样本自身的有效间隔（p[2]/2：逐次采样约 1.75×interval，每小时平均 45 分钟）匹配最近点，不随视窗跨度放宽，避免填充采集中断空白区
   const near = pts => { let b = null; for (const p of pts) if (!b || Math.abs(p[0] - t) < Math.abs(b[0] - t)) b = p; return b && Math.abs(b[0] - t) <= b[2] / 2 ? b : null; };
   const gp = near(info.gpuPts), cp = near(info.cpuPts), cv = cpuView(info.host);
-  const lines = [`${info.host.label} · ${ts(t)}`];
+  const lines = [`${info.host.label}${info.host.pool_label ? `（共有算力池：${info.host.pool_label}）` : ""} · ${ts(t)}`];
   if (gp) lines.push(`GPU 利用率  ${f1(gp[1], 0)}%（${info.long ? "每小时平均" : "近 10 分钟平均"}）`);
   if (cp) lines.push(`CPU 占用  ${f1(cp[1], 0)}%${info.long ? "（每小时平均）" : ""}`);
   if (!gp && !cp) lines.push("该时刻无 GPU / CPU 采样");
@@ -714,7 +717,9 @@ function hostRow(host, hb, ev, y, h, c) {
   const cpuS = hostSeries(H.filter(p => p.cpu_pct != null), D.cpu_hourly?.[host.id], p => p.cpu_pct, c, long);
   const ub = y + (ev ? h - 11 : h - 2), Y = v => ub - (ub - y - 3) * v / 100;     // 利用率的底边与高度（GPU 与 CPU 同轴 0–100%）
   const cv = cpuView(host);
-  let s = `<text class="lab" x="0" y="${y + (ub - y) / 2 + 5}" style="font-weight:600" ${tip(`${host.label}\n蓝底蓝线：整机 GPU 平均利用率（含同机别的项目${long ? "，每小时平均" : ""}）\n青绿线：整机 CPU 占用率（同轴，按容器配额或可用核数换算）`
+  let s = `<text class="lab" x="0" y="${y + (ub - y) / 2 + 5}" style="font-weight:600" ${tip(`${host.label}`
+    + (host.pool_label ? `\n所属共有算力池：${host.pool_label}` : "")
+    + `\n蓝底蓝线：整机 GPU 平均利用率（含同机别的项目${long ? "，每小时平均" : ""}）\n青绿线：整机 CPU 占用率（同轴，按容器配额或可用核数换算）`
     + (cv.has ? `\n此刻 CPU ${cv.short}${cv.thrStr ? " · " + cv.thrStr : ""}` : "")
     + (ev ? "\n底边色带：连不上、drain、暂停、续租截止、labmon 没在采集；竖线是换容器、续租与作废重排" : ""))}>${esc(fit(hostShort(host), c.L - 6))}</text>`;
   s += `<g clip-path="url(#tlclip)">`;
@@ -1070,7 +1075,7 @@ function resourcesCard() {
     const firstShared = D.hosts.find(x => !x.pool && !x.ephemeral && !sg.standalone?.[x.id]);
     const sh = !h.ephemeral && !wd && h === firstShared ? sg.dirs || [] : [], loc = h.ephemeral ? null : sg.local?.[h.id], lb = loc ? (loc.cache || 0) + (loc.scratch || 0) : 0;
     if (wd || sh.length || loc) chips.push(storageChip(sg, sh, loc, lb, wd));
-    const head = `<span class="cdot" style="background:${h.ok ? "var(--ok)" : h.ephemeral ? "var(--faint)" : "var(--bad)"}" ${tip(h.ephemeral ? (h.ok ? "临时主机在线" : h.error || "临时主机已离线") : h.ok ? "探针正常" : h.error || "失败")}></span> ${esc(h.label)}${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : ""}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}${h.stale ? ` <span class="sm" style="color:var(--bad)">（显示 ${ts(h.last_ok)} 的数据）</span>` : ""}`;
+    const head = `<span class="cdot" style="background:${h.ok ? "var(--ok)" : h.ephemeral ? "var(--faint)" : "var(--bad)"}" ${tip(h.ephemeral ? (h.ok ? "临时主机在线" : h.error || "临时主机已离线") : h.ok ? "探针正常" : h.error || "失败")}></span> ${esc(h.label)}${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : ""}${h.pool_label ? " " + poolBadge(h) : ""}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}${h.stale ? ` <span class="sm" style="color:var(--bad)">（显示 ${ts(h.last_ok)} 的数据）</span>` : ""}`;
     out.push(block(head, chips, tiles.length ? tiles : [`<div class="sm mut">没有数据</div>`]));
   }
   const card = `<div class="card" style="margin-top:10px"><div class="row"><span class="hd">资源</span><span class="sm mut hide-sm">整台主机的数字，含同机别的项目与 labmon 之外的进程</span><span class="sp"></span>
