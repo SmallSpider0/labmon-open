@@ -33,6 +33,7 @@ from pathlib import Path, PurePosixPath
 from . import lan as L
 from . import lease as LS
 from .config import POOL, ConfigError, active_hosts, all_hosts, home_host, home_key, host_defaults, hosts_file, is_pool_id, is_standalone, pool_home, shell_path, user_hosts
+from .state import snapshot
 
 from .worker import queue_stop_path
 
@@ -49,15 +50,13 @@ def host_conf(hid: str) -> dict:
     return h
 
 
-def via(hid: str, home: str | tuple | None = None) -> dict:
-    """在哪台上操作这台目录下的登记（worker rm）：在用的就是它自己；已归还的、主机清单里已没有的（home 是它的 worker_home，
-    全局快照 regs 里那一项的 home），经一台与它同共享域（config.home_key）的在用主机代办（config.home_host），
-    命令照样带 --host hid：改的是共享盘上我们自己 worker_home 里那台的登记文件，不连已归还的那台（借来还了的是别人的服务器）。
-    独立主机（无论是否显式传 home）已不在用时直接拒绝，绝不借同路径集群主机代办。
-    算力池（hid 是 config.POOL，#24）没有 home 时取 config.pool_home：worker add|rm pool 都经这里。"""
+def via_candidates(hid: str, home: str | tuple | None = None) -> list[dict]:
+    """返回可代办 hid 登记操作的主机候选列表（在线且 worker 运行中的排最前，供 via 与 run_out 连接失败回退共用）：
+    - 在用主机返回它自己；
+    - 已归还、清单已无或共有池入口（is_pool_id）返回同共享域的所有在用主机（非独立主机），优先按全局快照把在线主机排前。"""
     act = active_hosts()
     if any(str(h["id"]) == hid for h in act):
-        return host_conf(hid)
+        return [host_conf(hid)]
     if is_pool_id(hid) and home is None:                 # 共有型算力池（#24、#212）：登记在对应池的 worker_home 下，经共用该目录的在用主机代办
         home = pool_home(hid)
         if home is None:
@@ -66,11 +65,24 @@ def via(hid: str, home: str | tuple | None = None) -> dict:
     if old_h and is_standalone(old_h):
         raise ConfigError(f"{hid} 是独立主机且已不在用，没有共享盘代办主机：它的登记现在动不了")
     key = home_key(old_h) if old_h else (("shared", home.rstrip("/")) if isinstance(home, str) else home)
-    o = home_host(key, act) if key else None
-    if o is None:
+    cands, rest = [], list(act)
+    if key:
+        while (o := home_host(key, rest)) is not None:
+            cands.append(host_conf(str(o["id"])))
+            rest.remove(o)
+    if not cands:
         show = key[-1] if isinstance(key, tuple) else (key or "不知道在哪")
         raise ConfigError(f"{hid} 已不在用，又没有与它共用 worker 目录（{show}）的在用主机：它的登记现在动不了")
-    return host_conf(str(o["id"]))
+    snap_hosts = {str(e.get("id")): e for e in (snapshot() or {}).get("hosts") or []}
+    if snap_hosts:
+        cands.sort(key=lambda h: 0 if (snap_hosts.get(str(h["id"])) and not snap_hosts[str(h["id"])].get("error")
+                                       and snap_hosts[str(h["id"])].get("worker_up")) else 1)
+    return cands
+
+
+def via(hid: str, home: str | tuple | None = None) -> dict:
+    """在哪台上操作这台目录下的登记（worker rm 与共有池 add/rm）：返回 via_candidates 的首选主机。"""
+    return via_candidates(hid, home)[0]
 
 
 DEPLOY_REF = "main"     # 部署到服务器上的只取这个分支：在分支的 worktree 里跑 labmon 也不会把没合并的版本推上去
@@ -309,15 +321,18 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
             return 2, str(e)
     if sub in CHANGE or (sub == "clean" and opts.get("yes")):
         LS.need(f"worker {sub}")
-    h = via(hid, home) if sub == "rm" or is_pool_id(hid) else host_conf(hid)
+    cands = via_candidates(hid, home) if (sub == "rm" or is_pool_id(hid)) else [host_conf(hid)]
+    h = cands[0]
     if sub == "add" and not is_pool_id(hid) and args:
         if bad := _check_standalone_root(h, args[0]):
             return 2, bad
-    home, py = h["worker_home"], h["python"]
-    we = worker_env(h)
-    w = (f"env {we} " if we else "env ") + f"{shlex.quote(py)} {shell_path(home.rstrip('/') + '/labmon_worker.py')}"
     hq = shlex.quote(hid)
+    def _wcmd(hc: dict) -> str:
+        we = worker_env(hc)
+        return (f"env {we} " if we else "env ") + f"{shlex.quote(hc['python'])} {shell_path(hc['worker_home'].rstrip('/') + '/labmon_worker.py')}"
     if sub == "start":
+        home = h["worker_home"]
+        w = _wcmd(h)
         guest = h.get("borrow") and not h["borrow"].get("swap")                  # 直接借来的：不在对方的容器里扫共享盘
         sh = f" --shared {shlex.quote(h['shared'][0])}" if h["shared"] and not guest and not is_standalone(h) else ""      # 共享盘用量由这台的 worker 统计
         sa = " --standalone" if is_standalone(h) else ""
@@ -363,7 +378,11 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
     extra += " --dry-run" if opts.pop("dry_run", False) else ""
     extra += " --yes" if opts.pop("yes", False) else ""
     extra += "".join(f" --{k.replace('_', '-')} {shlex.quote(str(v))}" for k, v in opts.items() if v)
-    rc, out = ssh(h, f"{w} {'ls' if sub == 'status' else sub} {extra} --host {hq}")   # 位置参数要在 --host 前
+    rc, out = 255, ""
+    for cand in cands:
+        rc, out = ssh(cand, f"{_wcmd(cand)} {'ls' if sub == 'status' else sub} {extra} --host {hq}")   # 位置参数要在 --host 前
+        if rc != 255:
+            break
     if opts.get("expect_project") and rc != 0 and "unrecognized arguments: --expect-project" in out:
         return rc, "这台主机的 worker 还不支持按项目核对登记，请让管理员更新 worker 后再试"
     return rc, out

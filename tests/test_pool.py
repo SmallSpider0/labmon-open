@@ -859,6 +859,54 @@ members = ["bob"]
             S.reg_move("pool", [{"host": "h1", "root": "/data/lab/pa", "jobs": "jobs/q.txt", "project": "pa"}])
         self.assertEqual(moved_to, ["pool:a100"])
 
+    def test_host_view_deadline_single_host_nofit_and_via_fallback(self):
+        """Codex 第四轮 P2：① _host_view 投影 deadline 与 lease_end；② 单健康机池 orig_nofit 退回待放；③ workerctl.run_out 对池入口 SSH 255 自动切下一台可达同域代办主机。"""
+        # ① _host_view 传递 deadline 与 lease_end
+        h_dl = make_host_entry("h1", gpus=1, busy_gpus=0,
+                               overrides=[{"kind": "deadline", "target": "renew", "until": self.t + 7200}], t=self.t)
+        h_dl["lease_end"] = self.t + 86400
+        out0 = P.tick([h_dl], [], self.sw, self.t, lan_ok=True, use_ssh=False)
+        hv = next(h for h in out0["pools"][0]["hosts"] if h["id"] == "h1")
+        self.assertTrue(hv["deadline"])
+        self.assertEqual(hv["lease_end"], self.t + 86400)
+
+        # ② 单健康机池原机已 nofit：退回待放以便下一轮标 nofit=True 并告警
+        (self.d / "hosts.toml").write_text(SHARED_HOSTS.format(pools="""
+[pools.a100]
+label = "单机池"
+hosts = ["h1"]
+members = ["alice"]
+"""))
+        h1 = make_host_entry("h1", gpus=1, busy_gpus=0,
+                             waiting=[{"name": "big1", "project": "pa", "root": "/data/lab/pa", "queue": "jobs/big.txt",
+                                       "since": self.t - 60, "why": "单卡显存放不下"}], t=self.t)
+        regs = [{"host": "h1", "state": "active", "queues": [
+            {"root": "/data/lab/pa", "jobs": "jobs/big.txt", "project": "pa", "pool": "a100"},
+        ]}]
+        moves = []
+        fit_nofit = lambda pcfg, it, hs: {"head": "big1", "need": {"ngpu": 1}, "hosts": {h: {"ok": False, "nofit": True, "why": "显存放不下"} for h in hs}}
+        P.tick([h1], regs, self.sw, self.t, lan_ok=True,
+               move_fn=lambda to, it, pid, rsn: moves.append((to, it["src"])), fit_fn=fit_nofit)
+        self.assertEqual(moves, [("pool:a100", "h1")])
+
+        # ③ workerctl.run_out("add", "pool:a100", ...) 首台 h1 SSH 255 时自动回退到同域可达主机 h2
+        (self.d / "hosts.toml").write_text(SHARED_HOSTS.format(pools="""
+[pools.a100]
+label = "双机池"
+hosts = ["h1", "h2"]
+members = ["alice"]
+"""))
+        tried = []
+
+        def fake_ssh(hc, cmd, *a, **k):
+            tried.append(hc["id"])
+            return (255, "ssh: connect failed") if hc["id"] == "h1" else (0, "已登记")
+
+        with mock.patch.object(W, "ssh", side_effect=fake_ssh):
+            rc, out = W.run_out("add", "pool:a100", ["/data/lab/pa", "jobs/q.txt"], project="pa")
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(tried[:2], ["h1", "h2"])
+
 
 class PoolInfraTest(Base):
     def test_locate_and_worker_rm(self):

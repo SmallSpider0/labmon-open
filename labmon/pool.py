@@ -216,6 +216,8 @@ def _host_view(hid: str, hmap: dict[str, dict], by_host: dict[str, dict], t: flo
     online = bool(e and not returned and not e.get("error") and e.get("worker_up"))
     down = bool(e and not returned and (e.get("error") or not e.get("worker_up")))
     drain = bool(online and _has_override(st, "drain", t))
+    deadline = bool(online and _has_override(st, "deadline", t, skip_target="borrow"))
+    lease_end = (e or {}).get("lease_end")
     gs = (st.get("info") or {}).get("gpus") or []
     n_gpu = len(gs)
     free_g = _free_gpu_count(st) if online else 0
@@ -226,7 +228,8 @@ def _host_view(hid: str, hmap: dict[str, dict], by_host: dict[str, dict], t: flo
     vals = [v for v in vals if v is not None]
     util = round(sum(vals) / len(vals), 1) if vals else None
     return {
-        "id": hid, "label": label, "returned": returned, "online": online, "down": down, "drain": drain,
+        "id": hid, "label": label, "returned": returned, "online": online, "down": down,
+        "drain": drain, "deadline": deadline, "lease_end": lease_end,
         "gpus": n_gpu, "free_gpus": free_g, "running": ld["running"], "queued": ld["queued"],
         "until": ld["until"], "util": util,
     }
@@ -528,6 +531,17 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
                         wait_since.setdefault(it["lk"], t)
                     except CF.ConfigError:
                         pass
+                elif it["orig_nofit"] and it["src"] != phid and it["src"] in healthy and not (picked & (set(healthy) - {it["src"]})):
+                    # 单健康机池且无其他候选被 picked 排除：经 do_fit 复核原机确认硬件 nofit 后退回待放，
+                    # 避免清单永久滞留无法运行的原机、漏发 pool_wait:...:nofit 告警。
+                    res0 = do_fit(pcfg, it, [it["src"]])
+                    if res0 and ((res0.get("hosts") or {}).get(it["src"]) or {}).get("nofit"):
+                        try:
+                            do_move(phid, it, pid, f"{it['reason']}，全池暂无放得下的主机，退回待放")
+                            moved_at[it["lk"]] = {"t": round(t), "host": phid}
+                            wait_since.setdefault(it["lk"], t)
+                        except CF.ConfigError:
+                            pass
                 elif it["pending"] and it["lk"] in out_lists:
                     out_lists[it["lk"]]["why"] = "池内暂时没有在线且健康的候选主机" if not healthy else "本轮候选主机已各落 1 条，下一轮继续"
                 continue
