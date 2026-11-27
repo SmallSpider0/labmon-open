@@ -864,5 +864,97 @@ class SmokeTest(unittest.TestCase):
         self.assertIn("项目页 " + self.ids[0], fails)
 
 
+class AutoCleanBranchesTest(unittest.TestCase):
+    """自动清理已合并/已失效分支与过期 worktree 纯函数及清理流程测试（Issue #246）。"""
+
+    def test_parse_worktree_branches(self):
+        sample = """worktree /Users/alice/Projects/labmon
+HEAD ce51f631075caa10d8f08b74c63bafff6e5b2de7
+branch refs/heads/main
+
+worktree /Users/alice/Projects/labmon/.claude/worktrees/agent-1
+HEAD a2a11faa8817bb589fc01c5c160b536a4f2dddfe
+branch refs/heads/feature/active-worktree
+
+worktree /Users/alice/Projects/labmon/.claude/worktrees/detached
+HEAD deadbeef
+detached
+"""
+        branches = DP.parse_worktree_branches(sample)
+        self.assertEqual(branches, {"main", "feature/active-worktree"})
+
+    def test_parse_merged_branches(self):
+        sample = """* chore/current
++ feat/in-wt
+  fix/merged-1
+  feature/merged-2
+"""
+        branches = DP.parse_merged_branches(sample)
+        self.assertEqual(branches, {"chore/current", "feat/in-wt", "fix/merged-1", "feature/merged-2"})
+
+    def test_parse_gone_branches(self):
+        sample = """main|[ahead 1]
+feat/active|[gone]
+fix/gone-branch|[gone]
+feature/ahead-gone|[gone, ahead 1]
+feat/alive|[behind 2]
+feature/with-gone-in-title-normal-upstream|[ahead 1]
+feature/untracked|
+"""
+        branches = DP.parse_gone_branches(sample)
+        self.assertEqual(branches, {"feat/active", "fix/gone-branch", "feature/ahead-gone"})
+        self.assertNotIn("feature/with-gone-in-title-normal-upstream", branches)
+        self.assertNotIn("feature/untracked", branches)
+
+    def test_filter_cleanup_branches_safety(self):
+        # 绝不误删 main/master、当前 HEAD、活跃 worktree 分支
+        gone = {"fix/gone-branch", "feat/active", "main", "feature/unmerged-gone"}
+        merged = {"fix/merged-branch", "chore/current-head", "feat/active", "master"}
+        active = {"feat/active", "feature/another-active"}
+        head_br = "chore/current-head"
+
+        candidates = DP.filter_cleanup_branches(gone, merged, active, head_branch=head_br)
+        self.assertEqual(candidates, ["feature/unmerged-gone", "fix/gone-branch", "fix/merged-branch"])
+        self.assertNotIn("main", candidates)
+        self.assertNotIn("master", candidates)
+        self.assertNotIn("chore/current-head", candidates)
+        self.assertNotIn("feat/active", candidates)
+
+    def test_auto_clean_branches_execution(self):
+        calls = []
+
+        def fake_git(*args):
+            calls.append(args)
+            if args == ("worktree", "list", "--porcelain"):
+                return "worktree /tmp/wt\nbranch refs/heads/main\n\nworktree /tmp/wt2\nbranch refs/heads/active-wt\n"
+            if args == ("rev-parse", "--abbrev-ref", "HEAD"):
+                return "main"
+            if args == ("branch", "--merged", "origin/main"):
+                return "  main\n  active-wt\n  merged-branch\n"
+            if args == ("for-each-ref", "--format=%(refname:short)|%(upstream:track)", "refs/heads"):
+                return "main|\ngone-branch|[gone]\nalive-branch|[ahead 1]\n"
+            if args[:2] == ("branch", "-D"):
+                return "Deleted branch"
+            return ""
+
+        with mock.patch.object(DP, "git", fake_git):
+            del_count = DP.auto_clean_branches()
+            self.assertEqual(del_count, 2)
+            del_args = [args[2] for args in calls if args[:2] == ("branch", "-D")]
+            self.assertEqual(del_args, ["gone-branch", "merged-branch"])
+            self.assertIn(("fetch", "--prune", "origin"), calls)
+            self.assertIn(("worktree", "prune"), calls)
+
+    def test_auto_clean_branches_handles_errors_gracefully(self):
+        def bad_git(*args):
+            raise Exception("git 权限或网络故障")
+
+        errs = []
+        with mock.patch.object(DP, "git", bad_git), mock.patch.object(DP, "say", errs.append):
+            del_count = DP.auto_clean_branches()
+            self.assertEqual(del_count, 0)
+            self.assertTrue(any("自动清理分支跳过（不影响部署）" in e for e in errs))
+
+
 if __name__ == "__main__":
     unittest.main()
