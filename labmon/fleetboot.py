@@ -299,12 +299,38 @@ def spec_name(specs: list[dict], spec_id: str | None) -> str | None:
     return (sp.get("specificationName") if sp else None) or spec_id
 
 
+SPEC_FIELDS = ("specificationId", "specificationName", "quantityAvailable", "specificationAmount", "isSchedule", "queueNum")
+
+
+def _has_spec_id(specs: list[dict] | None) -> bool:
+    return bool(specs) and any(isinstance(x, dict) and x.get("specificationId") not in (None, "") for x in specs)
+
+
+def specs_from_pools(rows: list[dict] | None, pool_id) -> list[dict]:
+    """从 cli.pools() 返回的行里按 poolId 提取规格列表（唯一实现），按 specificationId 去重并保留顺序。"""
+    if pool_id in (None, ""):
+        return []
+    want = str(pool_id)
+    out, seen = [], set()
+    for r in rows or []:
+        if not isinstance(r, dict) or r.get("poolId") in (None, "") or str(r.get("poolId")) != want:
+            continue
+        sid = r.get("specificationId")
+        if sid in (None, "") or sid in seen:
+            continue
+        seen.add(sid)
+        out.append({k: r.get(k) for k in SPEC_FIELDS})
+    return out
+
+
 def check_spec(specs: list[dict], spec_id: str | None, *, freed: bool = False, cached: bool = False) -> tuple[bool | None, str]:
     """核对规格在不在池里、有没有空位（fleetboot.check 与 preview 共用）。
     freed：同池、同规格先停一台再开（停完会空出同规格 1 位，不要求此刻有空位）；改选别的规格或换节点时为 False。
     cached：来自上次核对的 pools.json。"""
-    if not specs or not any("specificationId" in x for x in specs):
-        return None, "还没读过这个池的规格列表，先「与平台核对」" if cached else "规格列表格式认不出，没核对"
+    if not specs:
+        return None, "还没读过这个池的规格列表，先「与平台核对」" if cached else "平台未返回该池的规格列表，没核对"
+    if not _has_spec_id(specs):
+        return None, "规格列表格式认不出，没核对"
     sp = spec_of(specs, spec_id)
     if sp is None:
         return False, f"池里没有规格 {spec_id}"
@@ -474,7 +500,12 @@ def check(cli: P.Client, c: dict, human=lambda: None, freed: bool = False) -> li
     out = [{"item": "作业名", "ok": bool(P.NAME_RE.match(s["name"] or "")), "note": s["name"]},
            {"item": "端口", "ok": bool(s["port"]) and P.PORTS[0] <= int(s["port"]) <= P.PORTS[1], "note": f"22→{s['port']}"}]
     human()
-    ok, note = check_spec(cli.specs(c.get("poolId")), s["spec"], freed=freed)
+    pool_id = c.get("poolId")
+    specs = cli.specs(pool_id)
+    if pool_id and not _has_spec_id(specs):
+        human()
+        specs = specs_from_pools(cli.pools(), pool_id) or specs
+    ok, note = check_spec(specs, s["spec"], freed=freed)
     out.append({"item": "规格", "ok": ok, "note": note})
     human()
     vols = cli.volumes()
@@ -506,8 +537,8 @@ def read_pools(cli: P.Client, cfg: dict, human, t: float) -> dict:
             continue
         human()
         p = pools.setdefault(name, {"id": pid, "hosts": [], "specs": []})
-        p["specs"] = [{k: x.get(k) for k in ("specificationId", "specificationName", "quantityAvailable", "specificationAmount",
-                                               "isSchedule", "queueNum")} for x in cli.specs(pid)]
+        raw = cli.specs(pid)
+        p["specs"] = [{k: x.get(k) for k in SPEC_FIELDS} for x in raw if isinstance(x, dict)] if _has_spec_id(raw) else specs_from_pools(rows, pid)
     human()
     vols = [{"path": v.get("fullPath"), "name": v.get("volumeName")} for v in cli.volumes()]
     human()

@@ -955,7 +955,8 @@ def _new_job(r: _Run, cli: P.Client, cfg: dict, old: dict | None, oj: dict | Non
     bad = [x for x in checks if x["ok"] is False]
     if bad:
         raise P.PlatformError("；".join(f"{x['item']}：{x['note']}" for x in bad) + "；什么都没动")
-    sp_note = next((x["note"] for x in checks if x["item"] == "规格"), None)
+    sp_chk = next((x for x in checks if x["item"] == "规格"), None)
+    sp_note = sp_chk["note"] if sp_chk and sp_chk.get("ok") is True else None
     sp_label = sp_note.split("，", 1)[0] if sp_note and "，" in sp_note else FB.spec_name(FB.pool_specs(pl), target_spec)
     return {"job": job, "pool": pl, "port": port, "c": c, "nodes": nodes, "spec": target_spec, "spec_name": sp_label,
             "note": f"开 {name}" + (f"（作业名 {job}）" if job != name else "") + f"：{FB.summary(c)['image']}"
