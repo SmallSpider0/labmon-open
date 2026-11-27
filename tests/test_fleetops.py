@@ -69,6 +69,7 @@ class FleetPlat:
         self.pending, self.n_new, self.on = [], 0, {}      # pending：[列表还要查几次, 作业, 改成的 runningCount]；on：接口 → 钩子
         self.fail, self.avail = {}, {}                    # fail：接口 → 报错信息；avail：池 → 空卡数
         self.specs, self.spec_ip = {}, {}                 # specs：池 id → 规格列表（不设时单规格 "s"）；spec_ip：规格 id → 节点 IP
+        self.specs_raw = None                             # 设成非 None 时 getResourceSpecification 原样返回（测空列表/未知格式回退）
         self.tags = {"grp/ubuntu": ["aa", "bb", "zz", "dd"], "grp/pt": ["1"]}
         self.jobs = [
             {"id": "j1", "taskName": "AA", "poolName": PRIV, "createTime": "2026-11-05 10:00:00", "runningCount": 1, "port": "15001", "image": REG + "ubuntu:aa"},
@@ -156,13 +157,14 @@ class FleetPlat:
                 pid = PID[p]
                 if pid in self.specs:
                     for sp in self.specs[pid]:
-                        rows.append({"poolId": pid, "poolName": p, "host": self.spec_ip.get(sp["specificationId"], IP[p]),
-                                     "specificationId": sp["specificationId"], "specificationName": sp["specificationName"],
-                                     "quantityAvailable": sp["quantityAvailable"]})
+                        rows.append({**sp, "poolId": pid, "poolName": p, "host": self.spec_ip.get(sp["specificationId"], IP[p])})
                 else:
-                    rows.append({"poolId": pid, "poolName": p, "host": IP[p], "specificationId": "s", "specificationName": "1 卡", "quantityAvailable": 1})
+                    rows.append({"poolId": pid, "poolName": p, "host": IP[p], "specificationId": "s", "specificationName": "1 卡",
+                                 "quantityAvailable": self.avail.get(pid, 1), "specificationAmount": 4, "isSchedule": 0, "queueNum": 0})
             return ok(rows)
         if path.startswith("/submitWork/getResourceSpecification/"):
+            if self.specs_raw is not None:
+                return ok(self.specs_raw)
             pid = path.rsplit("/", 1)[1]
             if pid in self.specs:
                 return ok([{**sp, "poolId": pid} for sp in self.specs[pid]])
@@ -1558,6 +1560,90 @@ class FleetOpsTest(unittest.TestCase):
             if t.name == "fleet-move":
                 t.join(10)
         self.assertIn("不知道本机怎么连它", FO.op()["error"])
+
+    def test_specs_fallback_from_pools(self):
+        """#234：getResourceSpecification 返回空或无 specificationId 时，read_pools 与 check 回退从 getResourcePool 提取；check_spec 区分空列表与格式不匹配。"""
+        # 1) specs_from_pools 去重与字段提取
+        rows = [
+            {"poolId": "p2", "specificationId": "sA", "specificationName": "nodeA", "quantityAvailable": 1,
+             "specificationAmount": 4, "isSchedule": 0, "queueNum": 0, "extra": "drop"},
+            {"poolId": "p2", "specificationId": "sA", "specificationName": "dup", "quantityAvailable": 9},
+            {"poolId": "p1", "specificationId": "s1", "specificationName": "priv"},
+            {"poolId": "p2", "specificationName": "missing-id"},
+            {"poolId": "p2", "specificationId": "sB", "specificationName": "nodeB", "quantityAvailable": 2,
+             "specificationAmount": 4, "isSchedule": 1, "queueNum": 3},
+        ]
+        got = FB.specs_from_pools(rows, "p2")
+        self.assertEqual([x["specificationId"] for x in got], ["sA", "sB"])
+        self.assertEqual(set(got[0]), set(FB.SPEC_FIELDS))
+        self.assertEqual(got[0]["specificationName"], "nodeA")
+        self.assertEqual(got[1]["queueNum"], 3)
+        self.assertEqual(FB.specs_from_pools(rows, None), [])
+
+        # 2) check_spec 区分空列表与字段不匹配
+        self.assertEqual(FB.check_spec([], "sA"), (None, "平台未返回该池的规格列表，没核对"))
+        self.assertEqual(FB.check_spec([], "sA", cached=True), (None, "还没读过这个池的规格列表，先「与平台核对」"))
+        self.assertEqual(FB.check_spec([{"foo": 1}], "sA"), (None, "规格列表格式认不出，没核对"))
+
+        # 3) getResourceSpecification 返回空：read_pools 复用已有 rows（零额外 getResourcePool 请求），preview 正常
+        self._multi_spec_pub(avail_a=1, avail_b=2)
+        self.plat.specs_raw = []
+        n0 = len(self.plat.calls)
+        op = self.sync()
+        self.assertIsNone(op["error"], op)
+        pool_calls = [c[0] for c in self.plat.calls[n0:] if c[0] == "/submitWork/getResourcePool/1"]
+        self.assertEqual(len(pool_calls), 1)
+        info = FB.pools_info()
+        self.assertEqual([x["specificationId"] for x in info["pools"][PUB]["specs"]], ["sA", "sB"])
+        self.assertEqual(info["pools"][PUB]["specs"][1]["quantityAvailable"], 2)
+        c = cfg(self.plat.url)
+        c["public_max"] = 4
+        FB.set_defaults(REG + "ubuntu:bb", RUN)
+        pv = FB.preview(c, "open", None, "EE", PUB, tcp=lambda n, p: False, spec="sB")
+        self.assertEqual(pv["spec_name"], "nodeB-1GPU")
+        sp_item = next(x for x in pv["items"] if x["item"] == "规格")
+        self.assertTrue(sp_item["ok"])
+        self.assertIn("nodeB-1GPU，上次核对时空 2 / 4", sp_item["note"])
+
+        # 4) check() 在 specs() 返回空时经 human() 停顿后回退调用一次 pools()，并正确核对有空位与无空位
+        cli = FO.SESS["cli"]
+        base = FB.ref(PUB)[1]
+        comp = FB.compose(base, "EE", REG + "ubuntu:bb", RUN, 15151, spec="sB")
+        n1, pauses = len(self.plat.calls), []
+        checks = FB.check(cli, comp, human=lambda: pauses.append(1))
+        sp_chk = next(x for x in checks if x["item"] == "规格")
+        self.assertEqual(sp_chk["ok"], True)
+        self.assertIn("nodeB-1GPU，空 2 / 4", sp_chk["note"])
+        self.assertEqual([x[0] for x in self.plat.calls[n1:] if x[0] == "/submitWork/getResourcePool/1"], ["/submitWork/getResourcePool/1"])
+        self.assertGreaterEqual(len(pauses), 5)
+
+        # specs() 有效时不额外调 pools()
+        self.plat.specs_raw = None
+        n2 = len(self.plat.calls)
+        FB.check(cli, comp)
+        self.assertEqual([x[0] for x in self.plat.calls[n2:] if x[0] == "/submitWork/getResourcePool/1"], [])
+
+        # specs() 返回无效格式且 pools() 也无该池规格时保留“格式认不出”提示；均为空时提示“平台未返回”
+        self.plat.specs_raw = [{"foo": 1}]
+        comp_unknown = {**comp, "poolId": "p-none"}
+        chk_bad = next(x for x in FB.check(cli, comp_unknown) if x["item"] == "规格")
+        self.assertEqual((chk_bad["ok"], chk_bad["note"]), (None, "规格列表格式认不出，没核对"))
+        self.plat.specs_raw = []
+        chk_empty = next(x for x in FB.check(cli, comp_unknown) if x["item"] == "规格")
+        self.assertEqual((chk_empty["ok"], chk_empty["note"]), (None, "平台未返回该池的规格列表，没核对"))
+
+        # 5) 端到端开机：specs() 返回空时仍能正常核对并完成开机
+        self.remote = Remote()
+        self.hosts = []
+        FO.start("open", c, None, ids=[], person="EE", pool=PUB, spec="sB", probe=self.remote.probe, ssh_fn=self.remote.ssh,
+                 forget_fn=self.remote.forget, ssh_poll=0.01, password=lambda u: "pw", pace=0, poll=0.01, fast=0.01,
+                 tcp=lambda nd, p: False, hosts=self.fake_hosts())
+        for t in threading.enumerate():
+            if t.name == "fleet-open":
+                t.join(10)
+        op = FO.op()
+        self.assertIsNone(op["error"], op)
+        self.assertEqual(op["conn"]["spec"], "nodeB-1GPU")
 
 
 if __name__ == "__main__":
