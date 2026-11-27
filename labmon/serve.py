@@ -700,6 +700,16 @@ class Handler(BaseHTTPRequestHandler):
                     U.need_room(who, pid)
             self._guard(guard)
             return True
+        if r.own == "fleet_srv":                       # 本人持有服务器的曲线（#211）：非本人持有或不存在一律 403（防 ID 枚举）
+            sid = unquote(path[len("/fleet/"):-len(".json")])
+            try:
+                cfg = F.conf()
+                PO.need_holder(who, sid, cfg)
+                if not FV.known(sid, cfg):
+                    raise U.Denied(403, "只有持有人本人和管理员能看这台服务器的曲线")
+            except (U.Denied, ConfigError):
+                raise U.Denied(403, "只有持有人本人和管理员能看这台服务器的曲线")
+            return True
         body = self._body()
         if body is None:
             return False
@@ -829,8 +839,10 @@ class Handler(BaseHTTPRequestHandler):
     def _me(self, who: U.Ident) -> dict:
         """GET /api/me 与页面上的 ME：users.me 加上在跑的代码是哪个提交、何时启动（deploy.RUNNING；部署脚本等它换成新提交，#164）。"""
         out = U.me(who, self.entry) | {"commit": DP.RUNNING["commit"], "started": DP.RUNNING["started"]}
-        if out["admin"]:                               # 组内服务器页认“我”（#19：只认账号库的绑定）
-            out["fleet_person"], out["fleet_person_error"] = U.person_of(who.name)
+        person, perr = U.person_of(who.name)
+        out["fleet_person"] = person                   # 本人绑定的组内人员名（#19、#211）；错误详情含冲突账号名，仅给管理员
+        if out["admin"]:
+            out["fleet_person_error"] = perr
         if out["account"]:                             # 浏览器会话（「我的账号」）：自己的推送（只有打码的目标，#167）
             self._client_tokens(out["tokens"])
             out["push"] = S.push_view(who.name)
@@ -889,6 +901,8 @@ class Handler(BaseHTTPRequestHandler):
                 ok = U.access(who).allowed
                 got["hosts"] = [dict(h, home_with=[x for x in h["home_with"] if x in ok]) for h in got["hosts"] if str(h.get("id")) in ok]
             return self._json(200, got)
+        if path == "/api/disk":
+            return self._json(200, A.my_disk(who, snapshot()))
         m = PROJECT_CONFIG_PATH.fullmatch(path)
         if m:
             try:
@@ -951,7 +965,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(404, "{}", "application/json")
             return self._json(200, FV.person(name))
         if path.startswith("/fleet/") and path.endswith(".json"):
-            sid = path[len("/fleet/"):-len(".json")]
+            sid = unquote(path[len("/fleet/"):-len(".json")])
             try:
                 ok = FV.known(sid, F.conf())
             except ConfigError:
@@ -1765,7 +1779,7 @@ def live_snapshot() -> dict:
 # 备用时照收的写请求（#163）：登录与账号（只动本机的账号库）、部署（换代码、重启，主备都要能部署）。别的写请求回 409。
 PROJECT_CONFIG_PATH = re.compile(r"/api/project/([^/]+)/config")
 PROJECT_READ_PATH = re.compile(r"/api/project/([^/]+)/(status|disk|records)")   # 实验会话的只读命令（#52）：labmon status、disk、records
-CLI_READS = re.compile(r"/api/(hosts|project/[^/]+/(config|status|disk|records)|client/wheel|reports)")     # 命令行读的接口：备用上同样回 409 standby（_standby），命令行接着找主那台
+CLI_READS = re.compile(r"/api/(hosts|disk|project/[^/]+/(config|status|disk|records)|client/wheel|reports)")     # 命令行读的接口：备用上同样回 409 standby（_standby），命令行接着找主那台
 STANDBY_OK = re.compile(r"/api/(login|setup|logout|password|tokens/add|revoke|users/.*|admin/deploy)")
 
 
@@ -1789,7 +1803,7 @@ class Route(NamedTuple):
 OPEN = ""
 # own（#167，Handler._own）：普通用户的这个请求按什么核。path 地址里的项目要是他的；new 同 path，还没登记的也放（第一次推就登记）；
 # body 请求体的 project；worker、override、init、wait、reg 见 _own；self 只动自己的账号；holder 请求体 id 那台组内服务器的持有人本人（#24）。
-OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self", "holder", "host_assign")
+OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self", "holder", "host_assign", "fleet_srv")
 _R = lambda m, p, scope, admin=False, lan=False, own=None, ops=False: Route(m, re.compile(p), scope, admin, lan, own, ops)   # noqa: E731
 # 看板服务的路由表（#160）：每条路由要什么权限只在这里写；Handler._allow 按它调 users.check。
 # 没登记的路径 GET 按 read、POST 与 PUT 按管理员的 admin（新写路由忘了登记时从严）。平台操作由 ops 核对账号入口许可；部署等纯内网路由用 lan。
@@ -1817,6 +1831,7 @@ ROUTES = [
     _R("POST", r"/api/pool/reclaim", "project", own="holder"),         # 收回（#25）：持有人本人；管理员要能做平台操作（pool.reclaim 核）
     _R("POST", r"/api/project/[^/]+/check", "project", own="new"),
     _R("GET", r"/api/hosts", "read"),                                  # 普通用户只列他能用的（Handler.do_GET）
+    _R("GET", r"/api/disk", "read"),                                   # 本人共享盘用量汇总与总盘余量（#211，api.my_disk）
     _R("GET", PROJECT_CONFIG_PATH.pattern, "read", own="path"),
     _R("GET", PROJECT_READ_PATH.pattern, "read", own="path"),         # labmon status|disk|records（#52）：只读，普通用户只看自己的项目
     _R("PUT", PROJECT_CONFIG_PATH.pattern, "project", own="new"),     # 推项目配置（#161）：第一次推的人是主人（#167）
@@ -1826,7 +1841,10 @@ ROUTES = [
     _R("POST", r"/api/users/(add|role|reset|revoke|remove|hosts)", "admin", admin=True, lan=True),
     _R("GET", r"/|/index\.html|/overview\.json|/records\.json", "read"),   # 普通用户只看到自己的（users.view、users.visible）
     _R("GET", r"/p/.*", "read", own="path"),                           # 项目页：普通用户只看自己的项目（#167）
-    _R("GET", r"/fleet/.*", "read", admin=True),                       # 组内服务器的数据只给管理员（维护者 2026-11-10 定）
+    _R("GET", r"/fleet/(op|plan)\.json", "read", admin=True),         # 平台操作进度与向导预览只给管理员
+    _R("GET", r"/fleet/person/.*\.json", "read", admin=True),         # 人员详情只给管理员
+    _R("GET", r"/fleet/[^/]+\.json", "read", own="fleet_srv"),        # 服务器曲线：管理员全看，普通用户只看本人持有（#211）
+    _R("GET", r"/fleet/.*", "read", admin=True),                       # 兜底：其余组内路由只给管理员
     _R("POST", r"/(fleet/op|fleet/probe|renew)/.*", "admin", admin=True, ops=True),
     _R("POST", r"/sched/(weight|focus|unfocus)", "project", admin=True),   # 调度权重（#157 E 节的表）与优先（#16）只给管理员
     _R("POST", r"/project/(owner|delete)", "admin", admin=True),                # 换项目主人（#167）：只给管理员

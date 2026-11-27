@@ -246,7 +246,16 @@ class PreviewTest(unittest.TestCase):
                 self.assertIn("用设置码设口令", Path(out, "login.html").read_text())
                 for f in [Path(out, "index.html")] + [Path(out, "p", i, "index.html") for i in ids]:
                     self.assertNotIn("/*__ME__*/null", f.read_text(), f)
-                self.assertEqual(json.loads(Path(out, "overview.json").read_text())["fleet"] is None, who in ("user", "empty"))
+                ov = json.loads(Path(out, "overview.json").read_text())
+                if who == "empty":
+                    self.assertIsNone(ov["fleet"])
+                elif who == "user":
+                    self.assertEqual(ov["fleet"]["scope"], "self")
+                    self.assertEqual([s["id"] for s in ov["fleet"]["servers"]], ["srv-b"])
+                    self.assertEqual([o["name"] for o in ov["disk"]["owners"]], ["OWNER"])
+                    self.assertTrue(Path(out, "fleet", "srv-b.json").is_file())
+                else:
+                    self.assertIsNotNone(ov["fleet"])
                 if who in ("user", "empty"):
                     self.assertEqual(ids, ["proj-a"] if who == "user" else [])
                 self.assertNotIn("假口令", json.dumps(me, ensure_ascii=False))

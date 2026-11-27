@@ -554,7 +554,8 @@ class ViewTest(UsersBase):
         v = U.view(amy, snap, acc)
         self.assertEqual((v["fleet"], v["notices"], v["wake"], v["hosts"]), (None, [], [], [{"id": "h"}]))
         self.assertIsNone(v["hostcheck"])                                  # 看板服务所在机的体检（#166）也只给管理员
-        self.assertEqual(v["disk"], {"df": {"free": 1}, "alerts": [{"key": "low"}]})
+        self.assertEqual(v["disk"], {"df": {"free": 1}, "person": "amy", "owners": [], "alerts": [{"key": "low"}]})
+        self.assertIsNone(v["pool"])
         self.assertEqual([c[0] for c in v["event_cats"]], ["link", "queue"])
         see = U.visible(amy, acc)
         self.assertIsNone(U.visible(boss))
@@ -587,19 +588,165 @@ class ViewTest(UsersBase):
                          "alerts": [{"key": "low"}, {"key": "soon"}, {"key": "burst:zz"}, {"key": "x"}]}}
         v = U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))
         self.assertEqual(set(v), {"generated", "lan", "event_kinds", "event_cats", "sched", "hosts", "projects", "archived", "rebalance", "regs", "occ",
-                                  "colors", "server", "disk", "fleet", "notices", "wake", "hostcheck", "access"})
+                                  "colors", "server", "disk", "fleet", "pool", "notices", "wake", "hostcheck", "access"})
         self.assertEqual(v["hosts"], [snap["hosts"][0]])                     # 可见主机照整项给：别人任务的命令行照常显示（docs/api.md）
         self.assertEqual(v["colors"], {"p": "#111"})
         self.assertEqual(v["server"], {"role": "standby", "say": U.STANDBY_SAY})
-        self.assertEqual(set(v["disk"]), {"root", "df", "eta", "hist", "warn_gb", "at", "units", "pending", "yield", "ours", "alerts"})
+        self.assertEqual(set(v["disk"]), {"root", "df", "eta", "hist", "warn_gb", "at", "units", "pending", "yield", "owners", "ours", "alerts"})
+        self.assertEqual(v["disk"]["owners"], [])
         self.assertEqual(v["disk"]["ours"], {"dirs": [snap["disk"]["ours"]["dirs"][0]], "projects": {"p": {"b": 1, "jobs": []}}})   # 按项目的汇总只留自己的（#53）
         self.assertEqual(v["disk"]["alerts"], [{"key": "low"}, {"key": "soon"}])
+        self.assertIsNone(v["pool"])
         snap["disk"]["scanner"] = "h"
         self.assertEqual(U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))["disk"]["scanner"], "h")   # 扫盘的主机他看得见时才给
         snap["server"] = None
         self.assertIsNone(U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))["server"])
         snap["server"] = {"role": "primary", "id": "srv-main", "say": ""}
         self.assertEqual(U.view(amy, snap, U.Access({"p"}, {"h"}, {"h"}))["server"], {"role": "primary", "say": ""})
+
+    def test_user_view_member_disk_self_fleet_and_pool(self):
+        """#211：普通用户只看到本人共享盘、自己持有的服务器（借出保留借用人名并脱敏对方进程）和所属算力池聚合概况（非成员为 None）。"""
+        from labmon import fleetboot as FB, pool as PO
+        self.admin()
+        FB.set_person("OWNER", create=True, roster_only=True)
+        fixtures.add_account("amy", "user", "boss", t=T0, person="OWNER")
+        amy = U.Ident("amy", "user", frozenset({"read", "project"}), "session", "k")
+        snap = {
+            "generated": T0,
+            "hosts": [
+                {"id": "srv-mine", "worker_up": True, "status": {
+                    "info": {"gpus": [{"i": 0, "util": 80, "used": 20000, "total": 46068}]},
+                    "running": [
+                        {"project": "p1", "name": "my_job", "root": "/data/owner/p1", "queue": "jobs/a.txt", "hold": False, "gpus": ["g0"]},
+                        {"project": "p2", "name": "secret_other_job", "root": "/data/other/p2", "queue": "jobs/b.txt", "hold": False, "gpus": ["g0"]},
+                    ],
+                }},
+                {"id": "srv-pool", "borrow": {"pool": True}, "worker_up": True, "status": {
+                    "info": {"gpus": [{"i": 0, "util": 90, "used": 30000, "total": 46068}, {"i": 1, "util": 0, "used": 0, "total": 46068}]},
+                    "running": [{"project": "p2", "name": "other_pool_job", "hold": False, "gpus": ["g0"]}],
+                }},
+            ],
+            "disk": {
+                "root": "/data/share", "df": {"total": 1000, "used": 700, "free": 300}, "eta": 10.5, "eta7": 12.0,
+                "warn_gb": 30, "soon_days": 3, "burst_gb": 30, "at": T0, "units": 10, "pending": 0,
+                "names": ["OWNER", "OTHER"], "owners_set": {"x": "OTHER"}, "now": "/data/share/other/secret",
+                "colors": {"OWNER": "#1D9E75", "OTHER": "#D85A30"},
+                "owners": [
+                    {"name": "OWNER", "public": False, "b": 100, "units": [{"u": "owner/a", "b": 100}]},
+                    {"name": "OTHER", "public": False, "b": 200, "units": [{"u": "other/secret", "b": 200}]},
+                    {"name": "公共", "public": True, "b": 50, "units": [{"u": "envs", "b": 50}]},
+                ],
+                "alerts": [
+                    {"key": "low", "msg": "总盘剩余不足"},
+                    {"key": "burst:OWNER", "msg": "OWNER 涨得快"},
+                    {"key": "over:owner", "msg": "owner 超提醒线"},
+                    {"key": "burst:OTHER", "msg": "OTHER 涨得快"},
+                    {"key": "over:OTHER", "msg": "OTHER 超提醒线"},
+                ],
+            },
+            "fleet": {
+                "ops": {"boot": {"srv-b": {"image": "secret-img"}}, "people": {"OTHER": {}}},
+                "holders": [{"holder": "OWNER"}, {"holder": "OTHER"}],
+                "quota": {"private": 1, "public": 2},
+                "interval": 600, "share": {"vram": 0.3}, "names": {"job": "实验"},
+                "servers": [
+                    {
+                        "id": "srv-b", "holder": "OWNER", "job": "OWNER", "label": "OWNER", "pool": "pool-public", "public": True,
+                        "state": "job", "last": T0 - 60, "lease_end": T0 + 86400, "lease_cut": T0 + 80000,
+                        "reserve": {"vram": 2.0}, "using": "VS Code 远程连着",
+                        "borrow": {"since": T0 - 3600, "until": T0 + 3600, "by": "ME", "for": ["secret-proj"], "away": T0 + 3600, "returned": None},
+                        "lend": {"on": True, "open": True, "lent": False, "say": "入池，全天"},
+                        "strip": [["job", 0.0, ["ME"]], ["keepalive", 0.8]],
+                        "sample": {
+                            "state": "job", "util": 80,
+                            "work": [
+                                {"kind": "keepalive", "label": "keep_alive.py", "mb": 700, "n": 1, "etime": 100},
+                                {"kind": "job", "label": "python secret_train.py", "mb": 20000, "n": 2, "etime": 500,
+                                 "cwd": "/data/share/other/secret_repo", "chain": ["bash secret.sh"], "args": "--token xyz", "owner": "ME", "pid": 999},
+                                {"kind": "job", "label": "owner_tool.py", "mb": 1000, "n": 1, "etime": 50, "owner": "OWNER", "cwd": "/data/share/owner/work"},
+                            ],
+                        },
+                    },
+                    {"id": "srv-other", "holder": "OTHER", "state": "job", "lend": {"on": True, "open": True, "lent": True, "say": "算力池借着"}},
+                ],
+                "mine": [
+                    {
+                        "id": "srv-mine", "holder": "OWNER", "mine": True, "state": "job",
+                        "lend": {"on": True, "open": True, "mine": True, "placed": 1, "say": "入池，全天；跑着池里 1 条清单"},
+                        "work": [
+                            {"kind": "job", "label": "my_job", "mb": 10000},
+                            {"kind": "job", "label": "secret_other_job", "mb": 12000},
+                        ],
+                        "sample": {"work": [
+                            {"kind": "job", "label": "my_job", "mb": 10000, "n": 1, "etime": 100, "cwd": "/data/owner/p1"},
+                            {"kind": "job", "label": "secret_other_job", "mb": 12000, "n": 1, "etime": 200, "cwd": "/data/other/p2"},
+                        ]},
+                    },
+                    {"id": "srv-other-mine", "holder": "OTHER", "mine": True, "state": "job"},
+                ],
+                "unknown": [
+                    {"id": "srv-b", "holder": "OWNER", "kind": "unknown", "label": "proc", "mb": 500, "n": 1, "cwd": "/secret/path", "chain": ["secret"]},
+                    {"id": "srv-other", "holder": "OTHER", "kind": "unknown", "label": "other_proc", "mb": 500, "n": 1},
+                ],
+            },
+            "regs": [
+                {"host": "pool", "state": "pool", "queues": [{"root": "/data/owner/p1", "jobs": "jobs/a.txt", "project": "p1"}]},
+                {"host": "srv-mine", "state": "active", "queues": [
+                    {"root": "/data/owner/p1", "jobs": "jobs/a.txt", "project": "p1"},
+                    {"root": "/data/other/p2", "jobs": "jobs/b.txt", "project": "p2", "pool": True},
+                ]},
+            ],
+            "pool": {
+                "lists": {
+                    "k1": {"project": "p1", "root": "/data/owner/p1", "jobs": "jobs/a.txt", "host": "srv-other", "since": T0 - 600,
+                           "why": "池里借着的服务器都放不下（srv-other：显存不够）；正在借 OTHER 的 srv-other"},
+                    "k2": {"project": "p2", "root": "/data/other/secret", "jobs": "jobs/b.txt", "host": "pool", "since": T0 - 300, "why": "等待"},
+                },
+            },
+        }
+        acc = U.Access({"p1"}, {"srv-mine"}, {"srv-mine"})
+        with mock.patch.object(PO, "member", return_value=False):
+            v0 = U.view(amy, snap, acc)
+        self.assertIsNone(v0["pool"])                                        # 非池成员不给共有池概况
+        # 共享盘：仅总盘 + 本人 OWNER，屏蔽他人与公共、names/owners_set/now
+        self.assertEqual([o["name"] for o in v0["disk"]["owners"]], ["OWNER"])
+        self.assertEqual(v0["disk"]["colors"], {"OWNER": "#1D9E75"})
+        self.assertEqual([a["key"] for a in v0["disk"]["alerts"]], ["low", "burst:OWNER", "over:owner"])
+        for forbidden in ("names", "owners_set", "now"):
+            self.assertNotIn(forbidden, v0["disk"])
+        # 本人服务器：仅 OWNER 持有的 srv-b 与 srv-mine，屏蔽 ops/holders/quota/他人服务器
+        fl = v0["fleet"]
+        self.assertEqual((fl["scope"], fl["ops"], fl["holders"], fl["quota"]), ("self", None, [], None))
+        self.assertEqual([s["id"] for s in fl["servers"]], ["srv-b"])
+        self.assertEqual([s["id"] for s in fl["mine"]], ["srv-mine"])
+        sb = fl["servers"][0]
+        self.assertEqual(sb["borrow"], {"since": T0 - 3600, "until": T0 + 3600, "by": "ME", "returned": None})
+        for forbidden in ("reserve", "using", "lease_cut"):
+            self.assertNotIn(forbidden, sb)
+        self.assertEqual([w["label"] for w in sb["sample"]["work"]], ["keep_alive.py", "借用方任务", "owner_tool.py"])
+        self.assertNotIn("secret_train.py", json.dumps(sb, ensure_ascii=False))
+        self.assertNotIn("secret_repo", json.dumps(sb, ensure_ascii=False))
+        self.assertEqual(fl["unknown"], [{"id": "srv-b", "holder": "OWNER", "kind": "unknown", "label": "proc", "mb": 500, "n": 1}])
+        # 自用主机入池跑他人任务：脱敏他人项目名与 cwd
+        sm = fl["mine"][0]
+        self.assertEqual([w["label"] for w in sm["work"]], ["my_job", "算力池任务"])
+        self.assertEqual([w["label"] for w in sm["sample"]["work"]], ["my_job", "算力池任务"])
+        self.assertNotIn("secret_other_job", json.dumps(sm, ensure_ascii=False))
+        # 池成员：可见聚合概况与脱敏后的本人清单，不泄他人项目/服务器 ID/持有人名
+        with mock.patch.object(PO, "member", return_value=True):
+            v1 = U.view(amy, snap, acc)
+        self.assertIsInstance(v1["pool"], dict)
+        self.assertEqual(v1["pool"]["summary"]["lent"], 1)
+        self.assertEqual(v1["pool"]["summary"]["gpus_total"], 3)
+        self.assertEqual(v1["pool"]["summary"]["gpus_busy"], 2)
+        self.assertEqual(v1["pool"]["summary"]["running_jobs"], 2)
+        self.assertEqual(len(v1["pool"]["my_lists"]), 1)
+        ml = v1["pool"]["my_lists"][0]
+        self.assertEqual(ml["project"], "p1")
+        self.assertIsNone(ml["host"])                                        # 非 pool 的具体他人主机置 None
+        self.assertNotIn("srv-other", json.dumps(v1["pool"], ensure_ascii=False))
+        self.assertNotIn("OTHER", json.dumps(v1["pool"], ensure_ascii=False))
+        self.assertNotIn("p2", json.dumps(v1["pool"], ensure_ascii=False))
 
 
 if __name__ == "__main__":

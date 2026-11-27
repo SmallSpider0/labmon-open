@@ -108,13 +108,14 @@ function home() {
   const last = fin && fin.t1 > now ? fin : null;
   const mk = D.projects.flatMap(p => (p.markers || []).map(m => ({...m, p}))).filter(m => m.ts > now).sort((a, b) => a.ts - b.ts)[0];   // 几个项目时写明是谁的
   const na = al.length + fal.length + pal.length;
+  const selfView = LIVE && ME && !ME.admin, fLbl = selfView ? (D.fleet ? "我的服务器" : "共享盘") : "组内", fHref = selfView && !D.fleet ? "#/fleet/disk" : "#/fleet";
   let s = intro + `<div class="kpis k5">
     <div class="kpi"><div class="k">运行 / 等待</div><div class="v">${jobs.length}<small> / ${waits.length} 个任务</small></div><div class="s">${[esc([...new Set(jobs.map(j => j.project))].join("、")), waits.filter(w => w.excl).length ? waits.filter(w => w.excl).length + " 个独占在等" : "", blocked.length ? blocked.length + " 条队列受阻" : ""].filter(Boolean).join("，") || "—"}</div></div>
     <div class="kpi"><div class="k">显存</div><div class="v">${pct(gUsed, gTot) ?? "—"}<small>%</small></div><div class="s">${mb2g(gUsed)} / ${mb2g(gTot)} GiB，${gu.length} 张卡${U.v != null ? `，<span ${tip(U.tip)}>${U.span}利用率 ${U.big}</span>` : ""}</div></div>
     <div class="kpi"><div class="k">最早到期的租期</div><div class="v">${lease ? leaseHtml(lease.lease_end) : "—"}</div><div class="s">${lease ? `${esc(hostShort(lease))} · ${ts(lease.lease_end)} 到期` : "没有登记租期"}</div></div>
     <div class="kpi"><div class="k">预计全部跑完</div><div class="v" style="font-size:19px">${last ? ts(last.t1) : "—"}</div><div class="s" ${mk ? tip(`下一个里程碑：${projName(mk.p.id, {plain: true})}${mk.label} ${ts(mk.ts)}`) : ""}>${last ? `${projName(last.p)}剩 ${dur(last.t1 - now)}` : "没有排队的任务"}${mk ? `，离 ${mk.p.id === last?.p ? "" : projName(mk.p.id)}${esc(mk.label)} ${dur(mk.ts - now)}` : ""}</div></div>
-    <div class="kpi"><div class="k">告警</div><div class="v" style="color:${na ? "var(--bad)" : "var(--ok)"}">${na}<small> 条</small></div><div class="s">${na ? (fal.length || pal.length ? "含" + [fal.length ? `组内 ${fal.length} 条` : "", pal.length ? `项目 ${pal.length} 条` : ""].filter(Boolean).join("、") + "，" : "") + "见下方" : `${D.hosts.filter(h => h.worker_up).length} / ${D.hosts.length} 台 worker 在跑`}</div></div></div>`;
-  if (na) s += `<div class="alerts">${al.map(a => `<div>⚠ ${esc(a)}</div>`).join("")}${fal.map(a => `<div>⚠ <a href="#/fleet">组内</a>：${esc(a)}</div>`).join("")}`
+    <div class="kpi"><div class="k">告警</div><div class="v" style="color:${na ? "var(--bad)" : "var(--ok)"}">${na}<small> 条</small></div><div class="s">${na ? (fal.length || pal.length ? "含" + [fal.length ? `${fLbl} ${fal.length} 条` : "", pal.length ? `项目 ${pal.length} 条` : ""].filter(Boolean).join("、") + "，" : "") + "见下方" : `${D.hosts.filter(h => h.worker_up).length} / ${D.hosts.length} 台 worker 在跑`}</div></div></div>`;
+  if (na) s += `<div class="alerts">${al.map(a => `<div>⚠ ${esc(a)}</div>`).join("")}${fal.map(a => `<div>⚠ <a href="${fHref}">${fLbl}</a>：${esc(a)}</div>`).join("")}`
     + `${pal.map(({ps, m}) => `<div>⚠ ${ps.map(p => `<a href="#/p/${encodeURIComponent(p.id)}">${esc(p.title || p.id)}</a>`).join("、")}：${esc(m)}</div>`).join("")}</div>`;
   s += `<div class="card"><div class="chd"><b>主机</b><span class="sm mut">点一行看详情</span></div><div class="scroll"><table>
     <tr><th>主机</th><th>worker</th><th style="min-width:180px" ${tip("每张卡一行：条是显存，数字是显存占比 · GPU 近 1 小时平均利用率（保活按 0 算）")}>显存 · 利用率</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("组里各服务器挂的同一块盘：我们各项目、公共目录、我们的其他目录、其他人；红线是告警线。按人看在组内服务器的「共享盘」")}>共享盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
@@ -492,7 +493,7 @@ function resCard(h) {
     const eta = x.dk.eta_days;
     s += row(`<a href="#/fleet/disk">共享盘</a>`, sharedBar(x, false), `<span style="${x.dk.free < x.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(x.dk.free)} / ${Math.round(x.dk.total)} GiB</span>${eta != null ? `<span class="mut" style="${eta < 3 ? "color:var(--bad)" : ""}">约 ${eta} 天满</span>` : ""}`,
       pts.length > 1 ? spark(dg, now - 7 * 86400, now, pts, {lo, hi, ref: x.dk.warn_gb, gap: 3 * 3600}) + "7 天" : "7 天曲线攒数据中",
-      `${x.dk.path}：组里各服务器挂的同一块盘，总量与剩余由 df 直接读出\n${diskProg(D.disk)}\n红线：剩余低于 ${x.dk.warn_gb} GiB 告警\n点「共享盘」看各人用了多少`);
+      `${x.dk.path}：组里各服务器挂的同一块盘，总量与剩余由 df 直接读出\n${diskProg(D.disk)}\n红线：剩余低于 ${x.dk.warn_gb} GiB 告警\n点「共享盘」看${LIVE && ME && !ME.admin ? "本人用量" : "各人用了多少"}`);
   }
   const nf = pr.nfs;
   if (nf) {                                       // 共享盘读写延迟：条的一半是近 14 天基线（竖线），超过基线变红

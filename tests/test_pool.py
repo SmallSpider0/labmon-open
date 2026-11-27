@@ -1101,6 +1101,69 @@ class PoolGuardTest(Base):
         self.assertIn("算力池借来的", out["usage"])
         self.assertEqual(P.lent_ids([{"id": "a", "borrow": {"pool": True}}, {"id": "b", "borrow": {}}, {"id": "c", "borrow": {"pool": True}, "returned": "x"}]), {"a"})
 
+    def test_summary_aggregation_and_redaction(self):
+        """#211：pool.summary 聚合卡数/忙碌卡数/在跑任务/待放清单（含空池兼容与自用入池主机），对普通成员脱敏 host 与 why。"""
+        # 空池 / 无配置时返回全 0，不报错、不伪造
+        empty = P.summary({}, own_projects={"pa"}, cfg={"servers": []})
+        self.assertEqual((empty["on"], empty["lent"], empty["gpus_total"], empty["gpus_busy"], empty["running_jobs"], empty["queued_lists"], empty["my_lists"]),
+                         (0, 0, 0, 0, 0, 0, []))
+        snap = {
+            "hosts": [
+                {"id": "a", "borrow": {"pool": True}, "worker_up": True, "status": {
+                    "info": {"gpus": [{"i": 0, "util": 90, "used": 20000, "total": 46068}, {"i": 1, "util": 0, "used": 0, "total": 46068}]},
+                    "running": [
+                        {"project": "pa", "name": "j1", "hold": False, "gpus": ["g0"]},
+                        {"project": "pb", "name": "j2", "hold": True, "gpus": []},
+                    ],
+                }},
+                {"id": "self1", "worker_up": True, "status": {
+                    "info": {"gpus": [{"i": 0, "util": 50, "used": 10000, "total": 46068}]},
+                    "running": [
+                        {"project": "pb", "name": "j3", "root": "/r/pb", "queue": "jobs/pool_j3.txt", "hold": False, "gpus": ["g0"]},
+                        {"project": "pa", "name": "j_own", "root": "/r/pa", "queue": "jobs/own.txt", "hold": False, "gpus": []},
+                    ],
+                }},
+            ],
+            "regs": [
+                {"host": "self1", "queues": [
+                    {"root": "/r/pb", "jobs": "jobs/pool_j3.txt", "project": "pb", "pool": True},
+                    {"root": "/r/pa", "jobs": "jobs/own.txt", "project": "pa"},
+                ]},
+            ],
+            "fleet": {
+                "servers": [
+                    {"id": "a", "lend": {"on": True, "open": True, "lent": True, "returning": False, "rest": None}},
+                    {"id": "b", "lend": {"on": True, "open": False, "lent": False, "returning": False, "rest": NOW + 3600}},
+                ],
+                "mine": [
+                    {"id": "self1", "lend": {"on": True, "open": True, "mine": True, "placed": 1, "rest": None}},
+                ],
+            },
+            "pool": {
+                "lists": {
+                    "k1": {"project": "pa", "root": "/r/pa", "jobs": "jobs/a.txt", "host": "a", "since": NOW - 600,
+                           "why": "正在借 SECRET_OWNER 的 srv-secret"},
+                    "k2": {"project": "pa", "root": "/r/pa", "jobs": "jobs/a2.txt", "host": "pool", "since": NOW - 300,
+                           "why": "池里借着的服务器都放不下（srv-secret：显存不够）；没有能借的入池服务器（不在时段 2 台）"},
+                    "k3": {"project": "pb", "root": "/r/pb", "jobs": "jobs/b.txt", "host": "pool", "since": NOW - 200, "why": "等待"},
+                    "k4": {"project": "pa", "root": "/r/pa", "jobs": "jobs/done.txt", "host": "pool", "since": NOW - 900, "done": True, "why": P.POOL_DONE},
+                },
+            },
+        }
+        s = P.summary(snap, own_projects={"pa"}, cfg={"servers": []})
+        self.assertEqual((s["on"], s["open"], s["rest"], s["lent"], s["back"], s["self"], s["placed"]), (3, 2, 1, 1, 0, 1, 1))
+        self.assertEqual((s["gpus_total"], s["gpus_busy"], s["running_jobs"], s["queued_lists"]), (3, 2, 2, 3))
+        self.assertEqual([x["jobs"] for x in s["my_lists"]], ["jobs/done.txt", "jobs/a.txt", "jobs/a2.txt"])
+        self.assertIsNone(s["my_lists"][1]["host"])                           # 非 pool 的借用主机置 None
+        self.assertEqual(s["my_lists"][2]["host"], "pool")
+        import json as _json
+        blob = _json.dumps(s["my_lists"], ensure_ascii=False)
+        self.assertNotIn("srv-secret", blob)
+        self.assertNotIn("SECRET_OWNER", blob)
+        self.assertIn("算力池正在调度可用服务器", s["my_lists"][1]["why"])
+        self.assertIn("当前没有可借的入池服务器", s["my_lists"][2]["why"])
+        self.assertEqual(s["my_lists"][0]["why"], P.POOL_DONE)
+
 
 class CollectHookTest(Base):
     def test_tick_result_in_snapshot_and_errors_kept_out(self):

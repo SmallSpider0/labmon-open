@@ -1044,12 +1044,22 @@ def overview_dense() -> dict:
 ALL = {"overview": overview, "overview_evil": overview_evil, "overview_sparse": overview_sparse,
        "project": project, "project_evil": project_evil, "project_sparse": project_sparse}
 def overview_user() -> dict:
-    """普通用户只有一台可用主机、一个在用项目和一个已归档项目。"""
+    """普通用户只有一台可用主机、一个在用项目和一个已归档项目（无绑定组内服务器、非池成员）。"""
     return view(Ident("amy", "user", frozenset({"read", "project"}), "session", "k"), overview(),
                 Access({"proj-a", "proj-old"}, {"srv-a"}, {"srv-a"}))
 
 
-EXTRA = {"overview_user": overview_user, "records": records, "records_evil": records_evil, "events": project_events, "events_evil": project_events_evil,
+def overview_user_member() -> dict:
+    """#211：绑定组内人员 OWNER 且为算力池成员的普通用户快照（经真实 users.view 产出）。"""
+    from unittest.mock import patch
+    from labmon import pool as PO, users as U
+    with patch.object(U, "person_of", return_value=("OWNER", None)), patch.object(PO, "member", return_value=True):
+        return view(Ident("amy", "user", frozenset({"read", "project"}), "session", "k"), overview(),
+                    Access({"proj-a", "proj-old"}, {"srv-a"}, {"srv-a"}))
+
+
+EXTRA = {"overview_user": overview_user, "overview_user_member": overview_user_member, "records": records, "records_evil": records_evil,
+         "events": project_events, "events_evil": project_events_evil,
          "project_overdue": project_overdue, "project_longq": project_longq, "project_moved": project_moved, "project_pool_back": project_pool_back, "events_overdue": project_events_overdue,
          "project_dense": project_dense, "overview_dense": overview_dense, "project_many": project_many,
          "project_deps": project_deps, "project_par10": project_par10}

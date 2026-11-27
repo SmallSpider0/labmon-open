@@ -74,7 +74,7 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 - **综合状态**：`labmon status`（查主机显存、GPU 保活状态、容器 CPU 记账、车道进度与预计结束时间、挪法建议、告警）。
 - **推演结束时间**：以 `labmon status` 和 `labmon worker status` 的系统推演为准，不自行拿 `est_min` 外推。
 - **主机与卡**：`labmon host list` 查看在用、借用及共用目录主机；`labmon worker status <主机>` 查看具体队列与任务。
-- **磁盘用量**：`labmon disk` 查看共享盘与各台本地盘用量、增量及 Top 目录，不跑 du。
+- **磁盘用量**：`labmon disk` 查看本项目共享盘与各台本地盘用量、增量及 Top 目录（查本人共享盘总占用用 `labmon disk --me`），不跑 du。
 - **历史与事件**：`labmon records [--host <主机>]` 查看拉起、续租、失败及临时指令记录。
 
 ### 暂停与让路

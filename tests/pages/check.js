@@ -2414,7 +2414,7 @@ ta("project", "项目页打开时 events.json 连不上（#177，Codex 审查 #1
 });
 
 /* ---------- 看板账号（#160）：普通用户、从公网入口来的管理员看到什么；「我的账号」「管理 → 账号」；会话失效回登录页；登录页 ---------- */
-const OVU = J("overview_user.json"), lgSrc = rd("login.js"), lgHtml = rd("login.html");
+const OVU = J("overview_user.json"), OVUM = J("overview_user_member.json"), lgSrc = rd("login.js"), lgHtml = rd("login.html");
 const USER_ME = {...ADMIN_ME, name: "amy", role: "user", role_name: "普通用户", scopes: ["read"], admin: false, ops: false, write: false, token_scopes: ["read"],
   sessions: [{id: "s1", t: NOW - 86400, seen: NOW - 60, until: NOW + 29 * 86400, entry: "lan", entry_name: "内网入口", ua: "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_0) AppleWebKit Safari/605", this: true},
              {id: "s2", t: NOW - 3 * 86400, seen: NOW - 7200, until: NOW + 27 * 86400, entry: "public", entry_name: "公网入口", ua: BAD}],
@@ -2458,8 +2458,9 @@ t("auth", "普通用户：侧栏没有组内服务器与「管理」，有「我
     ok(!h.includes("请从内网入口操作，或为此管理员开启公网平台操作"), r + "：普通用户不该看到入口的说法");
   }
   has(side(U), 'href="#/me"', "侧栏的「我」");
-  has(page(U, "#/fleet"), "组内服务器只有管理员看得到");
-  has(page(U, "#/admin/users"), "组内服务器只有管理员看得到");
+  has(page(U, "#/fleet"), "你名下当前没有持有的服务器");
+  has(page(U, "#/fleet/people"), "组内人员与账号管理只有管理员看得到");
+  has(page(U, "#/admin/users"), "组内人员与账号管理只有管理员看得到");
   page(U, "#/log"); ok(!/平台操作/.test(el(U, "top").innerHTML), "记录的分类里还有平台操作");
   const m = page(U, "#/p/proj-a/manage"); has(m, "只读：你的账号没有项目的写权限"); has(m, " disabled"); ok(!m.includes("归档这个项目"), "普通用户的管理抽屉里有归档");
   const P = mkCtx(pgSrc, PJ, {filename: "page.js", me: USER_ME});
@@ -2664,7 +2665,7 @@ t("auth", "「我的账号」：角色、入口、能做什么；改口令表单
   const U = accCtx(OVU, USER_ME, "#/me");
   run(U, "ACC.at.me = 1");
   const h = page(U, "#/me"); clean(h, "#/me");
-  has(h, "普通用户"); has(h, "从内网入口来"); has(h, "组内服务器与平台操作只有管理员看得到"); has(el(U, "top").innerHTML, "我的账号");
+  has(h, "普通用户"); has(h, "从内网入口来"); has(h, "他人服务器、人员管理与平台操作只有管理员看得到"); has(el(U, "top").innerHTML, "我的账号");
   has(h, "下载安装脚本"); has(h, 'data-acc="open-pw"'); has(h, 'data-acc="out"'); ok(!h.includes("acpo") && !h.includes("acn"), "概览展开了表单");
   let sec = page(U, "#/me/security"); has(sec, "Safari · macOS"); has(sec, "这个浏览器");
   ok(!sec.includes('data-id="s1"') && !sec.includes("acpo"), "当前会话不吊销，口令表单按需展开");
@@ -2742,7 +2743,7 @@ ta("auth", "关闭口令浮窗后，迟到的错误不会显示在另一个浮�
 
 t("auth", "「我的账号」能做什么说人话、不列作用域名；项目归属写人员名、账号放悬停（#15）", () => {
   const U = accCtx(OVU, OWNER_ME, "#/me"); run(U, "ACC.at.me = 1");
-  const h = page(U, "#/me"); has(h, "可以查看能用的主机，管理自己的项目"); ok(!/能做：|只读、项目/.test(h), "还在列作用域名");
+  const h = page(U, "#/me"); has(h, "可以查看能用的主机、本人共享盘与自己持有的服务器，管理自己的项目"); ok(!/能做：|只读、项目/.test(h), "还在列作用域名");
   has(h, '<div class="acc-name"><b>amy</b>', "角色、入口的标签与名字同一行");
   const A = accCtx(OV, ADMIN_ME, "#/me"); run(A, "ACC.at.me = 1");
   has(page(A, "#/me"), "可以管理全部项目、主机与账号");
@@ -3055,7 +3056,55 @@ t("overview", "算力池概况（#76）：摘要行写入池、借着与在等�
   has(dh, "jobs/cpu.txt"); has(dh, "行都跑完了"); ok(!dh.slice(0, 600).includes("等了"), "跑完的不该写等了多久");
   const P = accCtx(OV, PUB_ME), pd = drw(P, "#/fleet/pool");
   ok(!pd.includes('data-lend="open"') && !pd.includes('data-lend="rc"'), "不能做平台操作的管理员不该有入池设置与收回"); has(pd, "请从内网入口操作");
-  const U = accCtx(OVU, USER_ME); page(U, "#/fleet/pool"); ok(!run(U, "DKEY"), "普通用户不该开算力池抽屉");
+  const U = accCtx(OVU, USER_ME); page(U, "#/fleet/pool"); ok(!run(U, "DKEY"), "非池成员普通用户不该开算力池抽屉");
+});
+ta("auth", "普通用户入口开放（#211）：我的资源侧栏、本人服务器/抽屉、本人共享盘、所属共有池聚合抽屉与防泄密；poll 带 D.fleet 不误刷", async () => {
+  const MEMBER_ME = {...OWNER_ME, fleet_person: "OWNER", pool_member: true};
+  const U = accCtx(OVUM, MEMBER_ME);
+  // 1. 侧栏有「我的资源」三项，不含「人员」「保活守护」
+  const sd = side(U);
+  has(sd, 'data-sec="myres"'); has(sd, "我的资源"); has(sd, 'href="#/fleet"'); has(sd, 'href="#/fleet/disk"'); has(sd, 'href="#/fleet/pool"');
+  ok(!sd.includes("#/fleet/people") && !sd.includes("#/fleet/guard"), "普通用户侧栏出现了人员或保活守护");
+  // 2. 我的服务器页：含本人 srv-b、保留借用人名 ME、屏蔽对方项目 proj-b 与他人服务器、无平台操作按钮
+  const fl = page(U, "#/fleet"); clean(fl, "普通用户我的服务器");
+  has(fl, "OWNER"); has(fl, "借给 ME"); has(fl, "算力池");
+  for (const bad of ["PERSON3", "PERSON4", "PERSON7", "srv-d", "srv-e", "srv-h", "proj-b", 'data-fop="sync"', 'data-drw="#/fleet/renew"']) {
+    ok(!fl.includes(bad), "我的服务器页泄露或多余：" + bad);
+  }
+  // 3. 本人服务器抽屉：可打开且不含平台操作按钮/开机参数/人员链接
+  const srv = drw(U, "#/fleet/srv/srv-b"); clean(srv, "普通用户本人服务器抽屉");
+  has(srv, "OWNER"); has(srv, "已借给 ME"); has(srv, "<span>借用人</span><span>ME</span>");
+  for (const bad of ['data-fop="wiz"', 'data-probe=', 'data-drw="#/fleet/people', "开机参数", "proj-b"]) {
+    ok(!srv.includes(bad), "本人服务器抽屉泄露或多余：" + bad);
+  }
+  // 4. 共享盘页：仅总盘 + 本人 OWNER 目录，无他人目录与归属表单
+  const dk = page(U, "#/fleet/disk"); clean(dk, "普通用户共享盘");
+  has(dk, "OWNER"); has(dk, "owner/archives"); has(dk, "其他已用");
+  for (const bad of ["PERSON3", "stray_dir", 'data-disk="own"', "设置提醒线"]) {
+    ok(!dk.includes(bad), "普通用户共享盘泄露或多余：" + bad);
+  }
+  // 5. 所属共有池聚合抽屉：池成员可打开，展示 4 格聚合指标与脱敏后的本人清单，不泄他人服务器与人名
+  const pl = drw(U, "#/fleet/pool"); clean(pl, "普通用户共有池抽屉");
+  has(pl, "入池规模"); has(pl, "运行中池任务"); has(pl, "我的池清单"); has(pl, "jobs/p.txt");
+  for (const bad of ["PERSON3", "PERSON6", "PERSON7", "srv-g", "srv-h", "proj-b", "jobs/p2.txt"]) {
+    ok(!pl.includes(bad), "普通用户共有池抽屉泄露他人信息：" + bad);
+  }
+  // 6. #/fleet/people 拦截
+  has(page(U, "#/fleet/people"), "组内人员与账号管理只有管理员看得到");
+  // 7. poll() 角色变化判定回归：普通用户收到含 D.fleet(scope=self) 的快照不 reload；收到管理员快照（无 access）触发 reload
+  run(U, `RELOADED = 0; location.reload = () => { RELOADED++; };
+    fetch = () => Promise.resolve({ok: true, json: async () => JSON.parse(JSON.stringify(D))});`);
+  await run(U, "poll()");
+  ok(run(U, "RELOADED") === 0, "普通用户收到含本人 D.fleet 的快照误触发了 location.reload");
+  run(U, `fetch = () => Promise.resolve({ok: true, json: async () => (${JSON.stringify(OV)})});`);
+  await run(U, "poll()");
+  ok(run(U, "RELOADED") === 1, "普通用户变成管理员快照时未触发 location.reload");
+  // 管理员收到降级后的普通用户快照（fleet.ops 缺失）应触发 reload
+  const A = accCtx(OV, ADMIN_ME);
+  run(A, `RELOADED = 0; location.reload = () => { RELOADED++; };
+    fetch = () => Promise.resolve({ok: true, json: async () => (${JSON.stringify(OVUM)})});`);
+  await run(A, "poll()");
+  ok(run(A, "RELOADED") === 1, "管理员被降级为普通用户快照时未触发 location.reload");
 });
 t("overview", "算力池概况（#76）：要还的写出来；都没入池、没有清单（含快照里没有 pool）时各写一句", () => {
   const C = ovCtx(OV, RR, "#/fleet");

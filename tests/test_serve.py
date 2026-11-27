@@ -936,7 +936,9 @@ class AuthTest(unittest.TestCase):
         user = make_token("amy", role="user", scopes=("read",))
         K.hosts_file().write_text('[[hosts]]\nid = "a"\nssh = "remote-a"\nusers = ["amy"]\n')
         ov = json.loads(self.call(self.lan + "/overview.json", tok=user)[2])
-        self.assertEqual((ov["fleet"], ov["wake"], ov["notices"], ov["disk"]), (None, [], [], {"df": {"free": 1, "used": 1, "total": 2}, "alerts": []}))
+        self.assertEqual((ov["fleet"], ov["wake"], ov["notices"], ov["disk"]),
+                         (None, [], [], {"df": {"free": 1, "used": 1, "total": 2}, "person": "amy", "owners": [], "alerts": []}))
+        self.assertIsNone(ov["pool"])
         self.assertEqual([c[0] for c in ov["event_cats"]], ["link", "queue"])
         page = self.call(self.lan + "/", tok=user)[2].decode()
         self.assertNotIn("srv-secret-id", page)                             # 现渲染的：不发磁盘上带全量数据的 index.html
@@ -949,6 +951,77 @@ class AuthTest(unittest.TestCase):
         self.assertEqual(rec["cats"], {"link": 1})
         admin = make_token()
         self.assertEqual(len(json.loads(self.call(self.lan + "/records.json", tok=admin)[2])["rows"]), 3)
+
+    def test_member_portal_routes_and_isolation(self):
+        """#211：普通用户可读自己持有服务器曲线与本人共享盘；他人与不存在 ID 统一 403；换人或改绑后旧持有人立即 403；管理路由与平台写路由均 403。"""
+        from labmon import fleetboot as FB
+        FB.set_person("OWNER", create=True, roster_only=True)
+        FB.set_person("OTHER", create=True, roster_only=True)
+        K.hosts_file().write_text(
+            '[fleet]\n'
+            '[[fleet.servers]]\nid = "s-own"\nholder = "OWNER"\nssh = "root@192.0.2.10"\nport = 15101\npool = "p1"\n'
+            '[[fleet.servers]]\nid = "s-other"\nholder = "OTHER"\nssh = "root@192.0.2.11"\nport = 15102\npool = "p1"\n'
+        )
+        amy = make_token("amy", role="user", scopes=("read", "project"))
+        bob = make_token("bob", role="user", scopes=("read", "project"))
+        with S.U._edit() as d:
+            d["users"]["amy"]["fleet_person"] = "OWNER"
+            d["users"]["bob"]["fleet_person"] = "OTHER"
+        admin = make_token("boss")
+        # 1. 曲线路由：本人 200，他人与不存在 ID 统一 403（防 ID 枚举）
+        with mock.patch.object(S.FV, "detail", return_value={"id": "s-own", "series": [{"t": 1}]}):
+            rc, _, body = self.call(self.lan + "/fleet/s-own.json", tok=amy)
+            self.assertEqual((rc, json.loads(body)["id"]), (200, "s-own"))
+            self.assertEqual(self.call(self.lan + "/fleet/s-own.json", tok=admin)[0], 200)
+        for path in ("/fleet/s-other.json", "/fleet/s-ghost.json", "/fleet/op.json", "/fleet/plan.json",
+                     "/fleet/person/OWNER.json", "/fleet/person/OTHER.json"):
+            self.assertEqual(self.call(self.lan + path, tok=amy)[0], 403, path)
+        # 平台写路由仍 403
+        for path in ("/fleet/op/renew", "/fleet/op/off", "/fleet/op/swap", "/fleet/probe/s-own", "/renew/s-own/reserve"):
+            self.assertEqual(self.call(self.lan + path, {}, tok=amy)[0], 403, path)
+        # 2. 换人后旧持有人立即 403，新持有人立即 200
+        K.hosts_file().write_text(
+            '[fleet]\n'
+            '[[fleet.servers]]\nid = "s-own"\nholder = "OTHER"\nssh = "root@192.0.2.10"\nport = 15101\npool = "p1"\n'
+            '[[fleet.servers]]\nid = "s-other"\nholder = "OTHER"\nssh = "root@192.0.2.11"\nport = 15102\npool = "p1"\n'
+        )
+        self.assertEqual(self.call(self.lan + "/fleet/s-own.json", tok=amy)[0], 403)
+        with mock.patch.object(S.FV, "detail", return_value={"id": "s-own", "series": []}):
+            self.assertEqual(self.call(self.lan + "/fleet/s-own.json", tok=bob)[0], 200)
+        # 3. 改绑 fleet_person 后旧绑定立即失效
+        FB.set_person("NEWP", create=True, roster_only=True)
+        with S.U._edit() as d:
+            d["users"]["bob"]["fleet_person"] = "NEWP"
+        self.assertEqual(self.call(self.lan + "/fleet/s-own.json", tok=bob)[0], 403)
+        # 4. /api/me 对普通用户返回本人 fleet_person，不泄露冲突报错
+        me_amy = json.loads(self.call(self.lan + "/api/me", tok=amy)[2])
+        self.assertEqual(me_amy["fleet_person"], "OWNER")
+        self.assertNotIn("fleet_person_error", me_amy)
+        # 5. GET /api/disk：仅返回总盘 + 本人目录；备用节点回 409 standby
+        save_json(state_dir() / "snapshot.json", {
+            "generated": time.time(),
+            "disk": {
+                "root": "/data/share", "df": {"total": 1000 * K.GIB, "used": 400 * K.GIB, "free": 600 * K.GIB},
+                "eta": 15.0, "warn_gb": 30, "names": ["OWNER", "OTHER"], "now": "/data/share/other/secret",
+                "owners": [
+                    {"name": "OWNER", "public": False, "b": 100 * K.GIB, "d24": 5 * K.GIB, "d7": 10 * K.GIB, "cold": 20 * K.GIB,
+                     "units": [{"u": "owner/exp", "b": 100 * K.GIB, "d24": 5 * K.GIB, "d7": 10 * K.GIB, "n": 42}]},
+                    {"name": "OTHER", "public": False, "b": 300 * K.GIB, "units": [{"u": "other/secret", "b": 300 * K.GIB}]},
+                ],
+                "alerts": [{"key": "low", "msg": "剩余低"}, {"key": "burst:OWNER", "msg": "OWNER 涨快"}, {"key": "burst:OTHER", "msg": "OTHER 涨快"}],
+            },
+        })
+        rc, _, body = self.call(self.lan + "/api/disk", tok=amy)
+        self.assertEqual(rc, 200, body)
+        dk = json.loads(body)
+        self.assertIn("OWNER", dk["out"])
+        self.assertIn("owner/exp", dk["out"])
+        self.assertNotIn("OTHER", dk["out"])
+        self.assertNotIn("other/secret", json.dumps(dk, ensure_ascii=False))
+        self.assertEqual([o["name"] for o in dk["data"]["owners"]], ["OWNER"])
+        with mock.patch.object(S.LS, "primary", return_value=False):
+            rc, _, body = self.call(self.lan + "/api/disk", tok=amy)
+            self.assertEqual((rc, json.loads(body).get("standby")), (409, True))
 
     def test_project_owner_and_host_permissions(self):
         admin = make_token()
