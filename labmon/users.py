@@ -517,6 +517,7 @@ def add(name: str, role: str, by: str, t: float | None = None, *, person: str) -
             raise Denied(409, str(e)) from e
         code, st = _new_code(t)
         d["users"][name] = {"role": role, "pw": None, "setup": st, "t": round(t), "by": by, "fleet_person": person}
+    _wake_member_hosts(name)
     _log(f"{by} 加了账号 {name}（{ROLES[role]}），关联组内人员 {person}，设置码 24 小时内有效")
     return code
 
@@ -531,6 +532,7 @@ def bind_person(name: str, person: str, by: str) -> str:
             return f"{k} 已关联组内人员 {person}"
         _check_bind(d["users"], k, person, existing=True)
         d["users"][k]["fleet_person"] = person
+    _wake_member_hosts(k)
     msg = f"{k} 已关联组内人员 {person}"
     _log(f"{by} 把账号 {k} 关联到组内人员 {person}")
     return msg
@@ -577,6 +579,20 @@ def person_of(name: str | None) -> tuple[str | None, str | None]:
     users = _read()["users"]
     k = _key(users, name) if name else None
     return people_of(users)[k] if k else (None, None)
+
+
+def _wake_member_hosts(acct: str) -> None:
+    """新开通账号或补绑定持有人后（#224），清除其名下自动接入组员服务器的 relaunch 冷却与已下发缓存，
+    避免此前删账号留下的冷却或缓存拖延自动恢复拉起（auto:account_removed 由 overview.relaunch 自动放行）。"""
+    try:
+        from . import overview as O
+        for h in user_hosts():
+            if h.get("member_auto") and acct.lower() in host_users(h):
+                hid = str(h["id"])
+                O.clear_relaunch(hid)
+                O.clear_sent(hid)
+    except ConfigError:
+        pass
 
 
 def free_people(users: dict | None = None) -> list[str]:
@@ -739,11 +755,13 @@ def reset(name: str, by: str, self_ok: bool = False, keep_tokens: bool = False, 
     return code
 
 
-def remove(name: str, by: str) -> str:
+def remove(name: str, by: str, *, stop_fn=None) -> str:
     """删掉一个账号（这人不再用看板）：删人时唯一的清理入口（#19）。连同它的会话与令牌（下一次请求就失效）、人员绑定（随账号一起删）、
-    能用的主机（主机清单的 users）、共有池显式成员（[pools.*].members，#212）、项目归属（meta.json 的 owner）与推送配置。暂停是谁下的（[sched.pause_by]、worker 指令的 by）不动：
-    同名新账号要管理员再把项目交给它才用得上。删不了自己，也删不了最后一个管理员。"""
-    from .config import HOSTS_LOCK
+    能用的主机（主机清单的 users）、共有池显式成员（[pools.*].members，#212）、项目归属（meta.json 的 owner）与推送配置。
+    若该账号名下存在自动接入的组员服务器（member_auto，#224）且当前 worker 在线，锁外尽力停掉其 worker 后撤出受管列表。
+    暂停是谁下的（[sched.pause_by]、worker 指令的 by）不动：同名新账号要管理员再把项目交给它才用得上。删不了自己，也删不了最后一个管理员。"""
+    from .config import HOSTS_LOCK, host_defaults
+    auto_hosts: list[dict] = []
     with HOSTS_LOCK, PJ._reg_locked(), _edit() as d:
         k = _key(d["users"], name)
         if not k:
@@ -752,6 +770,10 @@ def remove(name: str, by: str) -> str:
             raise Denied(409, "不能删自己的账号")
         if d["users"][k].get("role") == "admin" and _admins(d) == [k]:
             raise Denied(409, f"{k} 是最后一个管理员，删不掉：先把别人设为管理员")
+        try:
+            auto_hosts = [host_defaults(h) for h in user_hosts() if h.get("member_auto") and k.lower() in host_users(h)]
+        except ConfigError:
+            auto_hosts = []
         from .service import set_user_push
         set_host_users(k, [], by)
         remove_pool_member(k, by)
@@ -761,6 +783,25 @@ def remove(name: str, by: str) -> str:
         del d["users"][k]
         for kind in ("sessions", "tokens"):
             d[kind] = {h: r for h, r in d[kind].items() if r.get("user") != k}
+    if auto_hosts:
+        from . import lan as L
+        from . import lease as LS
+        from . import overview as O
+        from . import workerctl as W
+        snap_up = {str(e.get("id")) for e in (snapshot() or {}).get("hosts") or [] if e.get("worker_up")}
+        for h in auto_hosts:
+            hid = str(h["id"])
+            O.clear_sent(hid)
+            if stop_fn is not None:
+                try:
+                    stop_fn(h)
+                except Exception:  # noqa: BLE001 — 停 worker 失败不阻塞删账号
+                    pass
+            elif hid in snap_up and LS.primary() and (not h.get("ssh") or L.check()["ok"]):
+                try:
+                    W.stop_managed_worker(h, "account_removed", timeout=10)
+                except Exception:  # noqa: BLE001 — 停 worker 失败不阻塞删账号
+                    pass
     _log(f"{by} 删了账号 {k}（连同它的会话与令牌）")
     return f"删了账号 {k}，它的会话与令牌都已失效"
 
@@ -785,10 +826,12 @@ def listing(t: float | None = None, *, directory=False) -> dict:
                     "setup": setup_until, "lock": u["lock"] if (u.get("lock") or 0) > t else None,
                     "seen": max([x["seen"] or 0 for x in ss + ts] or [0]) or None,
                     "sessions": sorted(ss, key=lambda x: -(x["seen"] or 0)), "tokens": sorted(ts, key=lambda x: -(x["t"] or 0)),
-                    # 能用的主机（主机清单里列着他的，#167）、他是主人的项目；管理员的都是“全部”，不列
-                    "hosts": [str(h["id"]) for h in hs if k.lower() in host_users(h)] if u.get("role") != "admin" else None,
+                    # 能用的主机（主机清单 [[hosts]] 里列着这人的，#167；自动接入的组员服务器另列在 member_hosts，避免回传给 set_host_users 冲突）
+                    "hosts": [str(h["id"]) for h in hs if not h.get("member_auto") and k.lower() in host_users(h)] if u.get("role") != "admin" else None,
+                    "member_hosts": [str(h["id"]) for h in hs if h.get("member_auto") and k.lower() in host_users(h)],
                     "projects": sorted(p for p, o in owners.items() if o == k)})
-    pick = [{"id": str(h["id"]), "label": h.get("label") or str(h["id"]), "returned": bool(h.get("returned"))} for h in hs if "id" in h and share_host(h) and not h.get("borrow")]
+    pick = [{"id": str(h["id"]), "label": h.get("label") or str(h["id"]), "returned": bool(h.get("returned"))}
+            for h in hs if "id" in h and share_host(h) and not h.get("borrow") and not h.get("member_auto")]
     result = {"users": out, "admins": len(_admins(d)), "roles": ROLES, "scope_info": scope_info(), "hosts": pick}
     if directory:
         from . import fleet as F
@@ -930,8 +973,8 @@ USER_EXT_HOSTS = 3      # 普通用户名下私有外部主机的数量上限（
 
 
 def is_external_host(h: dict | None) -> bool:
-    """是否属于可经外部主机接口管理的非 SCM / 非借用主机（唯一判定）。"""
-    if not h or h.get("borrow") or h.get("platform_job") or h.get("platform") or h.get("platform_pool") or h.get("platform_holder"):
+    """是否属于可经外部主机接口管理的非 SCM / 非借用 / 非自动接入组员主机（唯一判定）。"""
+    if not h or h.get("borrow") or h.get("member_auto") or h.get("platform_job") or h.get("platform") or h.get("platform_pool") or h.get("platform_holder"):
         return False
     from .config import host_platform, is_standalone
     return host_platform(h) != "scm" and is_standalone(h)
@@ -1033,11 +1076,11 @@ VIEW_KEYS = ("generated", "lan", "event_kinds")
 # 共享盘白名单统一定义在 disk.py（VIEW_DISK、VIEW_DISK_ALERTS、disk.person_storage），这里保留同名导出
 VIEW_DISK = DK.VIEW_DISK
 VIEW_DISK_ALERTS = DK.VIEW_DISK_ALERTS
-# 本人持有服务器的字段白名单（#211）：剥离 lease_cut、using、reserve、known_hosts 等平台/借用内部字段
+# 本人持有服务器的字段白名单（#211、#224）：剥离 lease_cut、using、reserve、known_hosts 等平台/借用内部字段
 SELF_FLEET_KEYS = ("id", "holder", "job", "label", "ssh", "port", "pool", "public", "mine",
                    "last", "error", "down", "fails", "since", "started",
                    "lease_end", "off", "last_job", "state", "lw",
-                   "strip", "h0", "idle_h", "s7", "s30", "guard")
+                   "strip", "h0", "idle_h", "s7", "s30", "guard", "manage")
 SELF_BORROW_KEYS = ("since", "until", "returning", "returned", "by")
 STANDBY_SAY = "这台看板服务是备用：页面上的数据可能不是最新的，要动东西到主看板做"
 

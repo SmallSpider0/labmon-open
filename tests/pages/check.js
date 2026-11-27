@@ -3223,10 +3223,10 @@ ta("auth", "共有型算力池前端权限隔离、独占池屏蔽与首页 noHo
   const hpPool = page(accCtx(poolOnlySnap, P_ME), "#/"); clean(hpPool, "仅池成员首页");
   ok(!hpPool.includes("你的账号还没有能用的主机"), "池成员不该弹无可用主机提示");
   has(hpPool, "共有算力池");
-  // 4. 首页 noHost 收口：② 无分配主机、不在共有池，但名下持有 1 台组内服务器时给明确提示
+  // 4. 首页 noHost 收口：② 无分配主机、不在共有池，但名下持有 1 台组内服务器时给明确提示（#212、#224）
   const fleetOnlySnap = {...JSON.parse(JSON.stringify(OVUM)), hosts: [], projects: [], pool: null};
   const hpFleet = page(accCtx(fleetOnlySnap, {...OWNER_ME, hosts: [], pools: [], pool_member: false}), "#/"); clean(hpFleet, "仅名下有组内服务器首页");
-  has(hpFleet, "你名下有 1 台组内服务器（可在<a href=\"#/fleet\">我的服务器</a>查看），但尚未分配可调度主机或加入算力池");
+  has(hpFleet, '你名下有 1 台组内服务器（当前暂未接入调度，可在<a href="#/fleet">我的服务器</a>查看）');
   ok(!hpFleet.includes("你的账号还没有能用的主机"), "名下有组内服务器时不该再笼统说没有能用的主机");
   // 5. 首页 noHost 收口：③ 既无主机、不在池、名下也无组内服务器时保留原提示并补充加入共有池引导
   const emptySnap = {...JSON.parse(JSON.stringify(OVU)), hosts: [], projects: [], pool: null, fleet: null};
@@ -3387,6 +3387,55 @@ t("overview", "WSL2 外部占卡暂停放行、共享模式、不报异常与抽
   clean(ph, "项目页外部占卡 resourcesCard");
   has(ph, "外部占卡");
   has(tips(ph), "外部（如宿主机）占卡暂停放行");
+});
+
+ta("auth", "已开账号的组员服务器自动接入调度、我的服务器切换与首页 noHost 仅监控收口（#224）", async () => {
+  const S = JSON.parse(JSON.stringify(OVUM));
+  const srv = S.fleet.servers[0];
+  srv.id = "srv-own"; srv.holder = "OWNER"; srv.borrow = null;
+  srv.manage = {on: true, auto: true, opt_out: false, hosted: false, account: "owner", can_toggle: true, worker_up: true, why: "已接入本人调度（worker 运行中）"};
+  const hostObj = {...JSON.parse(JSON.stringify(OV.hosts[0])), id: "srv-own", label: "node9（OWNER）", member_auto: true};
+  S.hosts = [hostObj];
+  S.projects = [];
+  S.pool = null;
+  const U_ME = {...OWNER_ME, hosts: ["srv-own"], fleet_person: "OWNER", pools: [], pool_member: false, write: true, admin: false};
+  const UC = accCtx(S, U_ME);
+  // 1. 总览：自动接入后不再报 noHost，主机表展示「我的服务器」徽标
+  const hp = page(UC, "#/"); clean(hp, "#224 自动接入总览");
+  ok(!hp.includes("你的账号还没有能用的主机"), "自动接入后不应出现无可用主机提示");
+  has(hp, "我的服务器"); has(hp, "node9（OWNER）");
+  // 2. 「我的服务器」卡片与抽屉展示「已接入调度」、调度接入行、切为仅监控弹窗与 worker 节
+  const fl = page(UC, "#/fleet"); clean(fl, "#224 我的服务器卡片");
+  has(fl, "已接入调度");
+  const drw = page(UC, "#/fleet/srv/srv-own"); clean(drw, "#224 服务器抽屉");
+  has(drw, "调度接入"); has(drw, "已接入本人调度（worker 运行中）"); has(drw, "切为仅监控"); has(drw, "<b>worker</b>"); has(drw, "#/host/srv-own");
+  // 3. 「我的账号 → 概览」展示「我的服务器」卡片及切换按钮
+  const me = page(UC, "#/me"); clean(me, "#224 我的账号含我的服务器");
+  has(me, "<b>我的服务器</b>"); has(me, "srv-own"); has(me, "切为仅监控");
+  // 4. 点开弹窗并确认提交 POST api/fleet/manage（切为仅监控）
+  run(UC, `POSTED = []; fetch = (u, o) => { POSTED.push([u, o?.body]); return Promise.resolve({ok: true, json: async () => ({id: "srv-own", on: false, msg: "已切为仅监控", manage: {on: false, auto: false, opt_out: true, hosted: false, account: "owner", can_toggle: true, worker_up: false, why: "已切为仅监控（不自动拉起 worker）"}})}); }; poll = () => {};`);
+  await run(UC, 'manageAct("pick", {id: "srv-own", where: "me"})');
+  const mePop = page(UC, "#/me"); clean(mePop, "#224 切为仅监控弹窗");
+  has(mePop, "容器内正在跑的任务不受影响"); has(mePop, "确认切为仅监控");
+  await run(UC, 'manageAct("go", {id: "srv-own", on: "0", where: "me"})');
+  ok(run(UC, 'POSTED.length === 1 && POSTED[0][0] === "api/fleet/manage" && JSON.parse(POSTED[0][1]).on === false'), "未正确发送 POST api/fleet/manage");
+  ok(run(UC, 'D.fleet.servers[0].manage.opt_out === true'), "切为仅监控后未原地更新 manage 状态");
+  // 5. 切为仅监控后若无其他主机，首页 noHost 精准提示「处于仅监控状态」并引导去「我的服务器」或「我的账号」一键重接
+  const S2 = JSON.parse(JSON.stringify(S));
+  S2.hosts = [];
+  S2.fleet.servers[0].manage = {on: false, auto: false, opt_out: true, hosted: false, account: "owner", can_toggle: true, worker_up: false, why: "已切为仅监控（不自动拉起 worker）"};
+  const UC2 = accCtx(S2, {...U_ME, hosts: []});
+  const hp2 = page(UC2, "#/"); clean(hp2, "#224 仅监控首页 noHost");
+  has(hp2, "处于仅监控状态"); has(hp2, "一键重新接入本人调度");
+  has(page(UC2, "#/fleet"), "仅监控");
+  has(page(UC2, "#/me"), "接入调度");
+  // 6. 管理员在组内页与抽屉可看到并代切换，恶意 why 必须转义
+  const S3 = JSON.parse(JSON.stringify(OV));
+  S3.fleet.servers.find(x => x.id === "srv-d").manage.why = "原因" + BAD;
+  const AC = accCtx(S3, ADMIN_ME);
+  clean(page(AC, "#/fleet"), "#224 管理员组内页转义");
+  clean(page(AC, "#/fleet/srv/srv-d"), "#224 管理员抽屉转义");
+  has(page(AC, "#/fleet/srv/srv-d"), "接入调度");
 });
 
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));

@@ -331,18 +331,20 @@ def thaw(p):
                                 ("看门狗：" if not back else "") + "已不在 " + "、".join("PID %d" % w["pid"] for w in gone) if gone else ""] if x)
 
 
-def gpu_owners(apps, procs, owner, ka_full=None):
+def gpu_owners(apps, procs, owner, ka_full=None, no_ka=False):
     """GPU 进程的归属（gp）：nvidia-smi 给的宿主机 PID 经 /proc/<pid>/sched 对回容器 PID（scan_procs 的 hpid），再看它属于哪个任务
     （owner {pid: 任务}）、是不是保活（命令行里有 keep_alive），都不是的算 labmon 之外的。
     ka_full（借来的主机上给）：ka.sh 认的保活脚本。ka.sh 认不出（ka_owned：不是 python 跑它，相对路径按工作目录还原后也不是它）的保活
-    worker 停不了（other，ka 为真）：那张卡不放；它整棵进程树不算对方的用量（sample 里扣，#37）。"""
+    worker 停不了（other，ka 为真）：那张卡不放；它整棵进程树不算对方的用量（sample 里扣，#37）。
+    no_ka（#224 自动接入的组员服务器 LABMON_NO_KA=1）：worker 不接管保活，容器内所有非 labmon 进程（含用户自开保活）均归为 other，
+    如实扣减显存/内存/CPU 并在独占检查中避让，不强行抢卡、不停保活。"""
     by_hpid = {p["hpid"]: pid for pid, p in procs.items() if p["hpid"]}
     gp = []
     for hp, mb, uu in apps:
         cp = by_hpid.get(hp)
         j = owner.get(cp)
         args, cwd = proc_args(cp) if not j and cp is not None else ([], "")
-        keep = any("keep_alive" in a for a in args)
+        keep = (not no_ka) and any("keep_alive" in a for a in args)
         ext = keep and ka_full is not None and not ka_owned(args, cwd, ka_full)
         gp.append({"hpid": hp, "pid": cp, "mb": mb, "uuid": uu, "comm": procs[cp]["comm"] if cp in procs else None,
                    "owner": "job" if j else "keepalive" if keep and not ext else "other", "ka": ext, "job": j["name"] if j else None, "_j": j})

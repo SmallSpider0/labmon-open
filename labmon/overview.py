@@ -419,8 +419,11 @@ def _expire(t: float) -> None:
 
 
 def _host_allowed_projects(h: dict) -> set[str] | None:
-    """外部主机归属普通用户时，返回其名下允许下发历史/eta/sched 的项目集合；管理员或无普通归属主返回 None（不限）。"""
+    """外部主机或自动接入的组员服务器（#224）归属普通用户时，返回其名下允许下发历史/eta/sched 及放行的项目集合；管理员或无普通归属主返回 None（不限）。"""
     owner = h.get("owner")
+    if not owner and h.get("member_auto"):
+        us = h.get("users") or []
+        owner = us[0] if us else None
     if not owner:
         return None
     acc = U.account(owner)
@@ -510,16 +513,21 @@ def _to_worker(projects: list[dict], t: float, sw: dict, snap: dict | None = Non
     def for_host(h: dict) -> dict:
         sh = dict(sw)
         standalone = is_standalone(h)
-        allowed = _host_allowed_projects(h) if standalone else None
+        member_auto = bool(h.get("member_auto"))
+        allowed = _host_allowed_projects(h) if (standalone or member_auto) else None
         if allowed is not None:
-            # 普通用户归属外部机：eta.json 与 sched.json 仅保留本人获准项目，绝不泄露他人项目名、任务名或预计结束时刻
+            # 普通用户归属外部机 / 自动接入的组员服务器：eta.json 与 sched.json 仅保留本人获准项目，绝不泄露他人项目名、任务名或预计结束时刻
             for k in ("weight", "pause", "focus", "owner"):
                 if isinstance(sh.get(k), dict):
                     sh[k] = {p: v for p, v in sh[k].items() if p in allowed}
             h_jobs = {k: v for k, v in jobs.items() if k.partition("|")[0] in allowed}
             h_prog = [k for k in by_prog if k.partition("|")[0] in allowed]
+            if member_auto:
+                sh["allowed_projects"] = sorted(allowed)
         else:
             h_jobs, h_prog = jobs, by_prog
+            if member_auto:
+                sh["allowed_projects"] = None
         if standalone:
             sh["standalone"] = True
         for k in ("disk_warn_gb", "disk_stop_gb", "disk_quota_gb"):
@@ -546,7 +554,7 @@ def _host_entry(h: dict, raw: str | None, err: str | None, lan_off: bool, prev: 
     lan_off 是这轮没连（远程主机、本机不在内网），error 里是给页面看的那句话，状态沿用上一次采到的 prev。"""
     pk, standalone = host_platform(h), is_standalone(h)
     e = {"id": h["id"], "label": h.get("label", h["id"]), "error": err, "status_error": None, "status": None, "log": [], "done": [],
-         "lan_off": lan_off, "auto": h.get("worker") == "auto",
+         "lan_off": lan_off, "auto": h.get("worker") == "auto", "member_auto": bool(h.get("member_auto")),
          "platform_kind": pk, "share": host_share(h), "standalone": standalone,
          "owner": h.get("owner"), "data_root": h.get("data_root"),
          "disk_warn_gb": h.get("disk_warn_gb"), "disk_stop_gb": h.get("disk_stop_gb"), "disk_quota_gb": h.get("disk_quota_gb"),
@@ -859,19 +867,22 @@ def health(hosts: list[dict], cfg: dict, t: float, probe=platform_ok, per_host: 
                 hs["down"] = why
                 msg = f"{label} 掉线（{fmt_time(hs['since'], date=False)} 起连不上）：{why}"
                 evs.append({"host": e["id"], "kind": "host_down", "msg": msg})
-                out.append(msg)
+                if not c.get("member_auto"):         # 组员自动接入服务器由 fleet.tick 统一给管理员报掉线，不重复发全局通知；本人仍走 per_host
+                    out.append(msg)
                 if per_host is not None:
                     per_host.setdefault(e["id"], []).append(msg)
         else:
             if step == "up":
                 msg = f"{label} 恢复连接（离线 {round((t - hs['since']) / 60)} 分钟）"
                 evs.append({"host": e["id"], "kind": "host_up", "msg": msg})
-                out.append(msg)
+                if not c.get("member_auto"):
+                    out.append(msg)
                 if per_host is not None:
                     per_host.setdefault(e["id"], []).append(msg)
             ev = container_step(hs, started, label)
             if ev:
                 evs.append({"host": e["id"], **ev})
+                clear_relaunch(e["id"])
         e["health"] = {"state": "lan", "fails": 0, "since": None, "why": None} if e.get("lan_off") else \
             {"state": "down" if hs["down"] else "suspect" if hs["fails"] else "ok", "fails": hs["fails"],
              "since": hs.get("since") if hs["fails"] else None, "why": hs["down"]}
@@ -882,7 +893,8 @@ def health(hosts: list[dict], cfg: dict, t: float, probe=platform_ok, per_host: 
                 hint = "请在外平台手动续租或提前迁移任务" if pk == "other" else "可在看板主机页点「预备续租」，等这格跑完再续"
                 msg = f"{label} 租期约剩 {(end - t) / 3600:.0f} 小时（{fmt_time(end)} 到期），{hint}"
                 evs.append({"host": e["id"], "kind": "lease", "msg": msg})
-                out.append(msg)
+                if not c.get("member_auto"):
+                    out.append(msg)
         miss = {w["name"]: w["why"] for w in ((e.get("status") or {}).get("waiting") or []) if w.get("miss")}
         for n, why in miss.items():               # 声明的本地依赖缺了：任务挡在队首不放行，通知一次
             if n not in hs.setdefault("miss", []):
@@ -900,23 +912,40 @@ HEALTH_KEYS = ("fails", "down", "since", "warned", "started", "miss", "lease_end
 RELAUNCH_GAP = 600
 
 
+def clear_relaunch(hid: str) -> None:
+    """清除单台主机在 relaunch.json 中的拉起冷却时间（容器重启、换人/续租/开机、重新接入或借用归还后立即允许跟随拉起，#224）。"""
+    f = state_dir() / "relaunch.json"
+    last = load_json(f, {})
+    if isinstance(last, dict) and hid in last:
+        last.pop(hid, None)
+        save_json(f, last)
+
+
 def relaunch(snap: dict, start=None) -> list[str]:
     """主机清单里标了 worker = "auto" 的主机：能连上而 worker 不在（多半是容器重启），就拉起 worker（10 分钟内最多一次）。
-    手动 labmon worker stop 过的不拉，status.json 读不出的也不拉（worker 多半还在）。拉起记在本机 events.jsonl（输出放 detail），
-    工作台的事件里能看到；返回的消息带上输出，调用方记进服务日志。start(主机) 返回 (退出码, 输出)。"""
-    if start is None:
-        start = lambda hid: run_out("start", hid, [])
+    手动 labmon worker stop 过的不拉，status.json 读不出的也不拉（worker 多半还在）。
+    对自动接入的组员服务器（member_auto，#224）：
+    - 生命周期停机留下的 auto:* 标记（切仅监控/删账号/借用归还）在重新成为合法 member_auto 后自动允许拉起，管理员手动 stop 仍不拉；
+    - 默认走 deploy="if_missing"：共享盘已有 worker 代码时绝不覆盖代码或 --replace 运行中 worker。
+    拉起记在本机 events.jsonl（输出放 detail），工作台的事件里能看到；返回的消息带上输出，调用方记进服务日志。start(主机) 返回 (退出码, 输出)。"""
     sd = state_dir()
     sd.mkdir(parents=True, exist_ok=True)
     last = load_json(sd / "relaunch.json", {})
     out = []
     for h in snap["hosts"]:
-        if h.get("ephemeral") or not h.get("auto") or h.get("error") or h.get("status_error") or h.get("stopped") or (h.get("status") and h.get("worker_up")):
+        stopped = h.get("stopped")
+        manual_stopped = bool(stopped) and not (h.get("member_auto") and str(stopped).startswith("auto:"))
+        if h.get("ephemeral") or not h.get("auto") or h.get("error") or h.get("status_error") or manual_stopped or (h.get("status") and h.get("worker_up")):
             continue
         if time.time() - last.get(h["id"], 0) < RELAUNCH_GAP:
             continue
         last[h["id"]] = time.time()
-        rc, text = start(h["id"])
+        if start is not None:
+            rc, text = start(h["id"])
+        elif h.get("member_auto"):
+            rc, text = run_out("start", h["id"], [], deploy="if_missing")
+        else:
+            rc, text = run_out("start", h["id"], [])
         msg = (f"{h['label']}：worker 不在" + (f"（状态停在 {fmt_time(h['status']['t'])}）" if h.get("status") else "")
                + ("，已重新拉起" if rc == 0 else f"，拉起失败（退出码 {rc}）"))
         log_events([{"kind": "relaunch", "host": h["id"], "msg": msg, "detail": text.strip()[-400:]}])

@@ -106,6 +106,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `GET /api/admin/backup`（冷备，回 `.tar.gz`） | `backup`，只给管理员，只在内网入口（#17） |
 | `POST /api/admin/deploy`、`/api/worker/start` | `deploy`，只给管理员，只在内网入口 |
 | `GET /api/hosts`、`GET /api/client/install.sh`、`GET /api/client/wheel`、`GET /api/client/ephemeral.py` | `read` |
+| `POST /api/fleet/manage`（组员服务器切换接入本人调度 / 仅监控，#224） | `project`；`own="fleet_manage"`：普通用户仅限持有人本人（`users.need_holder`，非持有人或不存在 403），管理员须具平台操作许可（`users.can_ops`）；仅主服务可写 |
 | `POST /api/ephemeral/push`（推模式临时主机心跳上报，#213） | `project`；校验 `project` 归属（`users.need_project`），单请求 ≤ 128 KiB，仅主服务可写 |
 | `GET /api/project/<id>/(status\|disk\|records)`（实验会话的只读命令，#52） | `read`；普通用户只看自己的项目（`users.need_project`） |
 | `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
@@ -125,7 +126,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 
 - `/` 与 `/overview.json`：按白名单取（`users.view`，#17、#211），快照以后新加的字段默认不给普通用户。原样给 `generated`、`lan`、`event_kinds`、`sched`；`hosts`、`projects`、`archived`、`rebalance`、`regs`、`occ` 按可见范围过滤；`colors` 只留自己的项目；`server` 只给 `role` 和一句通用的备用提示；
   - `disk`（`disk.person_storage`）：保留总盘概况、历史、提醒线、扫描进度与总盘告警（`low`、`soon`），并补充本人名下目录（`owners`）、本人颜色与本人告警（`burst:<人>`、`over:<人>`）；`ours` 只留自己项目的目录与按项目的汇总（`ours.projects`，#53），扫盘的主机可见时才给 `scanner`；屏蔽他人目录、公共目录明细、全组名单 `names`、归属表 `owners_set` 与正在扫的路径 `now`；
-  - `fleet`（`users._self_fleet`）：账号绑定了组内人员且名下持有服务器时，下发 `scope = "self"`、仅含本人持有的 `servers` 与 `mine`，`ops = None`、`holders = []`、`quota = None`；借出期间保留借用人名（`borrow.by`）及时间，屏蔽对方项目（`borrow.for`）、`away`、`reserve`、`using`、`lease_cut`，并脱敏借用方任务的进程命令行、路径与 PID；未绑人或名下无服务器时为 `null`；
+  - `fleet`（`users._self_fleet`）：账号绑定了组内人员且名下持有服务器时，下发 `scope = "self"`、仅含本人持有的 `servers`（含每台 `manage` 接入状态）与 `mine`，`ops = None`、`holders = []`、`quota = None`；借出期间保留借用人名（`borrow.by`）及时间，屏蔽对方项目（`borrow.for`）、`away`、`reserve`、`using`、`lease_cut`，并脱敏借用方任务的进程命令行、路径与 PID；未绑人或名下无服务器时为 `null`；
   - `pool`（`pool.summary`，#212）：账号属于至少一个共有型算力池时，下发所属池的聚合概况（在线主机/GPU/运行排队/已落机与待放数，剥离 `members` 列表）与本人项目的待放清单；非池成员为 `null`；
   - `notices`（给系统通知的提醒）、`wake`（给实验会话的消息）、`hostcheck`（看板服务所在机的体检，#166）给空值。`/` 现渲染（`collect.render_page`），不发磁盘上带全量数据的 `index.html`。
 - 可见主机的主机项整项照给，包括这台上别人任务的命令行、日志末尾与资源用量。同一台主机上的任务用共享的系统账号跑，能在这台上跑任务的人本来就能看到这些；所以开一台主机给谁，就等于让谁看到这台上所有任务的命令行与日志。不想让人看到的任务，不要放在开给这人的主机上。
@@ -286,6 +287,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 | `POST /api/hosts/external/<id>/test` | 单次测试外部主机 SSH 连通性、OS/WSL/GPU、Python 版本与 `data_root` 可用空间（不重试） |
 | `POST /api/hosts/external/<id>/key {"rotate"?}` | 查看或轮换外部主机专用 Ed25519 公钥（`rotate=true` 时断开旧连接），仅返回公钥、指纹与授权命令 |
 | `GET /api/hosts` | `{"missing", "hosts": [{"id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until", "worker_home", "data_root", "local_dir", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "platform_kind", "share", "standalone", "ssh_key_mode", "ssh_key_fp", "home_with"}]}`：`labmon host list`、`labmon borrow` 与外部机抽屉共用（普通用户只列他能用及名下的主机，他人私有外部机完全不可见） |
+| `POST /api/fleet/manage {"id", "on"}` | `{"id", "on", "msg", "manage"}`：将已开账号的组员名下服务器切为「接入本人调度」（`on=true`，删 `manage` 键并清 `relaunch` 冷却，由主服务后台按共享盘已部署代码自动拉起）或「仅监控」（`on=false`，先停 worker 并记 `auto:monitor` 标记再写 `manage = false`，不杀在跑任务）；严格与 worker 代码部署分离（绝不推送或替换 worker 代码）；已在 `[[hosts]]` 配置、关机、借用中或未开账号回 409（`fleet.set_member_manage`，#224） |
 
 | `GET /api/disk` | `{"rc", "out", "err", "data"}`：`out` 是排好的总盘概况与本人共享盘用量，`data` 是 `disk.person_storage` 的脱敏结果（`api.my_disk`，#211） |
 | `GET /api/project/<id>/status` | `{"rc", "out", "err", "data"}`：`out` 是排好的项目现状，`data` 是项目快照原样（[schema.md](schema.md)；还没采集过为 null）（`api.status`） |

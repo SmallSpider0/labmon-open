@@ -309,9 +309,114 @@ def check_legacy_pool(hf: Path, item: dict) -> None:
         raise ConfigError(f"{hf} 里 {item.get('id')} 含有已删除的旧借用型算力池字段（{'、'.join(bad)}），请从主机清单移除")
 
 
+def check_fleet_manage(hf: Path, item: dict) -> None:
+    """[[fleet.servers]] 的 manage 字段校验（#224）：缺省或不写跟随账号状态自动接入，写时须为布尔值。"""
+    if "manage" in item and not isinstance(item["manage"], bool):
+        raise ConfigError(f"{hf} 里 {item.get('id')} 的 manage 只能写 true 或 false，写的是 {item['manage']!r}")
+
+
+def _ssh_port_pair(h: dict) -> tuple[str, int] | None:
+    ssh = str(h.get("ssh") or "").strip().lower()
+    if not ssh:
+        return None
+    try:
+        port = int(h.get("port") or PORT)
+    except (TypeError, ValueError):
+        return None
+    return ssh, port
+
+
+def _fleet_conflict_hosts(hosts: list[dict]) -> tuple[set[str], set[tuple[str, int]]]:
+    """[[hosts]] 已显式配置的主机 id 集合与在用 (ssh, port) 集合：组内服务器命中任一项时尊重 [[hosts]] 不重复覆盖。"""
+    ids = {str(h["id"]) for h in hosts if "id" in h}
+    pairs = {p for h in hosts if not h.get("returned") and (p := _ssh_port_pair(h))}
+    return ids, pairs
+
+
+def _member_account(holder: str | None, links: dict[str, tuple[str | None, str | None]]) -> str | None:
+    """按 users.people_of() 反查持有人 holder 无误绑定的唯一账号名；未开账号或绑定有误返回 None。"""
+    if not holder:
+        return None
+    for acct, (person, err) in links.items():
+        if not err and person == holder:
+            return acct
+    return None
+
+
+def member_manage_state(s: dict, hosts: list[dict], *, links: dict | None = None, off: dict | None = None,
+                        snap_e: dict | None = None) -> dict:
+    """单台 [[fleet.servers]] 自动接入本人调度的状态唯一判定（#224）：
+    user_hosts()、fleetview.view()、fleet.set_member_manage() 共用。"""
+    if links is None:
+        from .users import people_of
+        links = people_of()
+    if off is None:
+        from .fleet import off_servers
+        off = off_servers()
+    sid = str(s.get("id") or "")
+    holder = str(s.get("holder") or "")
+    acct = _member_account(holder, links)
+    ids, pairs = _fleet_conflict_hosts(hosts)
+    pair = _ssh_port_pair(s)
+    hosted = sid in ids or (pair is not None and pair in pairs)
+    is_off = sid in off
+    is_borrowed = bool(s.get("borrow_since")) and not s.get("borrow_returned")
+    opt_out = s.get("manage") is False
+    worker_up = bool((snap_e or {}).get("worker_up"))
+    if hosted:
+        return {"on": False, "auto": False, "opt_out": False, "hosted": True, "account": acct,
+                "can_toggle": False, "worker_up": worker_up, "why": "已在主机清单 [[hosts]] 单独配置"}
+    if is_borrowed:
+        return {"on": False, "auto": False, "opt_out": opt_out, "hosted": False, "account": acct,
+                "can_toggle": False, "worker_up": worker_up, "why": "当前处于借用中，归还后按本人设置恢复"}
+    if is_off:
+        return {"on": False, "auto": False, "opt_out": opt_out, "hosted": False, "account": acct,
+                "can_toggle": False, "worker_up": False, "why": "已关机"}
+    if not acct:
+        return {"on": False, "auto": False, "opt_out": opt_out, "hosted": False, "account": None,
+                "can_toggle": False, "worker_up": False, "why": "未开通看板账号，保持只读"}
+    if opt_out:
+        return {"on": False, "auto": False, "opt_out": True, "hosted": False, "account": acct,
+                "can_toggle": True, "worker_up": False, "why": "已切为仅监控（不自动拉起 worker）"}
+    return {"on": True, "auto": True, "opt_out": False, "hosted": False, "account": acct,
+            "can_toggle": True, "worker_up": worker_up,
+            "why": "已接入本人调度（worker 运行中）" if worker_up else "已接入本人调度（等待自动拉起 worker）"}
+
+
+def member_host(s: dict, hosts: list[dict], acct: str, fleet_cfg: dict | None = None) -> dict:
+    """已开账号的组员名下 [[fleet.servers]] 自动接入本人调度时的受管主机条目（#224）：
+    复用模板或 [fleet] 的 SSH/python/data_root/worker_home/shared/mounts/checks，不继承 ka_bin（不碰用户自开保活），
+    仅开放给持有人本人（users=[acct]），普通账号另标 member_restrict（worker 启动时启用项目白名单硬隔离，防遗留队列越权放行），
+    不写 platform_job/platform_pool 以免被误当成 [[hosts]] 自用机。"""
+    from .fleet import state_file                 # fleet 在上层 import 本模块，这里只能延迟 import
+    from .users import account as _account
+    tpl = _guest_tpl(hosts)
+    fcfg = fleet_cfg or {}
+    base = {k: tpl[k] for k in ("python", "data_root", "worker_home", "shared", "mounts", "checks") if k in tpl}
+    for k in ("python", "data_root", "worker_home", "shared"):
+        if fcfg.get(k):
+            base[k] = fcfg[k]
+        if s.get(k):
+            base[k] = s[k]
+    node = str(s.get("ssh", "")).rsplit(".", 1)[-1] or str(s["id"])
+    lbl = str(s.get("label") or "").strip()
+    holder = str(s.get("holder") or "")
+    label = lbl if lbl and lbl != holder else f"{node}（{holder}）" if holder else node
+    acc = _account(acct)
+    out = {**base,
+           "id": str(s["id"]), "label": label, "ssh": s.get("ssh"), "port": s.get("port", PORT),
+           "known_hosts": str(state_file("known_hosts")), "worker": "auto",
+           "users": [acct], "share": "private", "member_auto": True, "member_holder": holder,
+           "member_restrict": (acc or {}).get("role") != "admin"}
+    if fcfg.get("lease_days") is not None:
+        out["lease_days"] = fcfg["lease_days"]
+    return out
+
+
 def user_hosts() -> list[dict]:
-    """用户级主机清单里的主机（还没补缺省值；已归还的也在，带 returned）：[[hosts]]，加上借过的组内服务器（guest_host）。
-    借用中由看板拉起 worker，还了（borrow_returned）就和归还的自用主机一样不再连接。
+    """用户级主机清单里的主机（还没补缺省值；已归还的也在，带 returned）：[[hosts]]，加上借过的组内服务器（guest_host），
+    以及已开通看板账号且未显式退出的组员名下服务器（member_host，#224）。
+    借用中由看板拉起 worker，还了（borrow_returned）若持有人已开账号且未退出则恢复为 member_host，否则和归还的自用主机一样不再连接。
     borrow 字段：{holder, since, until, for, light（借来时对方在轻用）, away（对方说好不用到几点）}（since、until、away 是 epoch 秒；手写的 borrow_until 认不出时 until 为 None、原文在 until_bad，
     borrow.check 提醒一次）；自用主机写了 borrow_until 的（换给自己借来的）也有，holder 取 borrow_from，swap 为真。"""
     hf = hosts_file()
@@ -326,10 +431,26 @@ def user_hosts() -> list[dict]:
         check_legacy_pool(hf, h)
         if h.get("borrow_until"):
             h["borrow"] = {"holder": h.get("borrow_from"), "since": None, **_until(h["borrow_until"]), "for": None, "swap": True}
-    servers = (d.get("fleet") or {}).get("servers", [])
+    fleet_raw = d.get("fleet") or {}
+    servers = fleet_raw.get("servers", [])
     for s in servers:
         check_legacy_pool(hf, s)
-    return hosts + [guest_host(s, hosts) for s in servers if s.get("borrow_since")]
+        check_fleet_manage(hf, s)
+    extra: list[dict] = []
+    if servers:
+        from .fleet import off_servers
+        from .users import people_of
+        links, off = people_of(), off_servers()
+        for s in servers:
+            if s.get("borrow_since") and not s.get("borrow_returned"):
+                extra.append(guest_host(s, hosts))
+                continue
+            ms = member_manage_state(s, hosts, links=links, off=off)
+            if ms["on"] and ms["account"]:
+                extra.append(member_host(s, hosts, ms["account"], fleet_raw))
+            elif s.get("borrow_since"):
+                extra.append(guest_host(s, hosts))
+    return hosts + extra
 
 
 def _until(v) -> dict:
@@ -939,7 +1060,7 @@ def set_fleet_holder(sid: str, holder: str, job: str | None = None) -> Path:
         if not m:
             raise ConfigError(f"{p} 里 {sid} 的 holder 行看不懂：{lines[k].strip()}")
         lines[k] = f'{m.group(1)}"{holder}"{m.group(3)}\n'
-        block = [l for l in lines[s + 1:end] if not re.match(r"\s*job\s*=", l)]
+        block = [l for l in lines[s + 1:end] if not re.match(r"\s*(?:job|manage)\s*=", l)]
         if job and job != holder:
             block.insert(next(i for i, l in enumerate(block) if re.match(r"\s*holder\s*=", l)) + 1, f'job = "{job}"   # 平台作业名（同名作业已在跑，加了后缀）\n')
         return _write_checked(p, "".join(lines[:s + 1] + block + lines[end:]), f"{sid} 的使用人改为 {holder}")

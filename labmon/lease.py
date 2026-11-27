@@ -210,9 +210,13 @@ def _run(h: dict, mode: str, me: str, timeout: float = TIMEOUT) -> dict | None:
 def homes(hosts: list[dict] | None = None) -> dict[str, list[dict]]:
     """参与主备服务租约仲裁的在用主机按共享域分组（照主机清单顺序）：
     存在非独立（共享盘）主机时，仅以共享盘为仲裁点，排除独立主机（避免笔记本休眠或外租机断连导致主看板误降备）；
+    其中若存在常驻 [[hosts]] 共享盘主机，优先仅以常驻主机仲裁，不因组员自动接入机单台退出/关机抖动主备；
     全部都是独立主机时按主机隔离键分组，防止多台独立机默认 worker_home 撞名互覆盖。"""
     act = active_hosts() if hosts is None else hosts
     shared = [h for h in act if not is_standalone(h)]
+    fixed = [h for h in shared if not h.get("member_auto")]
+    if fixed:
+        shared = fixed
     out: dict = {}
     if shared:
         for h in shared:

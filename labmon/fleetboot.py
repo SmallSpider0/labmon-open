@@ -50,7 +50,7 @@ def mine(cfg: dict | None, hosts: list[dict] = ()) -> list[dict]:
     priv = (cfg or {}).get("private_pools") or []
     out = []
     for h in active_hosts():
-        if not (h.get("platform_job") and h.get("platform_pool") and h.get("ssh")):
+        if h.get("member_auto") or not (h.get("platform_job") and h.get("platform_pool") and h.get("ssh")):
             continue
         e = snap.get(h["id"]) or {}
         st, hl = e.get("status") or {}, e.get("health") or {}
