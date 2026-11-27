@@ -248,10 +248,11 @@ t("overview", "#96 调度卡的暂停与恢复：项目级的（所有主机）�
   run(O, `POP = null; SF = []; schedAct("ur", "proj-b"); schedAct("urgo", "proj-b")`);
   ok(JSON.stringify(run(O, "SF")) === JSON.stringify([["sched/resume", {project: "proj-b"}]]), JSON.stringify(run(O, "SF")));
   run(O, "POP = null");
-  // 临时指令表：项目级的主机写“全部”、撤销不带 --host；只给这台的带 --host；总览各主机合起来时项目级的只列一次
+  // 临时指令表：项目级的主机写“全部”、撤销不带 --host；单机 pause/drain 对管理员给撤销按钮（#241，悬停含带 --host 的命令）；总览各主机合起来时项目级的只列一次
   const ot = run(O, `ovrTable([{kind: "focus", target: "proj-a", global: true, h: D.hosts[0]}, {kind: "pause", target: "proj-b", h: D.hosts[0]}], true)`);
-  has(ot, `<td class="nw">全部</td>`); has(ot, "labmon unfocus proj-a</code>"); has(ot, "labmon resume proj-b --host srv-a</code>");
-  has(run(O, `ovrTable([{kind: "drain", target: null, h: D.hosts[0]}], false)`), "labmon undrain srv-a</code>", "drain 的撤销照旧");
+  has(ot, `<td class="nw">全部</td>`); has(ot, "labmon unfocus proj-a</code>"); has(ot, 'data-ovr="open" data-kind="pause" data-host="srv-a" data-target="proj-b"'); has(tips(ot), "labmon resume proj-b --host srv-a");
+  const dt = run(O, `ovrTable([{kind: "drain", target: null, h: D.hosts[0]}], false)`);
+  has(dt, 'data-ovr="open" data-kind="drain" data-host="srv-a" data-target=""', "drain 的撤销按钮"); has(tips(dt), "labmon undrain srv-a");
   has(run(O, `(() => { ST.set("cardOpen", {"rec:home": true}); ST.set("recTab", {home: "ovr"}); const r = home(); ST.set("cardOpen", {}); return r; })()`), `临时指令<span class="mut">4 条</span>`, "项目级的只列一次");
 });
 t("overview", "etaOf：进度 → 推演的 run 条 → worker 的预计时长 → 清单估时 → 没有", () => {
@@ -3617,6 +3618,129 @@ t("overview", "前端 UI 打磨（#237）：分段按钮组、外部机抽屉重
   const rRadio = run(AT, "RN"), toks = run(AT, "POP.draft.toks");
   run(AT, "render = ORIG_R");
   ok(rText === 0 && rRadio === 0 && toks === "admin", `data-pop-field change 不应重建表单且应更新 radio 草稿：rText=${rText}, rRadio=${rRadio}, toks=${toks}`);
+});
+
+ta("overview", "#241 补齐 4 处前端实用入口：Colab 引导、本地工作盘清理、单机指令撤销与普通用户空态导航", async () => {
+  // 1. Colab 临时 worker 接入引导（我的账号 → 命令行）
+  const meHtml = page(mkCtx(ovSrc, OV, {hash: "#/me", filename: "overview.js", path: "/pfx/"}), "#/me");
+  clean(meHtml, "我的账号 Colab 引导");
+  has(meHtml, "Colab / 临时上报");
+  has(meHtml, 'href="api/client/ephemeral.py" download="labmon_ephemeral.py"');
+  has(meHtml, 'from google.colab import userdata; os.environ[&quot;LABMON_TOKEN&quot;] = userdata.get(&quot;LABMON_TOKEN&quot;)');
+  has(meHtml, "!python3 labmon_ephemeral.py run --url http://127.0.0.1:8765/pfx --project &lt;项目ID&gt; --job &lt;任务名&gt; -- python3 train.py");
+  has(meHtml, "LABMON_TOKEN"); has(meHtml, 'href="#/me/tokens"');
+
+  // 2. 独立主机本地工作盘缓存预览与清理（POST /api/worker/clean）
+  const S = JSON.parse(JSON.stringify(OV));
+  const ext = JSON.parse(JSON.stringify(OV.hosts[0]));
+  Object.assign(ext, {
+    id: "ext-1", label: "外租机-1", standalone: true, worker_up: true, error: null, owner: "alice",
+    platform: null, platform_kind: "other", lw: null, lease_end: null, borrow: null,
+    work_disk: {root: "/data/work", total: 200 * 1024 ** 3, free: 80 * 1024 ** 3, work_b: 12 * 1024 ** 3, warn_gb: 20, stop_gb: 10, projects: {"proj-a": {b: 8 * 1024 ** 3}}, dirs: [], reclaimable: []},
+  });
+  S.hosts.push(ext);
+  const calls = [];
+  let cleanOut = "可清理 2 项，共 1.5 GiB（目录：/data/work/.tmp；预览模式未删除）：\n  [缓存] proj-a  1.2 GiB  (/data/work/.tmp/cache/proj-a)\n  [单格临时] " + BAD;
+  const fakeFetch = async (u, o) => {
+    const body = o?.body ? JSON.parse(o.body) : null;
+    if (u.startsWith("api/")) calls.push([u, body]);
+    if (u === "api/worker/clean") return {ok: true, status: 200, json: async () => ({rc: 0, out: body.yes ? "已清理 2 项，释放 1.5 GiB" : cleanOut, err: ""})};
+    if (u === "api/override/undrain") return {ok: true, status: 200, json: async () => ({rc: 0, out: "[srv-a] 已撤销 drain", err: ""})};
+    if (u === "api/override/resume") return {ok: true, status: 200, json: async () => ({rc: 0, out: "[srv-a] 已恢复 proj-b", err: ""})};
+    return {ok: true, status: 200, json: async () => structuredClone(S)};
+  };
+  const A = mkCtx(ovSrc, S, {hash: "#/host/ext-1", filename: "overview.js", fetch: fakeFetch});
+  A.RR = RR; A.RTAB = "lw";
+  run(A, `recs = () => ({rows: RR, gen: D.generated, more: false}); ST.get = (k, d) => k === "cardOpen" ? {"rec:host": 1} : k === "recTab" ? {host: "lw"} : d;`);
+  const hp = page(A, "#/host/ext-1");
+  clean(hp, "独立主机工作盘页");
+  has(hp, 'data-wclean="open" data-host="ext-1" data-where="block"');
+  await run(A, `wcleanAct("open", {host: "ext-1", where: "block"})`);
+  const popHtml = page(A, "#/host/ext-1");
+  clean(popHtml, "工作盘清理预览弹窗");
+  has(popHtml, "可清理 2 项，共 1.5 GiB");
+  has(popHtml, "清空范围：此主机全部项目的 <code>.tmp/{cache,jobs}</code>");
+  has(popHtml, "删除后不可恢复");
+  has(popHtml, "绝不触碰 <code>projects/</code>");
+  has(popHtml, 'type="checkbox" data-pack');
+  ok(/data-wclean="go"[^>]*disabled/.test(popHtml), "未勾选风险确认时确认按钮应禁用");
+  ok(JSON.stringify(calls[0]) === JSON.stringify(["api/worker/clean", {host: "ext-1", dry_run: true}]), "预览请求参数不对：" + JSON.stringify(calls[0]));
+  // 未勾选风险确认直接调 go 必须拦截
+  await run(A, `wcleanAct("go", {host: "ext-1", where: "block"})`);
+  ok(calls.length === 1, "未勾选风险确认不应发起清理请求");
+  // 勾选风险确认后启用并可提交
+  fire(A, "change", {type: "checkbox", checked: true, dataset: {pack: ""}, classList: {contains: () => false}});
+  ok(!/data-wclean="go"[^>]*disabled/.test(page(A, "#/host/ext-1")), "勾选风险确认后确认按钮应启用");
+  await run(A, `wcleanAct("go", {host: "ext-1", where: "block"})`);
+  ok(JSON.stringify(calls[1]) === JSON.stringify(["api/worker/clean", {host: "ext-1", yes: true}]), "确认清理请求参数不对：" + JSON.stringify(calls[1]));
+  has(page(A, "#/host/ext-1"), "已清理 2 项，释放 1.5 GiB");
+  // 无可清理项时确认按钮禁用
+  cleanOut = "没有可清理的自管缓存或已结束单格临时目录（目录：/data/work/.tmp）";
+  await run(A, `wcleanAct("open", {host: "ext-1", where: "block"})`);
+  const emptyPop = page(A, "#/host/ext-1");
+  ok(/data-wclean="go"[^>]*disabled/.test(emptyPop), "无可清理项时确认按钮应禁用");
+  // 离线主机按钮灰显
+  run(A, `D.hosts.find(h => h.id === "ext-1").worker_up = false; POP = null;`);
+  has(page(A, "#/host/ext-1"), 'disabled data-tip="worker 未运行或主机离线，无法清理缓存"');
+  // 普通用户：多项目用紧凑药丸选项目（无下拉框），自动带 project；无权主机或只读用户不显示
+  const userMe = {name: "alice", role: "user", role_name: "普通用户", scopes: ["project", "read"], admin: false, ops: false, write: true, account: true, hosts: ["ext-1", "srv-a"], own: ["proj-a", "proj-b"], pools: []};
+  const uCalls = [];
+  const U = mkCtx(ovSrc, S, {hash: "#/host/ext-1", filename: "overview.js", me: userMe, fetch: async (u, o) => {
+    const body = o?.body ? JSON.parse(o.body) : null;
+    if (u.startsWith("api/")) uCalls.push([u, body]);
+    return {ok: true, status: 200, json: async () => ({rc: 0, out: "可清理 1 项，共 200 MiB", err: ""})};
+  }});
+  await run(U, `wcleanAct("open", {host: "ext-1", where: "block"})`);
+  const uPop = run(U, `workDiskBlock(D.hosts.find(h => h.id === "ext-1").work_disk, D.hosts.find(h => h.id === "ext-1"))`);
+  ok(!uPop.includes("<select"), "普通用户选项目不应使用下拉框");
+  has(uPop, 'class="seg form-seg"'); has(uPop, 'data-wclean="proj"'); has(uPop, 'data-p="proj-a"'); has(uPop, 'data-p="proj-b"');
+  has(uPop, "清空范围：项目 <code>proj-a</code> 的 <code>.tmp/{cache,jobs}</code>");
+  ok(JSON.stringify(uCalls[0]) === JSON.stringify(["api/worker/clean", {host: "ext-1", project: "proj-a", dry_run: true}]), "普通用户应带 project：" + JSON.stringify(uCalls[0]));
+  const roUser = {...userMe, write: false, scopes: ["read"]};
+  const RO = mkCtx(ovSrc, S, {hash: "#/host/ext-1", filename: "overview.js", me: roUser});
+  ok(!run(RO, `workCleanPop(D.hosts.find(h => h.id === "ext-1"), "block")`), "只读用户不应显示清理按钮");
+
+  // 3. 临时指令表单机撤销按钮（POST /api/override/undrain & /api/override/resume）
+  calls.length = 0;
+  run(A, `D.hosts[0].status.overrides = [{kind: "drain", target: null}, {kind: "pause", target: "proj-b", by: "boss"}]; POP = null;`);
+  run(A, `ovrUndoAct("open", {kind: "drain", host: "srv-a", target: ""})`);
+  await run(A, `ovrUndoAct("go", {kind: "drain", host: "srv-a", target: ""})`);
+  ok(JSON.stringify(calls[0]) === JSON.stringify(["api/override/undrain", {target: "srv-a"}]), "undrain 请求不对：" + JSON.stringify(calls[0]));
+  run(A, `ovrUndoAct("open", {kind: "pause", host: "srv-a", target: "proj-b"})`);
+  await run(A, `ovrUndoAct("go", {kind: "pause", host: "srv-a", target: "proj-b"})`);
+  ok(JSON.stringify(calls[1]) === JSON.stringify(["api/override/resume", {target: "proj-b", hosts: ["srv-a"]}]), "resume 请求不对：" + JSON.stringify(calls[1]));
+  // 普通用户权限边界：自己下的单机 pause 可撤；别人下的单机 pause 与单机 drain 保留只读 CLI
+  const uOvr = run(U, `ovrTable([
+    {kind: "pause", target: "proj-a", by: "alice", h: D.hosts[0]},
+    {kind: "pause", target: "proj-a", by: "boss", h: D.hosts[0]},
+    {kind: "drain", target: null, h: D.hosts[0]},
+  ], true)`);
+  clean(uOvr, "普通用户临时指令表");
+  ok((uOvr.match(/data-ovr="open"/g) || []).length === 1, "普通用户只能撤销自己下的单机 pause：" + uOvr);
+  has(uOvr, "labmon resume proj-a --host srv-a</code>");
+  has(uOvr, "labmon undrain srv-a</code>");
+
+  // 4. 普通用户空态导航闭环
+  const emptySnap = JSON.parse(JSON.stringify(OVS));
+  emptySnap.hosts = []; emptySnap.projects = []; emptySnap.pool = {pools: []};
+  emptySnap.fleet = {scope: "self", mine: [], servers: [{id: "srv-me", holder: "alice", off: true, manage: {on: false, opt_out: false}}]};
+  const meEmpty = {...userMe, hosts: [], own: []};
+  const E1 = mkCtx(ovSrc, emptySnap, {hash: "#/", filename: "overview.js", me: meEmpty});
+  const h1 = page(E1, "#/");
+  clean(h1, "普通用户有组员机空态");
+  has(h1, 'href="#/fleet">前往我的服务器</a>');
+  has(h1, 'data-drw="#/ext/new">+ 添加外部主机</button>');
+  // 有项目但无主机（进入主机表空态行）
+  emptySnap.projects = [OV.projects[0]];
+  const E2 = mkCtx(ovSrc, emptySnap, {hash: "#/", filename: "overview.js", me: meEmpty});
+  const h2 = page(E2, "#/");
+  clean(h2, "普通用户主机表空态");
+  has(h2, "当前没有可用主机");
+  has(h2, 'href="#/fleet">前往我的服务器</a>接入名下组员机');
+  has(h2, 'data-drw="#/ext/new">+ 添加外部主机</button>');
+  // 只读普通用户不显示添加外部主机
+  const E3 = mkCtx(ovSrc, emptySnap, {hash: "#/", filename: "overview.js", me: {...meEmpty, write: false, scopes: ["read"]}});
+  ok(!page(E3, "#/").includes("添加外部主机"), "只读用户空态不应显示添加外部主机");
 });
 
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));

@@ -6,13 +6,62 @@ function ovrTarget(o) {
   return o.kind === "pause" || o.kind === "focus" || o.kind === "guest"
     ? o.target.split(",").filter(Boolean).map(id => `<b>${projName(id, {always: true}).trim()}</b>`).join("、") : `<b>${esc(o.target)}</b>`;
 }
+let OMSG = null, OMT = 0;
+const omsg = m => { OMSG = m; clearTimeout(OMT); OMT = setTimeout(() => { OMSG = null; render(false); }, 30000); };
+// 临时指令表单机撤销权限（#241）：单机 drain 仅管理员（POST /api/override/undrain），单机 pause 管理员或符合 pauseMine 的项目主人（POST /api/override/resume）
+function canOvrUndo(o) {
+  if (!LIVE || !ME || o.global || !o.h?.id) return false;
+  if (o.kind === "drain") return canWeight();
+  if (o.kind === "pause") return !!o.target && canWrite(o.target) && (!!ME.admin || (canUseHost(o.h.id) && pauseMine(o)));
+  return false;
+}
+function ovrUndoPop(o, cli) {
+  const key = `${o.kind}:${o.h.id}:${o.target || ""}`, open = popIs("ovru", key);
+  const btn = `<button type="button" class="btn mini-btn undo" data-ovr="open" data-kind="${esc(o.kind)}" data-host="${esc(o.h.id)}" data-target="${esc(o.target || "")}" aria-haspopup="dialog" aria-expanded="${open}" ${tip(cli)}>撤销</button>`;
+  const body = !open ? "" : (o.kind === "drain"
+    ? `<b>撤销 ${esc(hostShort(o.h))} 的 drain？</b><div class="rn-note">该主机下一轮起恢复放行新任务。</div>`
+    : `<b>撤销 ${esc(pname(o.target))} 在 ${esc(hostShort(o.h))} 上的暂停？</b><div class="rn-note">该主机下一轮起恢复放行此项目的新任务。</div>`)
+    + (POP?.err ? `<div class="rn-err">${esc(POP.err)}</div>` : "");
+  const go = !open ? "" : `<button type="button" class="btn pri" data-ovr="go" data-kind="${esc(o.kind)}" data-host="${esc(o.h.id)}" data-target="${esc(o.target || "")}" ${POP?.busy ? "disabled" : ""}>${POP?.busy ? "撤销中…" : "确认撤销"}</button>`;
+  return popConfirm(btn, open, body, go);
+}
+async function ovrUndoAct(act, d = {}) {
+  const kind = d.kind || "", host = d.host || "", target = d.target || "";
+  if (kind !== "drain" && kind !== "pause" || !host) return;
+  const h = D.hosts.find(x => x.id === host);
+  const row = h?.status?.overrides?.find(x => x.kind === kind && !x.global && (x.target || "") === target);
+  if (!canOvrUndo({kind, target: target || null, by: row?.by, h: h || {id: host}})) return;
+  const key = `${kind}:${host}:${target}`;
+  if (act === "open") { popToggle("ovru", key); return render(false); }
+  if (act !== "go" || !popIs("ovru", key) || POP.busy) return;
+  POP.busy = true; POP.err = null; render(false);
+  try {
+    const url = kind === "drain" ? "api/override/undrain" : "api/override/resume";
+    const body = kind === "drain" ? {target: host} : {target, hosts: [host]};
+    const r = await postJSON(url, body);
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || (j.rc != null && j.rc !== 0)) throw new Error(j.error || (j.err || j.out || "").trim() || ("HTTP " + r.status));
+    omsg((j.out || "").trim() || (kind === "drain" ? `已撤销 ${host} 的 drain` : `已恢复 ${target}（${host}）`));
+    POP = null;
+    return collectNow(true);
+  } catch (e) {
+    if (popIs("ovru", key)) { POP.busy = false; POP.err = e.message || String(e); }
+    render(false);
+  }
+}
 // 临时指令表（总览各主机合起来、主机页这一台）：项目级的暂停、优先（global，主机清单 [sched.*]，所有主机）主机写“全部”、撤销不带 --host；
-// 只给这台下的撤销命令带 --host
+// 只给这台下的撤销命令带 --host；单机 drain / pause 对有权用户给出直接撤销按钮，无权用户保留只读显示（#241）
 function ovrTable(rows, showHost) {
-  if (!rows.length) return `<div class="empty">没有生效中的临时指令（labmon pause|focus|drain …）。</div>`;
-  const undo = o => o.global ? `<code class="sm">labmon ${UNDO[o.kind]} ${esc(o.target)}</code> <span class="sm mut">或调度卡</span>`
-    : `<code class="sm">labmon ${UNDO[o.kind]} ${esc(o.target || o.h.id)}${o.target ? ` --host ${esc(o.h.id)}` : ""}</code>`;
-  return `<div class="scroll"><table><tr><th>指令</th>${showHost ? "<th>主机</th>" : ""}<th>到期</th><th>撤销</th></tr>` + rows.map(o => `<tr>
+  if (!rows.length) return (OMSG ? `<div class="rn-state" style="margin-bottom:6px">${esc(OMSG)}</div>` : "")
+    + `<div class="empty">没有生效中的临时指令（labmon pause|focus|drain …）。</div>`;
+  const undo = o => {
+    if (o.global) return `<code class="sm">labmon ${UNDO[o.kind]} ${esc(o.target)}</code> <span class="sm mut">或调度卡</span>`;
+    const cli = `labmon ${UNDO[o.kind]} ${o.target || o.h.id}${o.target ? ` --host ${o.h.id}` : ""}`;
+    if (canOvrUndo(o)) return ovrUndoPop(o, cli);
+    return `<code class="sm">${esc(cli)}</code>`;
+  };
+  return (OMSG ? `<div class="rn-state" style="margin-bottom:6px">${esc(OMSG)}</div>` : "")
+    + `<div class="scroll"><table><tr><th>指令</th>${showHost ? "<th>主机</th>" : ""}<th>到期</th><th>撤销</th></tr>` + rows.map(o => `<tr>
     <td>${o.kind === "deadline" && o.target === "borrow" ? "约定归还" : `${OVR[o.kind] || esc(o.kind)} ${o.target ? ovrTarget(o) : ""}`}${o.now ? ` <span class="badge b-warn">立即停</span>` : ""}${o.keep ? ` <span class="sm mut">${esc(keepText(o.keep))}</span>` : ""}</td>
     ${showHost ? `<td class="nw">${o.global ? "全部" : esc(hostShort(o.h))}</td>` : ""}<td class="sm">${o.until ? tsNear(o.until) : "无期限"}${o.global && !showHost ? ` <span class="mut">· 所有主机</span>` : ""}</td>
     <td>${o.kind === "guest" || o.target === "borrow" ? `<span class="sm">还了就撤（看板按借用的约定下）</span>${o.at ? ` <span class="sm mut">截止 ${tsNear(o.at)}</span>` : ""}`

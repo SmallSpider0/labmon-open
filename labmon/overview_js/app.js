@@ -377,6 +377,10 @@ document.addEventListener("click", e => {
   if (ac) { if (!ac.disabled && !ACC.busy) accAct(ac.dataset.acc, ac.dataset); return; }
   const sc = e.target.closest?.("[data-sch]");
   if (sc) { if (!sc.disabled) schedAct(sc.dataset.sch, sc.dataset.p); return; }
+  const ov = e.target.closest?.("[data-ovr]");
+  if (ov) { if (!ov.disabled) ovrUndoAct(ov.dataset.ovr, ov.dataset); return; }
+  const wc = e.target.closest?.("[data-wclean]");
+  if (wc) { if (!wc.disabled) wcleanAct(wc.dataset.wclean, wc.dataset); return; }
   const pj = e.target.closest?.("[data-pj]");
   if (pj) { if (!pj.disabled) pjAct(pj.dataset.pj, pj.dataset.p); return; }
   const cfb = e.target.closest?.("[data-cfb]");

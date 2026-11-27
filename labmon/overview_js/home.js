@@ -103,8 +103,13 @@ function home() {
     : fleetN
     ? `<p>你名下有 ${fleetN} 台组内服务器（${offN === fleetN ? "当前均已关机" : "当前暂未接入调度"}，可在<a href="#/fleet">我的服务器</a>查看）：开机并空闲后会自动接入本人调度，也可请管理员分配主机或加入共有算力池。</p>`
     : '<p>你的账号还没有能用的主机：请管理员在「组内服务器 → 人员」里打开你，在「账号与权限」给你分配主机，或将你加入共有算力池。</p>';
+  const noHostActs = !noHost || !LIVE || !ME || ME.admin ? "" : [
+    fleetN ? `<a class="btn mini-btn" href="#/fleet">前往我的服务器</a>` : "",
+    ME.write ? `<button type="button" class="btn mini-btn" data-drw="#/ext/new">+ 添加外部主机</button>` : "",
+  ].filter(Boolean).join(" ");
   const intro = LIVE && ME && !ME.admin && (!D.projects.length || noHost) ? dSec("开始使用", `
     ${noHostMsg}
+    ${noHostActs ? `<div class="row wrap" style="gap:8px;margin:6px 0">${noHostActs}</div>` : ""}
     ${D.projects.length ? "" : '<p>从<a href="#/me">我的账号</a>下载命令行，在项目目录里运行 <code>labmon project push</code> 登记项目。</p>'}`) : "";
   if (intro && !D.hosts.length && !D.projects.length && !(D.pool?.pools?.length)) return intro;
   const al = allAlerts(), fal = fleetAlerts(false), pal = projAlerts(), hs = D.hosts.filter(h => h.status?.info);
@@ -165,7 +170,10 @@ function home() {
         <td>${gb || "—"}</td><td>${mb}</td><td>${sb}</td><td class="r nw">${info?.cpu_used != null ? g1(info.cpu_used) : "—"} <span class="mut">/ ${info?.cpu_quota ? g1(info.cpu_quota) : info?.nproc ?? "—"}</span>${thrTag(h) ? `<div>${thrTag(h)}</div>` : ""}</td>
         <td class="r">${jobsOf(h).length}</td><td class="r">${(h.status?.waiting || []).length}</td>
         <td class="sm nw" ${!h.ephemeral && info?.started ? tip(`${info.os === "darwin" ? "主机" : "容器"} ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : ""}>${h.ephemeral ? `<span class="mut">临时实例</span>` : h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${h.ephemeral ? "" : renewChip(h)}</td></tr>`;
-    }).join("") || `<tr><td colspan="9" class="empty">主机清单里没有在用的主机。</td></tr>`) + `</table></div></div>`;
+    }).join("") || `<tr><td colspan="9" class="empty">${selfView
+      ? (() => { const ls = [fleetN ? `<a href="#/fleet">前往我的服务器</a>接入名下组员机` : "", ME.write ? `<button type="button" class="btn mini-btn" data-drw="#/ext/new">+ 添加外部主机</button>` : ""].filter(Boolean);
+        return `当前没有可用主机${ls.length ? "：" + ls.join("，或 ") : "。"}`; })()
+      : "主机清单里没有在用的主机。"}</td></tr>`) + `</table></div></div>`;
   s += poolSummaryCard() + schedCard() + tasksCard(D.hosts, jobs, allw, true);
   const pEnd = id => Math.max(0, ...D.hosts.flatMap(h => planLanes(h).filter(l => l.project === id).flatMap(l => l.jobs.map(j => j.t1 || 0))));   // 这个项目在各主机推演里最晚的结束
   s += `<div class="card"><div class="chd"><b>项目</b></div><table><tr><th>项目</th><th>更新</th><th>预计全部跑完</th><th>下一个里程碑</th><th>告警</th></tr>` +
