@@ -188,41 +188,6 @@ def _pool_entry(pcfg: dict, pool_map: dict[str, dict]) -> str:
     return POOL if len(pool_map) <= 1 else pcfg["host_id"]
 
 
-def _active_pool_projects(pid: str, snap: dict | None, pool_map: dict[str, dict]) -> set[str]:
-    """快照中在共有池 pid 有待放或已落机未完成清单的项目 id 集合。"""
-    if not isinstance(snap, dict):
-        return set()
-    pcfg = pool_map.get(pid)
-    phid = pcfg["host_id"] if pcfg else (POOL if pid == POOL else f"pool:{pid}")
-    match_phids = {phid}
-    if pid == POOL or len(pool_map) <= 1:
-        match_phids.add(POOL)
-    out: set[str] = set()
-    done_keys: set[str] = set()
-    for v in ((snap.get("pool") or {}).get("lists") or {}).values():
-        if isinstance(v, dict) and v.get("pool") == pid and v.get("root") and v.get("jobs"):
-            rk = key(v["root"], v["jobs"])
-            if v.get("done") or v.get("sleeping"):
-                done_keys.add(rk)
-            elif v.get("project"):
-                out.add(str(v["project"]))
-    for x in snap.get("regs") or []:
-        xh = str(x.get("host") or "")
-        qs = x.get("queues") or []
-        if xh in match_phids:
-            for q in qs:
-                if q.get("root") and q.get("jobs") and q.get("project") and not q.get("empty") and not q.get("sleeping"):
-                    if key(q["root"], q["jobs"]) not in done_keys:
-                        out.add(str(q["project"]))
-            continue
-        if is_pool_id(xh):
-            continue
-        for q in qs:
-            if _reg_pool_id(q) == pid and q.get("project") and not q.get("empty") and not q.get("sleeping"):
-                out.add(str(q["project"]))
-    return out
-
-
 def tell_saved(pcfg: dict, *, create: bool, old_pool: dict | None = None,
                old_pools: dict[str, dict] | None = None, snap: dict | None = None) -> None:
     """共有池新建/修改成功后，经 records.tell 通知相关未归档项目的实验会话（#249）：
@@ -241,7 +206,7 @@ def tell_saved(pcfg: dict, *, create: bool, old_pool: dict | None = None,
         msg = f"{action}了共有算力池「{pcfg['label']}」（入口 {entry}，主机：{hosts_txt}，开放模式）：可经 {entry} 提交，也可直投池内单机"
     active_projs: set[str] = set()
     if not create and old_pool:
-        active_projs = _active_pool_projects(pcfg["id"], snap, old_pools or {pcfg["id"]: old_pool})
+        _, _, active_projs = _scan_pool_activity(pcfg["id"], snap=snap, pool_map=old_pools or {pcfg["id"]: old_pool})
     for proj_id in PJ.project_ids():
         if _proj_member(proj_id, pcfg):
             tell(proj_id, "pool", msg)
@@ -740,11 +705,12 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
     return {"pools": out_pools, "lists": out_lists}
 
 
-def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dict] | None = None) -> dict:
-    """统计共有算力池 pid 当前未完成的待放清单与已落机活跃清单条数（remove_pool 与 manage_data 共用）。"""
+def _scan_pool_activity(pid: str, *, snap: dict | None = None,
+                        pool_map: dict[str, dict] | None = None) -> tuple[int, int, set[str]]:
+    """共有算力池 pid 未完成待放与已落机清单的唯一扫描实现：返回 (待放条数, 已落机条数, 涉及项目集合)。"""
     snap = snapshot() if snap is None else snap
     if not isinstance(snap, dict):
-        return {"pending": 0, "placed": 0}
+        return 0, 0, set()
     if pool_map is None:
         try:
             pool_map = CF.pools()
@@ -757,6 +723,7 @@ def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dic
         match_phids.add(POOL)
     pend_keys: set[str] = set()
     done_keys: set[str] = set()
+    projs: set[str] = set()
     for v in ((snap.get("pool") or {}).get("lists") or {}).values():
         if isinstance(v, dict) and v.get("pool") == pid and v.get("root") and v.get("jobs"):
             rk = key(v["root"], v["jobs"])
@@ -764,6 +731,8 @@ def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dic
                 done_keys.add(rk)
             else:
                 pend_keys.add(rk)
+                if v.get("project"):
+                    projs.add(str(v["project"]))
     placed = 0
     for x in snap.get("regs") or []:
         xh = str(x.get("host") or "")
@@ -774,13 +743,23 @@ def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dic
                     rk = key(q["root"], q["jobs"])
                     if rk not in done_keys:
                         pend_keys.add(rk)
+                        if q.get("project"):
+                            projs.add(str(q["project"]))
             continue
         if is_pool_id(xh):
             continue
         for q in qs:
             if _reg_pool_id(q) == pid and not q.get("empty") and not q.get("sleeping"):
                 placed += 1
-    return {"pending": len(pend_keys), "placed": placed}
+                if q.get("project"):
+                    projs.add(str(q["project"]))
+    return len(pend_keys), placed, projs
+
+
+def pool_activity(pid: str, *, snap: dict | None = None, pool_map: dict[str, dict] | None = None) -> dict:
+    """统计共有算力池 pid 当前未完成的待放清单与已落机活跃清单条数（remove_pool 与 manage_data 共用）。"""
+    pending, placed, _ = _scan_pool_activity(pid, snap=snap, pool_map=pool_map)
+    return {"pending": pending, "placed": placed}
 
 
 def manage_data(snap: dict | None = None) -> dict:
