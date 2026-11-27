@@ -24,7 +24,7 @@ from .pure import (  # noqa: F401 — 经 common 与包顶层兼容导出
 )
 
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-HOME = os.environ.get("LABMON_HOME") or BASE_DIR
+HOME = os.path.expanduser(os.environ.get("LABMON_HOME") or BASE_DIR)
 
 
 TICK = float(os.environ.get("LABMON_TICK", "10"))
@@ -51,10 +51,10 @@ CG = os.environ.get("LABMON_CGROUP", "/sys/fs/cgroup")
 NAME_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
 
-DATA_ROOT = os.path.dirname(HOME.rstrip("/"))          # 共享盘根（worker 装在 <data_root>/labmon）
+DATA_ROOT = os.path.expanduser(os.environ.get("LABMON_DATA_ROOT") or os.path.dirname(HOME.rstrip("/")))  # 工作根目录（优先 LABMON_DATA_ROOT，兼容旧反推）
 
 
-LOCAL = os.environ.get("LABMON_LOCAL", "/tmp/labmon")   # 容器本地盘上 labmon 管的目录：单格临时、项目缓存、单元申请
+LOCAL = os.path.expanduser(os.environ.get("LABMON_LOCAL") or "/tmp/labmon")   # 本地临时目录：单格临时、项目缓存、单元申请
 
 
 ROOTFS = os.environ.get("LABMON_ROOTFS", "/")           # 容器根盘（续租、容器重启会清空）：开机以来的新写入按它算、扫它（LocalDisk）；测试指到假目录
@@ -301,6 +301,23 @@ def queue_stop_path(mode, root=None):
                 # 原有原子替换语义：最终一项是符号链接时，替换链接本身。
                 return os.path.join(parent, path.name)
     raise ValueError("stop 要用 boundary、term，或 file: 加清单目录内的相对路径")
+
+
+def queue_root_ok(root, data_root=None):
+    """校验独立主机登记的清单目录 ROOT 位于 <data_root>/projects/<项目>/ 内（经 realpath 防符号链接越界）。"""
+    dr = os.path.expanduser(data_root or DATA_ROOT)
+    proj = os.path.realpath(os.path.join(dr, "projects"))
+    target = os.path.realpath(os.path.expanduser(root))
+    try:
+        inside = target != proj and os.path.commonpath((proj, target)) == proj
+    except ValueError:
+        inside = False
+    if not inside:
+        raise ValueError(
+            "独立主机须在 %s/projects/<项目>/ 下运行，避免日志与产物污染原代码仓库"
+            "（如确需原地运行，可在 hosts.toml 设 allow_outside_root = true）" % dr.rstrip("/")
+        )
+    return target
 
 
 def write_queue_stop(root, mode, text):

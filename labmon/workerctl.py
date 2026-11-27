@@ -28,11 +28,11 @@ import shlex
 import subprocess
 import tarfile
 import time
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from . import lan as L
 from . import lease as LS
-from .config import POOL, ConfigError, active_hosts, all_hosts, home_host, host_defaults, hosts_file, pool_home, user_hosts
+from .config import POOL, ConfigError, active_hosts, all_hosts, home_host, home_key, host_defaults, hosts_file, is_standalone, pool_home, shell_path, user_hosts
 
 from .worker import queue_stop_path
 
@@ -49,10 +49,11 @@ def host_conf(hid: str) -> dict:
     return h
 
 
-def via(hid: str, home: str | None = None) -> dict:
+def via(hid: str, home: str | tuple | None = None) -> dict:
     """在哪台上操作这台目录下的登记（worker rm）：在用的就是它自己；已归还的、主机清单里已没有的（home 是它的 worker_home，
-    全局快照 regs 里那一项的 home），经一台与它共用 worker_home 的在用主机代办（config.home_host，与 overview.collect 每轮代读登记挑的是同一台），
-    命令照样带 --host hid：改的是共享盘上我们自己 worker_home 里那台的登记文件，不连已归还的那台（借来还了的是别人的服务器）。找不到能代办的报 ConfigError。
+    全局快照 regs 里那一项的 home），经一台与它同共享域（config.home_key）的在用主机代办（config.home_host），
+    命令照样带 --host hid：改的是共享盘上我们自己 worker_home 里那台的登记文件，不连已归还的那台（借来还了的是别人的服务器）。
+    独立主机（无论是否显式传 home）已不在用时直接拒绝，绝不借同路径集群主机代办。
     算力池（hid 是 config.POOL，#24）没有 home 时取 config.pool_home：worker add|rm pool 都经这里。"""
     act = active_hosts()
     if any(str(h["id"]) == hid for h in act):
@@ -61,11 +62,14 @@ def via(hid: str, home: str | None = None) -> dict:
         home = pool_home()
         if home is None:
             raise ConfigError("主机清单里没有自用主机：算力池的登记没有地方放（池登记放在自用主机的 worker 目录下）")
-    if home is None:
-        home = next((h["worker_home"] for h in all_hosts() if str(h["id"]) == hid), None)
-    o = home_host(home, act) if home else None
+    old_h = next((h for h in all_hosts() if str(h["id"]) == str(hid)), None)
+    if old_h and is_standalone(old_h):
+        raise ConfigError(f"{hid} 是独立主机且已不在用，没有共享盘代办主机：它的登记现在动不了")
+    key = home_key(old_h) if old_h else (("shared", home.rstrip("/")) if isinstance(home, str) else home)
+    o = home_host(key, act) if key else None
     if o is None:
-        raise ConfigError(f"{hid} 已不在用，又没有与它共用 worker 目录（{home or '不知道在哪'}）的在用主机：它的登记现在动不了")
+        show = key[-1] if isinstance(key, tuple) else (key or "不知道在哪")
+        raise ConfigError(f"{hid} 已不在用，又没有与它共用 worker 目录（{show}）的在用主机：它的登记现在动不了")
     return host_conf(str(o["id"]))
 
 
@@ -107,23 +111,48 @@ def worker_bundle() -> tuple[str, list[str]]:
 
 def ssh(h: dict, remote: str, stdin: str = "", timeout: float | None = None) -> tuple[int, str]:
     """在主机上跑一条命令（stdin 是喂给它的文字），返回 (退出码, 输出)；输出里 stderr 接在 stdout 后面（ssh 连不上的原因也在里面）。"""
-    cmd = L.ssh_argv(h["ssh"], h["port"], known_hosts=h.get("known_hosts")) + [remote] if h.get("ssh") else ["bash", "-c", remote]     # 没有 ssh：本机（测试用）
+    if h.get("ssh"):
+        try:
+            cmd = L.host_ssh_argv(h) + [remote]
+        except ConfigError as e:
+            return 255, str(e)
+    else:
+        cmd = ["bash", "-c", remote]     # 没有 ssh：本机（测试用）
     r = (L.ssh_run if h.get("ssh") else subprocess.run)(cmd, input=stdin, capture_output=True, text=True, timeout=timeout)
     return r.returncode, r.stdout + r.stderr
 
 
 def worker_env(h: dict) -> str:
-    """把主机的部署路径（保活脚本 ka_bin）交给 worker；取值按 shell 参数转义。"""
-    pairs = (("KA_BIN", h.get("ka_bin")),)
-    return " ".join("%s=%s" % (name, shlex.quote(str(value))) for name, value in pairs if value)
+    """把主机的部署路径（ka_bin、data_root、local_dir）与独立主机标记交给 worker；取值按 shell 参数安全转义（支持 ~/ 展开）。"""
+    pairs = [
+        ("KA_BIN", h.get("ka_bin")),
+        ("LABMON_DATA_ROOT", h.get("data_root")),
+        ("LABMON_LOCAL", h.get("local_dir")),
+    ]
+    parts = [f"{name}={shell_path(str(value))}" for name, value in pairs if value]
+    if is_standalone(h):
+        parts.append("LABMON_STANDALONE=1")
+        if h.get("allow_outside_root"):
+            parts.append("LABMON_ALLOW_OUTSIDE_ROOT=1")
+    return " ".join(parts)
 
 
 def project_init(hid: str, name: str | None) -> tuple[int, str]:
-    """一条连接：建规范目录（和 projects/<名称>/），更新根目录 README，列出现有的共享环境、数据集与权重。返回 (退出码, 输出)。"""
+    """一条连接：建规范目录（和 projects/<名称>/），更新根目录 README，列出现有的环境、数据集与权重。返回 (退出码, 输出)。
+    独立主机（is_standalone）建立 labmon/.tmp 与 projects/<名称>/{code,queues,runs} 隔离分层并写独立机版 README。"""
     h = host_conf(hid)
     root = h["data_root"].rstrip("/")
+    rq = shell_path(root)
+    if is_standalone(h):
+        proj = (f"projects/{shlex.quote(name)}/code projects/{shlex.quote(name)}/queues projects/{shlex.quote(name)}/runs"
+                if name else "projects")
+        remote = (f"mkdir -p {rq} && cd {rq} && mkdir -p labmon envs datasets weights archive .tmp {proj} && "
+                  f"cat > README.md.new && mv README.md.new README.md && "
+                  f"for d in envs datasets weights; do echo \"$d/：$(ls $d | tr '\\n' ' ')\"; done"
+                  + (f" && echo {shlex.quote(f'已建 {root}/projects/{name}/（含 code/、queues/、runs/）')}" if name else ""))
+        return ssh(h, remote, committed("data_root_standalone_readme.md"))
     proj = f"projects/{shlex.quote(name)}" if name else "projects"
-    remote = (f"cd {shlex.quote(root)} && mkdir -p envs datasets weights archive {proj} && "
+    remote = (f"cd {rq} && mkdir -p envs datasets weights archive {proj} && "
               f"cat > README.md.new && mv README.md.new README.md && "
               f"for d in envs datasets weights; do echo \"$d/：$(ls $d | tr '\\n' ' ')\"; done"
               + (f" && echo {shlex.quote(f'已建 {root}/projects/{name}/')}" if name else ""))
@@ -141,7 +170,7 @@ def override_each(action: str, kind: str, target: str | None, hosts: list[str], 
     out = []
     for hid in hosts:
         h = host_conf(hid)
-        w = f"env {worker_env(h)} {shlex.quote(h['python'])} {shlex.quote(h['worker_home'] + '/labmon_worker.py')}"
+        w = f"env {worker_env(h)} {shlex.quote(h['python'])} {shell_path(h['worker_home'].rstrip('/') + '/labmon_worker.py')}"
         args = ["override", action, kind] + ([target] if target else [])
         extra = (f" --until {until}" if until else "") + (" --now" if now else "") + (f" --at {at}" if at else "") \
             + (f" --keep {shlex.quote(json.dumps(keep))}" if keep else "") + (" --once" if once else "") \
@@ -197,24 +226,30 @@ def clear_overrides(hid: str, *, home: str | None = None, borrow_only: bool = Fa
         cands = [h]
     else:
         act = [h for h in active_hosts() if str(h["id"]) not in skip_ids]
-        if home is None:
-            home = next((h["worker_home"] for h in all_hosts() if str(h["id"]) == str(hid)), None)
-        if not home:
-            return False, f"不知道 {hid} 的 worker 目录"
-        cands, rest = [], list(act)
-        me = next((h for h in rest if str(h["id"]) == str(hid) and home_host(home, [h])), None)
-        if me is not None:
-            cands.append(me)
-            rest.remove(me)
-        while (o := home_host(home, rest)) is not None:
-            cands.append(o)
-            rest.remove(o)
+        known_h = next((h for h in all_hosts() if str(h["id"]) == str(hid)), None)
+        if known_h and is_standalone(known_h):
+            me = next((h for h in act if str(h["id"]) == str(hid)), None)
+            cands = [me] if me is not None else []
+            home = home or known_h["worker_home"]
+        else:
+            if home is None:
+                home = known_h["worker_home"] if known_h else None
+            if not home:
+                return False, f"不知道 {hid} 的 worker 目录"
+            cands, rest = [], list(act)
+            me = next((h for h in rest if str(h["id"]) == str(hid) and home_host(home, [h])), None)
+            if me is not None:
+                cands.append(me)
+                rest.remove(me)
+            while (o := home_host(home, rest)) is not None:
+                cands.append(o)
+                rest.remove(o)
     if not cands:
         return False, f"没有与 {hid} 共用 worker 目录（{home}）的在用主机"
     ovr = f"{home.rstrip('/')}/hosts/{hid}/overrides.json"
     last_err = ""
     for c in cands:
-        cmd = f"{shlex.quote(c['python'])} -c {_clear_borrow_cmd(ovr)}" if borrow_only else f"rm -f {shlex.quote(ovr)}"
+        cmd = f"{shlex.quote(c['python'])} -c {_clear_borrow_cmd(ovr)}" if borrow_only else f"rm -f {shell_path(ovr)}"
         rc, out = run(c, cmd)
         if rc == 0:
             if borrow_only:
@@ -231,6 +266,37 @@ def clear_overrides(hid: str, *, home: str | None = None, borrow_only: bool = Fa
 CHANGE = ("start", "stop", "add", "rm", "limit")     # 改 worker 的子命令（备用时不做）
 
 
+def _check_standalone_root(h: dict, root: str) -> str | None:
+    """看板侧独立主机路径边界前置校验（与 worker/common.py:queue_root_ok 同口径，防旧 worker 绕过）：
+    仅当 data_root 与 root 均为明确路径（或本机无 ssh 可展开）时校验；远端含 ~ 的另由远端 worker 经 realpath 校验。"""
+    if not is_standalone(h) or h.get("allow_outside_root"):
+        return None
+    dr = str(h.get("data_root") or "")
+    if not dr:
+        return None
+    if not h.get("ssh"):
+        import os as _os
+        dr = _os.path.expanduser(dr)
+        rt = _os.path.expanduser(root)
+    else:
+        if dr.startswith("~") or root.startswith("~"):
+            return None
+        rt = root
+    if ".." in PurePosixPath(rt).parts:
+        return (f"独立主机须在 {dr.rstrip('/')}/projects/<项目>/ 下运行，避免日志与产物污染原代码仓库"
+                "（如确需原地运行，可在 hosts.toml 设 allow_outside_root = true）")
+    proj = PurePosixPath(dr.rstrip("/")) / "projects"
+    target = PurePosixPath(rt)
+    try:
+        rel = target.relative_to(proj)
+    except ValueError:
+        rel = None
+    if not rel or not rel.parts:
+        return (f"独立主机须在 {dr.rstrip('/')}/projects/<项目>/ 下运行，避免日志与产物污染原代码仓库"
+                "（如确需原地运行，可在 hosts.toml 设 allow_outside_root = true）")
+    return None
+
+
 def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: str | None = None, **opts) -> tuple[int, str]:
     """worker 的部署拉起、停、看状态、登记队列：返回 (退出码, 输出)。add 登记到这台（别的主机上同一条清单的登记搬过来，页面上的「搬到…」就是它）；
     rm 对已归还的主机经共用 worker_home 的在用主机代办（via；home 同 via）；算力池（pool）的 add、rm 都经 via 代办。备用的看板服务上只许看（status、fit），改 worker 的到主那台做（#163）。"""
@@ -242,8 +308,12 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
     if sub in CHANGE:
         LS.need(f"worker {sub}")
     h = via(hid, home) if sub == "rm" or hid == POOL else host_conf(hid)
+    if sub == "add" and hid != POOL and args:
+        if bad := _check_standalone_root(h, args[0]):
+            return 2, bad
     home, py = h["worker_home"], h["python"]
-    w = f"env {worker_env(h)} {shlex.quote(py)} {shlex.quote(home + '/labmon_worker.py')}"
+    we = worker_env(h)
+    w = (f"env {we} " if we else "env ") + f"{shlex.quote(py)} {shell_path(home.rstrip('/') + '/labmon_worker.py')}"
     hq = shlex.quote(hid)
     if sub == "start":
         guest = h.get("borrow") and not h["borrow"].get("swap")                  # 直接借来的：不在对方的容器里扫共享盘
@@ -252,8 +322,8 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
         # 先在 worker_home 下建临时目录解包（失败则清理退出、不破坏现有文件），再替换 worker/*.py、清掉已删模块与旧 __pycache__、替换 ka.sh 与入口脚本，
         # 最后后台拉起（--replace 让旧 worker 退出、由新进程接管任务）。后台那句单独写、不接在 cd 或 && 后面，否则 ssh 会挂到进程结束。
         # START_CHECK_S 秒后看它还在不在：启动即崩的（输出接的是 /dev/null）带上 worker.log 末尾、退出码 3，调用方报“拉起失败”而不是“已拉起”
-        log = shlex.quote(f"{home.rstrip('/')}/hosts/{hid}/worker.log")
-        hq_home = shlex.quote(home)
+        log = shell_path(f"{home.rstrip('/')}/hosts/{hid}/worker.log")
+        hq_home = shell_path(home.rstrip("/"))
         b64, pkg_names = worker_bundle()
         if pkg_names:
             keep = " " + " ".join(pkg_names) + " "
@@ -268,8 +338,8 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
         remote = (
             f"mkdir -p {hq_home} && d=$(mktemp -d {hq_home}/.deploy.XXXXXX) || exit 1\n"
             f'if ! (base64 -d > "$d/.pkg.tgz" && tar -xzf "$d/.pkg.tgz" -C "$d" && {sync_pkg}'
-            f'mv "$d/ka.sh" {shlex.quote(home + "/ka.sh")} && '
-            f'mv "$d/labmon_worker.py" {shlex.quote(home + "/labmon_worker.py")}); then rm -rf "$d"; exit 1; fi\n'
+            f'mv "$d/ka.sh" {hq_home}/ka.sh && '
+            f'mv "$d/labmon_worker.py" {hq_home}/labmon_worker.py); then rm -rf "$d"; exit 1; fi\n'
             f'rm -rf "$d"\n'
             f"setsid nohup {w} run --host {hq} --replace{sh} > /dev/null 2>&1 < /dev/null &\n"
             f"sleep {START_CHECK_S}; o=$({w} ls --host {hq}); echo \"$o\"\n"

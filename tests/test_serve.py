@@ -2369,7 +2369,7 @@ class HealthTest(unittest.TestCase):
                 t0 = 1_800_000_000
                 save_json(Path(td) / "overview" / "health.json", {"a": {"fails": 0, "down": None, "warned": [], "disk_low": False, "disk_soon": False}})
                 self.run_health(td, None, t0, started=t0 - 86400)
-                self.assertEqual(set(json.loads((Path(td) / "overview" / "health.json").read_text())["a"]), {"fails", "down", "warned", "started", "miss"})   # 旧告警的键不再写回
+                self.assertEqual(set(json.loads((Path(td) / "overview" / "health.json").read_text())["a"]), {"fails", "down", "warned", "started", "miss", "lease_end"})   # 旧告警的键不再写回
                 e, m = self.run_health(td, "ssh 超时", t0 + 60)
                 self.assertEqual((e["health"]["state"], m), ("suspect", []))          # 抖一下不报
                 e, m = self.run_health(td, "ssh 超时", t0 + 120)

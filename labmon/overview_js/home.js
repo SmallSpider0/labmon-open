@@ -122,10 +122,10 @@ function home() {
     (D.hosts.map(h => {
       const info = h.status?.info, gs = info?.gpus || [], m = info?.mem;
       const gb = gs.map(g => { const U = utilText(gpuBusy(h, g.i), g.util); return `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB\n${U.tip}`)}><div class="bar thin" style="flex:1"><i style="width:${100 * g.used / g.total}%;background:var(--accent)"></i></div><span class="sm num nw">${pct(g.used, g.total)}%<span class="mut"> · ${U.big}</span></span></div>`; }).join("");
-      const sx = sharedParts();
-      const sb = sx ? `<div class="row" style="flex-wrap:nowrap">${sharedBar(sx, true)}<span class="sm num nw" style="${sx.dk.free < sx.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(sx.dk.free)}${sx.dk.eta_days != null && sx.dk.eta_days < 7 ? ` · ${sx.dk.eta_days} 天满` : ""}</span></div>` : "—";
+      const sx = h.standalone ? null : sharedParts();
+      const sb = h.standalone ? `<span class="sm mut" ${tip("独立主机不挂集群共享盘")}>—</span>` : sx ? `<div class="row" style="flex-wrap:nowrap">${sharedBar(sx, true)}<span class="sm num nw" style="${sx.dk.free < sx.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(sx.dk.free)}${sx.dk.eta_days != null && sx.dk.eta_days < 7 ? ` · ${sx.dk.eta_days} 天满` : ""}</span></div>` : "—";
       const mb = m ? `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1"><i style="width:${100 * m.used / m.limit}%;background:${m.used / m.limit >= 0.9 ? "var(--bad)" : "var(--accent)"}"></i><b style="left:90%"></b></div><span class="sm num nw">${g1(m.used)} / ${g1(m.limit)}</span></div>` : "—";
-      return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b></td><td>${workerBadge(h)}</td>
+      return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b>${standaloneBadge(h)}</td><td>${workerBadge(h)}</td>
         <td>${gb || "—"}</td><td>${mb}</td><td>${sb}</td><td class="r nw">${info?.cpu_used != null ? g1(info.cpu_used) : "—"} <span class="mut">/ ${info?.cpu_quota ? g1(info.cpu_quota) : info?.nproc ?? "—"}</span>${thrTag(h) ? `<div>${thrTag(h)}</div>` : ""}</td>
         <td class="r">${jobsOf(h).length}</td><td class="r">${(h.status?.waiting || []).length}</td>
         <td class="sm nw" ${info?.started ? tip(`容器 ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : ""}>${h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${renewChip(h)}</td></tr>`;

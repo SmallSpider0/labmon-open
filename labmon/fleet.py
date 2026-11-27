@@ -169,11 +169,14 @@ def conf(path: Path | None = None) -> dict | None:
 
 
 def _lend_check(hf, s: dict) -> None:
-    """入池的两项（lend、lend_hours）写得对不对：组内服务器与自用主机（#79）共用。"""
+    """入池的两项（lend、lend_hours）与可选共享分类（share）写得对不对：组内服务器与自用主机（#79）共用。"""
+    from .config import SHARE_MODES
     if "lend" in s and not isinstance(s["lend"], bool):
         raise ConfigError(f"{hf} 里 {s['id']} 的 lend 要写 true 或 false")
     if s.get("lend_hours") is not None and lend_span(s["lend_hours"]) is None:
         raise ConfigError(f"{hf} 里 {s['id']} 的 lend_hours「{s['lend_hours']}」认不出：写成 \"22:00-09:00\" 这样（每天一段，可跨零点）")
+    if "share" in s and s["share"] is not None and (not isinstance(s["share"], str) or s["share"] not in SHARE_MODES):
+        raise ConfigError(f"{hf} 里 {s['id']} 的 share 只能写 {' / '.join(SHARE_MODES)}，写的是 {s['share']!r}")
 
 
 LEND_RE = re.compile(r"\s*(\d{1,2}):(\d\d)\s*-\s*(\d{1,2}):(\d\d)\s*")

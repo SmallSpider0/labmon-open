@@ -24,7 +24,7 @@ import threading
 import time
 
 from . import lan as L
-from .config import ConfigError, active_hosts, fmt_time
+from .config import ConfigError, active_hosts, fmt_time, is_standalone, shell_path
 from .records import log_events
 from .state import load_json, save_json, state_root
 
@@ -173,7 +173,7 @@ def path(home: str) -> str:
 
 
 def _cmd(h: dict, mode: str, me: str) -> str:
-    return f"{shlex.quote(h['python'])} -c {shlex.quote(REMOTE_PY)} {shlex.quote(path(h['worker_home']))} {shlex.quote(me)} {mode} {TTL}"
+    return f"{shlex.quote(h['python'])} -c {shlex.quote(REMOTE_PY)} {shell_path(path(h['worker_home']))} {shlex.quote(me)} {mode} {TTL}"
 
 
 def remote_sh(h: dict, mode: str = "renew") -> str:
@@ -196,7 +196,10 @@ def parse(raw: str | None) -> dict | None:
 def _run(h: dict, mode: str, me: str, timeout: float = TIMEOUT) -> dict | None:
     """在一台主机上单独跑一次租约（备用时读、释放、强制拿）：走它的长连接；没有 ssh 的（测试）在本机跑。"""
     remote = _cmd(h, mode, me)
-    cmd = L.ssh_argv(h["ssh"], h["port"], known_hosts=h.get("known_hosts")) + [remote] if h.get("ssh") else ["bash", "-c", remote]
+    try:
+        cmd = L.host_ssh_argv(h) + [remote] if h.get("ssh") else ["bash", "-c", remote]
+    except ConfigError:
+        return None
     try:
         r = (L.ssh_run if h.get("ssh") else subprocess.run)(cmd, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     except subprocess.TimeoutExpired:
@@ -205,10 +208,18 @@ def _run(h: dict, mode: str, me: str, timeout: float = TIMEOUT) -> dict | None:
 
 
 def homes(hosts: list[dict] | None = None) -> dict[str, list[dict]]:
-    """在用主机按 worker_home 分组（照主机清单顺序）：每个 worker_home 都要是自己的才算主。"""
+    """参与主备服务租约仲裁的在用主机按共享域分组（照主机清单顺序）：
+    存在非独立（共享盘）主机时，仅以共享盘为仲裁点，排除独立主机（避免笔记本休眠或外租机断连导致主看板误降备）；
+    全部都是独立主机时按主机隔离键分组，防止多台独立机默认 worker_home 撞名互覆盖。"""
+    act = active_hosts() if hosts is None else hosts
+    shared = [h for h in act if not is_standalone(h)]
     out: dict = {}
-    for h in active_hosts() if hosts is None else hosts:
-        out.setdefault(h["worker_home"].rstrip("/"), []).append(h)
+    if shared:
+        for h in shared:
+            out.setdefault(h["worker_home"].rstrip("/"), []).append(h)
+        return out
+    for h in act:
+        out.setdefault(f"{h['id']}:{h['worker_home'].rstrip('/')}", []).append(h)
     return out
 
 

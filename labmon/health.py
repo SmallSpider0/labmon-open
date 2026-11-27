@@ -4,7 +4,7 @@
 """
 from __future__ import annotations
 
-from .config import fmt_time
+from .config import fmt_time, parse_time
 
 DOWN_S = 150                   # 连不上持续这么久（约 3 轮采集）才算掉线，网络抖一下不报
 LEASE_WARN_H = (24, 6)         # 租期到期前这么多小时各提醒一次
@@ -28,8 +28,12 @@ def link_step(hs: dict, ok: bool | None, t: float) -> str | None:
     return "down" if hs["fails"] >= 2 and t - hs["since"] >= DOWN_S and not hs.get("down") else None
 
 
-def lease_end(started: float | None, days) -> float | None:
-    """租期到期时刻：容器启动（或作业创建）时刻加 lease_days 天。"""
+def lease_end(started: float | None, days, until=None) -> float | None:
+    """租期到期时刻：优先取显式绝对到期时刻 until（外平台租机 lease_until），否则取容器启动（或作业创建）时刻加 lease_days 天。"""
+    if until is not None and until != "":
+        if isinstance(until, (int, float)) and not isinstance(until, bool):
+            return float(until)
+        return parse_time(str(until))
     return started + float(days) * 86400 if started and days else None
 
 
@@ -48,7 +52,14 @@ def container_step(hs: dict, started: float | None, label: str) -> dict | None:
 def lease_due(ends: list[tuple[dict, float | None]], t: float, merge_s: float = 0) -> list[list[int]]:
     """租期提醒的判定：到期前 LEASE_WARN_H 小时各提醒一次，已进更近一档的不再补远的那档；
     同一轮里相近到期（merge_s 内）的合成一组。ends：各台的 (连通状态 hs, 到期时刻)，已发的档记在 hs["warned"]。
+    若该台到期时刻发生明显变化（如外平台原地续租改了 lease_until、容器未重启），重置 hs["warned"] 以重新计下一期提醒。
     返回要提醒的各组，每组是 ends 的下标（按到期先后）；文字由调用方写。"""
+    for hs, e in ends:
+        if e:
+            prev = hs.get("lease_end")
+            if prev is not None and abs(e - prev) > 60:
+                hs["warned"] = []
+            hs["lease_end"] = round(e)
     out = []
     for h in sorted(LEASE_WARN_H):
         cand = [(i, e) for i, (hs, e) in enumerate(ends) if e and t < e and h not in hs.setdefault("warned", [])]

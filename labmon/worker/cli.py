@@ -135,6 +135,8 @@ def main(argv=None):
         if a.cmd == "add":
             try:
                 _C.queue_stop_path(a.stop, root)
+                if os.environ.get("LABMON_STANDALONE") == "1" and os.environ.get("LABMON_ALLOW_OUTSIDE_ROOT") != "1":
+                    _C.queue_root_ok(root, os.environ.get("LABMON_DATA_ROOT") or _C.DATA_ROOT)
             except (OSError, ValueError) as e:
                 print(str(e), file=sys.stderr)
                 return 2

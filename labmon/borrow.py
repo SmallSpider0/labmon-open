@@ -150,6 +150,10 @@ def begin(sid: str, until: float | None = None, projects=None, fetch=None, ssh=N
         raise ConfigError(error or f"账号 {account} 尚未关联组内人员")
     if sid in F.off_servers():
         raise ConfigError(f"{label(s)} 已关机")
+    if s.get("share") == "private":
+        raise ConfigError(f"{label(s)} 设为只自用（share = private）：不能借用")
+    if pool and s.get("share") == "borrow":
+        raise ConfigError(f"{label(s)} 设为仅手动借用（share = borrow）：不能由算力池自动借用")
     if sid in FO.busy() and not via_op:            # 看板上的借来用本身就是这台的操作（fleetops.start 已排过别的操作）
         raise ConfigError(f"{label(s)} 正在做平台操作")
     raw, err = (fetch or F.fetch)(s)

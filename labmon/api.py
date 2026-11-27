@@ -14,11 +14,12 @@ from . import borrow as B
 from . import collect as C
 from . import disk as DK
 from . import fleet as F
+from . import platform as PF
 from . import pool as P
 from . import projects as PJ
 from . import users as U
 from . import workerctl as W
-from .config import GIB, HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, hosts_file, set_returned, set_sched_ovr, user_hosts
+from .config import GIB, HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, host_platform, host_share, host_ssh_key, hosts_file, is_standalone, set_returned, set_sched_ovr, user_hosts
 from .worker import cpu_line, ka_lines
 from .worker.pure import other_load, other_load_text
 from .records import EVENT_KINDS, project_rows
@@ -71,15 +72,41 @@ def unknown_project(pid: str, *, require: bool = False) -> str | None:
 
 def hosts() -> dict:
     """GET /api/hosts：用户级主机清单里的主机（labmon host list、labmon borrow 不给参数时列）。没有清单时 missing 是它的路径。
-    worker_home 已补缺省值；home_with 是与它共用 worker_home 的别的在用主机（config.home_peers，#35 A；已归还的为 []）。"""
+    worker_home 已补缺省值；home_with 是与它共用 worker_home 的别的在用主机（config.home_peers，#35 A；已归还或独立机为 []）。
+    同时返回分类字段与托管公钥指纹（绝不返回私钥路径或原文）。"""
     hf = hosts_file()
     if not hf.exists():
         return {"missing": str(hf), "hosts": []}
-    keys = ("id", "returned", "ssh", "port", "label", "borrow")
-    act, home = active_hosts(), {str(h["id"]): h["worker_home"] for h in all_hosts()}
-    return {"missing": None, "hosts": [{**{k: h.get(k) for k in keys}, "worker_home": home.get(str(h.get("id"))),
-                                        "home_with": [x for x in home_peers(str(h.get("id")), act) if x != str(h.get("id"))]}
-                                       for h in user_hosts()]}
+    keys = ("id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until")
+    act, full = active_hosts(), {str(h["id"]): h for h in all_hosts()}
+    out = []
+    for raw in user_hosts():
+        hid = str(raw.get("id"))
+        h = full.get(hid) or raw
+        sk = host_ssh_key(h)
+        fp = None
+        if sk == "managed":
+            try:
+                info = PF.ssh_key_info(h.get("owner"), hid)
+                fp = info.get("fingerprint") if info else None
+            except PF.PlatformError:
+                fp = None
+        out.append({
+            **{k: raw.get(k) for k in keys},
+            "worker_home": h.get("worker_home"),
+            "data_root": h.get("data_root"),
+            "local_dir": h.get("local_dir"),
+            "disk_warn_gb": h.get("disk_warn_gb"),
+            "disk_stop_gb": h.get("disk_stop_gb"),
+            "disk_quota_gb": h.get("disk_quota_gb"),
+            "platform_kind": host_platform(h),
+            "share": host_share(h),
+            "standalone": is_standalone(h),
+            "ssh_key_mode": sk,
+            "ssh_key_fp": fp,
+            "home_with": [x for x in home_peers(hid, act) if x != hid],
+        })
+    return {"missing": None, "hosts": out}
 
 
 def host(sub: str, target: str, at: float | None = None, now: bool = False) -> dict:
@@ -198,8 +225,11 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
 
 
 def home_text(hid: str, may=None) -> str:
-    """worker status 末尾那一行：这台与哪几台在用主机共用 worker 目录（同一块共享盘）；只有它自己时为空。may 同 worker。"""
+    """worker status 末尾那一行：独立主机注明独立；共享盘主机列出与它共用 worker 目录的在用主机；只有它自己时为空。may 同 worker。"""
     act = active_hosts()
+    me = next((h for h in act if str(h["id"]) == hid), None)
+    if me and is_standalone(me):
+        return f"  独立主机（不共享集群盘；工作根目录 {me['data_root']}）\n"
     ids = [x for x in home_peers(hid, act) if x != hid and (may is None or may(x))]
     if not ids:
         return ""

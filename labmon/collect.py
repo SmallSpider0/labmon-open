@@ -26,7 +26,7 @@ from . import lan as L
 from . import lease as LS
 from . import pool as PO
 from . import projects as PJ
-from .config import AUTO_GROUP_RE, GIB, POOL, POOL_LABEL, STALE_S, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
+from .config import AUTO_GROUP_RE, GIB, POOL, POOL_LABEL, STALE_S, ConfigError, fmt_dur, fmt_time, parse_time, pick_color, stale_limit, with_queues
 from .fleet import worker_fresh
 from .health import link_step
 from .state import load_json, load_rows, save_json, snapshot, usage_file, usage_hosts, write_atomic
@@ -147,7 +147,10 @@ def lanes_cfg(cfg: dict, glob_snap: dict, sd: Path, t: float, save: bool = True)
 def run_probe(cfg: dict, host: dict) -> tuple[dict | None, str | None]:
     arg = base64.b64encode(json.dumps(probe_spec(cfg, host)).encode()).decode()
     if host["ssh"]:
-        cmd = L.ssh_argv(host["ssh"], host["port"], known_hosts=host.get("known_hosts")) + [f"{host['python']} - {arg}"]
+        try:
+            cmd = L.host_ssh_argv(host) + [f"{host['python']} - {arg}"]
+        except ConfigError as e:
+            return None, str(e)
     else:
         cmd = [host.get("python_local") or sys.executable, "-", arg]
     try:

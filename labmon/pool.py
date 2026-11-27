@@ -27,7 +27,7 @@ from . import fleet as F
 from . import fleetops as FO
 from . import lease as LS
 from . import users as U
-from .config import HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, fmt_dur, fmt_time, home_host, home_peers, pool_home, set_fleet_keys, share_host, user_hosts
+from .config import HOSTS_LOCK, POOL, POOL_LABEL, ConfigError, active_hosts, fmt_dur, fmt_time, home_host, home_key, home_peers, host_share, is_standalone, pool_home, set_fleet_keys, share_host, user_hosts
 from .worker import fair_key
 from .worker.pure import person_use
 from .records import log_events
@@ -61,12 +61,19 @@ def _selfs(cfg: dict | None, hosts: list[dict] | None = None) -> list[dict]:
 
 
 def _self_bar(h: dict) -> str | None:
-    """这台自用主机为什么不能入池（#79）；能入池为 None。看板本机与回环不行（池里是组里别人的清单，跑在这台的系统账号下，同 config.share_host）；
-    worker 目录与池的不同也不行（池的登记与清单在 config.pool_home 那块共享盘上，搬过去读不到）。"""
+    """这台自用主机为什么不能入池（#79、#114）；能入池为 None。看板本机与回环不行（同 config.share_host）；
+    独立主机、或共享分类设为 private / borrow 的不行；worker 目录与池的不同也不行（按 home_key 严格隔离）。"""
     if not share_host(h):
         return f"{h['id']} 是看板本机或回环：池里是组里别人的清单，不放到这台"
+    if is_standalone(h):
+        return f"{h['id']} 是独立主机（不共享集群盘）：暂不支持入池"
+    sh = host_share(h)
+    if sh == "private":
+        return f"{h['id']} 设为只自用（share = private）：不能入池"
+    if sh == "borrow":
+        return f"{h['id']} 设为仅手动借用（share = borrow）：不能入池"
     home = pool_home()
-    if not home or h["worker_home"].rstrip("/") != home.rstrip("/"):
+    if not home or home_key(h) != ("shared", home.rstrip("/")):
         return f"{h['id']} 的 worker 目录与算力池的（{home or '没有'}）不同：池里的清单在那块盘上，这台读不到"
     return None
 
@@ -119,6 +126,9 @@ def set_lend(sid: str, on: bool, hours: str | None, who: Ident, ops: bool, ok: b
         mine = bool(s["holder"]) and s["holder"] == _person(who, cfg) or not s["holder"] and who.role == "admin"   # 没有持有人的自用主机：管理员就是主人
         if on and s.get("mine") and (bar := _self_bar(s)):
             raise Denied(409, bar)
+        if on and not s.get("mine") and s.get("share") in ("private", "borrow"):
+            why = "设为只自用（share = private）" if s["share"] == "private" else "设为仅手动借用（share = borrow）"
+            raise Denied(409, f"{sid} {why}：不能入池")
         if not mine:
             if who.role != "admin":
                 raise Denied(403, f"{sid} 不是你的服务器：只有持有人本人能开入池，管理员能代开")
