@@ -135,13 +135,15 @@ def ssh(h: dict, remote: str, stdin: str = "", timeout: float | None = None) -> 
 
 
 def worker_env(h: dict) -> str:
-    """把主机的部署路径（ka_bin、data_root、local_dir）、独立主机标记与外部占卡共享策略交给 worker；取值按 shell 参数安全转义（支持 ~/ 展开）。"""
+    """把主机的部署路径（ka_bin、data_root、local_dir）、独立/自动接入主机标记与外部占卡共享策略交给 worker；取值按 shell 参数安全转义（支持 ~/ 展开）。"""
     pairs = [
-        ("KA_BIN", h.get("ka_bin")),
+        ("KA_BIN", None if h.get("member_auto") else h.get("ka_bin")),
         ("LABMON_DATA_ROOT", h.get("data_root")),
         ("LABMON_LOCAL", h.get("local_dir")),
     ]
     parts = [f"{name}={shell_path(str(value))}" for name, value in pairs if value]
+    if h.get("member_auto"):
+        parts.append("LABMON_NO_KA=1")
     if is_standalone(h):
         parts.append("LABMON_STANDALONE=1")
         if h.get("allow_outside_root"):
@@ -335,7 +337,7 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
     if sub == "start":
         home = h["worker_home"]
         w = _wcmd(h)
-        guest = h.get("borrow") and not h["borrow"].get("swap")                  # 直接借来的：不在对方的容器里扫共享盘
+        guest = (h.get("borrow") and not h["borrow"].get("swap")) or h.get("member_auto")   # 直接借来或自动接入的组员服务器：不在容器里扫全组共享盘
         sh = f" --shared {shlex.quote(h['shared'][0])}" if h["shared"] and not guest and not is_standalone(h) else ""      # 共享盘用量由这台的 worker 统计
         sa = " --standalone" if is_standalone(h) else ""
         # 一条连接：把 main 上已提交的 labmon_worker.py、worker/*.py 与停启保活的 ka.sh 打成 tar.gz 经标准输入送出，

@@ -546,7 +546,7 @@ def _host_entry(h: dict, raw: str | None, err: str | None, lan_off: bool, prev: 
     lan_off 是这轮没连（远程主机、本机不在内网），error 里是给页面看的那句话，状态沿用上一次采到的 prev。"""
     pk, standalone = host_platform(h), is_standalone(h)
     e = {"id": h["id"], "label": h.get("label", h["id"]), "error": err, "status_error": None, "status": None, "log": [], "done": [],
-         "lan_off": lan_off, "auto": h.get("worker") == "auto",
+         "lan_off": lan_off, "auto": h.get("worker") == "auto", "member_auto": bool(h.get("member_auto")),
          "platform_kind": pk, "share": host_share(h), "standalone": standalone,
          "owner": h.get("owner"), "data_root": h.get("data_root"),
          "disk_warn_gb": h.get("disk_warn_gb"), "disk_stop_gb": h.get("disk_stop_gb"), "disk_quota_gb": h.get("disk_quota_gb"),
@@ -859,19 +859,22 @@ def health(hosts: list[dict], cfg: dict, t: float, probe=platform_ok, per_host: 
                 hs["down"] = why
                 msg = f"{label} 掉线（{fmt_time(hs['since'], date=False)} 起连不上）：{why}"
                 evs.append({"host": e["id"], "kind": "host_down", "msg": msg})
-                out.append(msg)
+                if not c.get("member_auto"):         # 组员自动接入服务器由 fleet.tick 统一给管理员报掉线，不重复发全局通知；本人仍走 per_host
+                    out.append(msg)
                 if per_host is not None:
                     per_host.setdefault(e["id"], []).append(msg)
         else:
             if step == "up":
                 msg = f"{label} 恢复连接（离线 {round((t - hs['since']) / 60)} 分钟）"
                 evs.append({"host": e["id"], "kind": "host_up", "msg": msg})
-                out.append(msg)
+                if not c.get("member_auto"):
+                    out.append(msg)
                 if per_host is not None:
                     per_host.setdefault(e["id"], []).append(msg)
             ev = container_step(hs, started, label)
             if ev:
                 evs.append({"host": e["id"], **ev})
+                clear_relaunch(e["id"])
         e["health"] = {"state": "lan", "fails": 0, "since": None, "why": None} if e.get("lan_off") else \
             {"state": "down" if hs["down"] else "suspect" if hs["fails"] else "ok", "fails": hs["fails"],
              "since": hs.get("since") if hs["fails"] else None, "why": hs["down"]}
@@ -882,7 +885,8 @@ def health(hosts: list[dict], cfg: dict, t: float, probe=platform_ok, per_host: 
                 hint = "请在外平台手动续租或提前迁移任务" if pk == "other" else "可在看板主机页点「预备续租」，等这格跑完再续"
                 msg = f"{label} 租期约剩 {(end - t) / 3600:.0f} 小时（{fmt_time(end)} 到期），{hint}"
                 evs.append({"host": e["id"], "kind": "lease", "msg": msg})
-                out.append(msg)
+                if not c.get("member_auto"):
+                    out.append(msg)
         miss = {w["name"]: w["why"] for w in ((e.get("status") or {}).get("waiting") or []) if w.get("miss")}
         for n, why in miss.items():               # 声明的本地依赖缺了：任务挡在队首不放行，通知一次
             if n not in hs.setdefault("miss", []):
@@ -898,6 +902,15 @@ def health(hosts: list[dict], cfg: dict, t: float, probe=platform_ok, per_host: 
 
 HEALTH_KEYS = ("fails", "down", "since", "warned", "started", "miss", "lease_end")
 RELAUNCH_GAP = 600
+
+
+def clear_relaunch(hid: str) -> None:
+    """清除单台主机在 relaunch.json 中的拉起冷却时间（容器重启、换人/续租/开机、重新接入或借用归还后立即允许跟随拉起，#224）。"""
+    f = state_dir() / "relaunch.json"
+    last = load_json(f, {})
+    if isinstance(last, dict) and hid in last:
+        last.pop(hid, None)
+        save_json(f, last)
 
 
 def relaunch(snap: dict, start=None) -> list[str]:

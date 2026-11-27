@@ -804,6 +804,8 @@ def run_renew(cfg: dict, cli: P.Client, code: str | None, ids: list[str], ack=()
             else:
                 note = keepalive(s, cfg, ssh_fn, ssh_poll, ssh_wait_s)
                 probe(sid)
+                from . import overview as O
+                O.clear_relaunch(sid)
             _srv(sid, ka=True)
             done.append(s["label"] if s.get("mine") else s["holder"])
             if s is plan[-1][0]:
@@ -1130,6 +1132,8 @@ def run_swap(cfg: dict, cli: P.Client, code: str | None, ids=(), kind: str = "sw
             note += "；看板下一轮采集时拉起 worker"
         else:
             probe(new["id"])
+            from . import overview as O
+            O.clear_relaunch(new["id"])
         r.done(note)
         notify([f"{name}（{new['id']}）{'换节点' if kind == 'move' else '开机'}完成：{conn['cmd']}"])
     except Exception as x:  # noqa: BLE001 — 停在出错的那一步，页面写明这一台此刻的状态

@@ -702,6 +702,16 @@ class Handler(BaseHTTPRequestHandler):
             if m:
                 U.need_external_host(who, unquote(m[1]))
             return True
+        if r.own == "fleet_manage":                    # 组员服务器切换接入调度 / 仅监控（#224）：持有人本人或具平台操作许可的管理员
+            if who.role == "admin":
+                if not U.can_ops(who, self.entry):
+                    raise U.Denied(403, "管理员代切换组员服务器接入需在内网入口或开启公网平台操作（命令行需 admin 令牌）")
+                return True
+            body = self._body()
+            if body is None:
+                return False
+            U.need_holder(who, str(body.get("id") or ""))
+            return True
         if who.role == "admin" or r.own == "self" or (r.own is None and r.method == "GET"):
             return True
         if r.own is None:
@@ -1198,6 +1208,7 @@ class Handler(BaseHTTPRequestHandler):
                 role = "admin" if body.get("admin") else "user"
                 person = body.get("person")
                 code = U.add(s("name"), role, who.name, person=person)
+                self.board.overview.wake.set()
                 return self._json(200, {"code": code,
                                         "msg": f"加了 {s('name')}：把设置码交给这人，24 小时内在登录页「用设置码设口令」"})
             if act == "users/public-ops":
@@ -1211,7 +1222,13 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, {"msg": U.revoke(s("name"), who.name, ids=[s("id")] if body.get("id") else None)})
             if act == "users/remove":
                 msg = U.remove(s("name"), who.name)
+                self.board.overview.wake.set()
                 return self._json(200, {"msg": msg})
+            if act == "fleet/manage":                  # 组员名下服务器一键切换接入本人调度 / 仅监控（#224）
+                out = F.set_member_manage(s("id"), body.get("on"), who.name)
+                self.board.overview.wake.set()
+                log(f"组内服务器：{out['msg']}（{who.name}）")
+                return self._json(200, out)
             if act == "users/hosts":                   # 给普通用户开主机（#167）：改主机清单各主机项的 users
                 a = U.account(s("name"))
                 if not a:
@@ -1925,8 +1942,8 @@ class Route(NamedTuple):
 
 OPEN = ""
 # own（#167，Handler._own）：普通用户的这个请求按什么核。path 地址里的项目要是他的；new 同 path，还没登记的也放（第一次推就登记）；
-# body 请求体的 project；worker、override、init、wait、reg 见 _own；self 只动自己的账号；fleet_srv 本人持有服务器的曲线（#211）；ext_host 外部主机（#114）。
-OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self", "host_assign", "fleet_srv", "ext_host")
+# body 请求体的 project；worker、override、init、wait、reg 见 _own；self 只动自己的账号；fleet_srv 本人持有服务器的曲线（#211）；fleet_manage 切换本人服务器接入（#224）；ext_host 外部主机（#114）。
+OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self", "host_assign", "fleet_srv", "fleet_manage", "ext_host")
 _R = lambda m, p, scope, admin=False, lan=False, own=None, ops=False: Route(m, re.compile(p), scope, admin, lan, own, ops)   # noqa: E731
 # 看板服务的路由表（#160）：每条路由要什么权限只在这里写；Handler._allow 按它调 users.check。
 # 没登记的路径 GET 按 read、POST 与 PUT 按管理员的 admin（新写路由忘了登记时从严）。平台操作由 ops 核对账号入口许可；部署等纯内网路由用 lan。
@@ -1957,6 +1974,7 @@ ROUTES = [
     _R("POST", r"/api/project/init", "project", own="init"),
     _R("POST", r"/api/project/[^/]+/check", "project", own="new"),
     _R("GET", r"/api/hosts", "read"),                                  # 普通用户只列他能用的（Handler.do_GET）
+    _R("POST", r"/api/fleet/manage", "project", own="fleet_manage"),   # 组员服务器一键切换接入调度 / 仅监控（#224）
     _R("GET", r"/api/disk", "read"),                                   # 本人共享盘用量汇总与总盘余量（#211，api.my_disk）
     _R("GET", PROJECT_CONFIG_PATH.pattern, "read", own="path"),
     _R("GET", PROJECT_READ_PATH.pattern, "read", own="path"),         # labmon status|disk|records（#52）：只读，普通用户只看自己的项目

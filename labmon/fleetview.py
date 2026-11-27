@@ -12,7 +12,8 @@ from . import fleet as F
 from . import fleetboot as FB
 from . import fleetops as FO
 from . import lease as LS
-from .config import POOL_LABEL, ConfigError, active_hosts, fmt_time, hosts_file, parse_time
+from . import users as U
+from .config import POOL_LABEL, ConfigError, _read_toml, active_hosts, fmt_time, hosts_file, member_manage_state, parse_time
 from .service import notify
 from .state import file_sig, load_rows
 
@@ -120,6 +121,9 @@ def view(hosts: list[dict] | None = None, t: float | None = None, cfg: dict | No
         return None
     t = time.time() if t is None else t
     sts, off, busy, accs = F._load_state(), F.off_servers(), FO.busy(), F.accs()
+    hf = hosts_file()
+    hosts_raw = [dict(h) for h in (_read_toml(hf).get("hosts") or [])] if hf.exists() else []
+    links = U.people_of()
     who = DK.whose(cfg, active_hosts())
     h0 = int(t // 3600 * 3600) - 167 * 3600
     snap = {e["id"]: e for e in hosts or []}
@@ -129,11 +133,13 @@ def view(hosts: list[dict] | None = None, t: float | None = None, cfg: dict | No
         rows = _rows(s["id"], accs.get(s["id"]))
         strip, idle_h = _strip(rows, h0)
         o = off.get(s["id"])
-        # 借用中且 worker 状态新鲜（与自用主机同一门槛 fleet.worker_fresh，#174）：实时 sample 改用 worker 状态，避免滞后最多 10 分钟；
+        snap_e = snap.get(s["id"])
+        ms = member_manage_state(s, hosts_raw, links=links, off=off, snap_e=snap_e)
+        # 借用中或已自动接入调度且 worker 状态新鲜（与自用主机同一门槛 fleet.worker_fresh，#174、#224）：实时 sample 改用 worker 状态，避免滞后最多 10 分钟；
         # worker 过期、不在内网或掉线时回退探测样本。小时使用记录（hours/ 的 bw）仍由探针统一记，保持同一小时采样密度一致。
-        e = snap.get(s["id"]) if not o and F.borrowed(s) else None
+        e = snap_e if not o and (F.borrowed(s) or ms["on"]) else None
         live = F.worker_fresh(e)
-        smp = F.from_worker(e["status"], cfg, s["holder"], job_owner=F.borrower(s, cfg)) if live else st.get("sample") or {}
+        smp = F.from_worker(e["status"], cfg, s["holder"], job_owner=F.borrower(s, cfg) if F.borrowed(s) else s["holder"]) if live else st.get("sample") or {}
         if smp:                                          # 每组实验归谁：按路径，对不上算兜底归属（借用中 labmon 任务归借用方，其余归使用人）
             smp = {**smp, "work": [w if w["kind"] == "keepalive" else {**w, "owner": who([w.get("cwd"), *reversed(w.get("chain") or [])]) or w.get("owner") or s["holder"]}
                                    for w in smp.get("work", [])]}
@@ -149,6 +155,7 @@ def view(hosts: list[dict] | None = None, t: float | None = None, cfg: dict | No
                         "lw": None if o else F.server_lw(st),
                         "strip": strip, "h0": h0, "idle_h": 0 if o else idle_h, "s7": _stats(rows, t - 7 * 86400), "s30": _stats(rows, t - 30 * 86400),
                         "guard": F.guard_state({**s, "off": o}, st, cfg, t, s["id"] in busy),
+                        "manage": ms,
                         "borrow": {"since": parse_time(s.get("borrow_since")), "until": parse_time(s.get("borrow_until")), "for": s.get("borrow_for"), "by": F.borrower(s, cfg),
                                    "away": parse_time(s.get("borrow_away")), "returned": parse_time(s.get("borrow_returned"))} if s.get("borrow_since") else None,   # 时刻都是 epoch 秒
                         # 借得了（对方空着或轻用）的：对方在用什么、借来用时给对方留的量（按对方近 7 天轻用时的用量推荐）

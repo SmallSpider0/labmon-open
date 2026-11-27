@@ -387,6 +387,9 @@ document.addEventListener("click", e => {
   if (asg) { if (!asg.disabled) assignAct(asg.dataset.assign, asg.dataset); return; }
   const exb = e.target.closest?.("[data-ext]");
   if (exb) { if (!exb.disabled) extAct(exb.dataset.ext, exb.dataset); return; }
+  const fm = e.target.closest?.("[data-fman]");
+  if (fm && LANOFF() && fm.dataset.fman === "go") return noNet(e, fm);
+  if (fm) { if (!fm.disabled) manageAct(fm.dataset.fman, fm.dataset); return; }
   const fo = e.target.closest?.("[data-fop]");
   if (fo && LANOFF() && NONET.has(fo.dataset.fop)) return noNet(e, fo);
   if (fo) {

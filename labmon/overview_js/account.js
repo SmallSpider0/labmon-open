@@ -210,6 +210,22 @@ function meCan(M, info) {
   const ss = Object.keys(info).length ? Object.keys(info).filter(s => M.scopes.includes(s)) : M.scopes;
   return `这个令牌能做：${ss.map(s => info[s]?.[1] || info[s]?.[0] || s).join("；")}。`;
 }
+// 「我的账号 → 概览」的「我的服务器」（#224）：本人持有的组内服务器列表，一键切换「接入调度 / 仅监控（停 worker）」
+function myServersSec(M) {
+  const all = D.fleet?.servers || [];
+  const srvs = M.admin ? (M.fleet_person ? all.filter(s => s.holder === M.fleet_person) : []) : all;
+  if (!srvs.length) return "";
+  const note = MAN.where === "me" ? (MAN.msg ? `<div class="rn-state">${esc(MAN.msg)}</div>` : MAN.err && !popIs("fman-me", MAN.id) ? `<div class="rn-err">${esc(MAN.err)}</div>` : "") : "";
+  const body = `<div class="ulist">${srvs.map(x => {
+    const inHost = x.manage?.on && D.hosts.some(h => h.id === x.id);
+    return `<div class="urow sm-row"><div class="u">${icon("server")}<div class="t">
+      <b>${esc(x.id)}</b> <span class="sm mut">${esc(fNode(x.ssh))}:${esc(x.port)}${x.pool ? ` · ${esc(x.pool)}` : ""}</span> ${fBadge(x)} ${manageBadge(x)}
+      <div class="sm mut">${esc(x.manage?.why || "只读监控")}</div></div></div>
+      <div class="acts">${inHost ? `<a class="btn mini-btn" href="#/host/${encodeURIComponent(x.id)}">主机页</a>` : ""}
+        <button type="button" class="btn mini-btn" data-drw="${esc(DH.srv(x.id))}">详情</button>${managePop(x, "me")}</div></div>`;
+  }).join("")}</div>${note}`;
+  return dSec("我的服务器", body, `<span class="sm mut">${srvs.length} 台 · 默认自动接入本人调度，可单台切为仅监控</span>`);
+}
 // 「我的账号 → 概览」的「我的外部主机」：本人名下（管理员见全部）的独立外部主机，直接打开右侧抽屉增删改测
 function myExtHostsSec(M) {
   const exts = (D.hosts || []).filter(h => h.standalone && (M.admin || (h.owner && h.owner.toLowerCase() === M.name.toLowerCase())));
@@ -448,7 +464,7 @@ function mePage(tab) {
     ["我的项目", accountList(M.own)],
     ["能用的主机", (M.hosts?.length ? accountList(M.hosts) : "没有单独分配") + (seen.length ? `<span class="sm mut">；你的项目还在 ${accountList(seen)} 上有任务</span>` : "")]
   ]));
-  return head + myExtHostsSec(M) + clientSec(M) + own;
+  return head + myServersSec(M) + myExtHostsSec(M) + clientSec(M) + own;
 }
 function accStatus(u, brief = false) {
   if (u.lock) return `<span class="badge b-bad">${brief ? "已锁定" : `锁到 ${tsNear(u.lock)}`}</span>`;
@@ -507,7 +523,9 @@ function accountSections(u, L) {
     accGo("hostsgo", u.name, "保存"), true);
   const projects = (u.projects || []).map(id => D.projects.some(p => p.id === id)
     ? `<a href="#/p/${encodeURIComponent(id)}">${esc(pname(id))}</a>` : esc(id)).join("、") || "暂无直接归属项目";
-  const hosts = adm ? "全部主机 · 管理员权限" : L.hosts_error ? hostHint : u.hosts?.length ? accountList(u.hosts) : "未分配主机";
+  const hosts = adm ? "全部主机 · 管理员权限" : L.hosts_error ? hostHint
+    : (u.hosts?.length ? accountList(u.hosts) : u.member_hosts?.length ? "未单独分配" : "未分配主机")
+      + (u.member_hosts?.length ? `<span class="sm mut">（自动接入本人服务器：${accountList(u.member_hosts)}）</span>` : "");
   const access = permissionRow("账号角色", esc(L.roles[u.role] || u.role), role)
     + (adm ? permissionRow("公网平台操作", u.public_ops ? "已开启" : "未开启", publicops) : "")
     + permissionRow("直接归属项目", projects) + permissionRow("主机使用权限", hosts, edit);

@@ -93,10 +93,14 @@ const projName = (id, {always = false, plain = false} = {}) => {
   return plain ? t + " " : `<span class="nw"><span class="dot" style="background:${color(id)}"></span> <span ${tip(id)}>${esc(t)}</span></span> `;
 };
 function home() {
-  const noHost = !myHosts().length && !hasPoolCompute();      // 确实没有可用主机且不在任何有主机的共有池才提（#15、#212）
-  const fleetN = D.fleet?.servers?.length || 0;
-  const noHostMsg = !noHost ? "" : fleetN
-    ? `<p>你名下有 ${fleetN} 台组内服务器（可在<a href="#/fleet">我的服务器</a>查看），但尚未分配可调度主机或加入算力池：请管理员在「组内服务器 → 人员」给你分配主机，或将你加入共有算力池。</p>`
+  const noHost = !myHosts().length && !hasPoolCompute();      // 确实没有可用主机且不在任何有主机的共有池才提（#15、#212、#224）
+  const fleetSrvs = D.fleet?.servers || [], fleetN = fleetSrvs.length;
+  const optOutN = fleetSrvs.filter(s => s.manage?.opt_out).length;
+  const offN = fleetSrvs.filter(s => s.off).length;
+  const noHostMsg = !noHost ? "" : optOutN
+    ? `<p>你名下有 ${optOutN} 台服务器当前处于仅监控状态：可在<a href="#/fleet">我的服务器</a>或<a href="#/me">我的账号</a>一键重新接入本人调度，也可请管理员分配其他主机或加入共有算力池。</p>`
+    : fleetN
+    ? `<p>你名下有 ${fleetN} 台组内服务器（${offN === fleetN ? "当前均已关机" : "当前暂未接入调度"}，可在<a href="#/fleet">我的服务器</a>查看）：开机并空闲后会自动接入本人调度，也可请管理员分配主机或加入共有算力池。</p>`
     : '<p>你的账号还没有能用的主机：请管理员在「组内服务器 → 人员」里打开你，在「账号与权限」给你分配主机，或将你加入共有算力池。</p>';
   const intro = LIVE && ME && !ME.admin && (!D.projects.length || noHost) ? dSec("开始使用", `
     ${noHostMsg}
@@ -145,7 +149,8 @@ function home() {
         : sx ? `<div class="row" style="flex-wrap:nowrap">${sharedBar(sx, true)}<span class="sm num nw" style="${sx.dk.free < sx.dk.warn_gb ? "color:var(--bad)" : ""}">剩 ${Math.round(sx.dk.free)}${sx.dk.eta_days != null && sx.dk.eta_days < 7 ? ` · ${sx.dk.eta_days} 天满` : ""}</span></div>` : "—";
       const mb = m ? `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1"><i style="width:${100 * m.used / m.limit}%;background:${m.used / m.limit >= 0.9 ? "var(--bad)" : "var(--accent)"}"></i><b style="left:90%"></b></div><span class="sm num nw">${g1(m.used)} / ${g1(m.limit)}</span></div>` : "—";
       const poolTag = h.pool_label ? ` <span class="badge b-mute" ${tip(`共有算力池：${h.pool_label}（${h.pool_exclusive ? "独占，请经池入口提交" : "开放，允许直投单台"}）`)}>${esc(h.pool_label)}</span>` : "";
-      return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b>${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : standaloneBadge(h)}${poolTag}</td><td>${workerBadge(h)}</td>
+      const autoTag = h.member_auto ? ` <span class="badge b-ok" ${tip("已开账号的组员名下服务器自动接入本人调度（不动已有实验与用户自开保活）")}>${ME?.admin ? "组员自动接入" : "我的服务器"}</span>` : "";
+      return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b>${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : standaloneBadge(h)}${autoTag}${poolTag}</td><td>${workerBadge(h)}</td>
         <td>${gb || "—"}</td><td>${mb}</td><td>${sb}</td><td class="r nw">${info?.cpu_used != null ? g1(info.cpu_used) : "—"} <span class="mut">/ ${info?.cpu_quota ? g1(info.cpu_quota) : info?.nproc ?? "—"}</span>${thrTag(h) ? `<div>${thrTag(h)}</div>` : ""}</td>
         <td class="r">${jobsOf(h).length}</td><td class="r">${(h.status?.waiting || []).length}</td>
         <td class="sm nw" ${!h.ephemeral && info?.started ? tip(`容器 ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : ""}>${h.ephemeral ? `<span class="mut">临时实例</span>` : h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${h.ephemeral ? "" : renewChip(h)}</td></tr>`;

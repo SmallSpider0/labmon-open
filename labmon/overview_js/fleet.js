@@ -9,6 +9,50 @@ const fBadge = x => x.off ? `<span class="badge b-mute" ${tip(`${ts(x.off.t)} �
 const fShare = x => x.sample?.share && x.state !== "down" ? `<span class="badge b-ok" ${tip("除保活外的实际占用都低于阈值：还能给别人并行用")}>可共享</span>` : "";
 const fState = x => fBadge(x) + (fShare(x) ? " " + fShare(x) : "");
 const fDot = x => x.off ? "var(--muted)" : x.down ? "var(--bad)" : x.state === "unknown" || leaseSoon(x.lease_end) ? "var(--warn)" : x.state ? "var(--ok)" : "var(--muted)";
+// 组员名下服务器自动接入调度 / 仅监控状态与切换（#224，唯一实现）
+let MAN = {busy: false, id: null, where: null, msg: null, err: null};
+const manageBadge = x => !x || x.mine || !x.manage ? ""
+  : x.manage.on ? `<span class="badge b-ok" ${tip(x.manage.why || "已自动接入本人调度")}>已接入调度</span>`
+  : x.manage.opt_out ? `<span class="badge b-mute" ${tip(x.manage.why || "已切为仅监控")}>仅监控</span>` : "";
+const canToggleManage = x => !!(LIVE && ME && x && !x.mine && x.manage?.can_toggle
+  && (ME.admin ? canOps() : ME.write && ME.fleet_person === x.holder));
+function managePop(x, where = "drw") {
+  if (!canToggleManage(x)) return "";
+  const on = !!x.manage.on, k = `fman-${where}`, open = popIs(k, x.id), nextOn = !on;
+  const label = on ? "切为仅监控" : "接入调度";
+  const btn = `<button type="button" class="btn mini-btn${on ? "" : " pri"}" data-fman="pick" data-id="${esc(x.id)}" data-where="${where}" ${MAN.busy ? "disabled" : ""}>${label}</button>`;
+  const body = on
+    ? `<b>将 ${esc(x.holder)}（${esc(x.id)}）切为仅监控？</b><div class="rn-note">将停止该台 worker 并撤出受管主机列表，不再放行新任务；容器内正在跑的任务不受影响，看板保留只读监控。可随时重新接入。</div>`
+    : `<b>将 ${esc(x.holder)}（${esc(x.id)}）接入本人调度？</b><div class="rn-note">将自动部署并拉起 worker，仅开放给持有人本人；绝不动容器内已有实验进程与用户自开保活。</div>`;
+  const err = open && MAN.err && MAN.id === x.id ? `<div class="rn-err">${esc(MAN.err)}</div>` : "";
+  const go = `<button type="button" class="btn pri${on ? " dz" : ""}" data-fman="go" data-id="${esc(x.id)}" data-on="${nextOn ? "1" : "0"}" data-where="${where}" ${MAN.busy ? "disabled" : ""}>${MAN.busy ? "处理中…" : `确认${label}`}</button>`;
+  return popConfirm(btn, open, body + err, go);
+}
+async function manageAct(act, d = {}) {
+  const id = d.id || "", where = d.where || "drw";
+  if (act === "pick") {
+    MAN.err = null;
+    popToggle(`fman-${where}`, id);
+    return render(false);
+  }
+  if (act !== "go" || MAN.busy) return;
+  const on = d.on === "1";
+  MAN = {busy: true, id, where, msg: null, err: null};
+  render(false);
+  try {
+    const r = await postJSON("api/fleet/manage", {id, on}), j = await r.json().catch(() => ({}));
+    if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+    const srv = srvById(id);
+    if (srv && j.manage) srv.manage = j.manage;
+    popClose();
+    MAN = {busy: false, id, where, msg: j.msg || (on ? "已接入调度" : "已切为仅监控"), err: null};
+    render(false);
+    if (ME?.admin) collectNow(true); else poll();
+  } catch (e) {
+    MAN = {busy: false, id, where, msg: null, err: e.message || String(e)};
+    render(false);
+  }
+}
 let FRANGE = ST.get("frange", 24), SER = {}, PROBING = null, PERR = {}, FKEEP = null;   // FKEEP：立即探测的结果，等全局页采集追上前先用它
 function fleetAlerts(mine = true) {      // mine=false：首页用，自用主机的掉线、租期那里由主机自己的告警（alertsOf）报，不重复
   const F = D.fleet, out = [], now = D.generated;
@@ -187,6 +231,8 @@ function fleetCard(x) {
       tags.push(`<span class="badge b-warn" ${tip(tt)}>${esc(b.returning ? `${by} · 跑完就还` : by + til)}</span>`);
     } else tags.push(borrowBadge(b, now, "借用中 · ", b.for ? " · " + b.for.join("、") : "")); }
   else {
+    const mb = manageBadge(x);
+    if (mb) tags.push(mb);
     if (fShare(x)) tags.push(fShare(x));
     if (x.idle_h >= FREE_H) tags.push(`<span class="badge b-ok" ${tip(selfView ? `最近连着 ${x.idle_h} 小时只有保活或空闲` : `最近连着 ${x.idle_h} 小时只有保活或空闲：可以问问 ${x.holder} 还用不用，不用就换给别人`)}>闲置 · ${x.idle_h >= 48 ? Math.floor(x.idle_h / 24) + " 天" : x.idle_h + " 小时"}</span>`);
     if (x.error && !x.down) tags.push(`<span class="sm" style="color:var(--warn)" ${tip(x.error)}>上次没连上</span>`);
@@ -575,8 +621,11 @@ function srvDrawer(id) {
     ["容器", x.started ? `已运行 ${dur(now - x.started)} <span class="mut">${ts(x.started)} 启动${e.created ? ` · 作业 ${esc(fcr(e.created))} 创建` : ""}</span>` : "—"],
     ["上次探测", x.last ? `<span ${tip(x.mine ? "worker 最近一次写状态的时刻（自用主机不另外探，每轮采集读 worker 状态）" : "最近一次只读探测")}>${ts(x.last)}</span>${x.error ? ` <span style="color:var(--bad)">${esc(x.error)}</span>` : ""}` : "还没探过"],
     ["保活守护", `${esc(guardText(x))}${wk || selfView ? "" : ` <a href="${DH.guard()}" data-drw="${DH.guard()}">设置</a>`}`]);
+  if (x.mine) kv.push(["调度接入", "已在主机清单 [[hosts]] 单独配置"]);
+  else if (x.manage) kv.push(["调度接入", `<span class="row wrap" style="gap:6px;align-items:center"><span>${esc(x.manage.why)}</span>${managePop(x, "drw")}</span>`]);
+  const manNote = MAN.id === id && MAN.where === "drw" ? (MAN.msg ? `<div class="rn-state">${esc(MAN.msg)}</div>` : MAN.err && !popIs("fman-drw", id) ? `<div class="rn-err">${esc(MAN.err)}</div>` : "") : "";
   const btns = LIVE && !selfView ? `<div class="rn">${srvBtns(x)}</div>${PERR[id] ? `<div class="rn-err">${esc(PERR[id])}</div>` : ""}${RERR[id] ? `<div class="rn-err">${esc(RERR[id])}</div>` : ""}` : "";
-  s += dSec("概况", kvHtml(kv) + btns) + borrowSec(x) + workerSec(x);
+  s += dSec("概况", kvHtml(kv) + manNote + btns) + borrowSec(x) + workerSec(x);
   if (!x.off) {
     const rows = (SER[id]?.rows || []).filter(r => r.t >= now - FRANGE * 3600), grp = "f:" + id, t0 = now - FRANGE * 3600, gap = (F.interval || 600) * 2.5;
     SPKG[grp] = {t0, t1: now, at: t => { const r = nearest(rows, t); return r ? `${ts(r.t)} ${FSN[r.st] || ""}${r.sh ? "，可共享" : ""}` + (r.vt != null ? `\n显存 实际 ${mb2g(r.vr)} / ${mb2g(r.vt)} GiB（含保活 ${mb2g(r.v)}）` : "")
@@ -633,9 +682,9 @@ function weekSec(x) {
   for (let k = 0; k < 168; k++) { const t = x.h0 + k * 3600; if (new Date(t * 1000).getHours() === 0) ax.push(`<span style="left:${100 * k / 168}%">${tsMD(t)}</span>`); }
   return dSec("近 7 天", `${hourStrip(x, true)}<div class="hax">${ax.join("")}</div>${fLegend()}${kvHtml([["近 7 天", fSum(x.s7)], ["近 30 天", fSum(x.s30)]])}`, `<span class="sm mut">每小块一小时，悬停看那一小时</span>`);
 }
-// 自用主机的「worker」节（借来的组内服务器的 worker 在「借用」节）：worker 在不在、在跑与排队、预备续租、主机页上的告警，链到主机页
+// 自用主机与已自动接入调度的组员服务器的「worker」节（借来的组内服务器的 worker 在「借用」节）：worker 在不在、在跑与排队、预备续租、主机页上的告警，链到主机页
 function workerSec(x) {
-  const h = x.mine && D.hosts.find(e => e.id === x.id);
+  const h = (x.mine || x.manage?.on) && D.hosts.find(e => e.id === x.id);
   if (!h) return "";
   const run = hostRun(x), wait = h.status?.waiting || [], al = forUser(alertsOf(h)), rc = renewChip(h), hp = `#/host/${encodeURIComponent(x.id)}`;
   const kv = [["状态", x.error || !h.worker_up ? `<span style="color:var(--warn)">${esc(x.error || "worker 不在")}</span>` : `在写状态 <span class="mut">${dur(h.age || 0)} 前</span>`],

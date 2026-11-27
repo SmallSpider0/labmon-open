@@ -125,13 +125,16 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.ka_wait = None                   # 保活被拉起、看门狗正持着平时不持的锁：{t0: 开始等的时刻, said: 满 LOCK_WAIT_S 记过事件}（#38）
         self.procs, self.mine = {}, set()     # 这一轮的进程表（scan_procs）与 labmon 任务的进程：找看门狗用
         self.watch_t, self.watch_seen = 0.0, set()   # 借来的主机上次找看门狗的时刻、记过事件的可能的看门狗
-        # 保活由 worker 管的前提：有 ka.env（这台的保活配置）与随 worker 发来的 ka.sh（#105）；缺一样就当这台没配保活（keepalive.ctl 为假）
+        # 保活由 worker 管的前提：未禁用保活（LABMON_NO_KA!=1，#224）、有 ka.env（这台的保活配置）与随 worker 发来的 ka.sh（#105）；缺一样就当这台没配保活（keepalive.ctl 为假）
+        self.no_ka = os.environ.get("LABMON_NO_KA") == "1"
         env = subprocess.run(["bash", "-c", '. "$1" 2>/dev/null; echo "${AGRI_ROOT:-}"; echo "${AGRI_KA_SCRIPT:+${AGRI_KA_DIR:-}/$AGRI_KA_SCRIPT}"', "_", _C.KA_ENV],
-                             capture_output=True, text=True).stdout.split("\n") if os.path.exists(_C.KA_ENV) and os.path.exists(_C.KA_SH) else []
+                             capture_output=True, text=True).stdout.split("\n") if (not self.no_ka) and os.path.exists(_C.KA_ENV) and os.path.exists(_C.KA_SH) else []
         keepalive_demo = env[0].strip() if env else ""
         self.ka_full = (env[1].strip() if len(env) > 1 else "") or None   # ka.sh 认的保活：python 跑这个脚本（完整路径）；别的保活它停不了
         if keepalive_demo:
             self.ka_reg = os.path.join(keepalive_demo, "queues", "labmon-" + host)
+        elif self.no_ka:
+            self.ka_why = "不接管保活（自动接入的组员服务器）"
         self.ka_ev = os.path.join(keepalive_demo, "keepalive", "events.log") if keepalive_demo else None   # ka.sh 记的停启与调用者
 
     def is_standalone(self):
@@ -734,7 +737,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.ext = self.ext_jobs(queues)
         jobs = list(self.running.values()) + list(self.ext.values())
         mine = _M.job_procs(procs, jobs)
-        gp = _K.gpu_owners(apps, procs, {pid: j for j in jobs for pid in mine[id(j)]}, self.ka_full if self.guest() else None)
+        gp = _K.gpu_owners(apps, procs, {pid: j for j in jobs for pid in mine[id(j)]}, self.ka_full if self.guest() else None, no_ka=self.no_ka)
         self.util_window(gpus, gp, t)
         util = {g["uuid"]: g.get("util") for g in gpus}
         ovram, ogid = {}, {}                      # labmon 之外的进程各卡占的显存（MB）、各卡上它们的宿主机 PID

@@ -72,7 +72,7 @@ from pathlib import Path
 
 from . import lan as L
 from . import lease as LS
-from .config import GIB, LEGACY_POOL_KEYS, POOL, ConfigError, _read_toml, all_hosts, check_legacy_pool, fmt_time, guest_host, host_defaults, hosts_file, is_pool_id, parse_time, set_fleet_keys  # noqa: F401
+from .config import GIB, LEGACY_POOL_KEYS, POOL, ConfigError, _read_toml, all_hosts, check_fleet_manage, check_legacy_pool, fmt_time, guest_host, host_defaults, hosts_file, is_pool_id, member_manage_state, parse_time, set_fleet_keys  # noqa: F401
 from .health import container_step, lease_due, link_step
 from .health import lease_end as _lease_end
 from .records import log_events
@@ -167,9 +167,10 @@ def conf(path: Path | None = None) -> dict | None:
 
 
 def _legacy_pool_check(hf, s: dict) -> None:
-    """复用 config.check_legacy_pool 拦截旧借用型算力池字段（#212），并校验可选共享分类（share，#114）。"""
+    """复用 config.check_legacy_pool 拦截旧借用型算力池字段（#212），校验可选共享分类（share，#114）与自动接入开关（manage，#224）。"""
     from .config import SHARE_MODES
     check_legacy_pool(hf, s)
+    check_fleet_manage(hf, s)
     if "share" in s and s["share"] is not None and (not isinstance(s["share"], str) or s["share"] not in SHARE_MODES):
         raise ConfigError(f"{hf} 里 {s['id']} 的 share 只能写 {' / '.join(SHARE_MODES)}，写的是 {s['share']!r}")
 
@@ -1144,6 +1145,81 @@ def set_guard(sid: str | None = None, on: bool | None = None, idle_min=None, wat
         keys[k] = v
     if keys:
         set_fleet_keys(keys, "改保活守护的时间")
+
+
+def set_member_manage(sid: str, on: bool, by: str, *, stop_fn=None, start_fn=None, clear_relaunch_fn=None) -> dict:
+    """单台组员服务器一键切换「接入调度 / 仅监控（停 worker）」（#224，POST /api/fleet/manage 调用）：
+    - 过 lease.need 主备守门；
+    - 仅适用于已开通看板账号、未在 [[hosts]] 显式配置、未关机且未借出的 [[fleet.servers]]；
+    - 切为仅监控（on=False）：先尝试停掉该台 worker（在跑任务继续跑完，不再放新任务；连不上不阻塞退出），再落盘 manage = false；
+    - 切回接入调度（on=True）：清除 manage 键恢复默认自动接入，清 relaunch 冷却，内网可达时尝试立即部署拉起 worker（同步清除 stopped 标记）。"""
+    LS.need("切换服务器接入调度")
+    if not isinstance(on, bool):
+        raise ConfigError("on 参数须为 true（接入调度）或 false（仅监控）")
+    hf = hosts_file()
+    if not hf.exists():
+        raise ConfigError("主机清单不存在")
+    raw = _read_toml(hf)
+    hosts_raw = [dict(h) for h in raw.get("hosts") or []]
+    cfg = conf(hf) or {}
+    s = next((x for x in cfg.get("servers", []) if x["id"] == sid), None)
+    if not s:
+        raise ConfigError(f"组内服务器里没有 {sid}")
+    ms = member_manage_state(s, hosts_raw)
+    if ms["hosted"]:
+        raise ConfigError(f"{sid} 已在主机清单 [[hosts]] 单独配置，请直接在 [[hosts]] 管理")
+    if borrowed(s):
+        raise ConfigError(f"{sid} 当前处于借用中，请先归还后再切换调度接入")
+    if sid in off_servers():
+        raise ConfigError(f"{sid} 当前已关机，开机后再切换调度接入")
+    if not ms["account"]:
+        raise ConfigError(f"{s['holder']} 尚未开通看板账号（或账号关联异常），服务器保持只读，不能开启调度接入")
+
+    from . import overview as O
+    from . import workerctl as W
+
+    clear_rl = clear_relaunch_fn or O.clear_relaunch
+    name = f"{s['holder']}（{sid}）"
+    if not on:
+        stop_note = ""
+        if ms["on"]:
+            do_stop = stop_fn or (lambda hid: W.run_out("stop", hid, []))
+            if stop_fn is not None or L.check()["ok"]:
+                try:
+                    rc, out = do_stop(sid)
+                    if rc == 0:
+                        stop_note = "已停止 worker（在跑任务继续跑完，不再放新任务）"
+                    else:
+                        tail = ((out or "").strip().splitlines() or [f"退出码 {rc}"])[-1][:120]
+                        stop_note = f"未能停止远端 worker（{tail}），已先撤出受管列表"
+                except (ConfigError, OSError) as x:
+                    stop_note = f"未能停止远端 worker（{x}），已先撤出受管列表"
+            else:
+                stop_note = "当前不在内网未连远端停 worker，已撤出受管列表"
+        set_fleet_keys({"manage": False}, f"{by} 将 {name} 切为仅监控（退出调度）", sid=sid)
+        O.clear_sent(sid)
+        msg = f"{name} 已切为仅监控，保留只读监控" + (f"；{stop_note}" if stop_note else "")
+        return {"id": sid, "on": False, "msg": msg, "manage": member_manage_state({**s, "manage": False}, hosts_raw)}
+
+    set_fleet_keys({"manage": None}, f"{by} 将 {name} 重新接入本人调度", sid=sid)
+    clear_rl(sid)
+    start_note = ""
+    do_start = start_fn or (lambda hid: W.run_out("start", hid, []))
+    if start_fn is not None or L.check()["ok"]:
+        try:
+            rc, out = do_start(sid)
+            if rc == 0:
+                start_note = "已部署并拉起 worker（不动已有实验与自开保活）"
+            else:
+                tail = ((out or "").strip().splitlines() or [f"退出码 {rc}"])[-1][:120]
+                start_note = f"本次拉起暂未成功（{tail}），下一轮采集会自动重试拉起"
+        except (ConfigError, OSError) as x:
+            start_note = f"本次拉起暂未成功（{x}），下一轮采集会自动重试拉起"
+    else:
+        start_note = "当前不在内网，恢复内网后下一轮采集会自动拉起 worker"
+    s_on = {k: v for k, v in s.items() if k != "manage"}
+    msg = f"{name} 已重新接入本人调度；{start_note}"
+    return {"id": sid, "on": True, "msg": msg, "manage": member_manage_state(s_on, hosts_raw)}
 
 
 def lease_end(st: dict, cfg: dict) -> float | None:

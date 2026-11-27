@@ -450,6 +450,12 @@ def finish(sid: str, ssh=None, ka=None, wrote: dict | None = None, kill=(), prob
         else:
             mb = 0 if gone else next((int(x) for x in out.split() if x.isdigit()), 0)
     set_fleet_keys({"borrow_returned": fmt_time(time.time(), year=True)}, f"把 {label(s)} 还给 {s['holder']}", sid=sid)
+    # 归还后若持有人已开账号且未退出调度（#224），清理 relaunch 冷却与刚停 worker 留下的 stopped 标记，让下一轮采集自动拉回本人 worker
+    if any(str(x.get("id")) == sid and x.get("member_auto") for x in user_hosts()):
+        from . import overview as O
+        O.clear_relaunch(sid)
+        if not stopped and not gone:
+            (ssh or F.ssh)(s, f"rm -f {shlex.quote(h['worker_home'] + '/hosts/' + sid + '/stopped')}")
     since = parse_time(s.get("borrow_since"))
     took = f"（借了 {(time.time() - since) / 3600:.0f} 小时）" if since else ""
     if gone:
