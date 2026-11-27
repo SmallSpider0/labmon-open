@@ -279,6 +279,19 @@ function borrowBadge(b, now, pre = "", post = "") {
   const t = b.back?.length ? `${b.holder} 在用` : b.overdue ? "过了约定时间" : due ? (b.swap ? "到了约定时间" : "跑完就还") : b.cutoff ? `到 ${tsNear(b.cutoff)}` : "没约定时间";
   return `<span class="badge ${bad ? "b-bad" : "b-warn"}" ${tip(borrowText(b, now))}>${esc(pre + t + post)}</span>`;
 }
+// 共有算力池小角标（#251，项目页顶栏/资源卡/时间线与工作台主机表共用唯一实现）：紧凑显示「池」，悬停看所属共有池名（及独占/开放模式）
+const POOL_BADGE_TEXT = "池", POOL_BADGE_W = 16;
+const poolBadgeTip = h => !h?.pool_label ? "" : `所属共有算力池：${h.pool_label}`
+  + (h.pool_exclusive != null ? `（${h.pool_exclusive ? "独占，请经池入口提交" : "开放，允许直投单台"}）` : "");
+function poolBadge(h, svg) {
+  if (!h?.pool_label) return "";
+  const t = tip(poolBadgeTip(h));
+  if (svg) {
+    const w = POOL_BADGE_W, hh = 14, x = +svg.x.toFixed(1), y = +(svg.y - hh / 2).toFixed(1);
+    return `<g class="pbadge-svg" ${t}><rect x="${x}" y="${y}" width="${w}" height="${hh}" rx="3.5" fill="var(--accent)" fill-opacity=".14" stroke="var(--accent)" stroke-opacity=".3" stroke-width=".75"/><text x="${+(x + w / 2).toFixed(1)}" y="${+(svg.y + 3.5).toFixed(1)}" text-anchor="middle" style="font-size:9.5px;font-weight:600;fill:var(--accent)">${POOL_BADGE_TEXT}</text></g>`;
+  }
+  return `<span class="badge b-pool" ${t}>${POOL_BADGE_TEXT}</span>`;
+}
 // 项目暂时没实验（快照的 no_work_since，collect 算）：两个页面同一个标记、同一句说明
 const NO_WORK = "暂时没实验";
 const noWorkTip = since => `${ts(since)} 起清单里没有待办，worker 上也没有本项目的任务：不占卡，往清单里加任务就接着跑。这时本项目不报主机的事（连不上、磁盘余量、空闲关机风险）`;

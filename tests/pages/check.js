@@ -3142,17 +3142,19 @@ t("project", "项目页的算力池（#24）：顶栏一个「算力池」，车
   ok(!rc.includes("</span> 算力池</b>"), "资源小图不该画算力池"); has(rc, "srv-h", "项目主机照常画");
   ok(run(C, 'hostShort(D.hosts.find(h => h.pool))') === "算力池", "短名");
 });
-t("project", "项目页共有算力池主机小徽标（#251）：顶栏主机项与资源卡标题展示紧凑小徽标，时间线主机表头与折线悬停同步写明池名，非池主机不受影响且转义恶意字符", () => {
+t("project", "项目页共有算力池主机小角标（#251）：顶栏、资源卡与时间线主机表头复用紧凑「池」角标，悬停展示所属共有池名，非池主机不受影响且转义恶意字符", () => {
   const C = pjCtx(PJ, EVN), h = app(C);
   const top = run(C, "topline()"), rc = run(C, "resourcesCard()");
-  has(top, "池 · A6000 共有池", "顶栏入池主机应展示共有池小徽标");
-  has(tips(top), "所属共有算力池：A6000 共有池", "顶栏入池主机与徽标悬停应说明所属共有池");
-  ok((top.match(/池 · A6000 共有池/g) || []).length === 1, "顶栏只有入池主机 srv-h 出徽标");
-  has(rc, "池 · A6000 共有池", "资源卡标题处应展示共有池小徽标");
-  has(tips(rc), "所属共有算力池：A6000 共有池", "资源卡徽标悬停应说明所属共有池");
-  ok((rc.match(/池 · A6000 共有池/g) || []).length === 1, "资源卡只有入池主机 srv-h 出徽标");
+  has(top, '<span class="badge b-pool" data-tip="所属共有算力池：A6000 共有池">池</span>', "顶栏入池主机应展示紧凑池角标且悬停含池名");
+  ok(!top.includes("池 · A6000 共有池"), "顶栏不应再展示过大的「池 · 池名」药丸标签");
+  ok((top.match(/class="badge b-pool"/g) || []).length === 1, "顶栏只有入池主机 srv-h 出池角标");
+  has(rc, '<span class="badge b-pool" data-tip="所属共有算力池：A6000 共有池">池</span>', "资源卡标题处应展示紧凑池角标且悬停含池名");
+  ok(!rc.includes("池 · A6000 共有池"), "资源卡不应再展示过大的「池 · 池名」药丸标签");
+  ok((rc.match(/class="badge b-pool"/g) || []).length === 1, "资源卡只有入池主机 srv-h 出池角标");
   run(C, "drawTimeline()");
   const tl = el(C, "tlbox").innerHTML;
+  has(tl, '<g class="pbadge-svg" data-tip="所属共有算力池：A6000 共有池">', "时间线入池主机表头应展示紧凑池角标且悬停含池名");
+  ok((tl.match(/class="pbadge-svg"/g) || []).length === 1, "时间线只有入池主机 srv-h 出池角标");
   has(tips(tl), "srv-h\n所属共有算力池：A6000 共有池", "时间线主机表头悬停应写明所属共有池名称");
   ok(!tips(tl).includes("srv-a（A6000）\n所属共有算力池"), "未入池主机 srv-a 不应带共有池提示");
   // 时间线折线悬停读数（srv-h 补一个采样以触发 TLH 命中）
@@ -3162,8 +3164,18 @@ t("project", "项目页共有算力池主机小徽标（#251）：顶栏主机�
   has(hov, "srv-h（共有算力池：A6000 共有池）", "时间线折线悬停应带所属共有池名称");
   // 恶意字符串转义
   const E = pjCtx(PJE, EVE), eh = app(E);
-  clean(eh, "evil 共有池小徽标");
-  has(eh, "池 · 池" + BADESC, "evil 共有池名称应正确转义");
+  clean(eh, "evil 共有池小角标");
+  has(eh, `data-tip="所属共有算力池：池${BADESC}"`, "evil 共有池名称在悬停提示中应正确转义");
+  run(E, "drawTimeline()");
+  const etl = el(E, "tlbox").innerHTML;
+  clean(etl, "evil 时间线共有池小角标");
+  has(etl, `class="pbadge-svg" data-tip="所属共有算力池：池${BADESC}"`, "evil 时间线池角标应正确转义");
+  // 工作台首页主机表复用同一套 poolBadge
+  const ovSnap = JSON.parse(JSON.stringify(OV));
+  ovSnap.hosts[0].pool_id = "shared"; ovSnap.hosts[0].pool_label = "A6000 共有池"; ovSnap.hosts[0].pool_exclusive = true;
+  const ovHome = page(accCtx(ovSnap, ADMIN_ME), "#/");
+  has(ovHome, '<span class="badge b-pool" data-tip="所属共有算力池：A6000 共有池（独占，请经池入口提交）">池</span>', "工作台首页主机表应复用紧凑池角标并在悬停说明独占/开放");
+  ok((ovHome.match(/class="badge b-pool"/g) || []).length === 1, "工作台首页主机表只有入池主机出池角标");
 });
 t("project", "项目页 CPU 占用监控（#208）：顶部 CPU 卡片展示核数/配额与限流，时间线主机行同轴叠画不同颜色 CPU 折线与图例、悬停读数，兼容旧快照", () => {
   const C = pjCtx(PJ, EVN), h = app(C);
