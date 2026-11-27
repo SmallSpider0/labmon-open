@@ -29,6 +29,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self._allow_shared_gpu = os.environ.get("LABMON_ALLOW_SHARED_GPU") == "1"
         _mv = _M.num(os.environ.get("LABMON_MPS_VRAM_GB"))
         self._mps_vram_gb = _mv if _mv is not None and _mv > 0 else None
+        self._host_cpu_prev = None
         self._proc_ticks_prev = None
         self.p = _C.Paths(host)
         self.disk = _D.Disk(shared, host) if (shared and not self.standalone) else None   # 共享盘用量（只有拿着租约的那台在扫）
@@ -761,21 +762,35 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if self.cpu_prev and t > self.cpu_prev[0]:
                 h["cpu_used"] = round(max(0.0, (h["cpu_ns"] - self.cpu_prev[1]) / 1e9 / (t - self.cpu_prev[0])), 2)
             self.cpu_prev = (t, h["cpu_ns"])
-        elif procs:
-            cur_ticks = {pid: p["ticks"] for pid, p in procs.items() if p.get("ticks") is not None}
-            if self._proc_ticks_prev and t > self._proc_ticks_prev[0]:
-                pt, pm = self._proc_ticks_prev
-                dt = t - pt
-                dticks = sum(max(0, tk - pm[pid]) for pid, tk in cur_ticks.items() if pid in pm)
-                try:
-                    hz = os.sysconf("SC_CLK_TCK")
-                except (AttributeError, ValueError, OSError):
-                    hz = 100
-                cu = dticks / hz / dt
-                if h.get("nproc"):
-                    cu = min(float(h["nproc"]), cu)
-                h["cpu_used"] = round(max(0.0, cu), 2)
-            self._proc_ticks_prev = (t, cur_ticks)
+        else:
+            ht = _M.host_cpu_ticks()
+            try:
+                hz = os.sysconf("SC_CLK_TCK")
+            except (AttributeError, ValueError, OSError):
+                hz = 100
+            if ht is not None:
+                # Linux 无 cgroup CPU 计数时优先走 /proc/stat 全机非空闲计数，避免 /proc/<pid>/stat 的 cutime/cstime 在子进程回收时重复累计
+                if self._host_cpu_prev and t > self._host_cpu_prev[0] and ht >= self._host_cpu_prev[1]:
+                    cu = (ht - self._host_cpu_prev[1]) / hz / (t - self._host_cpu_prev[0])
+                    if h.get("nproc"):
+                        cu = min(float(h["nproc"]), cu)
+                    h["cpu_used"] = round(max(0.0, cu), 2)
+                self._host_cpu_prev = (t, ht)
+                self._proc_ticks_prev = None
+            elif procs and (h.get("os") == "darwin" or all(p.get("sid") is None for p in procs.values())):
+                # macOS `ps -o time=` 只含进程自身 CPU 时间（不含已回收子进程），可安全按存活 PID 交集求差
+                cur_ticks = {pid: p["ticks"] for pid, p in procs.items() if p.get("ticks") is not None}
+                if self._proc_ticks_prev and t > self._proc_ticks_prev[0]:
+                    pt, pm = self._proc_ticks_prev
+                    dt = t - pt
+                    dticks = sum(max(0, tk - pm[pid]) for pid, tk in cur_ticks.items() if pid in pm)
+                    cu = dticks / hz / dt
+                    if h.get("nproc"):
+                        cu = min(float(h["nproc"]), cu)
+                    h["cpu_used"] = round(max(0.0, cu), 2)
+                self._proc_ticks_prev = (t, cur_ticks)
+            else:
+                self._proc_ticks_prev = None
         self.ext = self.ext_jobs(queues)
         jobs = list(self.running.values()) + list(self.ext.values())
         mine = _M.job_procs(procs, jobs)
@@ -815,9 +830,10 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             for u in sorted(prev_busy - now_busy):
                 self.wlog("卡 %s 外部占卡已释放，恢复正常放行" % idx.get(u, u))
         cards_on = {}                             # 各任务此刻所用的卡（独占任务据此看同卡、同机有没有别的，作废）
+        mps_cards = {g["uuid"] for g in gpus if g.get("backend") == "mps"}
         for j in jobs:
             if mine[id(j)]:
-                cards_on[id(j)] = self.measure(j, mine[id(j)], procs, gp, util, ovram, jobs, t, unacct=unacct if apps_ok else None)
+                cards_on[id(j)] = self.measure(j, mine[id(j)], procs, gp, util, ovram, jobs, t, unacct=unacct if apps_ok else None, mps_cards=mps_cards)
         self.info = h
         for d in h.get("disk") or []:
             if isinstance(d, dict):

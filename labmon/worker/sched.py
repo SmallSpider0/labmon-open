@@ -643,16 +643,20 @@ def estimate(hist, r):
         keys.append(("queue", r["root"], r["queue"]))
     ok = lambda h: not h.get("oom") and (ran_ok(h) or (h.get("min") or 0) >= 5)     # noqa: E731 — 跑成功的，或跑了 5 分钟以上、不是 OOM 的（没跑成功的只能抬高：peak_rows）
     label = {"tag": "同 tag", "name": "同名", "queue": "同队列"}
-    peak = None                                   # 显存、内存取自的那一档历史：(档, 记录)
+    rpeak = None                                  # 内存取自的那一档历史：(档, 记录)
+    vpeak = None                                  # 显存取自的那一档历史：(档, 记录)（跳过 MPS 等 vram_peak=None 的记录）
     floor = {"vram": (0.0, None), "ram": (0.0, None)}   # OOM 后的下限：(GiB, 来源)
     cpu = (_M.job_cpus(r["cpus"]), "提示值") if r.get("cpus") is not None else None
     shrink = None                                 # 写了 cpus= 时，同 tag › 同名第一档有峰值的历史（cpu_shrink 看）
     for k in keys:
         rows = [h for h in hist if _C.hist_key(h, k[0]) == k]   # hist 按结束时刻排好（load_hist）
         same = [h for h in rows if ok(h)]
-        hs = peak_rows(same, "ram_peak")
-        if hs and peak is None:
-            peak = (k[0], hs)
+        hrs = peak_rows(same, "ram_peak")
+        if hrs and rpeak is None:
+            rpeak = (k[0], hrs)
+        hvs = peak_rows(same, "vram_peak")
+        if hvs and vpeak is None:
+            vpeak = (k[0], hvs)
         cr = peak_rows(same, "cores_peak")
         cs = [h["cores_peak"] for h in cr]
         if cs and cpu is None:
@@ -678,22 +682,30 @@ def estimate(hist, r):
         if n is not None:
             set_, cpu = cpu[0], (n, "清单 cpus=%d 偏大：%s 近 %d 次峰值 %.1f 核 ×1.1（开跑仍给 %d 核）"
                                  % (cpu[0], shrink[0], len(shrink[1]), max(h["cores_peak"] for h in shrink[1]), cpu[0]))
-    if peak:
-        kind, hs = peak
-        src = "%s 近 %d 次峰值 ×1.1" % (label[kind], len(hs))
-        solo = [h["gpu_util"] for h in hs if h.get("gpu_util") is not None and not [x for x in h.get("with_gpu") or [] if x != "GPU 保活"]]
-        hv = {"ram": round(1.1 * max(h["ram_peak"] or 0 for h in hs), 2),
-              "vram": round(1.1 * max((h.get("vram_peak") or 0) / 1024 / max(1, len(h.get("gpus") or [1])) for h in hs), 2),
-              "util": round(sum(solo) / len(solo)) if solo else None}
     out = {}
+    rv, rr = r.get("vram") or 0.0, r.get("ram") or 0.0
+    if rpeak and (rpeak[0] != "queue" or not rr):
+        rkind, rhs = rpeak
+        rsrc = "%s 近 %d 次峰值 ×1.1" % (label[rkind], len(rhs))
+        out["ram"], out["ram_src"] = round(1.1 * max(h["ram_peak"] or 0 for h in rhs), 2), rsrc
+    else:
+        out["ram"], out["ram_src"], rsrc = rr, "提示值", None
+    if vpeak and (vpeak[0] != "queue" or not rv):
+        vkind, vhs = vpeak
+        vsrc = "%s 近 %d 次峰值 ×1.1" % (label[vkind], len(vhs))
+        solo = [h["gpu_util"] for h in vhs if h.get("gpu_util") is not None and not [x for x in h.get("with_gpu") or [] if x != "GPU 保活"]]
+        out["vram"] = round(1.1 * max((h["vram_peak"] or 0) / 1024 / max(1, len(h.get("gpus") or [1])) for h in vhs), 2)
+        out["src"] = vsrc
+        v_util = round(sum(solo) / len(solo)) if solo else None
+    elif rpeak and (rpeak[0] != "queue" or not rv) and not rv and not any(str(u).startswith("mps-") for h in rpeak[1] for u in (h.get("gpus") or ())):
+        # 兼容未记 vram_peak 的旧记录（非 MPS 且未写 vram= 提示值）
+        out["vram"], out["src"], vsrc, v_util = 0.0, rsrc, None, None
+    else:
+        out["vram"], out["src"], vsrc, v_util = rv, "提示值", None, None
     for f, s in (("vram", "src"), ("ram", "ram_src")):
-        if peak and (peak[0] != "queue" or not r[f]):
-            out[f], out[s] = hv[f], src
-        else:
-            out[f], out[s] = r[f], "提示值"
         if floor[f][0] > out[f]:
             out[f], out[s] = floor[f]
-    out["util"] = hv["util"] if peak and out["src"] == src else None
+    out["util"] = v_util if vpeak and out["src"] == vsrc else None
     return dict(out, cpus=cpu[0], cpu_src=cpu[1], **({"cpus_set": set_} if set_ else {}))
 
 

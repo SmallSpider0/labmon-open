@@ -386,6 +386,82 @@ class MpsAndDarwinQuotaTest(unittest.TestCase):
                 hz = os.sysconf("SC_CLK_TCK")
                 self.assertAlmostEqual(w.info["cpu_used"], round(200 / hz / 2.0, 2), places=2)
 
+    def test_linux_no_cgroup_reaped_child_not_double_counted(self):
+        """回归 Codex P2 #1：Linux 无 cgroup 独立主机上，子进程退出被父进程回收（cutime/cstime 转入父进程）绝不能重复累计为本轮 cpu_used；
+        有 /proc/stat 时改走全机非空闲 ticks 差分，无 /proc/stat 时也不对含 cutime/cstime 的 Linux /proc 进程表做 PID 交集求差。"""
+        with tempfile.TemporaryDirectory() as td, _iso_worker(td) as d:
+            w = W.Worker("lin_standalone", standalone=True)
+            os.makedirs(w.p.queues, exist_ok=True)
+            hz = os.sysconf("SC_CLK_TCK")
+            # 1) 无 /proc/stat 且为 Linux 进程（带整数 sid，ticks 含 cutime/cstime）：子进程 20 退出被父进程 10 回收，不应产生虚假 cpu_used=5.0
+            p1 = {10: {"comm": "sh", "state": "S", "ppid": 1, "pgid": 10, "sid": 10, "ticks": 0, "hpid": None},
+                  20: {"comm": "py", "state": "S", "ppid": 10, "pgid": 10, "sid": 10, "ticks": 10 * hz, "hpid": None}}
+            p2 = {10: {"comm": "sh", "state": "S", "ppid": 1, "pgid": 10, "sid": 10, "ticks": 10 * hz, "hpid": None}}
+            t_now = [1000.0]
+            with mock.patch.object(W.common.time, "time", side_effect=lambda: t_now[0]), \
+                    mock.patch.object(W.measure, "scan_procs", side_effect=[p1, p2]), \
+                    mock.patch.object(W.measure, "gpu_table", return_value=[]), \
+                    mock.patch.object(W.measure, "gpu_procs", return_value=([], True)), \
+                    mock.patch.object(W.measure, "host_info", return_value={"gpus": [], "nproc": 8, "cpu_quota": 8.0, "cpu_ns": None, "mem": {}, "disk": []}):
+                w.sample([])
+                t_now[0] = 1002.0
+                w.sample([])
+                self.assertIsNone(w.info.get("cpu_used"))
+
+            # 2) 有 /proc/stat 时走 host_cpu_ticks 全机非空闲计数差分（期间子进程被回收但全机仅新增 1 CPU 秒 -> 0.5 核）
+            proc_dir = d / "fake_proc_stat"
+            proc_dir.mkdir()
+            stat_f = proc_dir / "stat"
+            stat_f.write_text(f"cpu  {100 * hz} 0 {20 * hz} 50000 0 0 0 0 0 0\n")
+            t_now2 = [2000.0]
+            with mock.patch.object(W, "PROC", str(proc_dir)), \
+                    mock.patch.object(W.common.time, "time", side_effect=lambda: t_now2[0]), \
+                    mock.patch.object(W.measure, "scan_procs", side_effect=[p1, p2]), \
+                    mock.patch.object(W.measure, "gpu_table", return_value=[]), \
+                    mock.patch.object(W.measure, "gpu_procs", return_value=([], True)), \
+                    mock.patch.object(W.measure, "host_info", return_value={"gpus": [], "nproc": 8, "cpu_quota": 8.0, "cpu_ns": None, "mem": {}, "disk": []}):
+                w.sample([])
+                stat_f.write_text(f"cpu  {101 * hz} 0 {20 * hz} 51000 0 0 0 0 0 0\n")
+                t_now2[0] = 2002.0
+                w.sample([])
+                self.assertAlmostEqual(w.info["cpu_used"], 0.5, places=2)
+
+    def test_mps_unmeasured_vram_keeps_hint_and_does_not_write_zero(self):
+        """回归 Codex P2 #2：Apple Silicon MPS 无单进程显存采集时，measure() 与 usage_rec() 将 vram_peak 记为 None（不写 0）；
+        estimate() 遇到 vram_peak=None 的 MPS 成功历史时保留清单 vram= 提示值（同时仍可复用该条实测 ram_peak），调小 mps_vram_gb 后正确拦截。"""
+        with tempfile.TemporaryDirectory() as td, _iso_worker(td):
+            w = W.Worker("mac", standalone=True)
+            os.makedirs(w.p.queues, exist_ok=True)
+            g = W.mps_gpu(mem={"limit": 16.0, "anon": 4.0}, chip="Apple M4")
+            w.info = {"os": "darwin", "nproc": 10, "cpu_quota": 8.0, "mem": {"limit": 16.0, "used": 6.0, "anon": 4.0, "src": "vm_stat"}, "gpus": [g], "disk": []}
+            j = {"name": "train_s0", "project": "p1", "pid": 101, "t0": 1000.0, "gpus": ["mps-0"], "ngpu": 1,
+                 "vram": 8.0, "ram": 2.0, "use": {}, "est": {"vram": 8.0, "ram": 2.0, "cpus": 2}}
+            procs = {101: {"comm": "python3", "state": "R", "ppid": 1, "pgid": 101, "sid": None, "ticks": 50, "hpid": None, "rss": 2 * 1024 ** 3}}
+            w.measure(j, [101], procs, [], {"mps-0": None}, {}, [j], 1010.0, mps_cards={"mps-0"})
+            self.assertIsNone(j["use"]["vram"])
+            self.assertIsNone(j["use"]["vram_peak"])
+            self.assertAlmostEqual(j["use"]["ram_peak"], 2.0, places=2)
+            rec = w.usage_rec(j, "0", None, False)
+            self.assertIsNone(rec["vram_peak"])
+            # 下一条带 vram=8 的同名任务经 estimate() 必须保留提示值 8.0（绝不被 0 覆盖），而 ram 正常取实测 2.0 * 1.1 = 2.2
+            req = {"name": "train_s1", "project": "p1", "vram": 8.0, "ram": 1.0, "cpus": None, "tag": None, "root": "/r", "queue": "q.txt"}
+            est = W.estimate([rec], req)
+            self.assertEqual(est["vram"], 8.0)
+            self.assertEqual(est["src"], "提示值")
+            self.assertAlmostEqual(est["ram"], 2.2, places=2)
+            self.assertIn("同名", est["ram_src"])
+            # 调小 mps_vram_gb=6 后，vram=8 必须因显存放不下被拦截
+            g_small = W.mps_gpu(mem={"limit": 16.0, "anon": 4.0}, limit_gb=6.0, chip="Apple M4")
+            w.info["gpus"] = [g_small]
+            S = w.snapshot({})
+            x = {"key": "q1", "lane": "q1", "name": "train_s1", "project": "p1", "ngpu": 1, "vram": est["vram"], "src": est["src"],
+                 "ram": est["ram"], "ram_src": est["ram_src"], "cpus": est["cpus"], "cpu_src": est["cpu_src"],
+                 "excl": None, "tag": None, "hold": False, "dur": 10.0, "allowed": None, "cards": 1.0}
+            cs, _, res = W.place(x, S, 1020.0)
+            self.assertIsNone(cs)
+            self.assertEqual(S["code"], "nofit_vram")
+            self.assertFalse(res)
+
 
 class BoardAndWorkerctlMacosTest(unittest.TestCase):
     def test_workerctl_env_and_portable_daemon_start(self):

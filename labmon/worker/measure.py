@@ -640,6 +640,23 @@ def cpu_cap(quota):
     return max(1, int(quota)) if quota else None
 
 
+def host_cpu_ticks():
+    """Linux `/proc/stat` 首行 `cpu` 的全机非空闲累计 ticks（user+nice+system+irq+softirq+steal），读不到为 None。
+    无 cgroup CPU 计数时用于求全机 `cpu_used`，不受子进程退出被父进程回收导致的 `/proc/<pid>/stat` cutime/cstime 重复累计影响。"""
+    for ln in (_C.read(os.path.join(_C.PROC, "stat"), "") or "").splitlines():
+        if ln.startswith("cpu "):
+            cols = ints(ln.split()[1:])
+            if cols and len(cols) >= 4:
+                # 顺序：user nice system idle iowait irq softirq steal [guest guest_nice]
+                busy = cols[0] + cols[1] + cols[2]
+                for idx in (5, 6, 7):
+                    if idx < len(cols):
+                        busy += cols[idx]
+                return busy
+            break
+    return None
+
+
 def cpu_quota():
     """容器的 CPU 配额（核数，cgroup v1 / v2；没设上限或读不到为 None）。"""
     q, per = cg("cpu/cpu.cfs_quota_us"), cg("cpu/cpu.cfs_period_us")
@@ -919,12 +936,13 @@ class MeasureMixin:
                       **({"ka": self.bka[k]} if k in self.bka else {})}
         return out
 
-    def measure(self, j, pids, procs, gp, util, ovram, jobs, t, unacct=None):
+    def measure(self, j, pids, procs, gp, util, ovram, jobs, t, unacct=None, mps_cards=()):
         """量一个任务这一轮的用量（写进 j["use"]）：内存（PSS 之和）与峰值、核数与累计 CPU、读写（进程树 /proc/<pid>/io 之和：此刻 MiB/s、
         累计字节 rd_b / wr_b）、核数与读写的 1 分钟峰值（PEAK_WIN 秒一个窗口）、近 CPU_WARM_S 内各 1 分钟窗口的核数 pks [[窗口结束时刻, 核数]]
         与从何时起量它的 pk0（CPU 记账的回收按它们，cpu_warm、Worker.acct）、同卡并行数 conc、显存（按卡）与峰值、所用卡的平均利用率，
         以及运行期间同卡、同机还有谁（with_gpu、with_host）、所用的卡上有没有过 labmon 之外的进程（owner_gpu）。返回此刻所用的卡。
-        CPU（cpu_since）与读写都是累计计数求差：子进程被回收时并进父进程，求和不重不漏；回收者不在树里时那一轮差值为负，按 0 算。"""
+        CPU（cpu_since）与读写都是累计计数求差：子进程被回收时并进父进程，求和不重不漏；回收者不在树里时那一轮差值为负，按 0 算。
+        Apple Silicon MPS 无法采集单进程显存：仅用 MPS 卡且无 compute-apps 时 vram/vram_peak 保留 None，避免写成 0 覆盖历史估计。"""
         u = j.setdefault("use", {})
         ram = sum(mem_of(p, procs) for p in pids) / _C.GIB
         ticks = sum(procs[p]["ticks"] for p in pids)
@@ -937,6 +955,8 @@ class MeasureMixin:
         if j.get("ext") and vr:
             j["gpus"] = sorted(vb)
         on = set(j["gpus"]) | set(vb)
+        mps_set = set(mps_cards or ())
+        vram_unmeasured = bool(on) and not vr and all((x in mps_set or str(x).startswith("mps-")) for x in on)
         if any(ovram.get(x) for x in on):
             j["owner_gpu"] = True             # 运行期间所用的卡上有过 labmon 之外的进程（借来的主机上据此判断 CUDA OOM 是不是被挤的）
         stopped = any(procs[p].get("state") == "T" for p in pids)
@@ -972,7 +992,9 @@ class MeasureMixin:
         else:
             u.pop("sus_on", None)
         u.update(t=t, ticks=ticks, rchar=rd, wchar=wr, nproc=len(pids), ram=round(ram, 2), ram_peak=round(max(ram, u.get("ram_peak") or 0), 2),
-                 vram=vram, vram_peak=max(vram, u.get("vram_peak") or 0), vram_by=vb)
+                 vram=None if vram_unmeasured else vram,
+                 vram_peak=u.get("vram_peak") if vram_unmeasured else max(vram, u.get("vram_peak") or 0),
+                 vram_by=vb)
         card, host = (sum(_C.intruders(s, on, jobs, gp, None, j, unacct=unacct), []) for s in ("gpu", "host"))
         u["with_host"] = sorted(set(u.get("with_host", [])) | set(host))[:8]
         u["with_gpu"] = sorted(set(u.get("with_gpu", [])) | set(card))[:8]
