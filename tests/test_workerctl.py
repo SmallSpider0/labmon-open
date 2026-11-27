@@ -76,7 +76,9 @@ class StartTest(unittest.TestCase):
                 mock.patch.object(workerctl.subprocess, "run", return_value=mock.Mock(returncode=0)):
             workerctl.run_out("start", "demo", [])
         command = ssh.call_args.args[1]
-        self.assertIn("setsid nohup env KA_BIN=/shared/ka ", command)
+        self.assertIn("env KA_BIN=/shared/ka ", command)
+        self.assertIn(" --replace --daemon", command)
+        self.assertNotIn("setsid ", command)
 
     def test_guest_inherits_explicit_deployment_paths(self):
         from labmon import config

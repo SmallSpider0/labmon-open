@@ -90,6 +90,15 @@ UNACCT_UTIL_HOT = 15.0   # 无可见 GPU 进程时外部活跃占卡利用率触
 UNACCT_UTIL_COOL = 5.0   # 外部活跃占卡利用率滞回解除门槛（%，#114）
 
 
+MACOS_RESERVE_CPUS = 2   # macOS 桌面默认保留核数（#114）：避免实验把笔记本 CPU 吃死，可经 cpu_quota 覆盖
+
+
+MPS_MEM_FRAC = 0.65      # Apple Silicon MPS 逻辑卡默认显存上限占统一内存比例（#114）
+
+
+MPS_MEM_RESERVE_GIB = 4.0  # Apple Silicon MPS 逻辑卡默认至少为 macOS 系统保留的统一内存（GiB，#114）
+
+
 WAIT_CAP_S = 1800        # 缺省：请求卡在资源上等了这么久，排在它后面的就不能再越过它，只能回填（预计在它放行前跑完的才放）；sched.json 的 wait_cap_min 可改
 
 
@@ -145,7 +154,7 @@ SQUEEZE_MAX = 2          # 借来的主机上同一任务被对方挤掉（OOM�
 GUEST_ADJ = 1000         # 借来的主机上我们任务的 oom_score_adj：撞容器内存上限时内核先杀我们的，不杀对方的
 
 
-CUDA_OOM = re.compile(r"CUDA out of memory|OutOfMemoryError|CUDA error: out of memory|CUBLAS_STATUS_ALLOC_FAILED")
+CUDA_OOM = re.compile(r"CUDA out of memory|OutOfMemoryError|CUDA error: out of memory|CUBLAS_STATUS_ALLOC_FAILED|MPS backend out of memory")
 
 
 VOID_CPU = 1.0           # 整机独占时 labmon 之外的进程占这么多核算打扰
@@ -394,10 +403,25 @@ def flock(path, *, required=False):
         yield
 
 
+def posix_fallback_ok():
+    """无 /proc 时是否启用轻量 POSIX（macOS/BSD）采集回退（#114）：
+    - LABMON_NO_POSIX=1 强制关闭；
+    - LABMON_POSIX_PROBE=1 强制开启（单测显式测回退路径用）；
+    - 缺省仅当 PROC 指向真实 "/proc" 且该目录不存在时启用（Linux 环境与指向假目录的测试夹具均不触发）。"""
+    if os.environ.get("LABMON_NO_POSIX") == "1":
+        return False
+    if os.environ.get("LABMON_POSIX_PROBE") == "1":
+        return True
+    return PROC == "/proc" and not os.path.isdir(PROC)
+
+
 def cmdline(pid):
-    """进程命令行；不存在或已成僵尸返回 None。没有 /proc 时（本机测试）退回 ps。"""
+    """进程命令行；不存在或已成僵尸返回 None。没有 /proc 时（macOS/BSD 与本机测试）退回 ps。"""
     if not os.path.isdir("/proc"):
-        r = subprocess.run(["ps", "-p", str(pid), "-o", "stat=,args="], capture_output=True, text=True).stdout.strip()
+        try:
+            r = subprocess.run(["ps", "-p", str(pid), "-o", "stat=,args="], capture_output=True, text=True, timeout=5).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return None
         return None if not r or r.startswith("Z") else r.split(None, 1)[-1]
     try:
         with open("/proc/%d/stat" % pid) as f:
@@ -503,26 +527,70 @@ def base_name(name):
     return re.sub(r"([_-](s|seed|rep)\d+)+$", "", name)
 
 
+def parse_lstart(text):
+    """解析 `LC_ALL=C ps -p <pid> -o lstart=` 输出（如 `Fri Nov 27 11:51:05 2026`）为整型 epoch 秒；失败返回 None。"""
+    s = " ".join((text or "").split())
+    if not s:
+        return None
+    try:
+        return int(time.mktime(time.strptime(s, "%a %b %d %H:%M:%S %Y")))
+    except (ValueError, OverflowError):
+        return None
+
+
+def parse_boottime(text):
+    """解析 macOS/BSD `sysctl -n kern.boottime`（如 `{ sec = 1794381005, usec = 776306 } ...`）为 epoch 秒；失败返回 None。"""
+    m = re.search(r"\bsec\s*=\s*(\d+)", text or "")
+    if not m:
+        return None
+    sec = int(m.group(1))
+    um = re.search(r"\busec\s*=\s*(\d+)", text or "")
+    return sec + (int(um.group(1)) / 1e6 if um else 0.0)
+
+
 def pstart(pid):
-    """进程启动时刻（时钟滴答）：认 PID 有没有被复用；没有 /proc 时为 None。"""
+    """进程启动时刻（Linux 为时钟滴答，macOS/BSD 无 /proc 回退为整型 epoch 秒）：认 PID 有没有被复用；读不到为 None。"""
     try:
         with open(os.path.join(PROC, str(pid), "stat")) as f:
             return int(f.read().rsplit(")", 1)[1].split()[19])
     except (OSError, IndexError, ValueError):
+        pass
+    if not posix_fallback_ok():
         return None
+    try:
+        env = dict(os.environ, LC_ALL="C")
+        r = subprocess.run(["ps", "-p", str(pid), "-o", "lstart="], capture_output=True, text=True, timeout=5, env=env)
+        if r.returncode == 0:
+            return parse_lstart(r.stdout)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return None
 
 
 def started_at(pid):
-    """进程启动时刻（epoch 秒）= 开机时刻（/proc/stat 的 btime）+ pstart / 每秒滴答数；读不到为 None。
-    容器启动时刻（host_info 取 PID 1）、保活进程什么时候起来的（ka_groups，认 ka.sh 日志里这台的 RESTORED）共用。"""
-    t = pstart(pid)
-    if t is None:
-        return None
+    """进程启动时刻（epoch 秒）= Linux `/proc/stat` btime + pstart / SC_CLK_TCK；
+    macOS/BSD 无 /proc 时：pid == 1 优先读 `sysctl -n kern.boottime`，其余回退 `pstart(pid)`（epoch 秒）；读不到为 None。
+    容器/主机启动时刻（host_info 取 PID 1）、保活进程什么时候起来的（ka_groups）共用。"""
     try:
+        with open(os.path.join(PROC, str(pid), "stat")) as f:
+            t = int(f.read().rsplit(")", 1)[1].split()[19])
         btime = int(next(ln.split()[1] for ln in (read(os.path.join(PROC, "stat"), "") or "").splitlines() if ln.startswith("btime")))
-    except (StopIteration, IndexError, ValueError):
+        return btime + t / os.sysconf("SC_CLK_TCK")
+    except (OSError, StopIteration, IndexError, ValueError):
+        pass
+    if not posix_fallback_ok():
         return None
-    return btime + t / os.sysconf("SC_CLK_TCK")
+    if pid == 1:
+        try:
+            r = subprocess.run(["sysctl", "-n", "kern.boottime"], capture_output=True, text=True, timeout=5)
+            if r.returncode == 0:
+                bt = parse_boottime(r.stdout)
+                if bt is not None:
+                    return bt
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    v = pstart(pid)
+    return float(v) if v is not None else None
 
 
 def fsig(path):

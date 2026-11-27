@@ -133,11 +133,13 @@ function home() {
     (D.hosts.map(h => {
       const info = h.status?.info, gs = info?.gpus || [], m = info?.mem;
       const gb = gs.map(g => {
-        const U = utilText(gpuBusy(h, g.i), g.util), up = unacctPaused(h, g), umb = g.unacct_mb || 0;
-        const utip = up ? `\n外部（如宿主机）占卡暂停放行${umb ? `（约 ${mb2g(umb)} GiB）` : ""}${g.unacct_why ? `：${g.unacct_why}` : ""}`
+        const isMps = g.backend === "mps", U = utilText(gpuBusy(h, g.i), g.util), up = unacctPaused(h, g), umb = g.unacct_mb || 0;
+        const utip = isMps ? `\n${g.name || "Apple Silicon (MPS)"}（统一内存保守估算，默认单卡互斥，不采集利用率）`
+          : up ? `\n外部（如宿主机）占卡暂停放行${umb ? `（约 ${mb2g(umb)} GiB）` : ""}${g.unacct_why ? `：${g.unacct_why}` : ""}`
           : umb >= 512 ? `\n外部（如宿主机）未归因显存约 ${mb2g(umb)} GiB（已扣减可放显存）` : "";
-        const utag = up ? ` <span class="badge b-warn">外部占卡</span>` : umb >= 512 ? `<span class="mut"> · 外部 ${mb2g(umb)}G</span>` : "";
-        return `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB\n${U.tip}${utip}`)}><div class="bar thin" style="flex:1"><i style="width:${100 * g.used / g.total}%;background:${up ? "var(--warn)" : "var(--accent)"}"></i></div><span class="sm num nw">${pct(g.used, g.total)}%<span class="mut"> · ${U.big}</span>${utag}</span></div>`;
+        const utag = isMps ? ` <span class="badge b-mute">MPS</span>`
+          : up ? ` <span class="badge b-warn">外部占卡</span>` : umb >= 512 ? `<span class="mut"> · 外部 ${mb2g(umb)}G</span>` : "";
+        return `<div class="row" style="flex-wrap:nowrap" ${tip(`GPU ${g.i}：${mb2g(g.used)} / ${mb2g(g.total)} GiB\n${isMps ? "Apple Silicon MPS 逻辑卡" : U.tip}${utip}`)}><div class="bar thin" style="flex:1"><i style="width:${g.total ? 100 * g.used / g.total : 0}%;background:${up ? "var(--warn)" : "var(--accent)"}"></i></div><span class="sm num nw">${pct(g.used, g.total)}%${isMps ? "" : `<span class="mut"> · ${U.big}</span>`}${utag}</span></div>`;
       }).join("");
       const sx = (h.ephemeral || h.standalone) ? null : sharedParts(), wd = h.standalone ? h.work_disk : null;
       const ephSto = h.ephemeral ? (h.storage || []).map(x => {
@@ -153,7 +155,7 @@ function home() {
       return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b>${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : standaloneBadge(h)}${autoTag}${poolTag}</td><td>${workerBadge(h)}</td>
         <td>${gb || "—"}</td><td>${mb}</td><td>${sb}</td><td class="r nw">${info?.cpu_used != null ? g1(info.cpu_used) : "—"} <span class="mut">/ ${info?.cpu_quota ? g1(info.cpu_quota) : info?.nproc ?? "—"}</span>${thrTag(h) ? `<div>${thrTag(h)}</div>` : ""}</td>
         <td class="r">${jobsOf(h).length}</td><td class="r">${(h.status?.waiting || []).length}</td>
-        <td class="sm nw" ${!h.ephemeral && info?.started ? tip(`容器 ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : ""}>${h.ephemeral ? `<span class="mut">临时实例</span>` : h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${h.ephemeral ? "" : renewChip(h)}</td></tr>`;
+        <td class="sm nw" ${!h.ephemeral && info?.started ? tip(`${info.os === "darwin" ? "主机" : "容器"} ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : ""}>${h.ephemeral ? `<span class="mut">临时实例</span>` : h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${h.ephemeral ? "" : renewChip(h)}</td></tr>`;
     }).join("") || `<tr><td colspan="9" class="empty">主机清单里没有在用的主机。</td></tr>`) + `</table></div></div>`;
   s += poolSummaryCard() + schedCard() + tasksCard(D.hosts, jobs, allw, true);
   const pEnd = id => Math.max(0, ...D.hosts.flatMap(h => planLanes(h).filter(l => l.project === id).flatMap(l => l.jobs.map(j => j.t1 || 0))));   // 这个项目在各主机推演里最晚的结束
@@ -445,7 +447,10 @@ function gpuSegs(h, g) {
       s += seg(100 * show / g.total, "var(--warn)", desc, "外部占卡", "hatch");
     }
   } else if (rest > 256) {
-    s += seg(100 * rest / g.total, "var(--line)", `没有对应进程的显存 ${mb2g(rest)} GiB（驱动与上下文开销等）`);
+    const restTip = g.backend === "mps"
+      ? `系统与其他进程统一内存占用约 ${mb2g(rest)} GiB（按统一内存保守估算）`
+      : `没有对应进程的显存 ${mb2g(rest)} GiB（驱动与上下文开销等）`;
+    s += seg(100 * rest / g.total, "var(--line)", restTip);
   }
   return s;
 }
@@ -498,24 +503,33 @@ function resCard(h) {
   const big = s => `<div class="bar big" style="overflow:hidden">${s}</div>`;
   let s = "";
   gs.forEach((g, k) => {
-    const room = st.room?.gpus?.[g.uuid], nm = gs.length > 1 ? `GPU ${g.i} ` : "GPU ";
+    const isMps = g.backend === "mps", room = st.room?.gpus?.[g.uuid], nm = gs.length > 1 ? `GPU ${g.i} ` : "GPU ";
     const up = unacctPaused(h, g), umb = g.unacct_mb || 0;
-    const uNote = up
+    const uNote = isMps
+      ? ` <span class="badge b-mute" ${tip("Apple Silicon MPS 逻辑卡：按统一内存保守估算容量，默认单卡互斥")}>MPS</span>`
+        + (room != null ? `<span class="mut" ${tip("按统一内存与记账还能放")}>可放 ${mb2g(room)}</span>` : "")
+      : up
       ? ` <span class="badge b-warn" ${tip(`外部（如宿主机）占卡暂停放行${umb ? `（约 ${mb2g(umb)} GiB）` : ""}${g.unacct_why ? `：${g.unacct_why}` : ""}\n不报异常、不杀已跑任务，释放后自动恢复`)}>外部占卡暂停放行</span>`
       : (room != null ? `<span class="mut" ${tip("按记账还能放（空闲 − 运行中任务还没占上的预留）")}>可放 ${mb2g(room)}</span>` : "")
         + (umb >= 512 ? `<span class="mut" ${tip(`外部（如宿主机）未归因显存约 ${mb2g(umb)} GiB，已从可放显存扣减${g.unacct_busy ? "（已开启允许与外部共享 GPU）" : ""}`)}>外部占 ${mb2g(umb)} GiB</span>` : "");
-    s += row(nm + "显存", big(gpuSegs(h, g)), `${mb2g(g.used)} / ${mb2g(g.total)} GiB${uNote}`,
-      sp(r => r.gpu?.[k] ? 100 * r.gpu[k][0] / r.gpu[k][1] : null), `GPU ${g.i}：${g.name || ""}`);
+    s += row(nm + (isMps ? "显存（MPS）" : "显存"), big(gpuSegs(h, g)), `${mb2g(g.used)} / ${mb2g(g.total)} GiB${uNote}`,
+      sp(r => r.gpu?.[k] ? 100 * r.gpu[k][0] / r.gpu[k][1] : null), `GPU ${g.i}：${g.name || ""}${isMps ? "\nApple Silicon 统一内存保守估算，默认单卡互斥" : ""}`);
     const U = utilText(gpuBusy(h, g.i), g.util);      // 吃满程度（只有保活时按 0，#51）：条与数是近 1 小时平均，小曲线是近 10 分钟平均（series 卡的第 4 项）
-    s += row(nm + "利用率", big(`<i style="width:${U.v ?? 0}%;background:var(--accent);opacity:.6"></i>`), `${U.big}${U.sub ? `<span class="mut">${esc(U.sub)}</span>` : ""}`,
-      sp(r => r.gpu?.[k]?.[3]), `${U.span}平均\n${U.tip}\n小曲线是近 10 分钟平均`);
+    if (isMps) {
+      s += row(nm + "利用率", big(""), `—<span class="mut">MPS 不采集实时利用率</span>`, `<span class="sm mut">—</span>`,
+        `${g.name || "Apple Silicon (MPS)"}\n不依赖 Metal 实时利用率采集，不误报 GPU 空转`);
+    } else {
+      s += row(nm + "利用率", big(`<i style="width:${U.v ?? 0}%;background:var(--accent);opacity:.6"></i>`), `${U.big}${U.sub ? `<span class="mut">${esc(U.sub)}</span>` : ""}`,
+        sp(r => r.gpu?.[k]?.[3]), `${U.span}平均\n${U.tip}\n小曲线是近 10 分钟平均`);
+    }
   });
   const m = info.mem;
   if (m) {
     const extra = [m.peak ? `启动以来峰值 ${g1(m.peak)} GiB` : null, m.failcnt ? `撞上限 ${m.failcnt} 次` : null, m.oom_kill ? `OOM 杀进程 ${m.oom_kill} 次` : null].filter(Boolean);
-    s += row(`内存${m.src === "cgroup" ? "（容器）" : ""}`, `<div class="bar big" style="overflow:hidden">${memSegs(h)}<b style="left:90%" ${tip("90%：内存闸门，收不回的内存超过就停止放行新任务")}></b></div>`,
+    const mLbl = m.src === "cgroup" ? "内存（容器）" : m.src === "vm_stat" ? "内存（macOS）" : "内存";
+    s += row(mLbl, `<div class="bar big" style="overflow:hidden">${memSegs(h)}<b style="left:90%" ${tip("90%：内存闸门，收不回的内存超过就停止放行新任务")}></b></div>`,
       `${g1(m.used)} / ${g1(m.limit)} GiB${m.anon != null ? `<span class="mut" ${tip("收不回的内存 = 用量 − 页缓存：匿名页、共享内存（/dev/shm、tmpfs）与内核占用；放行与内存闸门看它")}>收不回 ${g1(m.anon)}</span>` : ""}${st.room?.ram != null ? `<span class="mut" ${tip("可放 = 上限 − labmon 之外收不回的内存 − 任务记账")}>可放 ${g1(st.room.ram)}</span>` : ""}${extra.filter(e => !e.startsWith("启动")).length ? ` <span style="color:var(--bad)">${esc(extra.filter(e => !e.startsWith("启动")).join("，"))}</span>` : ""}`,
-      sp(r => r.lim ? 100 * (r.anon ?? r.mem) / r.lim : null, {ref: 90}), ["工作集 = 用量 − 不活跃页缓存（与 cgroup 判定 OOM 的口径一致）", "曲线是收不回的内存（旧记录没有时是工作集），红线 90% 是内存闸门", ...extra].join("\n"));
+      sp(r => r.lim ? 100 * (r.anon ?? r.mem) / r.lim : null, {ref: 90}), [m.src === "vm_stat" ? "macOS 统一内存（vm_stat + sysctl hw.memsize）" : "工作集 = 用量 − 不活跃页缓存（与 cgroup 判定 OOM 的口径一致）", "曲线是收不回的内存（旧记录没有时是工作集），红线 90% 是内存闸门", ...extra].join("\n"));
   }
   const pr = info.press || {}, PSI = {cpu: "CPU", io: "读写", memory: "内存"};
   const psiT = k => pr.psi?.[k] != null ? `\nPSI：近 60 秒有任务在等${PSI[k]}的时间占 ${g1(pr.psi[k])}%` : "";
@@ -525,10 +539,13 @@ function resCard(h) {
     const ov = Object.fromEntries((st.throttle?.over || []).map(o => [o.project + "|" + o.name, o]));   // 限流中超核的任务（#39）
     const cs = js.map(j => (j.use?.cores ? seg(100 * j.use.cores / q, color(j.project), `${j.project} · ${j.name}：${g1(j.use.cores)} 核${ov[j.project + "|" + j.name] ? `\n超核：给 ${ov[j.project + "|" + j.name].give} 核，1 分钟窗口实测 ${g1(ov[j.project + "|" + j.name].cores)} 核` : ""}`, j.name) : "")
       + (j.acct?.cpu - (j.use?.cores || 0) > 0.05 ? seg(100 * (j.acct.cpu - (j.use?.cores || 0)) / q, color(j.project), `${j.name}：记账还没占上的 ${g1(j.acct.cpu - (j.use?.cores || 0))} 核\n（开跑 10 分钟内按估计值预留：${j.est?.cpu_src || ""}；满 10 分钟后按近 10 分钟窗口核数）`, "", "resv") : "")).join("");
+    const cpuHeadTip = info.os === "darwin"
+      ? `macOS 本机共 ${info.nproc ?? "—"} 核；当前配额 ${info.cpu_quota ? g1(info.cpu_quota) + " 核" : "未设"}${info.cpu_quota_src === "macos_default" ? "（默认留 2 核给桌面，可在主机配置中调整 cpu_quota）" : ""}`
+      : `容器里 nproc 显示 ${info.nproc ?? "—"} 个逻辑核，那是宿主机的；配额${info.cpu_quota ? " " + g1(info.cpu_quota) + " 核" : "读不到，不记 CPU 账"}`;
     s += row("CPU", big(cs + seg(Math.max(0, 100 * (info.cpu_used - js.reduce((a, j) => a + (j.use?.cores || 0), 0)) / q), "var(--muted)", "其他进程", "", "hatch")),
       `${g1(info.cpu_used)} / ${g1(q)} 核${st.room?.cpu_cap != null ? `<span class="mut" ${tip("记账 = 各任务记的核数合计：开跑后 10 分钟内取 max(估计核数（封顶到上限）, 实测核数)，满 10 分钟后估计那份换成近 10 分钟窗口核数的最大值（不超过开跑时给的核数、不低于 1）再与实测取大；上限是配额向下取整")}>记账 ${g1(acct)} / ${st.room.cpu_cap}</span>` : ""}${rc != null ? `<span class="mut" ${tip("可放 = 配额 − labmon 之外的（含旧 gpu_queue.sh 的任务）− 任务记账")}>可放 ${g1(Math.max(0, rc))}</span>` : ""}${thrTag(h, "mut")}`,
       sp(r => r.cpu != null ? 100 * r.cpu / q : null),
-      `容器里 nproc 显示 ${info.nproc ?? "—"} 个逻辑核，那是宿主机的；配额${info.cpu_quota ? " " + g1(info.cpu_quota) + " 核" : "读不到，不记 CPU 账"}\n放行按 CPU 记账：任务要的核数取清单的 cpus=，否则同类近 5 次峰值 ×1.1，都没有按 1 核；放不下的等着，原因写「CPU 不够」\n任务里的 $LABMON_CPUS 是开跑时给它记的核数（估计封顶到上限），不随之后的回收变；没设的 OMP/MKL/OPENBLAS 线程数缺省同它${psiT("cpu")}`);
+      `${cpuHeadTip}\n放行按 CPU 记账：任务要的核数取清单的 cpus=，否则同类近 5 次峰值 ×1.1，都没有按 1 核；放不下的等着，原因写「CPU 不够」\n任务里的 $LABMON_CPUS 是开跑时给它记的核数（估计封顶到上限），不随之后的回收变；没设的 OMP/MKL/OPENBLAS 线程数缺省同它${psiT("cpu")}`);
   }
   const x = (h.ephemeral || h.standalone) ? null : sharedParts();
   if (h.ephemeral) {

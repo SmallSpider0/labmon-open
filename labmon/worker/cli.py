@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import signal
+import subprocess
 import sys
 
 from . import common as _C
@@ -61,7 +62,7 @@ def slot_main(argv):
         ok = _C.read(base + ".ok")
         if ok:
             ok = json.loads(ok)
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(ok.get("gpus", []))
+            _M.accel_env(os.environ, ok.get("gpus", []), accel=ok.get("accel"))
             _M.cpu_env(os.environ, ok.get("cpus") or max(1, _M.job_cpus(_C.CPU_DEFAULT if a.cpus is None else a.cpus)))   # 旧 worker 的 .ok 不带 cpus：按 --cpus 或缺省
             if ok.get("adj"):                     # 借来的主机：撞容器内存上限时内核先杀我们的
                 try:
@@ -290,6 +291,7 @@ def main(argv=None):
     ap.add_argument("--hosts", help="fit --list：看哪几台（逗号分隔；看板按共用 worker 目录的在用主机给，缺省只看这台）")
     ap.add_argument("--json", action="store_true", help="fit --list：只看队首，打一行 JSON（算力池往哪台放用，#25）")
     ap.add_argument("--replace", action="store_true", help="run：已有 worker 时让它退出后接管（升级用）")
+    ap.add_argument("--daemon", action="store_true", help="run：以独立会话在后台启动 worker 后立即返回（不依赖 Linux setsid，macOS/Linux 通用）")
     ap.add_argument("--shared", help="run：组里共用的那块盘的挂载点（如 /root/data1），给了就参与统计它的用量")
     ap.add_argument("--standalone", action="store_true", help="run：以独立主机模式运行（不共享 worker_home，扫 <data_root> 工作盘）")
     ap.add_argument("--cache", action="store_true", help="clean：清理 <LOCAL>/cache")
@@ -299,6 +301,13 @@ def main(argv=None):
     a = ap.parse_args(argv)
     p = _C.Paths(a.host)
     if a.cmd == "run":
+        if a.daemon:
+            child_argv = [x for x in argv if x != "--daemon"]
+            entry = ([sys.executable, os.path.abspath(sys.argv[0])]
+                     if sys.argv and os.path.isfile(sys.argv[0]) else [sys.executable, "-m", "labmon.worker"])
+            subprocess.Popen(entry + child_argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                             start_new_session=True, close_fds=True)
+            return 0
         return _W.Worker(a.host, a.shared, standalone=True if a.standalone else None).run(a.replace)
     if a.cmd == "clean":
         return clean_local(p, project=a.project, cache=a.cache, scratch=a.scratch, yes=a.yes and not a.dry_run)

@@ -50,11 +50,11 @@ def fit_snapshot(st):
                                "why": g.get("unacct_why") or "外部（如宿主机）占卡"}
                    for g in info.get("gpus") or [] if g.get("unacct_busy") or g.get("uuid") in unacct_set}
     cards = [{"i": g["i"], "uuid": g["uuid"], "total": g.get("total") or 0.0, "keep": (room.get("keep") or {}).get(g["uuid"], 0.0),
-              "other": g.get("unacct_mb") or 0.0, "ka": False,
+              "other": g.get("unacct_mb") or 0.0, "ka": False, "backend": g.get("backend"),
               "unacct_mb": g.get("unacct_mb") or 0.0, "unacct_busy": bool(g.get("unacct_busy") or g.get("uuid") in unacct_set),
               "unacct_why": g.get("unacct_why") or "",
               "free": (room.get("gpus") or {}).get(g["uuid"], g.get("free") or 0.0) + ka.get(g["uuid"], 0.0)} for g in info.get("gpus") or []]
-    return {"cards": cards, "ngpus": len(cards), "limit": (info.get("mem") or {}).get("limit"),
+    return {"cards": cards, "ngpus": len(cards), "os": info.get("os"), "limit": (info.get("mem") or {}).get("limit"),
             "room": None if room.get("ram") is None else room["ram"] + sum(j["ram"] for j in jobs), "margin": room.get("margin") or 0,
             "cpu_cap": room.get("cpu_cap"), "cpu_room": None if room.get("cpu") is None else room["cpu"] + sum(j["cpu"] for j in jobs),
             "jobs": jobs, "ext": st.get("external") or [], "gp": gp, "cpu": room.get("other_cpu"), "holds": {}, "tags": (st.get("limits") or {}).get("tags") or {},
@@ -102,8 +102,10 @@ class FitHost:
                 ext_note = "；外部（如宿主机）占卡暂停放行" + ("（约 %.1f GiB）" % (c["unacct_mb"] / 1024) if c.get("unacct_mb", 0) >= _C.UNACCT_VRAM_MB else "")
             elif c.get("unacct_mb", 0) >= _C.UNACCT_VRAM_MB:
                 ext_note = "；外部占约 %.1f GiB" % (c["unacct_mb"] / 1024)
-            out.append("卡 %d：可用 %.1f GiB，近 10 分钟利用率 %s%s%s%s" % (
-                c["i"], max(0.0, free[c["uuid"]]) / 1024, "%d%%" % c["util"] if c["util"] is not None else "—（样本不够）",
+            is_mps = c.get("backend") == "mps"
+            util_s = "%d%%" % c["util"] if c["util"] is not None else ("—（MPS）" if is_mps else "—（样本不够）")
+            out.append("卡 %d%s：可用 %.1f GiB，近 10 分钟利用率 %s%s%s%s" % (
+                c["i"], " (MPS)" if is_mps else "", max(0.0, free[c["uuid"]]) / 1024, util_s,
                 on_card, ext_note,
                 "；%s 跑满了给的核（CPU 受限）" % "、".join("%s %.1f/%d 核" % x for x in b) if b else ""))
         if _S.cpu_line(self.st):

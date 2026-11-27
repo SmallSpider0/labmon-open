@@ -78,7 +78,9 @@ def ram_need(x, S):
 
 
 def ram_margin(limit_gib):
-    """放行时容器内存另留的余量（GiB）：上限的 5%，至少 8。"""
+    """放行时内存另留的余量（GiB）：64 GiB 及以上为上限的 5% 且至少 8 GiB；小于 64 GiB 的机器按上限 12.5%（封顶 8、保底 1 GiB，16 GiB→2、32 GiB→4）。"""
+    if limit_gib < 64.0:
+        return min(8.0, max(1.0, 0.125 * limit_gib))
     return max(8.0, 0.05 * limit_gib)
 
 
@@ -326,6 +328,8 @@ WHY = {
     "xgpu_nofit": ("独占：没有放得下的卡", "独占：没有放得下的卡（要显存 %(vram).0f GiB，另留 1 GiB%(kept)s）"),
     "xgpu_wait": ("独占：等卡腾空", "独占：等卡 %(idx)s 腾空（还在跑：%(names)s）"),
     "no_gpu": ("看不到 GPU（nvidia-smi 无输出）", "看不到 GPU（nvidia-smi 无输出）"),
+    "no_gpu_darwin": ("本机无可用 GPU（仅支持 gpus=0 纯 CPU 任务）", "本机无可用 GPU（仅支持 gpus=0 纯 CPU 任务）"),
+    "mps_busy": ("MPS 逻辑卡被占用（默认单卡互斥）", "Apple Silicon MPS 逻辑卡默认单卡互斥，卡 %(idx)s 上正在跑 %(names)s，等跑完再放"),
     "ext_gpu": ("外部（如宿主机）占卡暂停放行",
                 "卡 %(idx)s 有外部（如宿主机）占卡（%(note)s），默认整卡暂停放新任务；释放后自动恢复"),
     "gang_hold": ("成组 %(gang)s：已留好资源，等一起开跑",
@@ -477,7 +481,9 @@ def _place(x, S, t, pre=None):
     held = {u for v in rsv.values() for u in v["cards"] if u != "*"}
     unacct_set = set(S.get("unacct") or ())
     unacct_info = S.get("unacct_info") or {}
-    blocked = held | S["owner"] | unacct_set | {u for j in jobs if j["excl"] == "gpu" for u in j["gpus"]}
+    mps_uuids = {c["uuid"] for c in S["cards"] if c.get("backend") == "mps"}
+    mps_busy = {u for j in jobs for u in j["gpus"] if u in mps_uuids}
+    blocked = held | S["owner"] | unacct_set | mps_busy | {u for j in jobs if j["excl"] == "gpu" for u in j["gpus"]}
     allowed_cards = [c for c in S["cards"] if x["allowed"] is None or c["i"] in x["allowed"]]
     mine = [c for c in allowed_cards if c["uuid"] not in blocked]
     all_jobs = S["jobs"] + S["ext"]
@@ -557,7 +563,11 @@ def _place(x, S, t, pre=None):
         S["flex"] = flex_note
         return ok[:x["ngpu"]], None, False
     if not S["cards"]:                        # 不是资源等待，不成屏障：不然 30 分钟后连不用卡的任务也让位
-        return None, w("no_gpu"), False
+        return None, w("no_gpu_darwin" if S.get("os") == "darwin" else "no_gpu"), False
+    mps_hit = [c for c in allowed_cards if c["uuid"] in mps_busy]
+    if mps_hit and len(allowed_cards) - len(mps_hit) < x["ngpu"]:
+        names = sorted({j["name"] for j in jobs if set(j["gpus"]) & mps_busy})
+        return None, w("mps_busy", idx=",".join(str(c["i"]) for c in mps_hit), names="、".join(names) or "在跑任务"), True
     ka = ",".join(str(c["i"]) for c in S["cards"] if c["uuid"] in S["owner"] and c["ka"])        # 停不了的保活不是对方在用，分开说
     owner = ",".join(str(c["i"]) for c in S["cards"] if c["uuid"] in S["owner"] and not c["ka"])
     ext_s = "；卡 %s 有外部（如宿主机）占卡暂停放行" % ",".join(str(c["i"]) for c in ext_cards) if ext_cards else ""
@@ -912,7 +922,13 @@ def cpu_line(st):
     if not info:
         return None
     q, n = info.get("cpu_quota"), info.get("nproc")
-    host = "nproc 报的 %d 是宿主机的核数" % n if n else ""
+    if info.get("os") == "darwin":
+        if n and info.get("cpu_quota_src") == "macos_default":
+            host = "本机 %d 核（默认留 %d 核给桌面）" % (n, _C.MACOS_RESERVE_CPUS)
+        else:
+            host = "本机 %d 核" % n if n else ""
+    else:
+        host = "nproc 报的 %d 是宿主机的核数" % n if n else ""
     if not q:
         return "CPU：容器没设配额，不按核记账" + ("（%s）" % host if host else "")
     cap = room.get("cpu_cap") or _M.cpu_cap(q)
@@ -1061,11 +1077,12 @@ class SchedMixin:
         cards = [{"i": i, "uuid": u, "total": (info.get(u) or {}).get("total") or 0.0, "keep": self.keep_left(i, u),
                   "other": self.other["vram"].get(u, 0.0) + stuck.get(u, 0.0), "free": f - self.keep_left(i, u) + seen.get(u, 0.0),
                   "ka": bool(self.other["ka"].get(u)),
+                  "backend": (info.get(u) or {}).get("backend"),
                   "unacct_mb": (unacct.get(u) or {}).get("deduct") or 0.0,
                   "unacct_busy": u in unacct_busy,
                   "unacct_why": (unacct.get(u) or {}).get("why") or ""}
                  for i, u, f in gpus]
-        return {"cards": cards, "ngpus": max(len(info), len(cards)), "limit": m.get("limit"), "room": self.mem_room(), "margin": ram_margin(m["limit"]) if m.get("limit") else None,
+        return {"cards": cards, "ngpus": max(len(info), len(cards)), "os": self.info.get("os"), "limit": m.get("limit"), "room": self.mem_room(), "margin": ram_margin(m["limit"]) if m.get("limit") else None,
                 "cpu_cap": _M.cpu_cap(self.info.get("cpu_quota")), "cpu_room": self.cpu_room(),
                 "jobs": jobs, "ext": list(self.ext.values()), "gp": list(gp), "cpu": self.other["cpu"] if self.cpu_n >= 2 else None,
                 "holds": self.excl_hold, "tags": limits.get("tags") or {}, "owner": {u for u in self.back_last if u not in ("ram", "cpu")},
@@ -1250,17 +1267,25 @@ class SchedMixin:
             out["allowed_projects"] = [str(x) for x in ap] if isinstance(ap, list) else None
         env_cq = os.environ.get("LABMON_CPU_QUOTA")
         env_sg = os.environ.get("LABMON_ALLOW_SHARED_GPU") == "1"
+        env_mv = _M.num(os.environ.get("LABMON_MPS_VRAM_GB"))
         if "allow_shared_gpu" in d:
             self._allow_shared_gpu = bool(d.get("allow_shared_gpu"))
         else:
             self._allow_shared_gpu = env_sg
-        if st or any(k in d for k in ("standalone", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "cpu_quota", "allow_shared_gpu")) or env_cq or env_sg:
+        if "mps_vram_gb" in d:
+            mv = _opt_num("mps_vram_gb", None)
+            self._mps_vram_gb = mv if mv is not None and mv > 0 else None
+        else:
+            self._mps_vram_gb = env_mv if env_mv is not None and env_mv > 0 else None
+        if st or any(k in d for k in ("standalone", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "cpu_quota", "allow_shared_gpu", "mps_vram_gb")) or env_cq or env_sg or env_mv:
             out["standalone"] = st
             out["disk_warn_gb"] = _opt_num("disk_warn_gb", _C.DISK_WARN_GB if st else None)
             out["disk_stop_gb"] = _opt_num("disk_stop_gb", _C.DISK_STOP_GB if st else None)
             out["disk_quota_gb"] = _opt_num("disk_quota_gb", None)
             if "allow_shared_gpu" in d or env_sg:
                 out["allow_shared_gpu"] = bool(self._allow_shared_gpu)
+            if self._mps_vram_gb is not None:
+                out["mps_vram_gb"] = self._mps_vram_gb
             # 区分看板显式清除（"cpu_quota" in d 且为 null）与尚未收到下发（回退启动时的 LABMON_CPU_QUOTA）
             if "cpu_quota" in d:
                 cq = _opt_num("cpu_quota", None)

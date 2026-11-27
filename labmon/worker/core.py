@@ -27,6 +27,9 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.standalone = (os.environ.get("LABMON_STANDALONE") == "1") if standalone is None else bool(standalone)
         self._sched_standalone = False
         self._allow_shared_gpu = os.environ.get("LABMON_ALLOW_SHARED_GPU") == "1"
+        _mv = _M.num(os.environ.get("LABMON_MPS_VRAM_GB"))
+        self._mps_vram_gb = _mv if _mv is not None and _mv > 0 else None
+        self._proc_ticks_prev = None
         self.p = _C.Paths(host)
         self.disk = _D.Disk(shared, host) if (shared and not self.standalone) else None   # 共享盘用量（只有拿着租约的那台在扫）
         self.ldisk = _D.LocalDisk(host)          # 容器根盘开机以来的新写入与 labmon 目录的用量（每台扫自己的，#149）
@@ -336,7 +339,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             sd, cd = _Q.scratch_dir(q["project"], job["name"]), _Q.cache_dir(q["project"])
             env = dict(os.environ, PYTHONUNBUFFERED="1", QUEUE_ROOT=q["root"], LABMON_SCRATCH=sd, LABMON_CACHE=cd)
             env.pop("PYTHONPATH", None)
-            env["CUDA_VISIBLE_DEVICES"] = ",".join(c["uuid"] for c in gpus) if job["ngpu"] > 0 else ""
+            _M.accel_env(env, gpus if job["ngpu"] > 0 else ())
             _M.cpu_env(env, self.cpus_for(job))     # 给它记账的核数：项目拿它设线程数、DataLoader 进程数（nproc 是宿主机的）；没设的 BLAS/OpenMP 线程数缺省同它
             # 命令放子 shell 里跑：清单行里的 exit 不会跳过写退出码。借来的主机上先调高自己的 oom_score_adj（子进程继承）
             nice_inc = _S.cpu_only_nice(job["ngpu"], self.info.get("gpus") or (), _C.is_hold(job["name"]))
@@ -352,7 +355,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 for d in (sd, cd):
                     os.makedirs(d, exist_ok=True)
                 with open(os.path.join(lg, job["name"] + ".log"), "a") as out:
-                    out.write("===== %s labmon 开始（GPU %s）=====\n" % (_C.now_str(), ",".join(str(c["i"]) for c in gpus) or "无"))   # 分隔行，见 START_RE
+                    g_lbl = ",".join("%d (MPS)" % c["i"] if c.get("backend") == "mps" else str(c["i"]) for c in gpus) or "无"
+                    out.write("===== %s labmon 开始（GPU %s）=====\n" % (_C.now_str(), g_lbl))   # 分隔行，见 START_RE
                     out.flush()
                     pr = subprocess.Popen(args,
                                           cwd=q["root"], env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
@@ -413,7 +417,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         nice_inc = _S.cpu_only_nice(r["ngpu"], self.info.get("gpus") or (), _C.is_hold(r["name"]))
         with _C.flock(self.p.scratch_lock):
             self._note_scratch(r.get("project"), r.get("name"), r.get("pid"))
-            _C.write(base + ".ok", json.dumps({"gpus": [c["uuid"] for c in gpus], "t": _C.time.time(), "cpus": self.cpus_for(r),
+            _C.write(base + ".ok", json.dumps({"gpus": [c["uuid"] for c in gpus], "accel": _M.accel_kind(gpus), "t": _C.time.time(), "cpus": self.cpus_for(r),
                                             **({"adj": _C.GUEST_ADJ} if self.guest() else {}),
                                             **({"nice": nice_inc} if nice_inc else {})}))
         if os.path.exists(base + ".why"):
@@ -631,13 +635,17 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         local = not who or who == self.host       # 别的主机放的（那台已归还，run_elsewhere 才放过来）：PID 是另一个容器的，这里同号的进程不是它
         old = self.prev.get((q["root"], q["jobs"], name, pid), {})
         cmd = _Q.job_cmd(q, name) or ""
+        jh = _Q.hints(cmd)
         gpus = old.get("gpus")
         if gpus is None:                          # 上一份状态里没有它（旧 worker 没写过状态）：从进程的 CUDA_VISIBLE_DEVICES 找回，只认此刻看得到的卡
-            known = {g["uuid"] for g in _M.gpu_table()}
+            gtab = _M.gpu_table(mps_vram_gb=self._mps_vram_gb)
+            known = {g["uuid"] for g in gtab}
             gpus = [u for u in (_C.proc_env(pid, "CUDA_VISIBLE_DEVICES") or "").split(",") if u in known] if local else []
+            if not gpus and local and jh.get("ngpu", 1) > 0 and len(gtab) == 1 and gtab[0].get("backend") == "mps":
+                gpus = [gtab[0]["uuid"]]          # macOS 无 /proc/<pid>/environ 且 MPS 下 CUDA_VISIBLE_DEVICES=""，单逻辑 MPS 卡按 ngpu>0 找回
         use = dict(old.get("use") or {})
         use.pop("sus_on", None)               # 接管时保留已确认的 sus_s，重建挂起观测基线，不把停机未观测时段计为挂起（#149）
-        job = dict(_Q.hints(cmd), name=name, cmd=cmd, kind="queue", pid=pid, t0=t0, q=q, project=q["project"], stop=q["stop"],
+        job = dict(jh, name=name, cmd=cmd, kind="queue", pid=pid, t0=t0, q=q, project=q["project"], stop=q["stop"],
                    gpus=gpus, use=use, oom0=old.get("oom0"), fc0=old.get("fc0"), owner_gpu=old.get("owner_gpu"), io_sus=old.get("io_sus"),
                    cpu_fit=old.get("cpu_fit"), gang_with=old.get("gang_with"), gang_stop=old.get("gang_stop"))
         job["excl"] = old.get("excl", job["excl"])
@@ -744,7 +752,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         步骤：读主机（host_info、压力 press）→ 认旧 gpu_queue.sh 的任务（ext_jobs）→ 各任务的进程（job_procs）→ GPU 进程归属（gpu_owners）
         → 各卡利用率窗口（util_window）→ 逐任务量用量（measure）→ labmon 之外的用量、作废、借来主机的几项判定 → 内存闸门事件（mem_events）。"""
         t = _C.time.time()
-        procs, gpus = _M.scan_procs(), _M.gpu_table()
+        procs, gpus = _M.scan_procs(), _M.gpu_table(mps_vram_gb=self._mps_vram_gb)
         apps, apps_ok = _M.gpu_procs(with_ok=True)
         h = _M.host_info(gpus, _C.DATA_ROOT)
         h["press"] = self.press(t)
@@ -753,6 +761,21 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             if self.cpu_prev and t > self.cpu_prev[0]:
                 h["cpu_used"] = round(max(0.0, (h["cpu_ns"] - self.cpu_prev[1]) / 1e9 / (t - self.cpu_prev[0])), 2)
             self.cpu_prev = (t, h["cpu_ns"])
+        elif procs:
+            cur_ticks = {pid: p["ticks"] for pid, p in procs.items() if p.get("ticks") is not None}
+            if self._proc_ticks_prev and t > self._proc_ticks_prev[0]:
+                pt, pm = self._proc_ticks_prev
+                dt = t - pt
+                dticks = sum(max(0, tk - pm[pid]) for pid, tk in cur_ticks.items() if pid in pm)
+                try:
+                    hz = os.sysconf("SC_CLK_TCK")
+                except (AttributeError, ValueError, OSError):
+                    hz = 100
+                cu = dticks / hz / dt
+                if h.get("nproc"):
+                    cu = min(float(h["nproc"]), cu)
+                h["cpu_used"] = round(max(0.0, cu), 2)
+            self._proc_ticks_prev = (t, cur_ticks)
         self.ext = self.ext_jobs(queues)
         jobs = list(self.running.values()) + list(self.ext.values())
         mine = _M.job_procs(procs, jobs)
@@ -810,7 +833,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         roots.update({p: v[1] for p, v in self.ka_roots.items() if p not in seen and p in procs and v[0] is not None and _C.pstart(p) == v[0]})
         self.ka_roots = {p: (_C.pstart(p), x) for p, x in roots.items() if p in procs}
         ka_pids = _M.proc_tree(procs, roots)
-        ka_ram = sum(_M.mem_of(p) for p in ka_pids) / _C.GIB
+        ka_ram = sum(_M.mem_of(p, procs) for p in ka_pids) / _C.GIB
         ka_cpu = self.ka_cores(procs, ka_pids, t, "all")
         # 停不了的那几棵另算核数（cpu_room 另扣）：各棵保活树（按根的 PID 与启动时刻）分开记累计，归类只决定加进哪一份。
         # 改类那一轮照常按这一段求差（合成一份记时，刚归进来的树会把启动以来的 CPU 一起算进来）；一棵退出不丢别的几棵这一段的核数；
@@ -1239,7 +1262,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         need_gpu = (any(j.get("ngpu", 1) > 0 or j.get("excl") for j in self.running.values())
                     or any((r["ngpu"] > 0 or r["excl"]) and not r["held"] and not r.get("dep") and not r["stall"] and self.gang_soon(r, now) for r in reqs))
         self.keepalive(need_gpu)                  # 先停保活再看显存，否则保活占的显存会让任务以为没卡
-        gpus = _M.query_gpus() if any(r["ngpu"] > 0 for r in reqs) else []
+        gpus = _M.query_gpus(mps_vram_gb=self._mps_vram_gb) if any(r["ngpu"] > 0 for r in reqs) else []
         apps = self.gpu_now() if any(r["excl"] for r in reqs) else []
         live = [r for r in reqs if not r["held"] and not r.get("dep")]
         excl = {r["key"] for r in live if r["excl"]}
@@ -1472,8 +1495,11 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         stop = []
         signal.signal(signal.SIGTERM, lambda *_: stop.append(1))
         signal.signal(signal.SIGINT, lambda *_: stop.append(1))
+        if hasattr(signal, "SIGHUP"):             # 与 nohup 等价：--daemon 独立会话后不受终端挂断影响
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
         info = self.info or _M.host_info([], _C.DATA_ROOT)
-        self.event("worker", "worker 启动 PID=%d 主机=%s（容器 %s 启动）" % (os.getpid(), self.host, _C.now_str(info["started"]) if info.get("started") else "?"))
+        kind_s = "主机" if info.get("os") == "darwin" else "容器"
+        self.event("worker", "worker 启动 PID=%d 主机=%s（%s %s 启动）" % (os.getpid(), self.host, kind_s, _C.now_str(info["started"]) if info.get("started") else "?"))
         first = True
         while not stop:
             try:

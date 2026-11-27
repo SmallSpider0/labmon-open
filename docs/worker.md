@@ -45,10 +45,16 @@ worker 装在主机的 `worker_home`（缺省 `<data_root>/labmon`，`data_root`
 | `worker.log` | 文字日志（主机页的「worker 日志」）；出错崩掉时出错位置在这里 |
 | `overrides.json` | 临时指令；`overrides.json.lock`、`events.jsonl.lock` 是读改写的文件锁 |
 | `limits.json` | tag 上限（`labmon worker limit`） |
-| `eta.json`、`sched.json`、`returned.json`、`hist_shared.json` | 看板写来的（经同一条 SSH 的 stdin 管道落盘，避开 `ARG_MAX`）：运行中任务的预计结束（`jobs`）与其中真正按日志进度外推的任务键（`prog`，#149）；调度设置（主机清单的 `[sched]`，加上各项目算在谁名下的 `owner`，独立机另含 `standalone`、`disk_*`、`cpu_quota` 与 `allow_shared_gpu`）；主机清单里已归还的主机（`offers` 不让它们挡）；独立主机专用的跨机裁剪历史 `hist_shared.json`（仅喂 `estimate`/`duration`，与公平份额、依赖、盘写入统计严格隔离，#114） |
+| `eta.json`、`sched.json`、`returned.json`、`hist_shared.json` | 看板写来的（经同一条 SSH 的 stdin 管道落盘，避开 `ARG_MAX`）：运行中任务的预计结束（`jobs`）与其中真正按日志进度外推的任务键（`prog`，#149）；调度设置（主机清单的 `[sched]`，加上各项目算在谁名下的 `owner`，独立机另含 `standalone`、`disk_*`、`cpu_quota`、`allow_shared_gpu` 与 `mps_vram_gb`）；主机清单里已归还的主机（`offers` 不让它们挡）；独立主机专用的跨机裁剪历史 `hist_shared.json`（仅喂 `estimate`/`duration`，与公平份额、依赖、盘写入统计严格隔离，#114） |
 | `stopped` | `labmon worker stop` 的标记：看板见到它不自动拉起 |
 
 容器本地盘上 labmon 管的目录是 `/tmp/labmon/`（独立主机缺省 `<data_root>/.tmp/`）：单格临时目录、项目缓存、单元申请的交换文件（见下）。独立主机另用 `WorkDisk`（复用 `Disk` 限速与 `follow_symlinks=False`）仅扫描 `<data_root>`，并开启 `disk_gate` 准入闸门（默认预警 `20 GiB`、停止线 `10 GiB` + `2 GiB` 滞回，触发时只拦新任务、不杀在跑任务）；独立模式下 `peers()` 不扫别机，`dep_block`/`gang_block` 显式提示不支持跨主机依赖与成组。在 WSL2 下检测到 `data_root` 落在 `/mnt/[a-z]/`（Windows 9p 挂载）时，`worker status`、`labmon check`、`labmon host test` 与外部主机抽屉会给出性能风险提醒并建议迁到 Linux ext4 目录（不硬阻断）。
+
+**macOS 轻量 POSIX 模式与 Apple Silicon MPS（#114）**：
+- `workerctl` 启动 worker 改用 `labmon_worker.py run --daemon`（Python `start_new_session=True` + 忽略 `SIGHUP`），去掉对 Linux `setsid` 的硬依赖，同时兼容 BSD/macOS `base64 -d/-D`。
+- 在无 `/proc` / cgroup / `nvidia-smi` 的 macOS 上，worker 自动回退轻量 POSIX 采集：`ps -ax`（按 `ppid + pgid` 归集，显式置 `sid=None` 避开 macOS `ps -o sess=0`、保留 `rss` 与 `ticks` 差分算 `cpu_used`）+ `vm_stat` + `sysctl`（`hw.memsize` / `hw.ncpu` / `kern.boottime`）+ `os.statvfs`。
+- **桌面留核保护**：macOS 缺省保留 `MACOS_RESERVE_CPUS = 2` 核给系统桌面（`cpu_quota = max(1, nproc - 2)`，`cpu_quota_src = "macos_default"`），可通过主机 `cpu_quota` 配置调大到 `nproc` 或调小（`sched.json` 免重启生效）；小于 `64 GiB` 的机器内存准入余量按 `min(8, max(1, 0.125 × limit))` 适配。
+- **Apple Silicon MPS 单逻辑卡保守准入**：检测到 `Darwin` + `arm64` 且无 `nvidia-smi` 时暴露单逻辑 MPS 卡（`uuid = "mps-0"`, `backend = "mps"`, `util = null`）：保守容量 `min(0.65 × 总内存, max(1, 总内存 − 4 GiB))`（可经 `mps_vram_gb` 覆盖），可用显存按系统统一内存余量 `max(0, total − anon)` 与容量取小，跳过 `unacct_vram` 且不误报 `gpu_idle`；**默认单卡互斥**（`WHY["mps_busy"]`，真放行/推演/`fit`/`offers` 一致；`gpus=0` 纯 CPU 任务照常并发），日志匹配 `MPS backend out of memory` 记为 `vram` OOM；Intel Mac 或无 GPU 时请求 `gpus>0` 报 `本机无可用 GPU（仅支持 gpus=0 纯 CPU 任务）`，不误报 `nvidia-smi`。
 
 ## 清单与状态
 
@@ -73,7 +79,7 @@ worker 装在主机的 `worker_home`（缺省 `<data_root>/labmon`，`data_root`
 - **跑空登记自动休眠**（#164）：清单连续跑空满 `IDLE_REG_S`（2 天，无在跑与待办、未暂停）后，worker 将该登记转为休眠（不摘登记，状态 `queues[]` 标 `sleeping: true`、`empty_since`，顶层 `reg_idle` 记空置起点与休眠时的文件签名供重启恢复）。休眠期间每轮只用 `file_sig` 检查清单文件是否变动，不再读 `.env`、状态目录与标记；清单文件一变（如追加新行）或重新 `worker add` 自动醒来照常排（若仅删除 `.done`/`.failed` 重跑旧行而未改清单文件，需 `touch` 清单文件或重新 `worker add` 唤醒）。算力池待放目录（`hosts/pool/queues/`）里的空清单由 `pool_todo` 按同样 2 天规则休眠与唤醒。休眠队列作为 `after=` 被等方时，已跑完任务由全量 `usage.jsonl` 与休眠前缓存的标记快照（`sleep_marks`）覆盖，文件一变醒来即重新进入 `todo`。
 - 日志 `<名称>.log` 追加写，每次开跑先写一行 `===== 时刻 labmon 开始（GPU …）=====`。看板的最后一行与进度、状态里的日志末尾、OOM 判断（`oom_of`）都只看最后一行分隔之后的（这一次的；`START_RE`）。
   这一次里逐字出现过的行算套话（库每次加载模型都打印的提示之类）：最后一行跳过它们，日志末尾把连着的折成一行「…（N 行与前面重复，略）」，OOM 判断看原文；数字在变的行（进度、loss）每行都不一样，不受影响。不按任务、不按关键词配置。
-- 用 `CUDA_VISIBLE_DEVICES=<UUID>` 固定到选中的卡，`queue.log` 的“开始”行记下卡号和 UUID。各队列内部一次一个任务（[并行清单](#并行清单)同时至多 N 个），不同队列（以及单元申请）在余量够时并行。
+- 启动任务与单元申请统一经 `accel_env` 导出加速后端环境变量：CUDA 卡设 `CUDA_VISIBLE_DEVICES=<UUID>` 与 `LABMON_ACCEL=cuda`；Apple Silicon MPS 逻辑卡设 `CUDA_VISIBLE_DEVICES=""` 与 `LABMON_ACCEL=mps`；纯 CPU（`gpus=0`）设 `CUDA_VISIBLE_DEVICES=""` 与 `LABMON_ACCEL=cpu`。`queue.log` 的“开始”行记下卡号和 UUID。各队列内部一次一个任务（[并行清单](#并行清单)同时至多 N 个），不同队列（以及单元申请）在余量够时并行（Apple Silicon MPS 逻辑卡默认单卡互斥）。
 
 ### 并行清单
 

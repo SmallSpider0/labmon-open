@@ -154,6 +154,8 @@ def worker_env(h: dict) -> str:
         parts.append("LABMON_ALLOW_SHARED_GPU=1")
     if h.get("cpu_quota") is not None:
         parts.append(f"LABMON_CPU_QUOTA={shlex.quote(str(h['cpu_quota']))}")
+    if h.get("mps_vram_gb") is not None:
+        parts.append(f"LABMON_MPS_VRAM_GB={shlex.quote(str(h['mps_vram_gb']))}")
     return " ".join(parts)
 
 
@@ -466,12 +468,13 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
             )
         else:
             sync_pkg = ""
+        b64_dec = "(base64 -d < /dev/null >/dev/null 2>&1 && base64 -d || base64 -D)"
         if deploy == "if_missing":
             remote = (
                 f"mkdir -p {hq_home}\n"
                 f"if [ ! -f {hq_home}/labmon_worker.py ]; then\n"
                 f"  d=$(mktemp -d {hq_home}/.deploy.XXXXXX) || exit 1\n"
-                f'  if ! (base64 -d > "$d/.pkg.tgz" && tar -xzf "$d/.pkg.tgz" -C "$d" && {sync_pkg}'
+                f'  if ! ({b64_dec} > "$d/.pkg.tgz" && tar -xzf "$d/.pkg.tgz" -C "$d" && {sync_pkg}'
                 f'mv "$d/ka.sh" {hq_home}/ka.sh && '
                 f'mv "$d/labmon_worker.py" {hq_home}/labmon_worker.py); then rm -rf "$d"; exit 1; fi\n'
                 f'  rm -rf "$d"\n'
@@ -480,18 +483,18 @@ def run_out(sub: str, hid: str, args: list[str], gpus: str | None = None, home: 
                 f"fi\n"
                 f"o=$({w} ls --host {hq} 2>/dev/null)\n"
                 f"case \"$o\" in worker：运行中*) echo \"$o\"; exit 0;; esac\n"
-                f"setsid nohup {w} run --host {hq}{sh}{sa} > /dev/null 2>&1 < /dev/null &\n"
+                f"{w} run --host {hq} --daemon{sh}{sa}\n"
                 f"sleep {START_CHECK_S}; o=$({w} ls --host {hq}); echo \"$o\"\n"
                 f"case \"$o\" in worker：运行中*) ;; *) echo '---- worker.log 末尾'; tail -n 12 {log}; exit 3;; esac"
             )
         else:
             remote = (
                 f"mkdir -p {hq_home} && d=$(mktemp -d {hq_home}/.deploy.XXXXXX) || exit 1\n"
-                f'if ! (base64 -d > "$d/.pkg.tgz" && tar -xzf "$d/.pkg.tgz" -C "$d" && {sync_pkg}'
+                f'if ! ({b64_dec} > "$d/.pkg.tgz" && tar -xzf "$d/.pkg.tgz" -C "$d" && {sync_pkg}'
                 f'mv "$d/ka.sh" {hq_home}/ka.sh && '
                 f'mv "$d/labmon_worker.py" {hq_home}/labmon_worker.py); then rm -rf "$d"; exit 1; fi\n'
                 f'rm -rf "$d"\n'
-                f"setsid nohup {w} run --host {hq} --replace{sh}{sa} > /dev/null 2>&1 < /dev/null &\n"
+                f"{w} run --host {hq} --replace --daemon{sh}{sa}\n"
                 f"sleep {START_CHECK_S}; o=$({w} ls --host {hq}); echo \"$o\"\n"
                 f"case \"$o\" in worker：运行中*) ;; *) echo '---- worker.log 末尾'; tail -n 12 {log}; exit 3;; esac"
             )
