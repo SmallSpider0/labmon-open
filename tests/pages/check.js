@@ -1562,11 +1562,17 @@ t("project", "会话的 wait 断了（#141）：wait_gone 只给用户，进红�
   const ag = h.slice(h.indexOf('<details class="agal'), h.indexOf("</details>", h.indexOf('<details class="agal')));
   ok(!ag.includes("没在挂 labmon wait"), "只给用户的不该进给会话的折叠");
 });
-t("project", "GPU 利用率（#51）：大字是近 1 小时的吃满程度（保活按 0），小字是各卡与本项目近 24 小时；没有 worker 数据的卡退回探针此刻值", () => {
+t("project", "GPU 利用率（#51/#259）：大字是近 1 小时的吃满程度（保活按 0），≥ 4 卡走多机摘要模式、≤ 3 卡逐卡显示；没有 worker 数据的卡退回探针此刻值", () => {
   const h = app(P), i0 = h.lastIndexOf('<div class="kpi"', h.indexOf("GPU 利用率 · ")), kpi = h.slice(i0, h.indexOf('<div class="kpi"', i0 + 1));
   has(kpi, "GPU 利用率 · 4 卡 · 整机"); has(kpi, '62<small>% 近 1 小时 平均');                 // (72.3 + 4.2 + 90 + 80) / 4：srv-b 没有 busy，按探针此刻值逐卡补进平均（#54 审查）
-  has(kpi, "srv-a·0 72%"); has(kpi, "srv-a·1 4%"); has(kpi, "借 OWNER 90%"); has(kpi, "srv-h 80%"); has(kpi, "本项目近 24 小时 63%");
+  has(kpi, 'class="ch-band"', "≥ 4 卡应画包络带");
+  has(kpi, "最高 借 OWNER 90% · 最低 srv-a·1 4%"); has(kpi, "本项目近 24 小时 63%");
   const tt = tips(kpi); has(tt, "近 1 小时平均 62%"); has(tt, "其中 1 张卡没有 worker 数据"); has(tt, "只有保活（顶到 99%）"); has(tt, "保活按 0 算"); has(tt, "14.5 卡·时，平均把所用的卡用到 63%");
+  has(tt, "GPU0"); has(tt, "利用率 72%"); has(tt, "利用率 4%"); has(tt, "利用率 90%"); has(tt, "利用率 80%");
+  // ≤ 3 卡保持逐卡展示
+  const P3 = pjCtx({...PJ, hosts: PJ.hosts.filter(x => x.id !== "srv-h")}, EVN), h3 = app(P3);
+  const k3 = h3.slice(h3.lastIndexOf('<div class="kpi"', h3.indexOf("GPU 利用率 · ")), h3.indexOf('<div class="kpi"', h3.lastIndexOf('<div class="kpi"', h3.indexOf("GPU 利用率 · ")) + 1));
+  has(k3, "srv-a·0 72%"); has(k3, "srv-a·1 4%"); has(k3, "借 OWNER 90%"); ok(!k3.includes('class="ch-band"'), "≤ 3 卡不画包络带");
   has(h, '38%<span class="mut" style="font-weight:400"> 近 1 小时</span>');                    // 主机小图
   ok(run(P, "utilText({now: 0, m10: 0, h1: 4.2, cov: 1200, ka: 99}).span") === "近 20 分钟", "worker 刚起不满 1 小时该写实际多久");
   has(run(P, "utilText({now: 0, m10: 0, h1: 4.2, cov: 1200, ka: 99}).sub"), "只有保活（顶到 99%）");
@@ -4091,6 +4097,162 @@ t("overview", "#257 多主机（8 台+）：总览时间线隐藏空闲卡与按
   clean(el(CE, "view").innerHTML, "#257 恶意池名总览");
   clean(el(CE, "side").innerHTML, "#257 恶意池名侧栏");
   clean(el(CE, "tlctl").innerHTML, "#257 恶意池名时间线筛选");
+});
+
+t("project", "多主机（8 台/16 卡）承载力优化（#259）：摘要模式、异常前置、悬停收敛、顶栏按池聚合、时间线筛选、HIST_MAP 与资源卡折叠", () => {
+  // 构造 8 台虚拟双卡主机（16 卡）：前 6 台属 pool-alpha（其中 node-1 正常、node-2..6 正常，node-7 限流告警、node-8 高占用；另加 1 台同池离线、1 台同池借用）
+  const mkHost = (i, extra = {}) => ({
+    id: `node-${i}`, label: `node-${i}`, ok: true, pool_label: "pool-alpha",
+    gpus: [
+      {index: 0, name: "SimGPU-80G", util: 10 + i * 8, mem_used: i <= 2 ? 78000 : i <= 5 ? 36000 : 2000, mem_total: 81920, temp: 55 + i, power: 180, power_limit: 350},
+      {index: 1, name: "SimGPU-80G", util: 15 + i * 7, mem_used: i === 1 ? 76000 : i <= 4 ? 32000 : 1500, mem_total: 81920, temp: 52 + i, power: 160, power_limit: 350},
+    ],
+    busy: [
+      {now: 10 + i * 8, m10: 10 + i * 8, h1: 10 + i * 8, cov: 3600},
+      {now: 15 + i * 7, m10: 15 + i * 7, h1: 15 + i * 7, cov: 3600},
+    ],
+    cpu: {used: 4 + i, quota: 16, pct: 25 + i * 5, thr: 0, throttled: false, throttle_alert: false},
+    gpu_procs: [{pid: 1000 + i, mem: (10 + i) * 1024, cmd: `python train.py --node ${i}`}, {pid: 2000 + i, mem: (5 + i) * 1024, cmd: `python eval.py --node ${i}`}],
+    mounts: [{label: "数据盘", path: "/data", avail_gb: 500, total_gb: 1000, used_pct: 50, min_gb: 50}],
+    ...extra,
+  });
+  const hosts = [];
+  for (let i = 1; i <= 8; i++) {
+    const extra = i === 7 ? {cpu: {used: 15.2, quota: 16, pct: 95, thr: 42, throttled: true, throttle_alert: true, throttle_for: 720}}
+      : i === 8 ? {cpu: {used: 14.4, quota: 16, pct: 90, thr: 0, throttled: false, throttle_alert: false}}
+      : {};
+    hosts.push(mkHost(i, extra));
+  }
+  // 再加 1 台同池离线机、1 台同池借用机，验证异常/借用单独前置不进聚合胶囊
+  hosts.push({id: "node-off", label: "node-off", ok: false, error: "SSH 超时", pool_label: "pool-alpha", gpus: [], mounts: []});
+  hosts.push(mkHost(9, {id: "node-brw", label: "node-brw", borrow: {holder: "PEER", until: NOW + 3600}, pool_label: "pool-alpha", gpus: [], gpu_procs: [], cpu: {used: 2, quota: 16, pct: 12}}));
+
+  const history = [];
+  for (let k = 12; k >= 1; k--) {
+    const t = NOW - k * 600;
+    for (let i = 1; i <= 8; i++) {
+      history.push({t, host: `node-${i}`, ok: true, busy: [10 + i * 8, 15 + i * 7], cpu_pct: i === 7 ? 95 : i === 8 ? 90 : 25 + i * 5});
+    }
+    history.push({t, host: "node-1", ok: false, busy: [0, 0], cpu_pct: 0}); // ok:false 应被 HIST_MAP 跳过
+  }
+  const lanes = [], jobs = [];
+  for (let i = 1; i <= 8; i++) {
+    const lid = `lane-${i}`;
+    const running = i <= 3;
+    lanes.push({id: lid, label: `车道 ${i}`, host: `node-${i}`, type: "gpu_queue", alive: running, pid: running ? 3000 + i : null, managed: true, total: 2, done: running ? 0 : 2, failed: 0, unfinished: running ? 1 : 0});
+    jobs.push({
+      id: `job_${i}`, lane: lid, group: "g1", hold: false,
+      status: running ? "running" : "done",
+      start_ts: NOW - 3600, end_ts: running ? null : NOW - 1200, eta_ts: running ? NOW + 3600 : NOW - 1200,
+      est_min: 120, dur_min: 120, dur_src: "清单估时", elapsed_min: 60, remaining_min: 60, eta_source: "清单估时",
+    });
+  }
+  const S8 = {
+    id: "proj-scale", title: "多机压测项目", generated: NOW, interval: 120, refresh: 60,
+    thresholds: {stale_s: 420}, alerts: [], markers: [],
+    groups: [{id: "g1", label: "实验组 A", color: "#2f6fdd", status: "运行中", total: 8, done: 5, running: 3, queued: 0, failed: 0, ratios: []}],
+    gpu_mine: {util: 71.2, card_s: 117000, n: 12},
+    hosts, lanes, jobs, history, attempts: [],
+  };
+  const A = pjCtx(S8, {events: {}, occ: {}, colors: {}});
+  const h = app(A);
+  clean(h, "8 台 16 卡项目页");
+
+  // 1. 顶栏按池聚合：pool-alpha 有 7 台正常在线（node-1..6 + node-8，node-7 因 throttle_alert 前置），离线/借用/限流告警前置单列
+  const top = h.split('<div class="kpis">')[0];
+  has(top, 'class="badge b-pool"', "聚合摘要应复用 poolBadge 紧凑角标");
+  has(top, "pool-alpha（7 台在线）", "同池 > 4 台正常在线应按池聚合");
+  has(tips(top), "共有算力池：pool-alpha（7 台在线）", "聚合悬停含池摘要");
+  has(tips(top), "node-1：在线", "聚合悬停含完整主机清单");
+  has(tips(top), "node-6：在线", "聚合悬停含完整主机清单");
+  const idxOff = top.indexOf("node-off"), idxBrw = top.indexOf("node-brw"), idxThr = top.indexOf("node-7"), idxAgg = top.indexOf("pool-alpha（7 台在线）");
+  ok(idxOff > 0 && idxBrw > 0 && idxThr > 0 && idxAgg > 0, "离线、借用、限流告警与聚合胶囊都应出现");
+  ok(idxOff < idxAgg && idxBrw < idxAgg && idxThr < idxAgg, "离线、借用与限流告警主机应排在聚合胶囊之前");
+
+  // 2. 顶部三张资源卡：多机摘要模式
+  const kpiHtml = h.slice(h.indexOf('<div class="kpis">'), h.indexOf('<div class="card" style="margin-top:10px">'));
+  const cards = kpiHtml.split('<div class="kpi"').slice(1).map(s => '<div class="kpi"' + s);
+  const gpuCard = cards.find(c => c.includes("GPU 利用率 · 16 卡"));
+  const memCard = cards.find(c => c.includes("显存 · 16 卡"));
+  const cpuCard = cards.find(c => c.includes("CPU 占用 · 9 台"));
+  ok(gpuCard && memCard && cpuCard, "三张多机资源卡都应存在");
+
+  // GPU 卡：包络带 + 极值摘要 + 24h 本项目利用率保底
+  has(gpuCard, 'class="ch-band"', "GPU 卡 16 卡应画包络带");
+  has(gpuCard, "最高 node-8·0 74% · 最低 node-1·0 18%", "GPU 卡应给最高/最低极值摘要");
+  has(gpuCard, "本项目近 24 小时 71%", "GPU 卡必须保底保留本项目近 24 小时利用率");
+  has(tips(gpuCard), "… 另 4 卡，其余见下方资源区", "GPU 卡悬停超 12 卡应截断");
+
+  // GPU 卡无本项目任务在跑时：保底保留「本项目没有任务在跑」提示
+  const S8Idle = {...S8, jobs: S8.jobs.map(j => ({...j, status: "done", end_ts: NOW - 600}))};
+  const AI = pjCtx(S8Idle, {events: {}, occ: {}, colors: {}});
+  const hIdle = app(AI);
+  has(hIdle, "本项目没有任务在跑：是别的项目或进程在用", "多机摘要模式下必须保底保留非本项目在跑提示");
+  has(hIdle, "本项目近 24 小时 71%", "多机摘要模式下非本项目在跑与 24h 利用率共存于 2 行内");
+
+  // 显存卡：16 卡（> 8 卡）用总进度条 .meter 而非 .segs，且展示分桶摘要与最紧/最多余量
+  ok(!memCard.includes('class="segs"') && memCard.includes('class="meter"'), "> 8 卡显存卡应切换总进度条而非逐卡分段条");
+  has(memCard, "满载(>90%) 3", "显存卡应统计满载(>90%)卡数");
+  has(memCard, "在用 6 · 空闲 7", "显存卡应统计在用与空闲卡数");
+  has(memCard, "最紧 ", "显存卡应显示余量最紧");
+  has(tips(memCard), "… 另 4 卡，其余见下方资源区", "显存卡悬停超 12 卡应截断");
+  has(tips(memCard), "… 另 4 个进程，其余见下方资源区", "显存卡进程列表超 12 个应截断");
+
+  // CPU 卡：限流/高占用主机强制前置，绝不被前 6 台正常主机挤出 2 行，且叠画异常折线
+  has(cpuCard, 'class="ch-band"', "CPU 卡 ≥ 4 台应画包络带");
+  has(cpuCard, 'stroke="var(--bad)"', "CPU 限流告警主机应叠画红色异常线");
+  has(cpuCard, 'stroke="var(--warn)"', "CPU 高占用主机应叠画橙色异常线");
+  has(cpuCard, "1 台限流（node-7）", "限流主机必须前置显示");
+  has(cpuCard, "1 台高占用（node-8）", "高占用主机必须前置显示");
+  has(cpuCard, "最高 node-7 95% · 最低 借 PEER 12%", "CPU 卡第二行应给极值摘要");
+
+  // 3. chartHover 悬停收敛：16 卡超 12 行截断 + 平均/最小/最大摘要行
+  const svgId = /svg class="ch" id="(ch\d+)"/.exec(gpuCard)[1];
+  const hov = run(A, `chartHover({id: "${svgId}", getBoundingClientRect: () => ({left: 0, width: 300}), querySelector: () => ({setAttribute() {}})}, {clientX: 250})`);
+  has(hov, "平均 ", "包络图悬停首行应含平均摘要");
+  has(hov, "… 另 4 项，其余见下方资源区", "chartHover 超 12 项应截断并提示见下方资源区");
+
+  // 4. 少机模式（2 台）同台主机三卡同色（唯一常量 CC）
+  const S2 = {...S8, hosts: S8.hosts.slice(0, 2).map(x => ({...x, gpus: x.gpus.slice(0, 1), busy: x.busy.slice(0, 1)})), lanes: S8.lanes.slice(0, 2), jobs: S8.jobs.slice(0, 2)};
+  const A2 = pjCtx(S2, {events: {}, occ: {}, colors: {}});
+  const h2 = app(A2);
+  const k2 = h2.slice(h2.indexOf('<div class="kpis">'), h2.indexOf('<div class="card" style="margin-top:10px">')).split('<div class="kpi"').slice(1);
+  const g2 = k2.find(c => c.includes("GPU 利用率")), c2 = k2.find(c => c.includes("CPU 占用"));
+  has(g2, 'background:var(--accent)"></span> node-1', "2 台模式 GPU 卡 node-1 用 CC[0]");
+  has(c2, 'background:var(--accent)"></span> node-1', "2 台模式 CPU 卡 node-1 与 GPU 卡同色");
+  has(g2, 'background:#1D9E75"></span> node-2', "2 台模式 GPU 卡 node-2 用 CC[1]");
+  has(c2, 'background:#1D9E75"></span> node-2', "2 台模式 CPU 卡 node-2 与 GPU 卡同色");
+
+  // 5. 时间线轻量主机筛选（≥ 6 台显示，全部 / 仅运行中 / 单台）
+  run(A, "drawTimeline()");
+  const bar0 = el(A, "tlbar").innerHTML;
+  has(bar0, 'data-tlhf="all" class="on">全部 8', "≥ 6 台时间线应显示全部筛选按钮");
+  has(bar0, 'data-tlhf="run" class="">仅运行中 3', "≥ 6 台时间线应显示仅运行中计数");
+  has(bar0, 'data-tlhsel', "≥ 6 台时间线应提供单台主机下拉筛选");
+  run(A, 'LS.set("tlhost", "run"); drawTimeline()');
+  const tlRun = el(A, "tlbox").innerHTML;
+  has(tlRun, 'data-thost="node-1"', "仅运行中应保留运行中主机");
+  ok(!tlRun.includes('data-thost="node-5"'), "仅运行中应过滤掉无运行任务的空闲主机");
+  run(A, 'LS.set("tlhost", "h:node-6"); drawTimeline()');
+  const tlOne = el(A, "tlbox").innerHTML;
+  has(tlOne, 'data-thost="node-6"', "单台筛选应仅保留选中主机");
+  ok(!tlOne.includes('data-thost="node-1"'), "单台筛选应隐藏其他主机");
+  // 无运行中任务时选「仅运行中」给出可一键恢复的空态提示
+  run(AI, 'LS.set("tlhost", "run"); drawTimeline()');
+  has(el(AI, "tlbox").innerHTML, 'data-tlhf="all"', "无运行中主机时应给出切回全部的提示");
+  // < 6 台（S2）不显示主机筛选
+  run(A2, "drawTimeline()");
+  ok(!el(A2, "tlbar").innerHTML.includes("data-tlhf"), "< 6 台不显示时间线主机筛选");
+
+  // 6. HIST_MAP 预索引与 setData 重建
+  ok(run(A, 'HIST("node-1").length === 12 && HIST("node-1") === HIST_MAP.get("node-1")'), "初始化应预建 HIST_MAP 并跳过 ok:false");
+  run(A, 'setData({...D, history: [{t: NOW - 60, host: "node-1", ok: true, busy: [50, 50], cpu_pct: 40}]})');
+  ok(run(A, 'HIST("node-1").length === 1 && HIST("node-2").length === 0'), "setData 应重建 HIST_MAP");
+
+  // 7. 独立项目页 ≥ 4 台主机时底部资源卡默认折叠并提示告警主机；< 4 台保持展开
+  has(h, '<details class="res" ><summary>资源 · 10 台主机', "独立页 ≥ 4 台主机资源卡应默认折叠");
+  has(h, "3 台有告警（node-7、node-8、node-off）", "折叠摘要应标出告警台数与主机名");
+  ok(!h2.includes('<details class="res"'), "独立页 < 4 台主机资源卡保持默认展开");
 });
 
 Promise.all(PEND).then(() => process.stdout.write(JSON.stringify(R)));
