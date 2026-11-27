@@ -67,6 +67,11 @@ def slot_main(argv):
                         f.write(str(ok["adj"]))
                 except OSError:
                     pass
+            if ok.get("nice"):                    # GPU 主机上的纯 CPU 单元：降优先级，保障 GPU 进程时间片（#225）
+                try:
+                    os.nice(int(ok["nice"]))
+                except (AttributeError, OSError, ValueError):
+                    pass
             os.environ["LABMON_SLOT"] = rid
             os.environ["LABMON_SCRATCH"], os.environ["LABMON_CACHE"] = _Q.scratch_dir(a.project, a.name), _Q.cache_dir(a.project)
             for d in (os.environ["LABMON_SCRATCH"], os.environ["LABMON_CACHE"]):

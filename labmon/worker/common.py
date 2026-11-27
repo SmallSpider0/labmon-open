@@ -239,6 +239,15 @@ SLOW_RATIO = 1.5         # 运行中任务已跑过同类历史预计时长的�
 CPU_DEFAULT = 1          # 没写 cpus=、也没有同类历史时一个任务按几个核记账（#4 调研推荐、维护者定）
 
 
+GPU_CPU_RESERVE_PER_CARD = 2   # 有 GPU 的主机每张卡为 GPU 任务预留的保底 CPU 核数（#225）
+
+
+GPU_CPU_RESERVE_DIV = 4        # GPU 保底 CPU 核数最多占容器配额上限的 1/4（#225）
+
+
+CPU_ONLY_NICE = 10             # GPU 主机上纯 CPU 任务启动时的 nice 增量（降低 OS 调度优先级，保障 GPU 进程时间片，#225）
+
+
 CPU_ALERT_S = 600        # 请求一直因 CPU 被挡满这么久，等待项才写 cpu_wait（看板据此告警）
 
 

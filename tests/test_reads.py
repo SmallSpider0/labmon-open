@@ -112,7 +112,7 @@ class ReadsTest(unittest.TestCase):
         st["running"][0]["acct"], st["running"][1]["acct"] = {"cpu": 3.0}, {"cpu": 2.0}
         save_json(state_dir() / "snapshot.json", g)
         rc, out, _ = run(["status", "p1"])
-        self.assertIn("    CPU：配额 7 核，nproc 报的 64 是宿主机的核数；labmon 在跑 2 个任务记 5 核，还能给新任务 2 核\n", out)
+        self.assertIn("    CPU：配额 7 核（为 GPU 保底留 1 核，纯 CPU 上限 6 核），nproc 报的 64 是宿主机的核数；labmon 在跑 2 个任务记 5 核，还能给新任务 2 核\n", out)
         rc, out, _ = run(["status", "p1", "--json"])
         self.assertEqual(rc, 0)
         self.assertEqual(json.loads(out)["rebalance"]["key"], "rebalance:p1")

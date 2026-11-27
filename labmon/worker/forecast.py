@@ -69,7 +69,7 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
              "t1": _DP.dep_end(_DP.dep_keys(r), t, ends, dead) if r["hold"] and _DP.dep_keys(r) else t + d * 60 if d is not None else None,
              "after": [f for f in freed][:3] if t > r["since"] else [], **({"gang": r["gang"]} if r.get("gang") else {})}
         ends[(r["project"], r["name"])] = e["t1"]       # 同一遍里排在它后面、等它的任务就能看到
-        S["jobs"].append(dict(e, **_S.acct_job(r, cs, t, e["t1"], S["cpu_cap"])))
+        S["jobs"].append(dict(e, **_S.acct_job(r, cs, t, e["t1"], S["cpu_cap"], _S.snap_ngpus(S))))
         rows.append((r["project"], r["cards"], t, e["t1"]))
         out.append(e)
         put[r["lane"]].add(r["_i"])
