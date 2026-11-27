@@ -72,7 +72,7 @@ from pathlib import Path
 
 from . import lan as L
 from . import lease as LS
-from .config import GIB, POOL, ConfigError, _read_toml, all_hosts, fmt_time, guest_host, host_defaults, hosts_file, parse_time, set_fleet_keys
+from .config import GIB, LEGACY_POOL_KEYS, POOL, ConfigError, _read_toml, all_hosts, check_legacy_pool, fmt_time, guest_host, host_defaults, hosts_file, parse_time, set_fleet_keys  # noqa: F401
 from .health import container_step, lease_due, link_step
 from .health import lease_end as _lease_end
 from .records import log_events
@@ -166,15 +166,10 @@ def conf(path: Path | None = None) -> dict | None:
     return c
 
 
-LEGACY_POOL_KEYS = ("lend", "lend_hours", "borrow_pool")
-
-
 def _legacy_pool_check(hf, s: dict) -> None:
-    """旧借用型算力池字段（#212 已删除）与可选共享分类（share，#114）校验。"""
+    """复用 config.check_legacy_pool 拦截旧借用型算力池字段（#212），并校验可选共享分类（share，#114）。"""
     from .config import SHARE_MODES
-    bad = [k for k in LEGACY_POOL_KEYS if k in s]
-    if bad:
-        raise ConfigError(f"{hf} 里 {s['id']} 含有已删除的旧借用型算力池字段（{'、'.join(bad)}），请从主机清单移除")
+    check_legacy_pool(hf, s)
     if "share" in s and s["share"] is not None and (not isinstance(s["share"], str) or s["share"] not in SHARE_MODES):
         raise ConfigError(f"{hf} 里 {s['id']} 的 share 只能写 {' / '.join(SHARE_MODES)}，写的是 {s['share']!r}")
 

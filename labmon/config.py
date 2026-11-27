@@ -298,6 +298,17 @@ def _read_toml(path: Path) -> dict:
         raise ConfigError(f"读不了配置 {path}：{e}") from e
 
 
+LEGACY_POOL_KEYS = ("lend", "lend_hours", "borrow_pool")
+
+
+def check_legacy_pool(hf: Path, item: dict) -> None:
+    """旧借用型算力池字段校验唯一实现（#212 已删除）：user_hosts() 与 fleet.conf() 共用，
+    确保残留 lend / lend_hours / borrow_pool 的主机绝不会进入调度、采集或自动拉起流程。"""
+    bad = [k for k in LEGACY_POOL_KEYS if k in item]
+    if bad:
+        raise ConfigError(f"{hf} 里 {item.get('id')} 含有已删除的旧借用型算力池字段（{'、'.join(bad)}），请从主机清单移除")
+
+
 def user_hosts() -> list[dict]:
     """用户级主机清单里的主机（还没补缺省值；已归还的也在，带 returned）：[[hosts]]，加上借过的组内服务器（guest_host）。
     借用中由看板拉起 worker，还了（borrow_returned）就和归还的自用主机一样不再连接。
@@ -311,9 +322,13 @@ def user_hosts() -> list[dict]:
     if any(str(h.get("id")) == POOL for h in hosts):
         raise ConfigError(f"{hf} 的 [[hosts]] 不能叫 {POOL}：它是算力池的保留 id")
     for h in hosts:
+        check_legacy_pool(hf, h)
         if h.get("borrow_until"):
             h["borrow"] = {"holder": h.get("borrow_from"), "since": None, **_until(h["borrow_until"]), "for": None, "swap": True}
-    return hosts + [guest_host(s, hosts) for s in (d.get("fleet") or {}).get("servers", []) if s.get("borrow_since")]
+    servers = (d.get("fleet") or {}).get("servers", [])
+    for s in servers:
+        check_legacy_pool(hf, s)
+    return hosts + [guest_host(s, hosts) for s in servers if s.get("borrow_since")]
 
 
 def _until(v) -> dict:

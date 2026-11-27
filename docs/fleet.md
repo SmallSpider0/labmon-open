@@ -529,7 +529,7 @@ labmon 之外的按目录一段段斜纹，过门槛变紫），下面「本地�
 
 ## 算力池
 
-旧“借用推广型”算力池（`lend`/`lend_hours` 入池开关、`borrow_pool` 自动借还与 `reclaim` 收回）已随 Issue #212 阶段 1 移除，借卡回归纯粹的手动借用（[`labmon/borrow.py`](../labmon/borrow.py)）；若 `hosts.toml` 残留旧的 `lend`/`lend_hours`/`borrow_pool` 字段，配置校验会直接报错并提示移除（`fleet._legacy_pool_check`）。
+旧“借用推广型”算力池（`lend`/`lend_hours` 入池开关、`borrow_pool` 自动借还与 `reclaim` 收回）已随 Issue #212 阶段 1 移除，借卡回归纯粹的手动借用（[`labmon/borrow.py`](../labmon/borrow.py)）；若 `hosts.toml` 残留旧的 `lend`/`lend_hours`/`borrow_pool` 字段，`config.user_hosts` 与 `fleet.conf` 共用的配置校验会直接报错并提示移除（`config.check_legacy_pool`）。
 
 当前仅保留算力池基础设施（[`labmon/pool.py`](../labmon/pool.py) 保留主机 id `pool`、池成员判定 `pool.member`、撤回定位 `pool.locate`，以及项目页池待放车道与 worker 的 `pool_refuse`/`pool_todo`/`pool_heads`），供阶段 2 接入基于共有主机组的共有池使用。
 

@@ -12,7 +12,7 @@ from . import fleet as F
 from . import fleetboot as FB
 from . import fleetops as FO
 from . import lease as LS
-from .config import ConfigError, active_hosts, fmt_time, hosts_file, parse_time
+from .config import POOL_LABEL, ConfigError, active_hosts, fmt_time, hosts_file, parse_time
 from .service import notify
 from .state import file_sig, load_rows
 
@@ -73,7 +73,9 @@ def _by_person(since: float) -> dict[str, dict[str, list[dict]]]:
         for r in _rows(sid, accs.get(sid)):
             if r["h"] >= since:
                 for name, part in _parts(r):
-                    out.setdefault(name, {}).setdefault(sid, []).append(part)
+                    # 兼容 2026-11-27 #212 部署前 30 天内已落盘的 hours/*.jsonl 里的 bw["算力池"]，不再产生，2026-12-28 后可删
+                    if name != POOL_LABEL:
+                        out.setdefault(name, {}).setdefault(sid, []).append(part)
     return out
 
 

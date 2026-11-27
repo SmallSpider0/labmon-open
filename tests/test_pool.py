@@ -77,22 +77,51 @@ class Base(unittest.TestCase):
 
 class LegacyPoolRemovedTest(Base):
     def test_legacy_pool_fields_rejected(self):
-        """残留旧借用型算力池字段（lend / lend_hours / borrow_pool）时，fleet.conf 给出清晰报错提示移除。"""
+        """残留旧借用型算力池字段（lend / lend_hours / borrow_pool）时，config.user_hosts 与 fleet.conf 均给出清晰报错提示移除。"""
         for extra, field in (
             ("lend = true\n", "lend"),
             ('lend_hours = "22:00-09:00"\n', "lend_hours"),
             ("borrow_pool = true\n", "borrow_pool"),
         ):
             self.write(extra)
-            with self.assertRaises(CF.ConfigError) as e:
-                F.conf()
-            self.assertIn(field, str(e.exception))
-            self.assertIn("移除", str(e.exception))
-        # 自用主机 [[hosts]] 残留 lend 同样拦截
+            for fn in (F.conf, CF.user_hosts, CF.active_hosts):
+                with self.assertRaises(CF.ConfigError) as e:
+                    fn()
+                self.assertIn(field, str(e.exception))
+                self.assertIn("移除", str(e.exception))
+        # 自用主机 [[hosts]] 残留 lend 同样在两边拦截
         (self.d / "hosts.toml").write_text(HOSTS.format(extra="").replace('id = "here"\n', 'id = "here"\nlend = true\n'))
+        for fn in (F.conf, CF.user_hosts):
+            with self.assertRaises(CF.ConfigError) as e:
+                fn()
+            self.assertIn("lend", str(e.exception))
+
+    def test_legacy_pool_borrow_never_reaches_overview_or_relaunch(self):
+        """升级时若残留未归还的 borrow_since + borrow_pool=true，overview.collect 在读取主机清单即拒绝，绝不放进 active_hosts 或触发 relaunch。"""
+        from labmon import overview as O
+        self.write('borrow_since = "2026-11-20 10:00"\nborrow_pool = true\n')
         with self.assertRaises(CF.ConfigError) as e:
-            F.conf()
-        self.assertIn("lend", str(e.exception))
+            O.collect([])
+        self.assertIn("borrow_pool", str(e.exception))
+
+    def test_legacy_pool_hours_bw_filtered_from_holders(self):
+        """历史 hours/*.jsonl 若仍含 30 天内的 bw["算力池"]，人员页统计不把“算力池”当成真人加入 holders，同时保留原持有人的借出小时数。"""
+        import json
+        t = 1_700_000_000.0
+        h0 = int(t // 3600 * 3600) - 3600
+        hdir = F.state_dir() / "hours"
+        hdir.mkdir(parents=True, exist_ok=True)
+        row = {"h": h0, "holder": "AA", "n": 4, "sh": 0, "uj": 80, "vj": 4000, "cr": 4, "mr": 8, "nr": 4,
+               "c": {"job": 4}, "bw": {CF.POOL_LABEL: {"n": 4, "uj": 80, "vj": 4000, "cr": 4, "mr": 8, "nr": 4, "c": {"job": 4}}}}
+        (hdir / "a.jsonl").write_text(json.dumps(row, ensure_ascii=False) + "\n")
+        by = FV._by_person(t - 30 * 86400)
+        self.assertNotIn(CF.POOL_LABEL, by)
+        self.assertIn("AA", by)
+        v = FV.view([], t)
+        names = [x["holder"] for x in v["holders"]]
+        self.assertNotIn(CF.POOL_LABEL, names)
+        aa = next(x for x in v["holders"] if x["holder"] == "AA")
+        self.assertEqual(aa["lent"], [{"id": "a", "to": CF.POOL_LABEL, "h": 1.0}])
 
     def test_pool_reserved_id_rejected(self):
         (self.d / "hosts.toml").write_text(HOSTS.format(extra="").replace('id = "b"', 'id = "pool"'))

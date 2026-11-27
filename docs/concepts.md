@@ -60,7 +60,7 @@
 | 51 | 登录账号在组内人员表里的名字、主机上的使用人；后台与历史记录按已登记的人员统计 | `users.person_of`、`users.people_of`、开通与补绑定前的核对 `users._check_bind`、开通时可选的人 `users.free_people`、`users.add`、`users.bind_person`、名册删人前 `users.removing_person`；删人时唯一的清理入口 `users.remove`；`fleet.host_holder`；旧数据 `fleet.legacy_person`；项目算在谁名下`fleet.project_people`，写进 `sched.json` 的人员键 `fleet.share_key`；登记人员 `fleet.registered_people`、`fleetboot.set_person`，人员卡与账号详情共用 `personCard`、`directoryDrawer`（overview_js/fleetops.js） |
 | 52 | 组内服务器的状态文件；这一台正借着；借给了谁 | `fleet.state_file`；`fleet.borrowed`；`fleet.borrower` |
 | 53 | 算力池基础设施 | `worker.pure.POOL`（`config.POOL` 与 worker 共用）、`config.pool_home`（`config._guest_tpl`）；`pool.key`、`pool.member`（`users.may_host`）、`pool.locate`；worker 的 `pool_refuse`、`Worker.pool_todo`、`pool_heads`、`fit_head`、`add --pool`；`serve.reg_move` 的 `pool`、`workerctl.run_out` 的 `pool`、`overview._pool_mark`、`collect._lane` 的 `pool`；页面上 `hostShort` 的 `h.pool`（common.js） |
-| 54 | 旧借用池配置残留校验 | `fleet.LEGACY_POOL_KEYS`、`fleet._legacy_pool_check`（`fleet.conf` 对 `[[fleet.servers]]` 与 `[[hosts]]` 校验并拒绝 `lend`/`lend_hours`/`borrow_pool`） |
+| 54 | 旧借用池配置残留校验 | `config.LEGACY_POOL_KEYS`、`config.check_legacy_pool`（`config.user_hosts` 与 `fleet.conf` 共用，对 `[[hosts]]` 与 `[[fleet.servers]]` 拦截 `lend`/`lend_hours`/`borrow_pool`） |
 | 55 | 服务器持有人鉴权 | `users.need_holder`（核组内服务器 `holder` 与非借用自用主机 `fleet.host_holder`，`serve.Handler._own` 的 `fleet_srv` 调用） |
 | 56 | 租期到期时刻；租期提醒的档 | `health.lease_end`；`health.lease_due` |
 | 57 | 掉线与恢复判定；换了新容器 | `health.link_step`；`health.container_step` |
@@ -198,6 +198,7 @@
 - #161 部署那次的迁移（把 launchd plist 里旧的 `-c` 登记进来：`projects.adopt`（连同 `OUT_NAMES`）、`serve.serve` 的 `legacy`、`service._read` 的 `legacy` 与 `service.install` 里迁移的几行、`__main__` 传 `legacy` 的那处）：部署后跑过一次 `labmon service install` 就删。
 - #147 部署那次的迁移（`collect._last_probe` 把旧探针缓存 `last_probe_*.json` 里单个对象的 `current` 迁成列表）：部署后各项目采过一轮就删。
 - 2026-12-27 项目页旧快照缺 `hosts[].cpu` 的回退（`page.html` `cpuView` 回退读 `h.cpu_pct` / `cgroup.cpu_quota`）与旧状态缺 `cpu_h` 的回填（`collect._long_term`）：#208（2026-11-27）部署后活跃项目采过一轮即不再产生，2026-12-27 后可删。
+- 2026-12-28 人员页 30 天用量汇总跳过旧算力池借用方（`fleetview._by_person` 跳过 `POOL_LABEL`）：#212 阶段 1（2026-11-27）部署后 `hours/*.jsonl` 不再产生 `bw["算力池"]`，30 天统计窗口滑出即 2026-12-28 后可删。
 
 ## 各概念的口径
 
@@ -309,8 +310,8 @@
    实现：`fleet.state_file`；`fleet.borrowed`；`fleet.borrower`
 53. **算力池基础设施**：算力池基础能力（#24、#212 阶段 1 保留：保留主机 id `pool` 与池登记的 worker_home、池成员判定与撤回定位、池清单拒绝规则与 `pool_todo`/`pool_heads`、登记标记 `--pool`、项目页池车道待放与按实际跑的主机归属渲染；旧借用推广型算力池的入池开关、自动借还、自用主机入池与收回已随 #212 阶段 1 清理）
    实现：`worker.pure.POOL`（`config.POOL` 与 worker 共用）、`config.pool_home`（模板同借用 `config._guest_tpl`）；`pool.key`、`pool.member`（`users.may_host` 对 `pool` 问它）、`pool.locate`；worker 的 `pool_refuse`、`Worker.pool_todo`、`pool_heads`、`fit_head`（`fit --list --json`）、`add --pool`（`load_queue` 的 `pool`，`proj_lanes` 跳过）；`serve.reg_move` 的 `pool`、`workerctl.run_out` 的 `pool`、全局视图 `overview._pool_mark`、`collect._lane` 的 `pool`；页面上 `hostShort` 的 `h.pool` 分支（common.js）
-54. **旧借用池配置残留校验**：`hosts.toml` 的 `[[fleet.servers]]` 或 `[[hosts]]` 中若残留已移除的旧算力池字段（`lend`、`lend_hours`、`borrow_pool`），配置校验直接拒绝并给出清晰的移除提示（#212 阶段 1）
-   实现：`fleet.LEGACY_POOL_KEYS`、`fleet._legacy_pool_check`（`fleet.conf` 调用）
+54. **旧借用池配置残留校验**：`hosts.toml` 的 `[[fleet.servers]]` 或 `[[hosts]]` 中若残留已移除的旧算力池字段（`lend`、`lend_hours`、`borrow_pool`），`config.user_hosts` 与 `fleet.conf` 共用唯一校验直接拒绝并给出清晰的移除提示，避免残留旧池借用进入调度、采集或 `overview.relaunch`（#212 阶段 1）
+   实现：`config.LEGACY_POOL_KEYS`、`config.check_legacy_pool`（`config.user_hosts` 与 `fleet.conf` 的 `fleet._legacy_pool_check` 共用）
 55. **服务器持有人鉴权**：判断看板账号是否为指定组内服务器或非借用自用主机的持有人（管理员放行，普通用户须绑定组内人员且与服务器持有人一致；原在 `pool.need_holder`，#212 阶段 1 迁移至 `users.py` 供 `/fleet/<id>.json` 等复核）
    实现：`users.need_holder`（核组内服务器 `holder` 与非借用自用主机 `fleet.host_holder`，`serve.Handler._own` 的 `fleet_srv` 调用）
 56. **租期到期时刻；租期提醒的档**：租期到期时刻；租期提醒的档（到期前 24、6 小时各一次，已进更近一档不补远的；相近到期合成一组）
