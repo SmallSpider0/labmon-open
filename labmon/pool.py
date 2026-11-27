@@ -18,8 +18,10 @@ from pathlib import Path
 from . import config as CF
 from . import health as HL
 from . import lease as LS
+from . import projects as PJ
 from . import users as U
 from . import workerctl as W
+from .records import tell
 from .state import load_json, save_json, snapshot, state_dir
 from .worker.pure import POOL, is_pool_id, other_load, other_load_text, person_use, pool_host_id, same_list
 from .worker.sched import fair_key
@@ -179,6 +181,83 @@ def _proj_member(pid_proj: str, pcfg: dict) -> bool:
     if not acc or acc.get("role") == "admin":
         return True
     return owner.lower() in pcfg["members"]
+
+
+def _pool_entry(pcfg: dict, pool_map: dict[str, dict]) -> str:
+    """对外展示的提交入口：全配置仅 1 个池时用默认入口 pool，多池时用 pool:<id>（或 pool）。"""
+    return POOL if len(pool_map) <= 1 else pcfg["host_id"]
+
+
+def _active_pool_projects(pid: str, snap: dict | None, pool_map: dict[str, dict]) -> set[str]:
+    """快照中在共有池 pid 有待放或已落机未完成清单的项目 id 集合。"""
+    if not isinstance(snap, dict):
+        return set()
+    pcfg = pool_map.get(pid)
+    phid = pcfg["host_id"] if pcfg else (POOL if pid == POOL else f"pool:{pid}")
+    match_phids = {phid}
+    if pid == POOL or len(pool_map) <= 1:
+        match_phids.add(POOL)
+    out: set[str] = set()
+    done_keys: set[str] = set()
+    for v in ((snap.get("pool") or {}).get("lists") or {}).values():
+        if isinstance(v, dict) and v.get("pool") == pid and v.get("root") and v.get("jobs"):
+            rk = key(v["root"], v["jobs"])
+            if v.get("done") or v.get("sleeping"):
+                done_keys.add(rk)
+            elif v.get("project"):
+                out.add(str(v["project"]))
+    for x in snap.get("regs") or []:
+        xh = str(x.get("host") or "")
+        qs = x.get("queues") or []
+        if xh in match_phids:
+            for q in qs:
+                if q.get("root") and q.get("jobs") and q.get("project") and not q.get("empty") and not q.get("sleeping"):
+                    if key(q["root"], q["jobs"]) not in done_keys:
+                        out.add(str(q["project"]))
+            continue
+        if is_pool_id(xh):
+            continue
+        for q in qs:
+            if _reg_pool_id(q) == pid and q.get("project") and not q.get("empty") and not q.get("sleeping"):
+                out.add(str(q["project"]))
+    return out
+
+
+def tell_saved(pcfg: dict, *, create: bool, old_pool: dict | None = None,
+               old_pools: dict[str, dict] | None = None, snap: dict | None = None) -> None:
+    """共有池新建/修改成功后，经 records.tell 通知相关未归档项目的实验会话（#249）：
+    仅通知项目主人为管理员或属于该池 members 的未归档项目，严格不向非成员项目泄露；
+    改池移除原成员时，若其名下未归档项目此刻在原池仍有待放或已落机清单，仅发送脱敏提示告知原池已调整。"""
+    try:
+        pm = CF.pools()
+    except CF.ConfigError:
+        pm = {pcfg["id"]: pcfg}
+    entry = _pool_entry(pcfg, pm)
+    action = "新建" if create else "修改"
+    hosts_txt = "、".join(pcfg["hosts"])
+    if pcfg.get("exclusive", True):
+        msg = f"{action}了共有算力池「{pcfg['label']}」（入口 {entry}，主机：{hosts_txt}，独占模式）：后续清单请改投 {entry}"
+    else:
+        msg = f"{action}了共有算力池「{pcfg['label']}」（入口 {entry}，主机：{hosts_txt}，开放模式）：可经 {entry} 提交，也可直投池内单机"
+    active_projs: set[str] = set()
+    if not create and old_pool:
+        active_projs = _active_pool_projects(pcfg["id"], snap, old_pools or {pcfg["id"]: old_pool})
+    for proj_id in PJ.project_ids():
+        if _proj_member(proj_id, pcfg):
+            tell(proj_id, "pool", msg)
+        elif not create and old_pool and proj_id in active_projs and _proj_member(proj_id, old_pool):
+            old_entry = _pool_entry(old_pool, old_pools or {pcfg["id"]: old_pool})
+            tell(proj_id, "pool", f"共有算力池「{old_pool['label']}」（{old_entry}）已调整，当前账号已不在该池成员列表，请检查原池待放或在跑清单")
+
+
+def tell_removed(old_pool: dict, *, old_pools: dict[str, dict] | None = None) -> None:
+    """共有池删除成功后，经 records.tell 仅通知原池成员或管理员名下未归档项目（#249）。"""
+    old_entry = _pool_entry(old_pool, old_pools or {old_pool["id"]: old_pool})
+    hosts_txt = "、".join(old_pool["hosts"])
+    msg = f"移除了共有算力池「{old_pool['label']}」（原入口 {old_entry}，原主机：{hosts_txt}）：后续请改投其他可用主机或算力池"
+    for proj_id in PJ.project_ids():
+        if _proj_member(proj_id, old_pool):
+            tell(proj_id, "pool", msg)
 
 
 def _free_gpu_count(st: dict) -> int:

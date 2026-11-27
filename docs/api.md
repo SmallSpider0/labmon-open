@@ -163,8 +163,8 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/users/remove {"name"}` | 删账号，连同它的会话、令牌、人员绑定、能用的主机、项目归属与推送配置（同名新账号不继承；主机清单只改 `users`，#19） |
 | `POST /api/users/hosts {"name", "hosts": [...]}` | 更新这名普通用户可用的主机 |
 | `GET /api/pools/options` | 共有型算力池管理候选数据（仅内网管理员、`admin=True, lan=True`，不随公网平台许可开放）：最新池定义（含待放/已落机条数）、`[[hosts]]` 候选主机（含 `worker_home`、已属池与不可入池原因）与已开通普通账号列表；不向普通用户下发（#240） |
-| `POST /api/pools/save {"id", "label"?, "hosts": [...], "members": [...], "exclusive": bool, "create": bool}` | 新建或编辑 `hosts.toml` 的 `[pools.<id>]`（仅内网管理员、`admin=True, lan=True`，过服务租约 `lease.need`，备用机回 409）；复用 `config.pools` 强校验、核对成员账号存在并拦截仍有未完成清单时的跨 `worker_home` 切域，成功后唤醒全局采集并记 `config` 事件，回 `{"pool", "changed", "msg"}`（#240） |
-| `POST /api/pools/remove {"id", "force"?: bool}` | 删除 `hosts.toml` 的 `[pools.<id>]`（仅内网管理员、`admin=True, lan=True`，备用机回 409）；仍有待放或已落机清单时默认拒绝（409），`force=true` 可移除段落而不中断在跑任务（残留待放清单仍可经 `labmon worker rm pool:<id> ROOT JOBS` 按快照共享域撤回），成功后唤醒全局采集并记 `config` 事件，回 `{"msg"}`（#240） |
+| `POST /api/pools/save {"id", "label"?, "hosts": [...], "members": [...], "exclusive": bool, "create": bool}` | 新建或编辑 `hosts.toml` 的 `[pools.<id>]`（仅内网管理员、`admin=True, lan=True`，过服务租约 `lease.need`，备用机回 409）；复用 `config.pools` 强校验、核对成员账号存在并拦截仍有未完成清单时的跨 `worker_home` 切域，成功后若有实际变动则按权限隔离经 `records.tell(project, "pool", …)` 通知该池成员与管理员名下未归档项目（绝不向非成员普通用户项目泄露），唤醒全局采集并记 `config` 事件，回 `{"pool", "changed", "msg"}`（#240、#249） |
+| `POST /api/pools/remove {"id", "force"?: bool}` | 删除 `hosts.toml` 的 `[pools.<id>]`（仅内网管理员、`admin=True, lan=True`，备用机回 409）；仍有待放或已落机清单时默认拒绝（409），`force=true` 可移除段落而不中断在跑任务（残留待放清单仍可经 `labmon worker rm pool:<id> ROOT JOBS` 按快照共享域撤回），成功后经 `records.tell(project, "pool", …)` 仅通知原池成员或管理员名下未归档项目，唤醒全局采集并记 `config` 事件，回 `{"msg"}`（#240、#249） |
 | `POST /project/owner {"project", "owner"}` | 换项目主人；`owner` 为空时归管理员 |
 | `POST /api/push {"push", "bark" 或 "ntfy"}` | 保存自己的推送，回 `{msg, push}`；`push` 为空时移除。Bark 段填 `key`，可选 `server`、`encrypt_key`；ntfy 段填 `topic`，可选 `server`、`token`；服务地址限于渠道的官方地址或管理员在 `notify.toml` 配置的同渠道地址 |
 | `POST /api/push/test {}` | 用自己的推送配置试发一条，回 `{msg}` |

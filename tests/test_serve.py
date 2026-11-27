@@ -2760,3 +2760,179 @@ class HandleErrorTest(unittest.TestCase):
                 except Exception:
                     srv.handle_error(None, ("127.0.0.1", 1))
             self.assertEqual("Traceback" in buf.getvalue(), logged, exc)
+
+
+class PoolChangeTellTest(unittest.TestCase):
+    """共有型算力池新建/修改/删除后自动经 records.tell 通知相关项目实验会话（#249）。"""
+
+    def _post(self, base: str, path: str, tok: str, body: dict):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(
+            base + path,
+            data=json.dumps(body).encode(),
+            method="POST",
+            headers={"Authorization": f"Bearer {tok}", "Content-Type": "application/json"},
+        )
+        try:
+            with opener.open(req, timeout=5) as resp:
+                return resp.status, json.loads(resp.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())
+
+    def test_pool_save_and_remove_tell_scoped_to_members_and_admins(self):
+        from labmon import lease as LS
+        from labmon import projects as PJ
+        from labmon import records as RC
+        from labmon import state as ST
+        from fixtures import board, make_token
+
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            hf = d / "hosts.toml"
+            hf.write_text(
+                '[[hosts]]\nid = "h1"\nssh = "u@10.0.0.1"\nworker_home = "/data/lab/labmon"\n'
+                '[[hosts]]\nid = "h2"\nssh = "u@10.0.0.2"\nworker_home = "/data/lab/labmon"\n'
+                '[[hosts]]\nid = "h3"\nssh = "u@10.0.0.3"\nworker_home = "/data/lab/labmon"\n'
+            )
+            env = {
+                "LABMON_STATE": str(d / "state"),
+                "LABMON_HOSTS": str(hf),
+                "LABMON_NO_NOTIFY": "1",
+                "LABMON_NO_KEYCHAIN": "1",
+            }
+            with mock.patch.dict(os.environ, env):
+                srv = board(self, scopes=("admin",), name="boss", role="admin")
+                admin_tok = make_token("boss", role="admin", scopes=("admin",))
+                make_token("alice", role="user", scopes=("read", "project"))
+                make_token("bob", role="user", scopes=("read", "project"))
+                base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+                # 登记 5 个项目：无主（归管理员）、boss（管理员）、alice（池成员）、bob（非成员）、alice 已归档项目
+                for pid, owner in (
+                    ("p_none", None),
+                    ("p_boss", "boss"),
+                    ("p_alice", "alice"),
+                    ("p_bob", "bob"),
+                    ("p_arch", "alice"),
+                ):
+                    PJ.put_config(pid, f'id = "{pid}"\ntitle = "{pid}"\n', owner=owner)
+                ST.save_json(ST.state_dir() / "projects.json", {"archived": {"p_arch": {"id": "p_arch", "title": "p_arch", "t": 1}}})
+
+                def clear_tells():
+                    tf = RC._tell_file()
+                    if tf.exists():
+                        tf.unlink()
+
+                def tells_by_proj():
+                    out = {}
+                    for r in RC.told():
+                        for p in r["projects"]:
+                            out.setdefault(p, []).append(r)
+                    return out
+
+                with mock.patch.object(LS, "primary", return_value=True):
+                    # 1. 新建单池（独占模式，members=["alice"]）：入口用 pool，提示改投 pool；非成员 bob 与已归档 p_arch 不收
+                    clear_tells()
+                    st, out = self._post(base, "/api/pools/save", admin_tok, {
+                        "id": "a100", "label": "A100 池", "hosts": ["h1", "h2"],
+                        "members": ["alice"], "exclusive": True, "create": True,
+                    })
+                    self.assertEqual(st, 200, out)
+                    got = tells_by_proj()
+                    self.assertEqual(set(got), {"p_none", "p_boss", "p_alice"})
+                    self.assertNotIn("p_bob", got)
+                    self.assertNotIn("p_arch", got)
+                    for pid in ("p_none", "p_boss", "p_alice"):
+                        rec = got[pid][0]
+                        self.assertTrue(rec["key"].startswith(f"page:pool:{pid}:"))
+                        self.assertIn("新建了共有算力池「A100 池」", rec["msg"])
+                        self.assertIn("入口 pool，", rec["msg"])
+                        self.assertIn("h1、h2", rec["msg"])
+                        self.assertIn("独占模式", rec["msg"])
+                        self.assertIn("改投 pool", rec["msg"])
+
+                    # 2. 无改动编辑：不重复发 tell
+                    clear_tells()
+                    st, out = self._post(base, "/api/pools/save", admin_tok, {
+                        "id": "a100", "label": "A100 池", "hosts": ["h1", "h2"],
+                        "members": ["alice"], "exclusive": True, "create": False,
+                    })
+                    self.assertEqual(st, 200, out)
+                    self.assertFalse(out["changed"])
+                    self.assertEqual(tells_by_proj(), {})
+
+                    # 3. 新建第二个池（多池、开放模式，members=["bob"]）：入口用 pool:h800，开放模式文案；非成员 alice 不收
+                    clear_tells()
+                    st, out = self._post(base, "/api/pools/save", admin_tok, {
+                        "id": "h800", "label": "H800 池", "hosts": ["h3"],
+                        "members": ["bob"], "exclusive": False, "create": True,
+                    })
+                    self.assertEqual(st, 200, out)
+                    got = tells_by_proj()
+                    self.assertEqual(set(got), {"p_none", "p_boss", "p_bob"})
+                    self.assertNotIn("p_alice", got)
+                    self.assertNotIn("p_arch", got)
+                    msg = got["p_bob"][0]["msg"]
+                    self.assertIn("新建了共有算力池「H800 池」", msg)
+                    self.assertIn("入口 pool:h800", msg)
+                    self.assertIn("开放模式", msg)
+                    self.assertIn("直投池内单机", msg)
+
+                    # 4. 修改 a100（移除 alice、改为开放模式）：
+                    #    先模拟 p_alice 在 a100 有待放清单，验证 p_alice 仅收到脱敏调整提示（不泄露新主机/新模式），bob 仍不收
+                    clear_tells()
+                    ST.save_json(ST.state_dir() / "snapshot.json", {
+                        "pool": {"lists": {"a100|/data/lab/p_alice|jobs/q.txt": {
+                            "pool": "a100", "project": "p_alice", "root": "/data/lab/p_alice", "jobs": "jobs/q.txt", "done": False,
+                        }}},
+                        "regs": [],
+                    })
+                    st, out = self._post(base, "/api/pools/save", admin_tok, {
+                        "id": "a100", "label": "A100 池", "hosts": ["h1"],
+                        "members": [], "exclusive": False, "create": False,
+                    })
+                    self.assertEqual(st, 200, out)
+                    got = tells_by_proj()
+                    self.assertEqual(set(got), {"p_none", "p_boss", "p_alice"})
+                    self.assertNotIn("p_bob", got)
+                    self.assertIn("修改了共有算力池「A100 池」", got["p_boss"][0]["msg"])
+                    self.assertIn("入口 pool:a100", got["p_boss"][0]["msg"])
+                    self.assertIn("开放模式", got["p_boss"][0]["msg"])
+                    self.assertIn("已调整", got["p_alice"][0]["msg"])
+                    self.assertNotIn("开放模式", got["p_alice"][0]["msg"])
+
+                    # 5. 清空快照后再次修改 a100（仍不含 alice）：无待放记录的非成员 alice 与 bob 均绝不收到通知
+                    clear_tells()
+                    ST.save_json(ST.state_dir() / "snapshot.json", {"pool": {"lists": {}}, "regs": []})
+                    st, out = self._post(base, "/api/pools/save", admin_tok, {
+                        "id": "a100", "label": "A100 池", "hosts": ["h1", "h2"],
+                        "members": [], "exclusive": True, "create": False,
+                    })
+                    self.assertEqual(st, 200, out)
+                    got = tells_by_proj()
+                    self.assertEqual(set(got), {"p_none", "p_boss"})
+                    self.assertNotIn("p_alice", got)
+                    self.assertNotIn("p_bob", got)
+
+                    # 6. 删除 h800（多池中删除，原成员 bob）：仅通知原池成员 bob 与管理员项目，不通知非成员 alice 与已归档项目
+                    clear_tells()
+                    st, out = self._post(base, "/api/pools/remove", admin_tok, {"id": "h800"})
+                    self.assertEqual(st, 200, out)
+                    got = tells_by_proj()
+                    self.assertEqual(set(got), {"p_none", "p_boss", "p_bob"})
+                    self.assertNotIn("p_alice", got)
+                    self.assertNotIn("p_arch", got)
+                    msg = got["p_bob"][0]["msg"]
+                    self.assertIn("移除了共有算力池「H800 池」", msg)
+                    self.assertIn("原入口 pool:h800", msg)
+                    self.assertIn("h3", msg)
+
+                    # 7. 删除最后剩下的单池 a100（members=[]）：仅通知管理员项目，原入口为 pool
+                    clear_tells()
+                    st, out = self._post(base, "/api/pools/remove", admin_tok, {"id": "a100"})
+                    self.assertEqual(st, 200, out)
+                    got = tells_by_proj()
+                    self.assertEqual(set(got), {"p_none", "p_boss"})
+                    self.assertNotIn("p_alice", got)
+                    self.assertNotIn("p_bob", got)
+                    self.assertIn("原入口 pool，", got["p_boss"][0]["msg"])
