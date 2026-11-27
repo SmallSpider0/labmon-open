@@ -9214,6 +9214,40 @@ class GpuCpuReserveTest(unittest.TestCase):
             cpus_fb, nice_fb = run_one("cpu_fallback", gpu_list, ngpu=0, cpus=16)
         self.assertEqual(cpus_fb, 15)
         self.assertEqual(nice_fb, base_nice)
+        # 带 .env（含变量与 shell 函数）、含引号命令、非零退出码在 nice 包装下原样生效，且启动瞬间即被 alive_job 识别
+        env_file = root / "env.sh"
+        env_file.write_text("MY_TAG='a b'\nmy_fn() { echo \"fn:$MY_TAG\"; }\n")
+        q_env = dict(q, env=str(env_file))
+        w.info = {"gpus": gpu_list, "cpu_quota": 17.0, "mem": {"limit": 100.0, "anon": 5.0}}
+        w.running.clear()
+        (root / "state" / "current").unlink(missing_ok=True)
+        j_env = {"key": "cpu_env", "name": "cpu_env", "cmd": "my_fn > cpu_env.out; exit 7", "ngpu": 0, "vram": 0.0, "ram": 1.0,
+                 "cpus": 4, "excl": None, "tag": None, "est": {"vram": 0.0, "ram": 1.0, "cpus": 4, "cpu_src": "提示值"}}
+        self.assertIsNone(w.start(q_env, j_env, []))
+        t = time.time()
+        while not (root / "state" / "cpu_env.rc").exists() and time.time() - t < 10:
+            time.sleep(0.05)
+        self.assertEqual((root / "state" / "cpu_env.rc").read_text().strip(), "7")
+        self.assertEqual((root / "cpu_env.out").read_text().strip(), "fn:a b")
+        # 启动后立即检查 alive_job（无二次 execve 竞态）
+        w.running.clear()
+        (root / "state" / "current").unlink(missing_ok=True)
+        j_alive = {"key": "cpu_alive", "name": "cpu_alive", "cmd": "sleep 5", "ngpu": 0, "vram": 0.0, "ram": 1.0,
+                   "cpus": 2, "excl": None, "tag": None, "est": {"vram": 0.0, "ram": 1.0, "cpus": 2, "cpu_src": "提示值"}}
+        self.assertIsNone(w.start(q, j_alive, []))
+        j_run = next(iter(w.running.values()))
+        pid_alive = j_run["pid"]
+        try:
+            self.assertTrue(w.alive_job(j_run))
+        finally:
+            try:
+                os.killpg(pid_alive, signal.SIGKILL)
+            except OSError:
+                pass
+            try:
+                os.waitpid(pid_alive, 0)
+            except OSError:
+                pass
         # 单元申请 grant：GPU 机纯 CPU 写 nice=10 与封顶 cpus=15 到 .ok；无 GPU 机不写 nice
         os.makedirs(self.m.SLOTS, exist_ok=True)
         w.info = {"gpus": gpu_list, "cpu_quota": 17.0}

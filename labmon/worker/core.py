@@ -303,13 +303,14 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             env["CUDA_VISIBLE_DEVICES"] = ",".join(c["uuid"] for c in gpus) if job["ngpu"] > 0 else ""
             _M.cpu_env(env, self.cpus_for(job))     # 给它记账的核数：项目拿它设线程数、DataLoader 进程数（nproc 是宿主机的）；没设的 BLAS/OpenMP 线程数缺省同它
             # 命令放子 shell 里跑：清单行里的 exit 不会跳过写退出码。借来的主机上先调高自己的 oom_score_adj（子进程继承）
-            script = ("echo %d > /proc/self/oom_score_adj 2>/dev/null; " % _C.GUEST_ADJ if self.guest() else "") \
-                + 'set -a; [ -n "$1" ] && . "$1"; set +a; ( eval "$2" ); echo $? > "$3"'
-            args = ["bash", "-c", script, "labmon-job:" + job["name"], q["env"] or "", job["cmd"], rcf]
             nice_inc = _S.cpu_only_nice(job["ngpu"], self.info.get("gpus") or (), _C.is_hold(job["name"]))
             use_nice_cmd = bool(nice_inc and shutil.which("nice"))
-            if use_nice_cmd:
-                args = ["nice", "-n", str(nice_inc)] + args
+            # 外层 Popen 固定起 bash 保持单次 execve，避免 nice 放在 args[0] 时二次 execve bash 的窗口期让 /proc/<pid>/cmdline 读空误判任务死亡
+            body = '( nice -n %d bash -c \'set -a; [ -n "$1" ] && . "$1"; set +a; eval "$2"\' "$0" "$1" "$2" )' % nice_inc \
+                if use_nice_cmd else 'set -a; [ -n "$1" ] && . "$1"; set +a; ( eval "$2" )'
+            script = ("echo %d > /proc/self/oom_score_adj 2>/dev/null; " % _C.GUEST_ADJ if self.guest() else "") \
+                + body + '; echo $? > "$3"'
+            args = ["bash", "-c", script, "labmon-job:" + job["name"], q["env"] or "", job["cmd"], rcf]
             with open(os.path.join(lg, job["name"] + ".log"), "a") as out:
                 out.write("===== %s labmon 开始（GPU %s）=====\n" % (_C.now_str(), ",".join(str(c["i"]) for c in gpus) or "无"))   # 分隔行，见 START_RE
                 out.flush()
