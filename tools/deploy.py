@@ -30,7 +30,6 @@ import argparse
 import base64
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -142,20 +141,17 @@ def parse_merged_branches(merged_output: str) -> set[str]:
     return branches
 
 
-def parse_gone_branches(branch_vv_output: str) -> set[str]:
-    """从 git branch -vv 输出中提取远端跟踪分支已失效（: gone] 或 : gone, ...）的分支名。"""
+def parse_gone_branches(for_each_ref_output: str) -> set[str]:
+    """从 git for-each-ref --format="%(refname:short)|%(upstream:track)" refs/heads 输出中提取远端已失效的分支。
+    使用结构化输出单独读取 upstream 状态，避免从 commit subject 正文扫描误匹配。"""
     branches = set()
-    for line in branch_vv_output.splitlines():
+    for line in for_each_ref_output.splitlines():
         line = line.strip()
-        if not line or ": gone" not in line:
+        if not line or "|" not in line:
             continue
-        # 匹配 [remote/branch: gone] 或 [remote/branch: gone, ahead 1]
-        if not re.search(r"\[[^\]]*:\s*gone(?:,\s*[^\]]+)?\]", line):
-            continue
-        cleaned = line.lstrip("*+ ")
-        parts = cleaned.split()
-        if parts:
-            branches.add(parts[0])
+        branch, track = line.split("|", 1)
+        if track.startswith("[gone"):
+            branches.add(branch)
     return branches
 
 
@@ -187,8 +183,8 @@ def auto_clean_branches() -> int:
         head_br = git("rev-parse", "--abbrev-ref", "HEAD")
         merged_out = git("branch", "--merged", f"origin/{D.BRANCH}")
         merged = parse_merged_branches(merged_out)
-        branch_vv = git("branch", "-vv")
-        gone = parse_gone_branches(branch_vv)
+        branch_refs = git("for-each-ref", "--format=%(refname:short)|%(upstream:track)", "refs/heads")
+        gone = parse_gone_branches(branch_refs)
         to_del = filter_cleanup_branches(gone, merged, active, head_branch=head_br)
         deleted = 0
         for br in to_del:

@@ -893,14 +893,18 @@ detached
         self.assertEqual(branches, {"chore/current", "feat/in-wt", "fix/merged-1", "feature/merged-2"})
 
     def test_parse_gone_branches(self):
-        sample = """* main                                1234567 [origin/main] 提交
-+ feat/active                         2345678 [origin/feat: gone] 活跃 worktree 分支但已 gone
-  fix/gone-branch                     3456789 [origin/fix/gone-branch: gone] 已合并且远端已删
-  feature/ahead-gone                  4567890 [origin/ahead: gone, ahead 1] 远端删了但本地有新提交也识别为 gone
-  feat/alive                          5678901 [origin/alive] 正常分支
+        sample = """main|[ahead 1]
+feat/active|[gone]
+fix/gone-branch|[gone]
+feature/ahead-gone|[gone, ahead 1]
+feat/alive|[behind 2]
+feature/with-gone-in-title-normal-upstream|[ahead 1]
+feature/untracked|
 """
         branches = DP.parse_gone_branches(sample)
         self.assertEqual(branches, {"feat/active", "fix/gone-branch", "feature/ahead-gone"})
+        self.assertNotIn("feature/with-gone-in-title-normal-upstream", branches)
+        self.assertNotIn("feature/untracked", branches)
 
     def test_filter_cleanup_branches_safety(self):
         # 绝不误删 main/master、当前 HEAD、活跃 worktree 分支
@@ -927,8 +931,8 @@ detached
                 return "main"
             if args == ("branch", "--merged", "origin/main"):
                 return "  main\n  active-wt\n  merged-branch\n"
-            if args == ("branch", "-vv"):
-                return "  main 111 [origin/main]\n  gone-branch 222 [origin/gone: gone]\n"
+            if args == ("for-each-ref", "--format=%(refname:short)|%(upstream:track)", "refs/heads"):
+                return "main|\ngone-branch|[gone]\nalive-branch|[ahead 1]\n"
             if args[:2] == ("branch", "-D"):
                 return "Deleted branch"
             return ""
