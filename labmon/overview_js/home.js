@@ -462,7 +462,7 @@ function jobDetail(j) {
       : e ? `${p.progress ? `暂无速度（进度 ${esc(p.progress[0])}/${esc(p.progress[1])}）` : "没有进度行"}，预计结束依据：${esc(e.src)}` : "—"],
     ["同卡", wg.length ? esc(wg.join("、")) : "无"], ["同机", wh.length ? esc(wh.join("、")) : "无"],
   ];
-  if (j.est) kv.push(["记账", `内存 ${g1(j.acct?.ram)} GiB、显存 ${mb2g(j.acct?.vram)} GiB${j.acct?.cpu != null ? `、CPU ${g1(j.acct.cpu)} 核` : ""}（内存、显存 = max(估计值, 实测)；CPU 开跑满 10 分钟后按近 10 分钟窗口核数回收；估计 ${esc(estText(j.est))}）`]);
+  if (j.est) kv.push(["记账", `内存 ${g1(j.acct?.ram)} GiB、显存 ${mb2g(j.acct?.vram)} GiB${j.acct?.cpu != null ? `、CPU ${g1(j.acct.cpu)} 核` : ""}（内存、显存 = max(估计值, 实测)；CPU 开跑满 3 分钟后按近 3 分钟窗口核数回收；估计 ${esc(estText(j.est))}）`]);
   if (j.tag || j.stop) kv.push(["tag / 停法", `${esc(j.tag || "—")} / ${esc(j.stop || "—")}`]);
   if (u.rd != null || u.cores_peak != null) kv.push(["CPU 与读写", [`此刻 ${g1(u.cores)} 核、读 ${g1(u.rd)} / 写 ${g1(u.wr)} MiB/s`, ioText(u)].filter(Boolean).join("；")]);
   if (hintText(j)) kv.push(["资源提示", `${esc(hintText(j))} <span class="mut">（${HINT_NOTE}）</span>`]);

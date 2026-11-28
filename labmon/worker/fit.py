@@ -114,12 +114,17 @@ class FitHost:
             out.append(self.slack["throttle"])
         return out
 
+    def live_cpu(self):
+        """这台在跑满 CPU_LIVE_SHRINK_S 的实测峰值轨迹（供 estimate 的 cpu_shrink，与 worker 同口径）。"""
+        info = self.w.info or {}
+        return _S.live_cpu_rows(self.st.get("running") or (), self.S["cpu_cap"], info.get("gpus") or ())
+
     def req(self, q, n, cmd, project):
         """清单 q 里叫 n 的一行（命令 cmd）在这台上的样子：(请求 r, 资源估计 e, place 认的 x)。q 是别的主机上登记的，--gpus 限卡只在那台上算。"""
         r = _Q.queue_req(q, _Q.job_of(n, cmd))
         if project:
             r["project"] = project
-        e = _S.estimate(self.hist, r)
+        e = _S.estimate(self.hist, r, live=self.live_cpu())
         # 时长同真放行（queue_durs）：按此刻放一个新任务会遇到的同卡并行数（最空的那张卡，同 k_now；这次假设开的也算）与在跑同类的进度挑记录
         kn = min((1 + sum(1 for j in self.S["jobs"] if not j["hold"] and c["uuid"] in j["gpus"]) for c in self.S["cards"]), default=1)
         d = _S.duration(self.hist, r, self.model(), kn, self.runs(r))
@@ -287,7 +292,7 @@ def fit(p, names, project=None):
                                     if _C.base_name(h.get("name") or "") == _C.base_name(n) and (h.get("project") or h.get("root"))), None)
             where = "（清单里没找到这一行，按名字估；先把它追加到已登记的清单（比如占着卡的那条末尾）再问）"
             r = _Q.new_req("queue", None, proj, n)
-            e = _S.estimate(hist, r)
+            e = _S.estimate(hist, r, live=fh.live_cpu())
             d = _S.duration(hist, r, fh.model())
             x = dict(fh.w.job_spec(n, r, e, d and d["min"], cut=d and d["cut"]), key="fit:%s" % n, project=proj, cut_src=d and "%s；%s" % (d["cut_src"], d["src"]), allowed=None)
         say, why = fh.open(r, e, x, now, bool(row))

@@ -208,13 +208,13 @@ BUSY_WIN_S = 3600        # 各卡「吃满程度」（只有保活时按 0）留
 UTIL_LOW = 50            # 卡近 UTIL_WIN_S 的利用率低于这个 %，且上面在跑的被 CPU 卡住时，先加核、不在这张卡上开新车道（gpu_slack，#35、#37）
 
 
-CPU_BOUND_FRAC = 0.9     # 在跑任务近 CPU_WARM_S 各 1 分钟窗口核数的平均不少于给它的核数的这么多，算被 CPU 卡住、可能给少了（cpu_fit 的 low）
+CPU_BOUND_FRAC = 0.9     # 在跑任务近 CPU_FIT_WARM_S 各 1 分钟窗口核数的平均不少于给它的核数的这么多，算被 CPU 卡住、可能给少了（cpu_fit 的 low）
 
 
-CPU_SPARE_FRAC, CPU_SPARE_MIN = 0.5, 1.0   # 写了 cpus= 的在跑任务整段 1 分钟峰值不到给的核数的这么多、且少至少这么多核，算给多了（cpu_fit 的 high，#46）
+CPU_SPARE_FRAC, CPU_SPARE_MIN = 0.5, 1.0   # cpu_fit 的 high 告警：写了 cpus= 的在跑任务整段 1 分钟峰值不到给的核数的这么多、且少至少这么多核，算给多了（#46）；cpu_shrink 也复用 CPU_SPARE_MIN（至少小 1 核才收敛，#292）
 
 
-CPU_SHRINK_N = 3         # 写了 cpus= 的同类至少这么多次跑下来（近 HIST_N 次每次）都按上一行算给多了，没开跑的按实测记账（cpu_shrink，#91）
+CPU_SHRINK_N = 1         # 写了 cpus= 的同类至少这么多条有效样本（完赛/跑满 5 分钟历史或满 CPU_LIVE_SHRINK_S 在跑轨迹）且按实测峰值加裕量至少少 CPU_SPARE_MIN 核时，没开跑的连续收敛记账（cpu_shrink，#91、#292）
 
 
 UTIL_FULL = 90           # 卡近 UTIL_WIN_S 的利用率不低于这个 % 算吃满：offers 的同机多开车道不往它上面放（Worker.local_cards，#43；同卡 1 条车道常只到六七成，3–4 条才近满）
@@ -308,7 +308,13 @@ CPU_CODES = ("cpu", "cpu_est", "cpu_other", "nofit_cpu")   # 算“因 CPU 被�
 CPU_ALERT_CODES = ("cpu_est", "cpu_other", "nofit_cpu")   # 其中要告警的（cpu_wait）：核真被我们自己的任务用着的（cpu）是正常排队，不报（#65 维护者定）
 
 
-CPU_WARM_S = 600         # 运行中任务开跑（接管后从开始量起）满这么久，CPU 记账从估计改按近这么久的 1 分钟峰值（回收开头加载阶段之后没用上的核，#65）
+CPU_WARM_S = 180         # 运行中任务开跑（接管后从开始量起）满这么久，CPU 记账从估计改按近这么久的 1 分钟峰值（回收开头加载阶段之后没用上的核，#65、#292）
+
+
+CPU_FIT_WARM_S = 600     # cpu_fit 核数给多/给少告警与 gpu_slack 的防误报观察窗（秒，与 UTIL_WIN_S 对齐，#46、#292）
+
+
+CPU_LIVE_SHRINK_S = CPU_FIT_WARM_S   # 同变体在跑任务作为排队 cpu_shrink 实测峰值轨迹的稳定观察期（秒，#292）
 
 
 MIB = 2 ** 20

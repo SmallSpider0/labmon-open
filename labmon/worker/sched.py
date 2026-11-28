@@ -317,10 +317,11 @@ def cpu_held(S, cores, n, rsv_left=0.0):
     return ("cpu_est" if over and cores + spare >= n - 1e-6 else "cpu"), held
 
 
-def cpu_warm(u):
-    """运行中任务的 CPU 记账已按窗口核数回收（#65）：从开始量窗口核数（use 的 pk0）起满 CPU_WARM_S、量到了 pks。
-    Worker.acct（回收）与 cpu_held（只把没回收的算“记账比实测多”）共用这一个判断。"""
-    return bool(u.get("pks") and u.get("t") and u.get("pk0") and u["t"] - u["pk0"] >= _C.CPU_WARM_S)
+def cpu_warm(u, win=None):
+    """运行中任务从开始量窗口核数（use 的 pk0）起满 win（默认 CPU_WARM_S=180 秒；cpu_fit 与在跑收敛传 CPU_FIT_WARM_S=600 秒）且量到了 pks。
+    Worker.acct（回收）、cpu_held（只把没回收的算“记账比实测多”）、cpu_fit 与 live_cpu_rows 共用这一个判断。"""
+    w = _C.CPU_WARM_S if win is None else win
+    return bool(u.get("pks") and u.get("t") and u.get("pk0") and u["t"] - u["pk0"] >= w)
 
 
 def cpu_threads(e):
@@ -684,7 +685,24 @@ def admit(reqs, focus, pol, use, now, place, shadow=lambda r: None, before=None)
     return out
 
 
-def estimate(hist, r):
+def live_cpu_rows(running, cap, cards=()):
+    """从运行中任务（本机 running 或 peer_st 的 running）提取满稳定观察期（CPU_LIVE_SHRINK_S）的实测峰值轨迹，供 estimate 的 cpu_shrink 使用（#292）：
+    过滤占位任务、无 est 或未满观察期的任务；峰值取整段 1 分钟峰值 cores_peak（不因后段回落丢失开头加载峰）；give 按所在主机配额算（#99）。"""
+    out = []
+    for j in running or ():
+        e, u = j.get("est"), j.get("use") or {}
+        if not j.get("name") or _C.is_hold(j["name"]) or not e or not cpu_warm(u, _C.CPU_LIVE_SHRINK_S):
+            continue
+        pk = u.get("cores_peak")
+        if pk is None:
+            pk = max(x[1] for x in u["pks"])
+        give = cpus_export(cpu_threads(e), cap, job_ngpu(j), cards)
+        out.append({"project": j.get("project"), "name": j["name"], "tag": j.get("tag"),
+                    "cores_peak": pk, "give": give, "live": True})
+    return out
+
+
+def estimate(hist, r, live=None):
     """资源估计：显存、内存取同类任务最近几次峰值的最大值 × 1.1，及单跑（同卡没有别的任务）时的平均 GPU 利用率。只看量到了用量的记录。worker 准入、推演与 fit 都用它。
     显存、内存逐项依次看（#61、#282）：同 tag 下去种子同名（tag_name）› 同 tag › 去掉种子编号后同名的历史 › 清单写的提示值（vram=、ram=，> 0 才算写了）
     › 同一条队列的历史（同一份清单里可以是完全不同的任务，最弱，不盖过明写的提示值）› 0。这样同一批次 tag 下的轻量变体已有自身历史时不被重变体污染，
@@ -695,7 +713,8 @@ def estimate(hist, r):
     （显存用的是提示值时为 None，不拿别的任务的利用率）。
     CPU（cpus 整数核，job_cpus 取整；cpu_src 来源）：清单的 cpus= 优先（来源“提示值”），否则同类（同 tag 同名 › 同 tag › 同名 › 同队列）近几次 1 分钟峰值核数（cores_peak，
     期 1 起才记，旧行当没有历史）的最大值 × 1.1，都没有按 CPU_DEFAULT（#4 维护者定：cpus= 优先于历史，历史优先于缺省）。
-    写了的 cpus= 同类实测一直远低于它时只收小记账（cpu_shrink，#91）：cpus 是记账核数，cpus_set 记下清单写的值（开跑仍按它给，cpu_threads）。
+    写了的 cpus= 同类实测明显低于它时只收小记账（cpu_shrink，#91、#292）：支持完赛历史（≥ CPU_SHRINK_N 次）与同变体在跑满稳定观察期的实测轨迹（live，live_cpu_rows），
+    cpus 是记账核数，cpus_set 记下清单写的值（开跑仍按它给，cpu_threads）。
     OOM 后抬高（#62、#282）：用量行标了 oom 的（finish 经 oom_of 记）不进历史（它的峰值是被当时可用的量截住的）；同 tag 同名、同 tag、同名各档里，
     取这一档最近一次跑成功之后的 OOM 记录，给 OOM 的那一项（vram 或 ram）一个下限 max(那次放行时的估计 est × 2, 那次的峰值 × 1.1)，几条取大；
     其中粗粒度同 tag 档的 OOM 下限仅在该变体在同 tag 同名档尚无自身画像（无跑成功记录、且对该项无有效峰值及自身 OOM）时才回退采纳，避免重变体 OOM 污染已有自身样本的轻变体；
@@ -712,7 +731,7 @@ def estimate(hist, r):
     floor = {"vram": (0.0, None), "ram": (0.0, None)}   # OOM 后的下限：(GiB, 来源)
     tn_has = {"vram": False, "ram": False}        # tag_name 档对该资源是否已有自身画像（跑成功 / 有效峰值 / 自身 OOM）：有则不继承粗粒度 tag 档 OOM 下限
     cpu = (_M.job_cpus(r["cpus"]), "提示值") if r.get("cpus") is not None else None
-    shrink = None                                 # 写了 cpus= 时，同 tag 同名 › 同 tag › 同名第一档有峰值的历史（cpu_shrink 看）
+    shrink = None                                 # 写了 cpus= 时，同 tag 同名 › 同 tag › 同名第一档有峰值的历史：(kind, 中文标签, rows)
     for k in keys:
         kind = k[0]
         rows = [h for h in hist if _C.hist_key(h, kind) == k]   # hist 按结束时刻排好（load_hist）
@@ -730,7 +749,7 @@ def estimate(hist, r):
         if kind == "queue":
             continue
         if cr and shrink is None:
-            shrink = (label[kind], cr)
+            shrink = (kind, label[kind], cr)
         last = max((i for i, h in enumerate(rows) if h.get("rc") == "0"), default=-1)   # 只认真跑成功的：跑了 5 分钟后被停下、别的错误退出的不算资源够了
         if kind == "tag_name":
             if last >= 0 or hrs:
@@ -752,11 +771,24 @@ def estimate(hist, r):
                     floor[f] = (round(v, 2), "%s 上次 OOM：%s" % (label[kind], s))
     cpu = cpu or (_C.CPU_DEFAULT, "缺省 %d 核" % _C.CPU_DEFAULT)
     set_ = None
-    if cpu[1] == "提示值" and shrink:
-        n = cpu_shrink(cpu[0], shrink[1])
-        if n is not None:
-            set_, cpu = cpu[0], (n, "清单 cpus=%d 偏大：%s 近 %d 次峰值 %.1f 核 ×1.1（开跑仍给 %d 核）"
-                                 % (cpu[0], shrink[0], len(shrink[1]), max(h["cores_peak"] for h in shrink[1]), cpu[0]))
+    if cpu[1] == "提示值":
+        live_kind = "tag_name" if r.get("tag") else "name"
+        live_k = _C.hist_key(r, live_kind) if live else None
+        live_rows = [h for h in (live or ()) if _C.hist_key(h, live_kind) == live_k and h.get("cores_peak") is not None] if live_k else []
+        if shrink or live_rows:
+            # 本变体已有自身在跑稳定轨迹而历史只命中粗粒度 tag 档时，优先采用自身在跑轨迹（#282 变体隔离）
+            if live_rows and (not shrink or shrink[0] == "tag"):
+                s_label, h_rows, l_rows = label[live_kind], [], live_rows
+            else:
+                s_label, h_rows, l_rows = shrink[1], shrink[2], live_rows
+            all_rows = h_rows + l_rows
+            n = cpu_shrink(cpu[0], all_rows)
+            if n is not None:
+                pk_max = max(h["cores_peak"] for h in all_rows)
+                who = ("近 %d 次+在跑 %d 个" % (len(h_rows), len(l_rows)) if h_rows and l_rows
+                       else "近 %d 次" % len(h_rows) if h_rows else "在跑 %d 个" % len(l_rows))
+                set_, cpu = cpu[0], (n, "清单 cpus=%d 偏大：%s %s峰值 %.1f 核 ×1.1（开跑仍给 %d 核）"
+                                     % (cpu[0], s_label, who, pk_max, cpu[0]))
     out = {}
     rv, rr = r.get("vram") or 0.0, r.get("ram") or 0.0
     if rpeak and (rpeak[0] != "queue" or not rr):
@@ -785,20 +817,20 @@ def estimate(hist, r):
 
 
 def cpu_shrink(n, rows):
-    """清单写了 cpus=n、同类历史 rows（estimate 给的：同 tag › 同名第一档有峰值的近 HIST_N 条，跑成功或跑满 5 分钟、非 OOM）一直远低于它时，
-    没开跑的行按几核记账（#91）；不收小为 None。要至少 CPU_SHRINK_N 条，且每一条都满足：那次实际导出的核数（用量行的 give，即开跑时的
-    LABMON_CPUS：按那台的配额封顶过，#99）不少于 n——量到的峰值才是在至少这么多线程下跑出来的；在配额小的主机上跑的、把 cpus= 改大以后的旧行、
-    没记 give 的行（#99 之前的）都不算数——
-    1 分钟峰值 cores_peak 不超过 n × CPU_SPARE_FRAC 且少至少 CPU_SPARE_MIN 核（与 cpu_fit 的“给多了”同一门槛）。
-    记账取峰值最大值按 cpu_from_peak 估，比 n 小才算收小。只收记账：开跑仍按 n 给（cpu_threads），运行中照旧 max(估计, 实测) 与 #65 回收。"""
+    """清单写了 cpus=n、同类实测样本 rows（完赛/跑满 5 分钟非 OOM 历史，和/或满 CPU_LIVE_SHRINK_S 的在跑同变体轨迹）低于它时，
+    没开跑的行按实测峰值加裕量连续收敛记账（#91、#292）；不收小为 None。要至少 CPU_SHRINK_N 条，且每一条都满足：那次实际导出的核数
+    （give，即开跑时的 LABMON_CPUS：按那台的配额封顶过，#99）不少于 n——量到的峰值才是在至少这么多线程下跑出来的；在配额小的主机上跑的、
+    把 cpus= 改大以后的旧行、没记 give 的行（#99 之前的）都不算数。
+    记账取全部样本峰值最大值按 cpu_from_peak 估，至少比 n 小 CPU_SPARE_MIN（1 核）即收小。
+    只收记账：开跑仍按 n 给（cpu_threads），运行中照旧 max(估计, 实测) 与 #65 回收。"""
     if n < 2 or len(rows) < _C.CPU_SHRINK_N:
         return None
     for h in rows:
-        give, pk = h.get("give"), h["cores_peak"]
-        if give is None or give < n or pk > n * _C.CPU_SPARE_FRAC or n - pk < _C.CPU_SPARE_MIN:
+        give, pk = h.get("give"), h.get("cores_peak")
+        if give is None or give < n or pk is None:
             return None
     m = cpu_from_peak(max(h["cores_peak"] for h in rows))
-    return m if m < n else None
+    return m if n - m >= _C.CPU_SPARE_MIN else None
 
 
 def ran_ok(h):
@@ -1166,7 +1198,7 @@ def cpu_fit(j, cap, util, room=None, cards=(), hist_peak=None, thread_cap=None, 
     返回 {how, avg 近 10 分钟平均核数, peak 整段峰值, give, sug}（low 另有 room），都不是为 None。占位任务、没有估计的不判。
     gpu_slack（fit 开车道）只取 low；状态里运行中任务的 cpu_fit 是它，看板据此出只给实验会话的 cpu_low:、cpu_high: 告警。"""
     u, e = j.get("use") or {}, j.get("est")
-    if _C.is_hold(j.get("name")) or not e or not cpu_warm(u):
+    if _C.is_hold(j.get("name")) or not e or not cpu_warm(u, _C.CPU_FIT_WARM_S):
         return None
     give = cpus_export(cpu_threads(e), cap, job_ngpu(j), cards)
     avg = round(sum(x[1] for x in u["pks"]) / len(u["pks"]), 2)
@@ -1210,16 +1242,25 @@ def gpu_slack(cards, jobs, th, cap, hist=None, env_of=None):
 class SchedMixin:
 
     # ---- 估计与记账 ----
+    def live_cpu(self):
+        """本机与同共享盘活跃主机上满 CPU_LIVE_SHRINK_S 的在跑任务实测峰值轨迹（供 estimate 的 cpu_shrink 共用，#292）。"""
+        rows = live_cpu_rows(self.running.values(), _M.cpu_cap(self.info.get("cpu_quota")), self.info.get("gpus") or ())
+        for st in (self.peer_st or {}).values():
+            info = st.get("info") or {}
+            rows.extend(live_cpu_rows(st.get("running") or (), _M.cpu_cap(info.get("cpu_quota")), info.get("gpus") or ()))
+        return rows
+
     def acct(self, j):
-        """运行中任务的记账：max(估计值, 实测)（CPU 开跑满 10 分钟后见下）。内存 GiB；显存按卡，MB；CPU 核（估计是 job_cpus 取整过的，实测取此刻的核数；占位任务不记）。
-        CPU 另有回收（#65）：从开始量窗口核数（use 的 pk0）起满 CPU_WARM_S 后，估计那一份换成 min(开跑时给的核数, max(1, 近 CPU_WARM_S 内 1 分钟窗口核数的最大值))，
-        再与此刻实测取大：估计取的是同类的 1 分钟峰值，多半出在开头加载阶段，之后整段按它占着，核记了账却没人用。内存、显存是硬资源（超了 OOM），不回收；
+        """运行中任务的记账：max(估计值, 实测)（CPU 开跑满 CPU_WARM_S 后见下）。内存 GiB；显存按卡，MB；CPU 核（估计是 job_cpus 取整过的，实测取此刻的核数；占位任务不记）。
+        CPU 另有回收（#65、#292）：从开始量窗口核数（use 的 pk0）起满 CPU_WARM_S（3 分钟）后，估计那一份换成 min(开跑时给的核数, max(1, 近 CPU_WARM_S 内 1 分钟窗口核数的最大值))，
+        再与此刻实测取大：突增当轮立即跟进，回落后经 3 分钟窗口平滑释放。内存、显存是硬资源（超了 OOM），不回收；
         CPU 超用只是被限流变慢。写了 cpus=0 的给 0 核，回收后仍是 0。"""
         e, u = j.get("est") or {"ram": 0.0, "vram": 0.0}, j.get("use") or {}
         vb = u.get("vram_by") or {}
         give = float(cpu_give(e.get("cpus", _C.CPU_DEFAULT), _M.cpu_cap(self.info.get("cpu_quota")), job_ngpu(j), self.info.get("gpus") or ()))
         if cpu_warm(u):
-            give = min(give, max(1.0, max(x[1] for x in u["pks"])))
+            win_pks = [x[1] for x in u["pks"] if u["t"] - x[0] < _C.CPU_WARM_S] or [u["pks"][-1][1]]
+            give = min(give, max(1.0, max(win_pks)))
         return {"ram": max(e["ram"], u.get("ram") or 0.0),
                 "vram": {g: max(e["vram"] * 1024, vb.get(g, 0.0)) for g in j["gpus"]},
                 "cpu": 0.0 if _C.is_hold(j["name"]) else max(give, u.get("cores") or 0.0)}
@@ -1351,11 +1392,12 @@ class SchedMixin:
             h = _Q.first_rows(lists[k][1]).get(j["name"]) if k in lists else None
             if h:
                 j["deps"], j["deps_any"] = h["deps"], h["deps_any"]
-        kn, runs = self.k_now(), self.run_tot()
+        kn, runs, live = self.k_now(), self.run_tot(), self.live_cpu()
         # 运行中任务那一行按它自己的 k（k_of，同 run_end；dur_k 按取整的 k 缓存）：看板据它算剩余、写回 eta.json，不能按给新任务的 k_now（#138）
         rk = {k: conc_key(self.k_of(j)) for k, j in self.running.items() if not _C.is_hold(j["name"])}
+        live_sig = tuple(sorted((x.get("project") or "", x.get("tag") or "", _C.base_name(x["name"]), x["give"], cpu_from_peak(x["cores_peak"])) for x in live))
         key = (self.hist_v, self.model(), tuple(sorted((k, c[0]) for k, c in lists.items())), kn, tuple(sorted((k, tuple(v)) for k, v in runs.items())),
-               tuple(sorted((k, self.running[k]["name"], c) for k, c in rk.items())))
+               tuple(sorted((k, self.running[k]["name"], c) for k, c in rk.items())), live_sig)
         if key == self.durs_key:
             return
         self.durs_key = key
@@ -1372,7 +1414,7 @@ class SchedMixin:
                     out[n] = dict(d, min=round(d["min"], 1))
                 k = (q["key"], h["tag"], _C.base_name(n), h["ram"], h["vram"], h["cpus"])      # 同类任务的估计一样，清单长时省得每个都扫一遍历史
                 if k not in memo:
-                    memo[k] = estimate(self.hist, dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"]))
+                    memo[k] = estimate(self.hist, dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"]), live=live)
                 est[n] = memo[k]
 
     def k_now(self):

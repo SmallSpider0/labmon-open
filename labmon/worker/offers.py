@@ -235,7 +235,7 @@ class OffersMixin:
             # 原推演何时跑完推不出（free 为 None）时算不了收益，只看是不是因为行没有估时（那样的清单推演里排不上，state 是 trapped，也一起看）
             cands, why = self.move_cands(lns if free is not None else mine_p, now, waiters)
             for i, c in enumerate(cands):           # 只有提示值的 GPU 行不挪：没有实测，同卡并行怕 OOM（同 fit）
-                e = _S.estimate(self.hist, dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]))
+                e = _S.estimate(self.hist, dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]), live=self.live_cpu())
                 if c["h"]["ngpu"] and e["src"] == "提示值":
                     cands, why = cands[:i], "%s 的显存只有清单提示值、还没有实测，不与别的任务同卡" % c["name"]
                     break
@@ -398,7 +398,7 @@ class OffersMixin:
             return {"stop": cut[None][0], "why": "推演里没有它所在的清单", "nodur": False}
         for c in sorted(cs, key=lambda c: (c["lane"], c["i"])) if local is False else ():
             f = self.dur_k(dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]))   # 与 forecast 拼本机清单行同口径：dur 取此刻的 k，durk 给推演按开跑时同卡的条数取
-            jobs.append(self.job_spec(c["name"], c["h"], _S.estimate(self.hist, dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"])),
+            jobs.append(self.job_spec(c["name"], c["h"], _S.estimate(self.hist, dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]), live=self.live_cpu()),
                                       (f(self.k_now()) or {}).get("min"), f, (f(self.k_now()) or {}).get("cut")))
         jobs = [x for x in jobs if not self.dep_waiting(p, x)] + [x for x in jobs if self.dep_waiting(p, x)]
         key, n0 = tgt or "offer:" + p, 0
@@ -463,7 +463,7 @@ class OffersMixin:
         c = cands[0]
         r = dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"])
         f = self.dur_k(r)
-        x = dict(self.job_spec(c["name"], c["h"], _S.estimate(self.hist, r), (f(self.k_now()) or {}).get("min"), f), project=p, allowed=cards)
+        x = dict(self.job_spec(c["name"], c["h"], _S.estimate(self.hist, r, live=self.live_cpu()), (f(self.k_now()) or {}).get("min"), f), project=p, allowed=cards)
         S = dict(base, jobs=list(base["jobs"]), holds=dict(base.get("holds") or {}), gholds={})
         n = 0
         while n < min(_C.ROOM_MAX, rows):
