@@ -66,6 +66,9 @@ SLOTS = os.environ.get("LABMON_SLOTS", os.path.join(LOCAL, "slots"))   # 单元�
 GATE = 0.9               # 容器里收不回的内存（mem.anon，不算页缓存）超过上限的这个比例就停止放行
 
 
+FAILCNT_WIN_S = 300      # 高压期间容器 memory.failcnt 事件的聚合折叠时间窗（秒）：每窗最多记一条带累计增量的摘要（#262）
+
+
 DISK_WARN_GB = 20.0      # 独立主机本地盘预警线（GiB）
 
 

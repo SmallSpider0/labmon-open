@@ -1000,18 +1000,52 @@ class MeasureMixin:
         u["with_gpu"] = sorted(set(u.get("with_gpu", [])) | set(card))[:8]
         return on
 
-    def mem_events(self, m):
-        """内存闸门（收不回的内存到上限的 GATE；页缓存内核会先回收，不算）与撞上限次数：变化时记事件。"""
+    def mem_events(self, m, t=None):
+        """内存闸门（收不回的内存到上限的 GATE；页缓存内核会先回收，不算）与撞上限事件（#262）：
+        - 良性文件页缓存回收（大文件读写/mmap 触发）：无 oom_kill 且 anon / limit < GATE 时抑制 failcnt 刷屏；
+        - 真实内存高压（anon / limit >= GATE）：首次（或距上次记事件已满 FAILCNT_WIN_S 且无积压）立即记，
+          时间窗内继续递增则折叠累计，窗满记一条带累计增量与高压峰值的摘要；
+        - 发生 oom_kill：立即记录（合并窗口内尚未输出的增量），不受时间窗延迟。
+        不改 oom_of 判定，也不改 status.json 里的原始 failcnt / oom_kill 字段。"""
         if not m.get("limit"):
             return
+        now = _C.time.time() if t is None else t
         on = m["anon"] / m["limit"] >= _C.GATE
         if on != self.gate:
             self.event("gate", "内存闸门%s：收不回的内存 %.1f / %.1f GiB" % ("关闭，停止放行" if on else "打开，恢复放行", m["anon"], m["limit"]))
             self.gate = on
-        fc = m.get("failcnt")
-        if fc is not None and self.failcnt is not None and fc > self.failcnt:
-            self.event("failcnt", "容器内存撞上限 %d 次（累计 %d）" % (fc - self.failcnt, fc))
-        self.failcnt = fc
+        fc, oom = m.get("failcnt"), m.get("oom_kill")
+        fc_delta = int(fc - self.failcnt) if (fc is not None and self.failcnt is not None and fc > self.failcnt) else 0
+        oom_delta = int(oom - self.failcnt_oom) if (oom is not None and self.failcnt_oom is not None and oom > self.failcnt_oom) else 0
+        self.failcnt, self.failcnt_oom = fc, oom
+        if oom_delta > 0:
+            tot = self.failcnt_pend + fc_delta
+            last_fc = fc if fc is not None else self.failcnt_last_fc
+            peak = max(self.failcnt_peak, m["anon"]) if self.failcnt_peak is not None else m["anon"]
+            if tot > 0 and last_fc is not None:
+                self.event("failcnt", "容器内存撞上限 %d 次并触发 OOM 杀进程 %d 次（累计撞上限 %d、OOM %d；收不回的内存 %.1f / %.1f GiB）" % (
+                    tot, oom_delta, last_fc, oom, peak, m["limit"]))
+            else:
+                self.event("failcnt", "容器内存触发 OOM 杀进程 %d 次（累计 OOM %d；收不回的内存 %.1f / %.1f GiB）" % (
+                    oom_delta, oom, peak, m["limit"]))
+            self.failcnt_t, self.failcnt_pend, self.failcnt_peak, self.failcnt_last_fc = now, 0, None, None
+            return
+        had_pend = self.failcnt_pend > 0
+        if fc_delta > 0 and on:
+            self.failcnt_pend += fc_delta
+            self.failcnt_peak = max(self.failcnt_peak, m["anon"]) if self.failcnt_peak is not None else m["anon"]
+            self.failcnt_last_fc = fc
+        if self.failcnt_pend > 0 and (self.failcnt_t is None or now - self.failcnt_t >= _C.FAILCNT_WIN_S):
+            peak = self.failcnt_peak if self.failcnt_peak is not None else m["anon"]
+            last_fc = self.failcnt_last_fc if self.failcnt_last_fc is not None else fc
+            if not had_pend:
+                self.event("failcnt", "容器内存撞上限 %d 次（累计 %d；收不回的内存 %.1f / %.1f GiB）" % (
+                    self.failcnt_pend, last_fc, peak, m["limit"]))
+            else:
+                mins = max(1, round((now - self.failcnt_t) / 60.0))
+                self.event("failcnt", "近 %d 分钟容器内存撞上限 %d 次（累计 %d；高压峰值 %.1f / %.1f GiB）" % (
+                    mins, self.failcnt_pend, last_fc, peak, m["limit"]))
+            self.failcnt_t, self.failcnt_pend, self.failcnt_peak, self.failcnt_last_fc = now, 0, None, None
 
     def apply_cpu_quota(self, info, pol):
         """将主机配置的 cpu_quota 软配额接入有效 CPU 容量（#114）：
