@@ -50,6 +50,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.envc = {}                        # 队列 key → (.env 的 fsig, 变量)
         self.storage = None                   # 本地盘：各项目的缓存与单格临时、labmon 之外的新写入（LocalDisk.summary）；共享盘上各项目目录（看板按它把共享盘用量分到项目）
         self.gate, self.failcnt, self.ovr, self.seen = False, None, [], set()
+        self.failcnt_oom, self.failcnt_t, self.failcnt_pend, self.failcnt_peak, self.failcnt_last_fc = None, None, 0, None, None
         self.uwin = {}                        # 卡 UUID → 近 UTIL_WIN_S 秒的 (时刻, 利用率)：「在用时多高」，保活在的那几轮不记（util10，fit 用）
         self.bwin = {}                        # 卡 UUID → 近 BUSY_WIN_S 秒的 (时刻, 利用率)：「吃满程度」，只有保活的那几轮记 0（gpu_busy，页面用，#51）
         self.bka = {}                         # 卡 UUID → 这一轮只有保活时保活顶出来的原值（gpu_busy 的 ka）
@@ -880,7 +881,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         # 保活另记启动时刻（epoch 秒，状态的 gpu_procs[].t0：worker status 写“几点起”，#61）
         self.gprocs = [dict({k: v for k, v in g.items() if k != "_j"}, **({"t0": round(_C.started_at(g["pid"]) or 0) or None}
                                                                          if g["pid"] and (g["owner"] == "keepalive" or g["ka"]) else {})) for g in gp]
-        self.mem_events(m)
+        self.mem_events(m, t)
 
     def void_check(self, jobs, cards_on, gp, extra, unacct=None):
         """独占任务运行中被打扰（intruders：同卡、整机独占时同机有别的，未归因外部活跃占卡，或 labmon 之外占了 VOID_CPU 核以上）连着两轮就作废。

@@ -611,6 +611,60 @@ class AdmissionUnitTest(UnitBase):
         self.assertTrue(self.w.gate)
         self.assertIn("收不回的内存 115.0 / 122.0 GiB", self.events("gate")[-1]["msg"])
 
+    def test_failcnt_page_cache_suppressed_and_high_pressure_throttled(self):
+        # 1) 纯文件页缓存回收（高 used、低 anon < GATE、无 oom_kill）：连续多轮 failcnt 增长不刷屏
+        t = 1000.0
+        self.w.mem_events({"limit": 122.0, "used": 118.0, "anon": 20.0, "failcnt": 100.0, "oom_kill": 0.0}, t)
+        for i in range(1, 6):
+            self.w.mem_events({"limit": 122.0, "used": 122.0, "anon": 25.0, "failcnt": 100.0 + i * 50.0, "oom_kill": 0.0}, t + i * 10)
+        self.assertEqual(self.events("failcnt"), [])
+        self.assertFalse(self.w.gate)
+
+        # 2) 真实内存高压（anon / limit >= GATE）：首次立即记一条，窗内继续增长折叠累计，满 FAILCNT_WIN_S 记一条摘要
+        t0 = t + 100.0
+        self.w.mem_events({"limit": 122.0, "used": 122.0, "anon": 112.0, "failcnt": 360.0, "oom_kill": 0.0}, t0)
+        evs = self.events("failcnt")
+        self.assertEqual(len(evs), 1)
+        self.assertIn("容器内存撞上限 10 次（累计 360", evs[0]["msg"])
+        # 窗内多轮高压增长 + 穿插一轮低 anon 页缓存回收（不计入高压折叠）
+        self.w.mem_events({"limit": 122.0, "used": 122.0, "anon": 114.0, "failcnt": 375.0, "oom_kill": 0.0}, t0 + 30)
+        self.w.mem_events({"limit": 122.0, "used": 122.0, "anon": 118.0, "failcnt": 395.0, "oom_kill": 0.0}, t0 + 60)
+        self.w.mem_events({"limit": 122.0, "used": 122.0, "anon": 30.0, "failcnt": 450.0, "oom_kill": 0.0}, t0 + 120)
+        self.assertEqual(len(self.events("failcnt")), 1)
+        # 满 FAILCNT_WIN_S 后输出一条带累计增量（15 + 20 = 35）与高压峰值（118.0）的摘要
+        self.w.mem_events({"limit": 122.0, "used": 120.0, "anon": 30.0, "failcnt": 450.0, "oom_kill": 0.0}, t0 + self.m.FAILCNT_WIN_S)
+        evs = self.events("failcnt")
+        self.assertEqual(len(evs), 2)
+        self.assertIn("近 5 分钟容器内存撞上限 35 次（累计 395；高压峰值 118.0 / 122.0 GiB）", evs[1]["msg"])
+
+        # 3) 过了很久（无积压）再次高压：立即按单次事件记，不误写“近 N 分钟”
+        t1 = t0 + self.m.FAILCNT_WIN_S + 3600.0
+        self.w.mem_events({"limit": 122.0, "used": 122.0, "anon": 111.0, "failcnt": 455.0, "oom_kill": 0.0}, t1)
+        evs = self.events("failcnt")
+        self.assertEqual(len(evs), 3)
+        self.assertTrue(evs[2]["msg"].startswith("容器内存撞上限 5 次（累计 455"))
+
+    def test_failcnt_oom_kill_emits_immediately(self):
+        # 发生 oom_kill 递增时立即记录（即使仍在时间窗内或 anon 已回落），并合并窗内挂起的高压 failcnt 增量
+        t0 = 2000.0
+        self.w.mem_events({"limit": 122.0, "used": 120.0, "anon": 110.0, "failcnt": 10.0, "oom_kill": 0.0}, t0)
+        # 首次高压立即记一条
+        self.w.mem_events({"limit": 122.0, "used": 122.0, "anon": 112.0, "failcnt": 15.0, "oom_kill": 0.0}, t0 + 10)
+        self.assertEqual(len(self.events("failcnt")), 1)
+        # 窗内继续高压，折叠进 pend（+7）
+        self.w.mem_events({"limit": 122.0, "used": 122.0, "anon": 115.0, "failcnt": 22.0, "oom_kill": 0.0}, t0 + 20)
+        self.assertEqual(len(self.events("failcnt")), 1)
+        # 窗内发生 oom_kill（哪怕此时 anon 因进程被杀已回落到低水位）：立即记一条并合并 pend + 本次增量（7 + 3 = 10）
+        self.w.mem_events({"limit": 122.0, "used": 80.0, "anon": 40.0, "failcnt": 25.0, "oom_kill": 1.0}, t0 + 30)
+        evs = self.events("failcnt")
+        self.assertEqual(len(evs), 2)
+        self.assertIn("撞上限 10 次并触发 OOM 杀进程 1 次（累计撞上限 25、OOM 1", evs[1]["msg"])
+        # cgroup v2 仅 oom_kill 增加、无 failcnt（None）时也立即记录
+        self.w.mem_events({"limit": 122.0, "used": 90.0, "anon": 50.0, "failcnt": None, "oom_kill": 2.0}, t0 + 40)
+        evs = self.events("failcnt")
+        self.assertEqual(len(evs), 3)
+        self.assertIn("触发 OOM 杀进程 1 次（累计 OOM 2", evs[2]["msg"])
+
     def test_cpu_wait_alert_after_10_min(self):
         # 请求一直因记账被挡、实际空着的却够（cpu_est）：满 10 分钟（CPU_ALERT_S）才在等待项写 cpu_wait（秒）；腾出 CPU 放下了、换了原因就清掉、重新计时。
         # 核真被我们自己的任务用着（cpu）是正常排队：不计时、不告警（#65）
