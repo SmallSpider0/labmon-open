@@ -4409,6 +4409,52 @@ class ParallelListTest(UnitBase):
         self.assertLess(plan["g2"]["t0"] - now, 60, plan)
         self.assertGreaterEqual(round(plan["g3"]["t0"] - now), 600, plan)
 
+    def test_simulate_transient_gpar_until_wakes_and_restores_par(self):
+        # #297：simulate 传入瞬态 gpar_until 时，t < gpar_until 按 gpar 拦截并在 gpar_until 准时唤醒，之后自动恢复按 par 放行
+        self.cards(40000.0)
+        now = 1_700_000_000.0
+        snap = self.w.snapshot({})
+        snap["jobs"] = [{"key": "q|g0", "lane": "q", "name": "g0", "project": "pa", "gpus": ["GPU-a"], "t0": now - 60,
+                         "t1": now + 3600, "hold": False, "cards": 0.25, "vram": {"GPU-a": 1000.0}, "ram": 1.0, "cpu": 1.0, "excl": None, "tag": None}]
+        jobs = [self.w.job_spec("g%d" % i, self.m.hints("x  # vram=1 est_min=60"),
+                                {"vram": 1.0, "src": "提示值", "ram": 1.0, "ram_src": "提示值", "cpus": 1.0, "cpu_src": "缺省"}, 60.0)
+                for i in range(1, 5)]
+        q = {"key": "q", "kind": "queue", "project": "pa", "allowed": None, "since": now, "par": 4,
+             "gpar": 1, "gpar_until": now + 600, "jobs": jobs}
+        out, stuck = self.m.simulate(now, snap, [q], set())
+        self.assertEqual(stuck, {})
+        by_name = {e["name"]: e for e in out}
+        # g0 要跑 60 分钟，但在 gpar_until（+600s）处自动唤醒并立即按 par=4 放行 g1、g2、g3，绝不外推成串行
+        for n in ("g1", "g2", "g3"):
+            self.assertEqual(round(by_name[n]["t0"] - now), 600, by_name)
+        self.assertEqual(round(by_name["g4"]["t0"] - now), 3600, by_name)
+
+    def test_forecast_cfs_throttle_does_not_extrapolate_full_queue(self):
+        # #297：瞬态 CFS 限流（throttle）收窄并行窗口只锁 GPAR_TRANSIENT_S（10 分钟），不再把 40 行×1h 外推成 40h
+        self.cards(40000.0)
+        lines = ["# labmon: par=4"] + ["g%d|x   # vram=1 est_min=60" % i for i in range(41)]
+        self.setup_list(lines)
+        qs = self.w.registry()
+        self.m.list_jobs(qs[0])
+        now = time.time()
+        self.w.running["s|g0"] = {"key": qs[0]["key"] + "|g0", "kind": "queue", "name": "g0", "project": "pa", "t0": now - 60, "deps": [], "deps_any": [],
+                                  "gpus": ["GPU-a"], "use": {}, "est": None, "excl": None, "tag": None, "q": qs[0], "pid": 1}
+        Path(self.w.p.eta).write_text(json.dumps({"t": now, "jobs": {"pa|g0": now + 3600}}))
+        _, reqs = self.w.requests(qs, False)
+        self.w.queue_durs(qs)
+        reqs = [r for r in reqs if r["name"] != "g0"]
+        for r in reqs:
+            self.w.prep(r, now, {})
+        with mock.patch.object(self.w, "throttle", lambda t: {"since": t - 120, "for": 120, "thr": 35.0, "alert": False, "over": [], "other": None}), \
+                mock.patch.object(self.w, "local_cards", lambda: (None, "容器被配额限流：先减线程，不在这台多开车道")):
+            self.w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        plan = {j["name"]: j for ln in self.w.plan["lanes"] for j in ln["jobs"]}
+        # 瞬态 CFS 限流在 +600s 解除，g1/g2/g3 于 +600s 同步开跑，41 行总完工约 11h（远小于按 wpar=1 外推的 41h）
+        for n in ("g1", "g2", "g3"):
+            self.assertEqual(round(plan[n]["t0"] - now), self.m.GPAR_TRANSIENT_S, plan[n])
+        max_end = max(j["t1"] for j in plan.values())
+        self.assertLess(max_end - now, 13 * 3600, f"瞬态限流不应把 41 行外推至 {((max_end - now) / 3600):.1f}h")
+
 
 class OffersTest(UnitBase):
     """能接别处的任务（offers，Issue #20 第一档）：别的主机 o 上 pa 的清单排得很晚、本机 t 将空时，t 用自己的推演算出能接哪几行、几点跑完，

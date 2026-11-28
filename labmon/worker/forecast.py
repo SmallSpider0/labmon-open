@@ -33,7 +33,7 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
     只模拟显存（各卡按估计值记账；借来的主机上有停不了的保活的卡不放，同真放行）、内存、CPU（按估计核数记账）、独占（留卡与回填）、tag 上限、截止前的准入与公平份额；
     缺本地文件、拷本地依赖（含共享盘慢时推迟）、内存闸门、对方超出预留这类此刻才有的原因不模拟。
     - snap：资源快照（Worker.snapshot；sim_snapshot 换成推演口径）；
-    - queues：[{key, kind, project, allowed（能用的卡序号，None 不限）, since（队首开始等的时刻）, jobs [job_spec…], par（同时最多几行，缺省 1）, gpar（要卡的行只在这条在跑的少于它时排：并行清单的门槛此刻不给加，forecast 给；None 不限）}]，jobs 不含正在跑的；
+    - queues：[{key, kind, project, allowed（能用的卡序号，None 不限）, since（队首开始等的时刻）, jobs [job_spec…], par（同时最多几行，缺省 1）, gpar（要卡的行只在这条在跑的少于它时排：并行清单的门槛此刻不给加，forecast 给；None 不限）, gpar_until（瞬态 wpar / gpar 的恢复时刻：模拟时钟 t < gpar_until 时生效并在 gpar_until 唤醒，t >= gpar_until 自动解除恢复按 par 排；None 持久生效，#297）}]，jobs 不含正在跑的；
       每条队列按清单顺序取窗口（同 next_jobs：还没排上的前 par − 在跑数 行），各行的请求 key 按 run_key（并行清单逐行一个，#147），车道按队列 key（快照 jobs 的 lane）；
     - cut：(截止时刻, 没估时的放不放)：续租截止、约定归还前跑不完的不放（同 override_hit 的 deadline）；
     - pol：调度设置（缺省 POLICY）；use：开始时各项目的 GPU 用量（卡·时，不含在跑的），往后按半衰期衰减，再加上推演里跑的；
@@ -107,12 +107,18 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
             busy[y.get("lane") or y["key"]] = busy.get(y.get("lane") or y["key"], 0) + 1
         for q in queues:
             k = q["key"]
-            win = [i for i in range(len(q["jobs"])) if i not in put[k]][:max(0, (q.get("wpar") or q.get("par") or 1) - busy.get(k, 0))]   # 窗口（同 next_jobs；wpar 为限流缩小的窗口上限）
+            gu = q.get("gpar_until")
+            gactive = gu is None or t < gu
+            eff_wpar = q.get("wpar") if gactive else None
+            eff_gpar = q.get("gpar") if gactive else None
+            if gu is not None and t < gu and (q.get("wpar") or q.get("gpar")) and len(put[k]) < len(q["jobs"]):
+                wake.append(gu)                   # 瞬态限流/暂缓加行在恢复点自动唤醒，避免把短期限流外推至全队列（#297）
+            win = [i for i in range(len(q["jobs"])) if i not in put[k]][:max(0, (eff_wpar or q.get("par") or 1) - busy.get(k, 0))]   # 窗口（同 next_jobs；wpar 为限流缩小的窗口上限）
             if win:
                 blocked.pop(k, None)
             for i in win:
                 r = dict(q["jobs"][i], key=_Q.run_key(q, q["jobs"][i]["name"]), lane=k, _i=i, kind=q["kind"], project=q["project"], since=since[k], allowed=q["allowed"],
-                         gpar=q.get("gpar"))
+                         gpar=eff_gpar)
                 r["charge"] = r["cards"] * (r["dur"] or 0.0) / 60
                 d = _DP.dep_end(_DP.dep_keys(r), t, ends, dead) if _DP.dep_keys(r) else None
                 if _DP.dep_keys(r) and d is None:     # 依赖满足不了或不知道何时满足：它占着窗口的这一格（串行清单就是停在它这里）
@@ -223,9 +229,10 @@ class ForecastMixin:
                # 成组：别的主机上的成员预计何时能一起开跑（此刻就能的记 0，不随时钟变）、本机成员在不在队首
                tuple((gk, g["at"] and (0 if g["at"] <= now else round(g["at"] / 60)), tuple(sorted((k, n, e and e <= now) for (k, n), e in g["local"].items())))
                      for gk, g in sorted(self.gsim.items())))
-        cards, shut = self.local_cards()         # 并行清单加行的门槛（par_gate）：推演里按此刻的结论当常量（#147）
+        cards, shut = self.local_cards()         # 并行清单加行的门槛（par_gate）：推演里区分瞬态 CFS 限流与持久卡吃满（#147、#297）
+        throttled = bool(self.throttle(now))
         lvl = {q["key"]: self.par_level(q["key"], now) for q in queues if (q.get("par") or 1) > 1}   # 补位到的行数（#176）
-        key += (bool(shut), tuple(cards or ()), tuple(sorted(lvl.items())))
+        key += (bool(shut), throttled, tuple(cards or ()), tuple(sorted(lvl.items())))
         if key == self.plan_key and now - self.plan["t"] < _C.FORECAST_EVERY:
             return
         self.plan_key = key
@@ -255,16 +262,18 @@ class ForecastMixin:
             jobs = [self.job_spec(n, h, self.qest.get(k, {}).get(n) or _S.estimate(self.hist, dict(h, name=n, project=q["project"]), live=self.live_cpu()),
                                   self.req_dur(x), self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"])), self.req_dur(x, cut=True))
                     for n, h in pend for x in [{"key": k, "name": n, "project": q["project"], "gang": None if _C.is_hold(n) else h["gang"]}]]
-            par, wpar, allowed, gpar = q.get("par") or 1, None, q["gpus"], None
+            par, wpar, allowed, gpar, gpar_until = q.get("par") or 1, None, q["gpus"], None, None
             if par > 1 and cur:                   # 已有行在跑：再加的行要过门槛（同真放行 place 里的 par_gate）
-                if shut and self.throttle(now):   # 容器在限流：不用卡的行也不加，按此刻在跑的行数排（保留 par 供 run_key 对齐 starts）
+                if shut and throttled:            # 容器在 CFS 限流（瞬态）：只锁到恢复窗（now + GPAR_TRANSIENT_S），过了自动按 par 排（#297）
                     wpar = max(1, len(cur))
+                    gpar_until = now + _C.GPAR_TRANSIENT_S
                 elif shut or (cards is not None and not [i for i in cards if allowed is None or i in allowed]):
                     gpar = max(1, len(cur), lvl.get(k, 0))   # 卡吃满：要卡的行只补到此刻与近来跑到过的行数（真放行补位照补、不往上加），不用卡的照窗口排
                 elif cards is not None:           # 要卡的行只放在门槛给的卡上
                     allowed = [i for i in cards if allowed is None or i in allowed]
             qs.append({"key": k, "kind": "queue", "project": q["project"], "allowed": allowed, "par": par, "gpar": gpar,
                        **({"wpar": wpar} if wpar is not None else {}),
+                       **({"gpar_until": gpar_until} if gpar_until is not None else {}),
                        "since": heads[k]["since"] if k in heads else now, "jobs": jobs})
             info[k] = {"root": q["root"], "queue": q["jobs"], "project": q["project"], "kind": "queue"}
         for r in wait:

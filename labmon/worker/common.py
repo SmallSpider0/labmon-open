@@ -332,6 +332,9 @@ PAR_STEP_S = 60          # 并行清单已有行在跑时，两次往上加行�
 PAR_REFILL_S = UTIL_WIN_S   # 并行清单近这么久同时跑到过的行数（Worker.par_hi）：跑完一行后补回这个数不等 PAR_STEP_S、不看利用率（#176）
 
 
+GPAR_TRANSIENT_S = 600   # 推演里瞬态限流（如 CFS 限流）收窄并行窗口（wpar / gpar）的恢复窗（秒）：过了此时刻自动解除，不外推至全队列（#297）
+
+
 def now_str(t=None):
     return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(t))
 

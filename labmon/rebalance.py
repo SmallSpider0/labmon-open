@@ -34,6 +34,7 @@ TAIL_RE = re.compile(r"；按 \d\d:\d\d 的推演$")
 UNDER_BUSY = 80       # 一台能放的卡近 30 分钟「吃满程度」低于这个 %、此刻还能多开车道（offer 的 room），算吃不满：门槛放宽到 GAIN_MIN_S、句首写合计能开几条（#145）
 UNDER_KEEP = 90       # 报过的吃不满降到这以上才收（滞回；同 worker 的 UTIL_FULL：再满 worker 就不给这张卡了）
 STICK_S = 900          # 上一轮建议的那台跑完的时刻比最优的晚不到这么多时沿用它（几台一样空时谁领先每轮都可能换）
+REV_COOL_S = 1800      # 同一项目跨主机挪法反向冷却（秒，#297）：A→B 后这么多秒内抑制反向 B→A（borrow_cut 紧急抢救豁免），防 A ↔ B 乒乓
 
 
 def _top(xs: list) -> float | None:
@@ -252,6 +253,24 @@ def _reserve_target(reserved: dict, tid: str, best: dict, orig_o: dict, t: float
     res["used"] += 1
 
 
+def _prev_dir(was: dict | None, t: float) -> dict | None:
+    """从上一轮项目建议取未过期的跨主机方向记录 {src, dst, t}（#297）；过期或无记录返回 None。"""
+    d = (was or {}).get("dir")
+    if isinstance(d, dict) and d.get("dst") and d.get("src") and d.get("t") is not None and t - float(d["t"]) < REV_COOL_S:
+        return d
+    return None
+
+
+def _is_reverse(opt: dict, pdir: dict | None, late: set[str]) -> bool:
+    """候选跨主机挪法是否在冷却窗内与最近一次建议反向（原目标成源、原源成目标），且非 borrow_cut 紧急抢救（#297）。"""
+    if not pdir or opt.get("local"):
+        return False
+    if {_lane(j) for j in opt["jobs"]} & late:
+        return False
+    srcs = {j["host"] for j in opt["jobs"]}
+    return pdir["dst"] in srcs and opt["target"] in pdir["src"]
+
+
 def suggest(hosts: list[dict], prev: dict | None, t: float, sw: dict | None = None) -> dict:
     """各项目的挪法建议 {项目: 建议}。hosts：工作台这一轮的各主机（worker 状态在 status，借用的 borrow.late 已由 borrow.check 补上）；
     prev：上一轮的结果（滞回用）；sw：当前调度设置（weight、focus、owner，用于全局联合规划排序，缺省时从 hosts 的 share 回退）。
@@ -313,6 +332,7 @@ def suggest(hosts: list[dict], prev: dict | None, t: float, sw: dict | None = No
         xs_pairs = [(hid, _apply_reserved(o, reserved.get(hid), t), o) for hid, o in raw_xs]
         xs = [(hid, o) for hid, o, _ in xs_pairs]
         was = prev.get(proj) or {}
+        pdir = _prev_dir(was, t)
         opts, why, est, idles = [], [], [], []
         half = 0.5 if was.get("key") else 1
         under = _under(xs, set(((was.get("room") or {}).get("hosts")) or ()))
@@ -327,6 +347,8 @@ def suggest(hosts: list[dict], prev: dict | None, t: float, sw: dict | None = No
                        "before": None if any(j.get("dep") for j in o["jobs"][:k]) else o.get("before"),
                        "jobs": o["jobs"][:k], "from": f, "to": new,
                        "local": bool(o.get("local")), "gpus": o.get("gpus"), "_orig": orig_o}
+                if _is_reverse(opt, pdir, late):
+                    continue
                 there = _idle_gain(o["jobs"][:k], GAIN_MIN_S * half) if o.get("idle") and not o.get("local") else False
                 if there is not False:
                     most = dict(opt, idle=True, there=there, done=o["jobs"][k - 1]["end"])
@@ -370,12 +392,25 @@ def suggest(hosts: list[dict], prev: dict | None, t: float, sw: dict | None = No
                 best["text"] = _room_text(best, proj, label, pool_target) + best["text"]
                 if best.get("loose") or best.get("idle"):
                     best["key"] = f"rebalance:{proj}:room:{','.join(sorted(under))}"
+            if not best.get("local"):
+                best["dir"] = {"src": sorted({j["host"] for j in best["jobs"]}), "dst": best["target"], "t": t}
+            elif pdir:
+                best["dir"] = pdir
             _reserve_target(reserved, best["target"], best, orig_o, t)
             out[proj] = best
         elif why or est:
             out[proj] = {"why": why, "from": _top([_top(list(o["ends"].values()) + [o["free"]]) for _, o in xs])}
             if est:
                 out[proj].update(key=f"rebalance:{proj}:est", est=True, text=_est_text(est, proj, label))
+            if pdir:
+                out[proj]["dir"] = pdir
+        elif pdir:
+            out[proj] = {"dir": pdir}
+    for proj, was in prev.items():
+        if proj not in out:
+            pdir = _prev_dir(was, t)
+            if pdir:
+                out[proj] = {"dir": pdir}
     return out
 
 

@@ -280,6 +280,82 @@ class GlobalRebalanceTest(unittest.TestCase):
         # pb 只是同机挪到已有清单，t1 未被额外占用，pa 仍可正常挪入 t1
         self.assertEqual(out["pa"]["target"], "t1")
 
+    def test_reverse_direction_suppressed_within_cooldown(self):
+        """#297：A→B 发出后 30 分钟内（含中间有一轮无建议）抑制反向 B→A，超过 REV_COOL_S 后恢复。"""
+        hb = _host("B", [_offer("pa", "A", src_end_h=10, step_h=2, n=3, idle=True)])
+        out1 = RB.suggest([hb], None, NOW)
+        self.assertEqual(out1["pa"]["target"], "B")
+        self.assertEqual(out1["pa"]["dir"], {"src": ["A"], "dst": "B", "t": NOW})
+
+        # 中间一轮风平浪静无建议：dir 仍延续保留，且不含 key/text/why
+        out_quiet = RB.suggest([_host("A", []), _host("B", [])], out1, NOW + 300)
+        self.assertNotIn("key", out_quiet.get("pa", {}))
+        self.assertEqual(out_quiet["pa"]["dir"]["dst"], "B")
+
+        # 10 分钟后出现反向 B→A：被抑制（无 key/text），dir 仍保留
+        ha = _host("A", [_offer("pa", "B", src_end_h=10, step_h=2, n=3, idle=True)])
+        out2 = RB.suggest([ha], out_quiet, NOW + 600)
+        self.assertNotIn("key", out2.get("pa", {}))
+        self.assertNotIn("text", out2.get("pa", {}))
+        self.assertEqual(out2["pa"]["dir"]["dst"], "B")
+
+        # 超过 REV_COOL_S（30 分钟）后反向 B→A 正常放行
+        out3 = RB.suggest([ha], out2, NOW + RB.REV_COOL_S)
+        self.assertEqual(out3["pa"]["target"], "A")
+        self.assertEqual(out3["pa"]["dir"], {"src": ["B"], "dst": "A", "t": NOW + RB.REV_COOL_S})
+
+    def test_reverse_cooldown_allows_non_reverse_local_and_borrow_cut(self):
+        """#297：冷却期内非反向（A→C）、同机挪法（local=True）及 borrow_cut 紧急抢救均不受抑制。"""
+        hb = _host("B", [_offer("pa", "A", src_end_h=10, step_h=2, n=3, idle=True)])
+        out1 = RB.suggest([hb], None, NOW)
+        self.assertEqual(out1["pa"]["target"], "B")
+
+        # 非反向：B→C 允许
+        hc = _host("C", [_offer("pa", "B", src_end_h=10, step_h=2, n=3, idle=True)])
+        out_c = RB.suggest([hc], out1, NOW + 300)
+        self.assertEqual(out_c["pa"]["target"], "C")
+
+        # 同机挪法：B 上同机多开不受跨主机反向冷却影响，且透传原 dir
+        hb_local = _host(
+            "B",
+            [_offer("pa", "B", src_end_h=10, step_h=2, n=3, local=True)],
+            todo=[{"project": "pa", "root": "/proj", "queue": "q.txt", "jobs": ["pa_j1", "pa_j2", "pa_j3"]}],
+        )
+        out_loc = RB.suggest([hb_local], out1, NOW + 300)
+        self.assertEqual(out_loc["pa"]["target"], "B")
+        self.assertTrue(out_loc["pa"]["local"])
+        self.assertEqual(out_loc["pa"]["dir"]["dst"], "B")
+
+        # borrow_cut 紧急抢救：B 马上要还卡，允许立即反向 B→A
+        hb_late = _host(
+            "B",
+            [],
+            todo=[{"project": "pa", "root": "/proj", "queue": "q.txt", "jobs": ["pa_j1", "pa_j2", "pa_j3"]}],
+            borrow_late=[{"root": "/proj", "queue": "q.txt"}],
+        )
+        ha_cut = _host("A", [_offer("pa", "B", src_end_h=10, step_h=2, n=3, idle=True)])
+        out_cut = RB.suggest([hb_late, ha_cut], out1, NOW + 300)
+        self.assertEqual(out_cut["pa"]["target"], "A")
+        self.assertEqual(out_cut["pa"]["cut"], ["B|/proj|q.txt"])
+
+    def test_reverse_suppression_does_not_block_other_projects_in_joint_plan(self):
+        """#297 × #289：高优项目反向 B→A 被抑制时，不占用 A 的槽位，低优项目仍可正常挪入 A。"""
+        hb = _host("B", [_offer("pb", "A", src_end_h=10, step_h=3, n=2, idle=True)])
+        prev = RB.suggest([hb], None, NOW)
+        self.assertEqual(prev["pb"]["target"], "B")
+
+        ha = _host(
+            "A",
+            [
+                _offer("pb", "B", src_end_h=10, step_h=3, n=2, idle=True),
+                _offer("pa", "C", src_end_h=8, step_h=3, n=2, idle=True),
+            ],
+            ngpus=1,
+        )
+        out = RB.suggest([ha], prev, NOW + 300, sw={"focus": {"pb": None}})
+        self.assertNotIn("key", out.get("pb", {}))
+        self.assertEqual(out["pa"]["target"], "A")
+
 
 if __name__ == "__main__":
     unittest.main()
