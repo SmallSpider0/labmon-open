@@ -8597,6 +8597,54 @@ class RoomSuggestTest(unittest.TestCase):
         self.assertEqual(s["key"], "rebalance:pa:t:t/jobs/L.txt/b5")
         self.assertIn("合计还可开 3 条车道", s["text"])
 
+    def test_exclusive_pool_rebalance_commands(self):
+        # 独占共有算力池主机：需要新建清单时改推荐池入口（pool / pool:<id>）并去掉单机专属的 --gpus，
+        # _room_text 同步指向池入口；已有可追加清单时照旧提示追加；非独占/普通主机保持原行为
+        t, f = self.now, self.now + 10 * self.H
+
+        def make_host(hid, *, local=True, lane=None, gpus=None, room=False, pool_id=None, pool_exclusive=False):
+            new = f - 2 * self.H
+            o = {"project": "pa", "local": local, "lane": lane, "free": f, "ends": {}, "why": None, "stop": None,
+                 "gpus": gpus, "idle": False,
+                 "jobs": [{"host": "srv-a", "root": "/r", "queue": "jobs/L.txt", "name": "b5",
+                           "there": f, "rest": new, "end": t + 5 * self.H, "own": new, "dep": False}]}
+            if room:
+                o["room"] = {"busy": 40.0, "lanes": 2}
+            h = {"id": hid, "label": hid, "worker_up": True,
+                 "status": {"offers": [o], "running": [],
+                            "todo": [{"project": "pa", "root": "/r", "queue": "jobs/L.txt", "jobs": ["b5"]}]}}
+            if pool_id is not None:
+                h["pool_id"] = pool_id
+                h["pool_exclusive"] = pool_exclusive
+            return h
+
+        # 1. 独占命名池（pool:demo）跨机新建清单
+        s = RB.suggest([make_host("srv-b", local=False, pool_id="demo", pool_exclusive=True)], None, self.now)["pa"]
+        self.assertIn("labmon worker add pool:demo /r 新清单 --project pa", s["text"])
+        self.assertNotIn("labmon worker add srv-b", s["text"])
+
+        # 2. 独占默认池（pool）同机多开 + gpus=[1] + 吃不满：去掉 --gpus，fit/add 均指 pool
+        s = RB.suggest([make_host("srv-b", local=True, gpus=[1], room=True, pool_id="pool", pool_exclusive=True)],
+                       None, self.now)["pa"]
+        self.assertIn("labmon worker fit pool /r jobs/L.txt --list --project pa", s["text"])
+        self.assertIn("labmon worker add pool /r 新清单 --project pa：", s["text"])
+        self.assertNotIn("--gpus", s["text"])
+        self.assertNotIn("labmon worker add srv-b", s["text"])
+        self.assertNotIn("labmon worker fit srv-b", s["text"])
+
+        # 3. 独占池已有可追加清单：照旧提示追加，不生成 worker add
+        s = RB.suggest([make_host("srv-b", local=False, lane=["/r", "jobs/r.txt"], pool_id="demo", pool_exclusive=True)],
+                       None, self.now)["pa"]
+        self.assertIn("接在 /r/jobs/r.txt 后面", s["text"])
+        self.assertNotIn("labmon worker add", s["text"])
+
+        # 4. 非独占共有池（exclusive=False）与普通主机：保持原单机行为与 --gpus
+        for h in (make_host("srv-b", local=True, gpus=[1], room=True, pool_id="demo", pool_exclusive=False),
+                  make_host("srv-b", local=True, gpus=[1], room=True)):
+            s = RB.suggest([h], None, self.now)["pa"]
+            self.assertIn("labmon worker fit srv-b /r jobs/L.txt --list --project pa", s["text"])
+            self.assertIn("labmon worker add srv-b /r 新清单 --project pa --gpus 1", s["text"])
+
 
 class IdleSleepTest(UnitBase):
     """#164：跑空登记满 IDLE_REG_S（2 天）自动休眠：不摘登记、每轮只 stat 清单文件（不读 .env、状态目录、清单正文）；
