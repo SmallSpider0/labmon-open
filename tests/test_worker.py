@@ -402,7 +402,7 @@ class AdmissionTest(WorkerBase):
         (qb / "state" / "x_s0.failed").unlink()
         self.until(lambda: any(w["name"] == "x_s0" for w in self.status().get("waiting") or []))
         w = next(w for w in self.status()["waiting"] if w["name"] == "x_s0")
-        self.assertIn("没有可用显存够 24 GiB 的卡（同 tag 上次 OOM：放行时估 12.0 GiB ×2", w["why"])
+        self.assertIn("没有可用显存够 24 GiB 的卡（同 tag 同名 上次 OOM：放行时估 12.0 GiB ×2", w["why"])
         self.assertTrue(any(j["name"] == "hog" for j in self.status()["running"]))
         self.release()
         self.until(lambda: len(x_rows()) == 2 and (qa / "state" / "hog.done").exists(), timeout=30)
@@ -857,8 +857,8 @@ class AdmissionUnitTest(UnitBase):
         self.hosts.register("t", "s5", "bp")
         self.fit_status()
         out = self.fit_out(["vit_a", "agg_a"])
-        self.assertIn("可以开车道并行：卡 0 可用 43.9 GiB，要 17.0 GiB（同 tag 上次 OOM：放行时估 8.0 GiB ×2，含另留的 1 GiB）", out["vit_a"])
-        self.assertIn("可以开车道并行：不用 GPU，内存要 42 GiB（同 tag 上次 OOM：放行时估 30.0 GiB ×2；估计 60.0 GiB，封顶为 42.0 GiB（labmon 全停时能给的减去余量））",
+        self.assertIn("可以开车道并行：卡 0 可用 43.9 GiB，要 17.0 GiB（同 tag 同名 上次 OOM：放行时估 8.0 GiB ×2，含另留的 1 GiB）", out["vit_a"])
+        self.assertIn("可以开车道并行：不用 GPU，内存要 42 GiB（同 tag 同名 上次 OOM：放行时估 30.0 GiB ×2；估计 60.0 GiB，封顶为 42.0 GiB（labmon 全停时能给的减去余量））",
                       out["agg_a"])
 
     def test_fit_list_row_on_other_host(self):
@@ -1346,12 +1346,13 @@ class AdmissionUnitTest(UnitBase):
         e0 = self.m.estimate(hist, r)
         oom = lambda name, t, e, **kw: usage_row(name, "p", t, t + 60, **dict(dict(q, tag="sm_vit", rc="1", oom="vram", gpus=["GPU-a"], est=e), **kw))  # noqa: E731
         hist.append(oom("vit_s0", 600, e0, ram_peak=2.0))                    # 几十秒就 OOM、没采到显存峰值：按放行时的估计翻倍
-        self.assertEqual(est(), {"vram": 14.18, "src": "同 tag 上次 OOM：放行时估 7.1 GiB ×2", "ram": 1.1, "ram_src": qs, "util": None})
+        self.assertEqual(est(), {"vram": 14.18, "src": "同 tag 同名 上次 OOM：放行时估 7.1 GiB ×2", "ram": 1.1, "ram_src": qs, "util": None})
+        self.assertEqual(est(name="vit_other_s0")["src"], "同 tag 上次 OOM：放行时估 7.1 GiB ×2")   # 同 tag 全新变体回退到同 tag OOM 下限
         hist.append(oom("vit_s0", 700, self.m.estimate(hist, r), ram_peak=2.0))   # 再 OOM：再翻一倍
         self.assertEqual(est()["vram"], 28.36)
         hist[1:] = [oom("vit_s0", 600, e0, ram_peak=2.0, vram_peak=15360.0)]   # 峰值 15 GiB ×1.1 比估计 ×2 大
         self.assertEqual(est()["vram"], 16.5)
-        self.assertEqual(est()["src"], "同 tag 上次 OOM：OOM 时峰值 15.0 GiB ×1.1")
+        self.assertEqual(est()["src"], "同 tag 同名 上次 OOM：OOM 时峰值 15.0 GiB ×1.1")
         self.assertEqual(est(tag=None)["src"], "同名 上次 OOM：OOM 时峰值 15.0 GiB ×1.1")   # 没写 tag：同名一档照样认
         self.assertEqual(est(vram=8.0)["vram"], 16.5)                       # 写了提示值也抬高
         self.assertEqual(est(vram=24.0)["src"], "提示值")                     # 提示值本来就够大：不动
@@ -1364,19 +1365,126 @@ class AdmissionUnitTest(UnitBase):
         hist[1:] = [oom("vit_s0", 600, e0, ram_peak=2.0, vram_peak=12288.0, min=8.0)]
         self.assertEqual(est()["vram"], 14.18)
         hist.append(usage_row("vit_s2", "p", 800, 900, tag="sm_vit", gpus=["GPU-a"], ram_peak=3.0, vram_peak=16300.0, **q))   # 跑成功一次：回到按实测
-        self.assertEqual(est(), {"vram": 17.51, "src": "同 tag 近 1 次峰值 ×1.1", "ram": 3.3, "ram_src": "同 tag 近 1 次峰值 ×1.1", "util": None})
+        self.assertEqual(est(), {"vram": 17.51, "src": "同 tag 同名 近 1 次峰值 ×1.1", "ram": 3.3, "ram_src": "同 tag 同名 近 1 次峰值 ×1.1", "util": None})
         hist.append(oom("vit_s3", 1000, self.m.estimate(hist, r), oom="ram", ram_peak=30.0))   # 内存 OOM：只抬内存
-        self.assertEqual(est(), {"vram": 17.51, "src": "同 tag 近 1 次峰值 ×1.1", "ram": 33.0, "ram_src": "同 tag 上次 OOM：OOM 时峰值 30.0 GiB ×1.1", "util": None})
+        self.assertEqual(est(), {"vram": 17.51, "src": "同 tag 同名 近 1 次峰值 ×1.1", "ram": 33.0, "ram_src": "同 tag 同名 上次 OOM：OOM 时峰值 30.0 GiB ×1.1", "util": None})
+
+    def test_estimate_tag_name_isolation_and_fallback(self):
+        # #282：同 tag 下优先按 (tag, base_name) 匹配峰值与 OOM 下限；重变体不污染已有自身样本的轻变体，
+        # 全新变体回退到同 tag，同变体不同 seed 共享 (tag, base_name) 历史与 OOM 下限
+        q = dict(root="/r", queue="jobs/q.txt", tag="batch_a", gpus=["GPU-a"])
+        hist = [
+            usage_row("exp_light_s0", "p", 100, 700, ram_peak=14.0, vram_peak=8192.0, cores_peak=2.0, **q),
+            usage_row("exp_heavy_s0", "p", 800, 1400, ram_peak=50.0, vram_peak=32768.0, cores_peak=10.0, **q),
+            usage_row("exp_heavy_s1", "p", 1500, 1560, rc="1", oom="ram", ram_peak=56.0, vram_peak=30720.0,
+                      est={"ram": 55.0, "vram": 36.0}, **q),
+        ]
+        mk = lambda name, **kw: dict({"project": "p", "name": name, "tag": "batch_a", "ram": 0.0, "vram": 0.0, "root": "/r", "queue": "jobs/q.txt"}, **kw)  # noqa: E731
+        # 1. 轻变体不同 seed（_s1 / _seed2 / _rep1）只用自身 (tag, base_name) 样本，不被重变体高峰值及 OOM 污染
+        for nm in ("exp_light_s1", "exp_light_seed2", "exp_light_rep1"):
+            e = self.m.estimate(hist, mk(nm))
+            self.assertEqual((e["ram"], e["vram"], e["cpus"]), (15.4, 8.8, 2))
+            self.assertEqual((e["ram_src"], e["src"], e["cpu_src"]),
+                             ("同 tag 同名 近 1 次峰值 ×1.1", "同 tag 同名 近 1 次峰值 ×1.1", "同 tag 同名 近 1 次峰值 ×1.1"))
+        # 2. 重变体不同 seed 共享 (tag, base_name) OOM 下限；即便轻变体之后再跑成功，重变体 OOM 下限仍不丢失
+        hist.append(usage_row("exp_light_s1", "p", 1600, 2200, ram_peak=13.5, vram_peak=8192.0, cores_peak=2.0, **q))
+        eh = self.m.estimate(hist, mk("exp_heavy_seed9"))
+        self.assertEqual(eh["ram"], 110.0)
+        self.assertEqual(eh["ram_src"], "同 tag 同名 上次 OOM：放行时估 55.0 GiB ×2")
+        self.assertEqual(eh["vram"], 35.2)
+        self.assertEqual(eh["cpus"], 11)
+        # 3. 轻变体自身发生 OOM 时下限照常生效，跑成功一次后解除
+        hist.append(usage_row("exp_light_s2", "p", 2300, 2360, rc="1", oom="ram", ram_peak=20.0,
+                              est={"ram": 15.4, "vram": 8.8}, **q))
+        el_oom = self.m.estimate(hist, mk("exp_light_s3"))
+        self.assertEqual(el_oom["ram"], 30.8)
+        self.assertEqual(el_oom["ram_src"], "同 tag 同名 上次 OOM：放行时估 15.4 GiB ×2")
+        hist.append(usage_row("exp_light_s3", "p", 2400, 3000, ram_peak=14.0, vram_peak=8192.0, cores_peak=2.0, **q))
+        el_ok = self.m.estimate(hist, mk("exp_light_s4"))
+        self.assertEqual((el_ok["ram"], el_ok["ram_src"]), (15.4, "同 tag 同名 近 3 次峰值 ×1.1"))
+        # 4. 同 tag 下全新变体（尚无自身历史）回退到同 tag 峰值（若有更新的重变体 OOM 也会回退到同 tag OOM 下限）
+        en = self.m.estimate(hist, mk("exp_brandnew_s0"))
+        self.assertEqual(en["ram"], 55.0)
+        self.assertEqual(en["ram_src"], "同 tag 近 4 次峰值 ×1.1")
+        hist.append(usage_row("exp_heavy_s2", "p", 3100, 3160, rc="1", oom="ram", ram_peak=58.0,
+                              est={"ram": 55.0, "vram": 36.0}, **q))
+        en2 = self.m.estimate(hist, mk("exp_brandnew_s0"))
+        self.assertEqual(en2["ram"], 110.0)
+        self.assertEqual(en2["ram_src"], "同 tag 上次 OOM：放行时估 55.0 GiB ×2")
+        # 已有自身样本的轻变体依然不被新的重变体 OOM 污染
+        self.assertEqual(self.m.estimate(hist, mk("exp_light_s5"))["ram"], 15.4)
+        # 5. 换 tag 后同名变体自身曾 OOM 仍由 name 档兜底
+        hist_rename = [usage_row("exp_only_s0", "p", 100, 160, rc="1", oom="ram", ram_peak=25.0,
+                                 est={"ram": 20.0, "vram": 8.0}, tag="old_tag", gpus=["GPU-a"], root="/r", queue="jobs/q.txt")]
+        er = self.m.estimate(hist_rename, mk("exp_only_s1", tag="new_tag"))
+        self.assertEqual((er["ram"], er["ram_src"]), (40.0, "同名 上次 OOM：放行时估 20.0 GiB ×2"))
+
+    def test_tag_name_scope_admit_forecast_and_multi_host(self):
+        # #282：多主机（Hosts）跨机历史下，同 tag 重变体高内存及 OOM 不影响轻变体 par=3 并发准入与推演一致性；cpu_hist_peak 同步隔离
+        now = self.hosts.now()
+        self.hosts.usage("u", [
+            usage_row("exp_light_s0", "p", now - 2000, now - 1400, tag="batch_a", gpus=["GPU-a"],
+                      ram_peak=14.0, vram_peak=6144.0, cores_peak=1.5, min=20.0),
+            usage_row("exp_heavy_s0", "p", now - 1300, now - 1240, tag="batch_a", rc="1", oom="ram", gpus=["GPU-a"],
+                      ram_peak=56.0, vram_peak=32768.0, cores_peak=12.0, est={"ram": 50.0, "vram": 30.0}),
+        ])
+        self.hosts.queues({"q1": [
+            "# labmon: par=3",
+            "exp_light_s1|true   # tag=batch_a est_min=20",
+            "exp_light_s2|true   # tag=batch_a est_min=20",
+            "exp_light_s3|true   # tag=batch_a est_min=20",
+        ]}, project="p")
+        self.hosts.register("t", "q1", "p")
+        w = self.w
+        w.info = {"gpus": [{"i": 0, "uuid": "GPU-a", "name": "A100", "total": 49152.0, "free": 48000.0}],
+                  "mem": {"limit": 64.0, "anon": 0.0}, "cpu_quota": 16.0}
+        w.reload_hist()
+        qs = w.registry()
+        w.queue_durs(qs)
+        # 1. 真放行与推演共用 estimate：轻变体均按 14 * 1.1 = 15.4 GiB 记账，3 行同时满足 64 - 8 = 56 GiB 内存空间
+        reqs = [w.prep(r, now, {}) for r in w.requests(qs, False)[1]]
+        self.assertEqual([r["name"] for r in reqs], ["exp_light_s1", "exp_light_s2", "exp_light_s3"])
+        self.assertTrue(all(r["est"]["ram"] == 15.4 and "同 tag 同名" in r["est"]["ram_src"] for r in reqs))
+        snap = w.snapshot({})
+        placed = []
+        def _place_sim(r):
+            x = w.as_job(r)
+            cs, why, res = self.m.place(x, snap, now)
+            if cs is None:
+                return why, res
+            placed.append(r["name"])
+            snap["jobs"].append(self.m.acct_job(x, cs, now, now + 1200, snap["cpu_cap"], self.m.snap_ngpus(snap)))
+            return None
+        left = self.m.admit(reqs, set(), self.m.POLICY, {}, now, _place_sim)
+        self.assertEqual(placed, ["exp_light_s1", "exp_light_s2", "exp_light_s3"])
+        self.assertEqual(left, [])
+        # 2. forecast 推演与 admit 一致：3 行轻变体均在 now 时刻并发排上
+        w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        lanes = w.plan["lanes"]
+        self.assertEqual(len(lanes), 1)
+        self.assertIsNone(lanes[0]["stuck"])
+        self.assertEqual([(j["name"], j["t0"]) for j in lanes[0]["jobs"]],
+                         [("exp_light_s1", round(now)), ("exp_light_s2", round(now)), ("exp_light_s3", round(now))])
+        # 3. cpu_hist_peak 优先取 (tag, base_name)，不被同 tag 重变体高核峰值掩盖
+        self.hosts.usage("u", [
+            usage_row("exp_light_s0", "p", now - 2000, now - 1400, tag="batch_a", gpus=["GPU-a"],
+                      ram_peak=14.0, vram_peak=6144.0, cores_peak=1.5, min=20.0),
+            usage_row("exp_heavy_s1", "p", now - 1200, now - 600, tag="batch_a", gpus=["GPU-a"],
+                      ram_peak=50.0, vram_peak=32768.0, cores_peak=12.0, min=20.0),
+        ])
+        w.reload_hist()
+        self.assertEqual(w.cpu_hist_peak({"project": "p", "name": "exp_light_s1", "tag": "batch_a"}), 1.5)
+        self.assertEqual(w.cpu_hist_peak({"project": "p", "name": "exp_new_s0", "tag": "batch_a"}), 12.0)
 
     def test_estimate_failed_runs_only_raise(self):
         # #134：跑满 5 分钟后失败（没标 oom）的峰值没跑完、只是下限：不占近 5 次的名额，只能抬高；以前近 5 次全是这种失败时估计掉到它们的小峰值
         q = dict(root="/r", queue="jobs/q.txt", tag="sm", gpus=["GPU-a"])
         r = {"project": "p", "name": "vit_s9", "tag": "sm", "ram": 0.0, "vram": 0.0, "root": "/r", "queue": "jobs/q.txt"}
         hist = [usage_row("vit_s%d" % i, "p", 100 * i, 100 * i + 600, vram_peak=18432.0, ram_peak=4.0, **q) for i in range(3)]
-        fail = [usage_row("vit_f%d" % i, "p", 1000 + 100 * i, 1600 + 100 * i, rc="1", vram_peak=2048.0, ram_peak=1.0, **q) for i in range(5)]
+        fail = [usage_row("vit_s%d" % (10 + i), "p", 1000 + 100 * i, 1600 + 100 * i, rc="1", vram_peak=2048.0, ram_peak=1.0, **q) for i in range(5)]
         e = self.m.estimate(hist + fail, r)
-        self.assertEqual((e["vram"], e["ram"], e["src"]), (19.8, 4.4, "同 tag 近 8 次峰值 ×1.1"))
-        hi = usage_row("vit_f9", "p", 2000, 2600, rc="1", vram_peak=20480.0, ram_peak=1.0, **q)
+        self.assertEqual((e["vram"], e["ram"], e["src"]), (19.8, 4.4, "同 tag 同名 近 8 次峰值 ×1.1"))
+        hi = usage_row("vit_s20", "p", 2000, 2600, rc="1", vram_peak=20480.0, ram_peak=1.0, **q)
         self.assertEqual(self.m.estimate(hist + fail + [hi], r)["vram"], 22.0)          # 失败的峰值更大：照样抬高
         self.assertEqual(self.m.estimate([hi] + hist, r)["vram"], 19.8)                  # 比近 5 次跑成功的都旧：不算
         self.assertEqual(self.m.estimate(fail, r)["vram"], 2.2)                          # 一次也没跑成功：照旧取这几条
@@ -1404,7 +1512,7 @@ class AdmissionUnitTest(UnitBase):
         self.assertEqual(est(hist), {"cpus": 4, "cpu_src": "提示值"})                 # 只有 2 次：不收
         hist.append(row(3, 1.1))
         e = est(hist)
-        self.assertEqual(e, {"cpus": 1, "cpus_set": 4, "cpu_src": "清单 cpus=4 偏大：同 tag 近 3 次峰值 1.2 核 ×1.1（开跑仍给 4 核）"})
+        self.assertEqual(e, {"cpus": 1, "cpus_set": 4, "cpu_src": "清单 cpus=4 偏大：同 tag 同名 近 3 次峰值 1.2 核 ×1.1（开跑仍给 4 核）"})
         self.assertEqual(self.m.cpu_threads(e), 4)
         self.assertEqual(self.w.cpus_for({"est": e}), 4)                               # 导出的 LABMON_CPUS 仍按 cpus=
         self.assertEqual(self.m.cpu_threads({"cpus": 3}), 3)

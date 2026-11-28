@@ -732,6 +732,8 @@ def lane_key(j):
 def hist_key(h, kind):
     """同类记录的键（estimate、duration 用）。没记 project 的旧行按目录名猜，只供估时；份额（share）不认它们。"""
     proj = h.get("project") or (project_of(h["root"]) if h.get("root") else None)
+    if kind == "tag_name":
+        return ("tag_name", proj, h.get("tag"), base_name(h.get("name") or ""))
     if kind == "tag":
         return ("tag", proj, h.get("tag"))
     if kind == "name":

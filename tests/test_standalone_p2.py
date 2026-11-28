@@ -200,6 +200,35 @@ class StandaloneHistAndCrossHostTest(unittest.TestCase):
                 self.assertEqual(len(written["rows"]), 300)
                 self.assertTrue(json.loads((wh / "hosts" / "loc1" / "sched.json").read_text(encoding="utf-8"))["standalone"])
 
+    def test_overview_hist_payload_keeps_variants_under_same_tag(self):
+        """#282：看板裁剪 hist_shared.json 按 (project, tag, base_name, gpu) 计数，同 tag 下高频重变体不挤出轻变体历史。"""
+        with tempfile.TemporaryDirectory() as td:
+            st_root = Path(td) / "state"
+            hosts_f = Path(td) / "hosts.toml"
+            hosts_f.write_text(
+                '[[hosts]]\nid = "srv-a"\nssh = "u@192.0.2.10"\n\n'
+                '[[hosts]]\nid = "ext-1"\nssh = "u@203.0.113.10"\nplatform_kind = "other"\nstandalone = true\n',
+                encoding="utf-8",
+            )
+            with mock.patch.dict(os.environ, {"LABMON_STATE": str(st_root), "LABMON_HOSTS": str(hosts_f), "LABMON_NO_NOTIFY": "1", "LABMON_NO_KEYCHAIN": "1"}):
+                PJ.put_config("proj-a", 'id = "proj-a"\ntitle = "A"\n', {}, None, by="test", ops=True)
+                now = time.time()
+                done_rows = [
+                    {"t0": now - 5000, "t1": now - 4900, "project": "proj-a", "name": "exp_light_s0", "min": 10.0, "rc": "0",
+                     "vram_peak": 6144.0, "ram_peak": 14.0, "cores_peak": 2.0, "gpus": ["GPU-0"], "gpu": "A100", "tag": "batch_a"},
+                ] + [
+                    {"t0": now - 4000 + i * 100, "t1": now - 3950 + i * 100, "project": "proj-a", "name": f"exp_heavy_s{i}", "min": 10.0, "rc": "0",
+                     "vram_peak": 32768.0, "ram_peak": 56.0, "cores_peak": 10.0, "gpus": ["GPU-0"], "gpu": "A100", "tag": "batch_a"}
+                    for i in range(25)
+                ]
+                O._keep_usage(ST.state_dir(), "srv-a", done_rows, now, {"GPU-0": 0})
+                h_ext = next(h for h in CF.all_hosts() if h["id"] == "ext-1")
+                payload = O._hist_payload(h_ext, [{"id": "proj-a"}], now)
+                self.assertIsNotNone(payload)
+                names = [r["name"] for r in payload["rows"]]
+                self.assertIn("exp_light_s0", names)
+                self.assertEqual(sum(1 for n in names if n.startswith("exp_heavy_")), 20)
+
 
 class DiskGateWorkDiskCleanTest(unittest.TestCase):
     """本地工作盘 disk_gate、WorkDisk、host_work_disk 可回收、api.disk 与 clean_local 测试。"""
