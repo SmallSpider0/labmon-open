@@ -24,6 +24,7 @@
     "id": "29", "label": "29（A6000）", "ok": true, "error": null,   // 掉线按 health.link_step 判（连续失败 ≥ 2 次且持续 150 秒），掉线了才报 ssh_fail 告警
     "stale": false, "last_ok": null,           // 探针失败时显示上次数据：stale=true，last_ok 为其时刻
     "returned": null,                           // 已归还时为归还时刻（主机清单里写的文字由 config 读入时换算）：不再连接，ok=false、error="已归还"，其余字段都没有
+    "lease_end": 1794200000.0,                  // 可选：有平台租期的自用/池内主机从全局快照透传的租期到期时刻（Unix 秒，health.lease_end），无租期缺省
     "borrow": null,                             // 借来的主机（全局快照里 borrow.check 算好的）：{holder, since, until, for, light（借来时对方在轻用）, away（对方说好不用到几点，Unix 秒；没勾或已作废为 null）, swap（换给自己借来的）, cutoff（约定时间，Unix 秒）, why,
                                                 //   returning, now, back（对方超出预留）, tight（快撞上限）, overdue, keep（给对方留的量；说好不用的时段里带 away，keepText 据此写说好不用）, other（对方的用量 {vram 各卡 MB, ram GiB, cpu 核}：内存与 CPU 不含任何保活的进程树，`ka.sh` 停不了的对方保活也不算，与预留同口径（#37）；显存仍含停不了的保活（它是 labmon 之外的 GPU 进程，那张卡本来就不放），所以抽屉里“对方此刻”的三项口径不一）, late（约定归还挡住、这台不会再放的清单 [{project, root, queue, name, why, n}]，borrow.late_jobs；这一轮没拿到 worker 状态时沿用上一次的，back、tight 同样）, late_do（late 非空时该怎么办的一句，borrow.late_do，否则 null）}；页面上 borrowBadge、borrowText 读它
     "gpus": [{"index": 0, "name": "NVIDIA RTX A6000", "util": 99, "mem_used": 30720, "mem_total": 46068,

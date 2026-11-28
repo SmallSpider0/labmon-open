@@ -289,7 +289,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 | `DELETE /api/hosts/external/<id> {"force"?}` | 移除外部主机（有在跑/排队任务时非 `force` 回 409），同步断开 ControlMaster、清理独立 `known_hosts` 并销毁专用私钥 |
 | `POST /api/hosts/external/<id>/test` | 单次测试外部主机 SSH 连通性、OS/WSL/GPU、Python 版本与 `data_root` 可用空间（不重试） |
 | `POST /api/hosts/external/<id>/key {"rotate"?}` | 查看或轮换外部主机专用 Ed25519 公钥（`rotate=true` 时断开旧连接），仅返回公钥、指纹与授权命令 |
-| `GET /api/hosts` | `{"missing", "hosts": [{"id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until", "worker_home", "data_root", "local_dir", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "platform_kind", "share", "standalone", "ssh_key_mode", "ssh_key_fp", "home_with"}]}`：`labmon host list`、`labmon borrow` 与外部机抽屉共用（普通用户只列他能用及名下的主机，他人私有外部机完全不可见） |
+| `GET /api/hosts` | `{"missing", "hosts": [{"id", "returned", "ssh", "port", "label", "borrow", "owner", "lease_until", "lease_end", "worker_home", "data_root", "local_dir", "disk_warn_gb", "disk_stop_gb", "disk_quota_gb", "platform_kind", "share", "standalone", "ssh_key_mode", "ssh_key_fp", "home_with"}]}`：`labmon host list`、`labmon borrow` 与外部机抽屉共用（`lease_end` 为平台租期动态到期 epoch 秒，无租期或已归还为 null；普通用户只列他能用及名下的主机，他人私有外部机完全不可见） |
 | `POST /api/fleet/manage {"id", "on"}` | `{"id", "on", "msg", "manage"}`：将已开账号的组员名下服务器切为「接入本人调度」（`on=true`，删 `manage` 键并清 `relaunch` 冷却，由主服务后台按共享盘已部署代码自动拉起）或「仅监控」（`on=false`，先停 worker 并记 `auto:monitor` 标记再写 `manage = false`，不杀在跑任务）；严格与 worker 代码部署分离（绝不推送或替换 worker 代码）；已在 `[[hosts]]` 配置、关机、借用中或未开账号回 409（`fleet.set_member_manage`，#224） |
 
 | `GET /api/disk` | `{"rc", "out", "err", "data"}`：`out` 是排好的总盘概况与本人共享盘用量，`data` 是 `disk.person_storage` 的脱敏结果（`api.my_disk`，#211） |
@@ -305,7 +305,7 @@ labmon url <项目 id>         # 看板上这个项目的链接（每个入口�
 实验会话要知道的都用命令拿，不看页面（内置浏览器不认看板的自签证书）、不自己拿 CA 与令牌去 curl。项目缺省取当前目录 `monitor.toml` 的 id（`-c` 指别的、或直接写项目 id）；`--json` 打原始数据给脚本用。都只读、不连服务器、不叫醒 `labmon wait`。
 
 ```bash
-labmon status  [项目 id] [--json]      # 项目现状：各主机（卡的利用率与显存、掉线、借用、GPU 保活与它在 nvidia-smi 里的 PID）、各车道（几个跑完、预计何时跑完、为什么不跑）、
+labmon status  [项目 id] [--json]      # 项目现状：各主机（卡的利用率与显存、掉线、借用、平台租期到期时间、GPU 保活与它在 nvidia-smi 里的 PID）、各车道（几个跑完、预计何时跑完、为什么不跑）、
                                        # 运行中（进度、已跑、预计结束与依据、此刻 CPU 核数、日志最后一行与多久没更新）、排队的预计开始、
                                        # 最近失败（退出码、最后一行、日志位置）、计划项（实际/估时）、挪法建议或挪不了的原因、此刻的告警
 labmon disk    [项目 id | --me] [--json]   # 传项目或目录内有 monitor.toml 时查该项目共享盘与本地盘用量；加 --me 或目录无 monitor.toml 时走 GET /api/disk 查本人共享盘与总盘概况（#211）

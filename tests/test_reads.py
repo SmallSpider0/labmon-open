@@ -319,6 +319,87 @@ class ReadsTest(unittest.TestCase):
         for need in ("labmon status", "labmon disk", "labmon records", "$LABMON_CACHE"):
             self.assertTrue(need in text, f"skill 里没有 {need}")
 
+    def test_lease_end_expose_hosts_collect_and_status(self):
+        """#272：GET /api/hosts、collect._hosts 项目快照、labmon host list 与 labmon status 暴露平台租期到期时间，无租期机不显示。"""
+        from labmon import api as A
+        from labmon import collect as CL
+        from labmon.config import fmt_time
+
+        hosts_toml = self.d / "hosts_lease.toml"
+        hosts_toml.write_text(
+            '[[hosts]]\nid = "h1"\nssh = "root@192.0.2.1"\nlabel = "自用机1"\nlease_days = 7\n'
+            '[[hosts]]\nid = "ext1"\nssh = "u@203.0.113.10"\nlabel = "自有外部机"\nplatform_kind = "none"\nstandalone = true\n'
+            '[[hosts]]\nid = "ext2"\nssh = "u@203.0.113.11"\nlabel = "外租机"\nplatform_kind = "other"\nstandalone = true\nlease_until = "2026-12-01 12:00"\n'
+            '[[hosts]]\nid = "ret1"\nssh = "root@192.0.2.2"\nlabel = "已归还机"\nreturned = "2026-11-01 10:00"\nlease_days = 7\n'
+        )
+        le1 = round(self.now + 3 * 86400)
+        with mock.patch.dict(os.environ, {"LABMON_HOSTS": str(hosts_toml)}):
+            save_json(state_dir() / "snapshot.json", {
+                "generated": self.now,
+                "hosts": [
+                    {"id": "h1", "worker_up": True, "lease_end": le1, "status": {"running": [], "info": {"gpus": []}}},
+                    {"id": "ext1", "worker_up": True, "status": {"running": [], "info": {"gpus": []}}},
+                ],
+            })
+            # 1. GET /api/hosts 透传动态 lease_end（外租机无快照时回退 lease_until；无租期机与已归还机为 None）
+            res = A.hosts()
+            by_id = {h["id"]: h for h in res["hosts"]}
+            self.assertEqual(by_id["h1"]["lease_end"], le1)
+            self.assertIsNone(by_id["ext1"]["lease_end"])
+            self.assertIsNotNone(by_id["ext2"]["lease_end"])
+            self.assertIsNone(by_id["ret1"]["lease_end"])
+
+            # 2. labmon host list 展示有租期主机的到期时间，无租期外部机与已归还机不显示
+            board(self)
+            rc, out, err = run(["host", "list"])
+            self.assertEqual(rc, 0, err)
+            lines = {ln.strip().split()[0]: ln for ln in out.splitlines() if ln.strip()}
+            self.assertIn(f"租期到 {fmt_time(le1)}", lines["h1"])
+            self.assertIn("租期到 12-01 12:00", lines["ext2"])
+            self.assertNotIn("租期到", lines["ext1"])
+            self.assertNotIn("租期到", lines["ret1"])
+
+            # 3. collect._hosts 透传 lease_end 到项目快照 snap["hosts"]，无租期机缺省
+            cfg = {
+                "id": "p1",
+                "hosts": [
+                    {"id": "h1", "label": "自用机1", "ssh": None, "returned": None, "mounts": [], "checks": []},
+                    {"id": "ext1", "label": "自有外部机", "ssh": None, "returned": None, "mounts": [], "checks": []},
+                ],
+                "queues": [],
+            }
+            probes = {
+                "h1": ({"t": self.now, "gpu": [], "cgroup": {}, "mounts": {}, "checks": {}}, None),
+                "ext1": ({"t": self.now, "gpu": [], "cgroup": {}, "mounts": {}, "checks": {}}, None),
+            }
+            psnap: dict = {"hosts": [], "alerts": []}
+            sd = self.d / "sd_lease"
+            sd.mkdir()
+            CL._hosts(cfg, probes, False, load_json(state_dir() / "snapshot.json", {}), psnap, {}, [], sd, self.now)
+            ph = {h["id"]: h for h in psnap["hosts"]}
+            self.assertEqual(ph["h1"].get("lease_end"), le1)
+            self.assertNotIn("lease_end", ph["ext1"])
+
+            # 4. labmon status 文本与 --json 展示 lease_end（无租期机不显示）
+            self.snap(hosts=[
+                {"id": "h1", "label": "h1（A6000）", "ok": True, "lease_end": le1,
+                 "gpus": [{"index": 0, "util": 50, "mem_used": 10240, "mem_total": 46068}]},
+                {"id": "ext1", "label": "自有外部机", "ok": True,
+                 "gpus": [{"index": 0, "util": 10, "mem_used": 2048, "mem_total": 24576}]},
+            ])
+            rc, out, err = run(["status", "p1"])
+            self.assertEqual(rc, 0, err)
+            h1_line = next(ln for ln in out.splitlines() if "h1（A6000）" in ln)
+            ext1_line = next(ln for ln in out.splitlines() if "自有外部机" in ln)
+            self.assertIn(f"租期到 {fmt_time(le1)}", h1_line)
+            self.assertNotIn("租期到", ext1_line)
+
+            rc, jout, err = run(["status", "p1", "--json"])
+            self.assertEqual(rc, 0, err)
+            jhosts = {h["id"]: h for h in json.loads(jout)["hosts"]}
+            self.assertEqual(jhosts["h1"]["lease_end"], le1)
+            self.assertNotIn("lease_end", jhosts["ext1"])
+
 
 if __name__ == "__main__":
     unittest.main()

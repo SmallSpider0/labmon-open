@@ -126,6 +126,9 @@ def cmd_host(argv: list[str]) -> int:
             if h.get("standalone"):
                 tag = "外部机" + (f" · {h['owner']}" if h.get("owner") else "")
                 extra = f"{tag}{' ' + extra if extra else ''}"
+            if not h.get("returned") and h.get("lease_end"):
+                lt = f"租期到 {fmt_time(h['lease_end'])}"
+                extra = f"{extra}  {lt}" if extra else lt
             ptag = f"  [共有池 {h['pool_host_id']}{'·独占' if h.get('pool_exclusive') else ''}]" if h.get("pool_host_id") else ""
             print(f"  {h['id']:<10} {st:<22} {h.get('ssh') or '本机'}:{h.get('port', 22)}  {h.get('label') or ''}  {extra}{ptag}".rstrip())
         groups: dict = {}                   # 共用 worker 目录的在用主机按目录分组（#35 A；旧看板没有 home_with 时不打）
