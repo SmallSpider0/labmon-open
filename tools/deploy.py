@@ -519,7 +519,26 @@ def _update_remote(wait_min: float, checks: list) -> dict:
     return u
 
 
-def deploy(wait_min: float) -> tuple[int, list[str]]:
+def notify_sessions(commit: str, commits: list[str], files: list[str], *,
+                    restart: bool, worker: bool, projects: list[str] | None = None) -> tuple[bool, str]:
+    """部署验活全部通过后经 POST /api/deploy/tell 通知活跃实验会话（#275）。失败仅返回 (False, 原因)，不改变部署结论。"""
+    payload: dict = {"commit": commit, "commits": commits, "files": files, "restart": restart, "worker": worker}
+    if projects is not None:
+        payload["projects"] = projects
+    try:
+        code, body = http("POST", "/api/deploy/tell", timeout=30, body=payload)
+    except Exception as e:
+        return False, str(e)
+    try:
+        d = json.loads(body) if body else {}
+    except ValueError:
+        d = {}
+    if code == 200:
+        return True, d.get("msg") or f"已通知 {len(d.get('notified') or [])} 个活跃项目"
+    return False, d.get("error") or f"HTTP {code or '连不上'}"
+
+
+def deploy(wait_min: float, *, notify: bool = True, tell_projects: list[str] | None = None) -> tuple[int, list[str]]:
     out: list[str] = []
     checks: list[tuple[bool | None, str]] = []
     # 0. 前提
@@ -615,7 +634,16 @@ def deploy(wait_min: float) -> tuple[int, list[str]]:
     if todo:
         out.append("要你手做：" + "；".join(todo))
     fail = [t for ok, t in checks if ok is False]
-    out.append("结论：核对全部通过。" if not fail else f"结论：{len(fail)} 项核对没过，不报完成：查原因或回退。")
+    tell_note = ""
+    if not fail and notify and u["commits"] and D.should_notify(files):
+        say("通知活跃实验会话")
+        ok, msg = notify_sessions(u["new"], u["commits"], files, restart=restart, worker=bool(wk or started), projects=tell_projects)
+        if ok:
+            tell_note = f"（{msg}）"
+        else:
+            say(f"警告：通知实验会话失败（不影响部署）：{msg}")
+            tell_note = f"（通知会话失败，不影响部署：{msg}）"
+    out.append(f"结论：核对全部通过{tell_note}。" if not fail else f"结论：{len(fail)} 项核对没过，不报完成：查原因或回退。")
     return (1 if fail else 0), head(u["old"], u["new"], u["commits"], MAX_LINES - len(out)) + out
 
 
@@ -639,11 +667,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--wait", type=float, default=30, help="平台操作在做时最多等几分钟（缺省 30）")
     ap.add_argument("--to", help=f"远端模式：常驻机看板的内网入口地址（缺省取 {REMOTE_FILE} 的 url；都没有就是本机模式）")
     ap.add_argument("--ca", help="远端模式：内网入口证书的 CA（缺省取 deploy.toml 的 ca）")
+    ap.add_argument("--no-notify", action="store_true", help="部署验收通过后不通知活跃实验会话")
+    ap.add_argument("--tell", action="append", metavar="PROJECT", help="仅通知指定活跃项目（可多次传入或用逗号分隔）")
     a = ap.parse_args(argv)
+    tell_projects = [p.strip() for item in (a.tell or []) for p in item.split(",") if p.strip()] if a.tell else None
     try:
         conf = {} if a.to else remote_conf()
         TARGET.update(url=a.to or conf.get("url"), ca=a.ca or conf.get("ca"))
-        rc, out = deploy(a.wait)
+        rc, out = deploy(a.wait, notify=not a.no_notify, tell_projects=tell_projects)
     except Stop as e:
         rc, out = 2, [f"没部署：{e}"]
     print("\n".join(out), flush=True)

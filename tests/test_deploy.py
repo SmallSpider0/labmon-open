@@ -79,6 +79,8 @@ class Rig:
         self.lag = 0                    # 拉起之后还有几次采集读到的是旧 worker 的状态（新 worker 还没写出第一份，#70）
         self.timeouts = 0               # 接下来几次采集超时（504，看板上还是旧快照）
         self.tok, self.me = "lm_部署令牌", 200   # 部署令牌（#160）与看板认不认它（/api/me 的状态码）
+        self.tells: list[dict] = []             # 记下发给 POST /api/deploy/tell 的请求体
+        self.tell_resp: tuple[int, bytes] = (200, json.dumps({"notified": ["p1"], "skipped": [], "msg": "已通知 1 个活跃项目"}).encode())
 
     # ---- 假的外部动作 ----
     def git(self, *a):
@@ -124,6 +126,9 @@ class Rig:
             return 200, json.dumps(self.last).encode()
         if path == "/overview.json":                     # 看板上的是最后一次采完的那份
             return 200, json.dumps(self.last).encode()
+        if method == "POST" and path == "/api/deploy/tell":
+            self.tells.append(dict(body or {}))
+            return self.tell_resp
         raise AssertionError(f"没想到的请求 {method} {path}")
 
     def kickstart(self):
@@ -143,7 +148,7 @@ class Rig:
     def sleep(self, s):
         self.t += s
 
-    def run(self, wait=30):
+    def run(self, wait=30, *, notify=True, tell_projects=None):
         self.started = {}
         self.last = self.snap()
         orig = self.worker_start
@@ -155,7 +160,7 @@ class Rig:
                                              _now=lambda: self.t, _sleep=self.sleep, LOG=self.log, say=lambda m: None, PENDING_FILE=self.pending,
                                              page_check=lambda snap: (True, "页面过了")):
             try:
-                return DP.deploy(wait)
+                return DP.deploy(wait, notify=notify, tell_projects=tell_projects)
             except DP.Stop as e:
                 return 2, [f"没部署：{e}"]
 
@@ -218,6 +223,75 @@ class DeployTest(unittest.TestCase):
         self.assertTrue(DP.D.has_worker(["labmon/worker/sched.py"]))
         self.assertTrue(DP.D.has_worker(["labmon/labmon_worker.py"]))
         self.assertFalse(DP.D.has_worker(["labmon/serve.py"]))
+
+    def test_deploy_tell_triggers_and_skips(self):
+        """#275：改了 labmon/ 或 skills/ 且全部验活通过时自动通知；纯文档/测试/工具、无新提交、--no-notify 或验活不过时不发。"""
+        # 1. 代码改动且验活全过 → 自动发 POST /api/deploy/tell
+        r = self.rig(files=["labmon/serve.py", "labmon/__main__.py"])
+        rc, out = r.run()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(r.tells), 1)
+        self.assertEqual(r.tells[0]["commit"], "ccc3333")
+        self.assertTrue(r.tells[0]["restart"])
+        self.assertFalse(r.tells[0]["worker"])
+        self.assertNotIn("projects", r.tells[0])
+        self.assertTrue(any("已通知 1 个活跃项目" in l for l in out), out)
+
+        # 2. 只改 skill（不重启看板）照样通知
+        r_skill = self.rig(files=["skills/lab-experiments/SKILL.md"])
+        rc, out = r_skill.run()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(len(r_skill.tells), 1)
+        self.assertFalse(r_skill.tells[0]["restart"])
+
+        # 3. 纯文档/测试/工具改动不骚扰
+        r_doc = self.rig(files=["docs/deploy.md", "tests/test_deploy.py", "tools/deploy.py", "README.md"])
+        rc, out = r_doc.run()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(r_doc.tells, [])
+
+        # 4. 无新提交不发
+        r_empty = self.rig(files=[], commits=[])
+        rc, out = r_empty.run()
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(r_empty.tells, [])
+
+        # 5. notify=False (--no-notify) 不发
+        r_off = self.rig(files=["labmon/serve.py"])
+        rc, out = r_off.run(notify=False)
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(r_off.tells, [])
+
+        # 6. 验活失败（rc=1）不发
+        r_bad = self.rig(files=["labmon/serve.py"], hosts=[{"id": "a", "auto": True, "status": {"t": 1}, "worker_up": False, "age": 500}])
+        rc, out = r_bad.run()
+        self.assertEqual(rc, 1, out)
+        self.assertEqual(r_bad.tells, [])
+
+    def test_deploy_tell_projects_and_failure_warning(self):
+        """#275：支持 --tell 定向过滤与 --no-notify；通知接口失败只打警告，不把成功的部署标为失败。"""
+        r = self.rig(files=["labmon/serve.py"])
+        rc, out = r.run(tell_projects=["p-alpha", "p-beta"])
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(r.tells[0]["projects"], ["p-alpha", "p-beta"])
+
+        r_fail = self.rig(files=["labmon/serve.py"])
+        r_fail.tell_resp = (500, b'{"error": "boom"}')
+        rc, out = r_fail.run()
+        self.assertEqual(rc, 0, out)
+        self.assertTrue(any("通知会话失败，不影响部署" in l for l in out), out)
+
+        # CLI 参数解析：--no-notify 与 --tell
+        captured = {}
+
+        def fake_deploy(wait_min, *, notify=True, tell_projects=None):
+            captured.update(wait=wait_min, notify=notify, tell_projects=tell_projects)
+            return 0, ["ok"]
+
+        with mock.patch.object(DP, "remote_conf", return_value={}), mock.patch.object(DP, "deploy", fake_deploy), \
+                mock.patch("builtins.print"):
+            self.assertEqual(DP.main(["--no-notify", "--tell", "p1,p2", "--tell", "p3"]), 0)
+        self.assertEqual(captured, {"wait": 30, "notify": False, "tell_projects": ["p1", "p2", "p3"]})
 
     def test_overview_js_change_restarts_and_prompts_browser_check(self):
         """#168 第 3 步：只改 labmon/overview_js/*.js 触发看板重启与浏览器核对，不误判为 doc 或 worker。"""
@@ -716,6 +790,84 @@ class RemoteTest(unittest.TestCase):
         code, d = self.post(lan, "/api/admin/deploy", self.tok, b)
         self.assertEqual(code, 409)                 # 是 base64、不是 bundle：git bundle verify 不过
         self.assertEqual(sh_git(self.srv, "rev-parse", "HEAD"), self.c1)
+
+    def test_deploy_tell_route_and_wait_delivery(self):
+        """#275：POST /api/deploy/tell 鉴权（公网 404、非 deploy 令牌 403、备用看板 409）、仅发未归档活跃项目、--tell 过滤及 labmon wait 接收。"""
+        from fixtures import make_token, register
+        from labmon import lease as LS, projects as PJ, records as RC, waits as WT
+
+        lan, pub = self.server.server_address[1], self.pub.server_address[1]
+        payload = {
+            "commit": "abcdef1234567",
+            "commits": [f"c{i} 提交标题 {i}" for i in range(1, 7)],
+            "files": ["labmon/serve.py", "labmon/worker/sched.py", "labmon/__main__.py", "skills/lab-experiments/SKILL.md"],
+            "restart": True,
+            "worker": True,
+        }
+        # 权限校验：公网 404，普通用户/非 deploy 令牌 403，非法参数 400
+        self.assertEqual(self.post(pub, "/api/deploy/tell", self.tok, payload)[0], 404)
+        self.assertEqual(self.post(lan, "/api/deploy/tell", make_token("ann", "user", scopes=("project",)), payload)[0], 403)
+        self.assertEqual(self.post(lan, "/api/deploy/tell", make_token("bob", scopes=("read",)), payload)[0], 403)
+        self.assertEqual(self.post(lan, "/api/deploy/tell", make_token("bob", scopes=("project",)), payload)[0], 403)
+        self.assertEqual(self.post(lan, "/api/deploy/tell", self.tok, {"commit": ""})[0], 400)
+        self.assertEqual(self.post(lan, "/api/deploy/tell", self.tok, {"commit": "abc1234", "worker": "yes"})[0], 400)
+
+        # 备用看板拒绝（409 standby）
+        with mock.patch.object(LS, "primary", return_value=False):
+            code, d = self.post(lan, "/api/deploy/tell", self.tok, payload)
+        self.assertEqual(code, 409)
+        self.assertTrue(d.get("standby"))
+
+        # 登记两个活跃项目和一个已归档项目
+        tmp_dir = Path(self.tmp.name)
+        for pid in ("p-active-1", "p-active-2", "p-archived"):
+            cfg = tmp_dir / f"{pid}.toml"
+            cfg.write_text(f'id = "{pid}"\ntitle = "项目 {pid}"\n')
+            register(cfg)
+        PJ._save({"p-archived": {"id": "p-archived", "title": "项目 p-archived", "t": time.time(), "by": "测试"}})
+
+        # 1. 不指定 projects → 通知全部未归档活跃项目，跳过已归档项目
+        code, d = self.post(lan, "/api/deploy/tell", self.tok, payload)
+        self.assertEqual(code, 200, d)
+        self.assertEqual(set(d["notified"]), {"p-active-1", "p-active-2"})
+        self.assertEqual(d["skipped"], [])
+        self.assertIn("abcdef1", d["text"])
+        self.assertIn("已重启看板", d["text"])
+        self.assertIn("已更新 worker", d["text"])
+        self.assertIn("已更新 skill", d["text"])
+        self.assertIn("labmon update", d["text"])
+        self.assertIn("c5 提交标题 5", d["text"])
+        self.assertNotIn("c6 提交标题 6", d["text"])
+        self.assertIn("等共 6 条", d["text"])
+
+        # 验证 records.told() 与 waits.wait_check() 天然接收且只报一次
+        wakes = RC.told()
+        self.assertEqual({w["projects"][0] for w in wakes}, {"p-active-1", "p-active-2"})
+        ov = tmp_dir / "ov.json"
+        ov.write_text(json.dumps({"generated": time.time(), "wake": wakes}))
+        cfg1 = PJ.load_cfg("p-active-1")
+        out1 = PJ.out_dir("p-active-1")
+        out1.mkdir(parents=True, exist_ok=True)
+        (out1 / "snapshot.json").write_text(json.dumps({"generated": time.time(), "alerts": [], "hosts": []}))
+        sf1 = WT.state_file(out1)
+        got1 = WT.wait_check(cfg1, out1, sf1, overview=ov)
+        deploy_keys = [k for k in got1 if k.startswith("page:deploy:p-active-1:")]
+        self.assertEqual(len(deploy_keys), 1, got1)
+        self.assertIn("部署 ", got1[deploy_keys[0]])
+        self.assertIn("abcdef1", got1[deploy_keys[0]])
+        # 第二轮不重报
+        self.assertEqual(WT.wait_check(cfg1, out1, sf1, overview=ov), {})
+
+        # 2. 指定 projects 定向过滤：只发指定活跃项目，已归档/不存在的进 skipped
+        code, d = self.post(lan, "/api/deploy/tell", self.tok, {
+            "commit": "fedcba9",
+            "commits": ["fedcba9 fix: 定向通知"],
+            "files": ["labmon/serve.py"],
+            "projects": ["p-active-2", "p-archived", "no-such"],
+        })
+        self.assertEqual(code, 200, d)
+        self.assertEqual(d["notified"], ["p-active-2"])
+        self.assertEqual(d["skipped"], ["p-archived", "no-such"])
 
     def test_worker_start_route(self):
         """部署后拉起 worker 经 POST /api/worker/start（服务端 workerctl.run_out）。"""

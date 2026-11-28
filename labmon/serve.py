@@ -27,6 +27,7 @@
 部署（#164，deploy.py；管理员的 deploy 作用域）：
     GET  /api/admin/deploy  在跑的提交（commit）、checkout 现在的（head）、启动时刻、正在做的平台操作（busy）、这次启动以来日志里的 Traceback
     POST /api/admin/deploy {"bundle": git bundle 的 base64}  只在内网入口：快进 checkout 的 main（不是快进、平台操作在做时 409），改了代码的等平台操作做完后重启
+    POST /api/deploy/tell {"commit", "commits"?, "files"?, "restart"?, "worker"?, "projects"?}  只在内网入口（仅主服务，#275）：部署验收通过后经 records.tell 通知未归档活跃实验会话
     POST /api/worker/start {"host"}  只在内网入口：部署后拉起这台的 worker（workerctl.run_out），回 {"rc", "out"}
     GET  /api/me 另带 commit、started：在跑的代码是哪个提交、何时启动
 
@@ -1328,6 +1329,22 @@ class Handler(BaseHTTPRequestHandler):
                 out = DP.apply(body.get("bundle"))
                 log(f"部署由 {who.name} 发起：{out['msg']}")
                 return self._json(200, out)
+            if act == "deploy/tell":
+                commit = body.get("commit")
+                if not isinstance(commit, str) or not commit.strip() or len(commit.strip()) > 64 or "\x00" in commit:
+                    raise U.Denied(400, "commit 要是 1 到 64 字的非空字符串")
+                commits = _strings(body, "commits")
+                files = _strings(body, "files")
+                restart = body.get("restart")
+                worker = body.get("worker")
+                if restart not in (None, False, True) or worker not in (None, False, True):
+                    raise U.Denied(400, "restart 与 worker 要是布尔值")
+                projects = None if body.get("projects") is None else _strings(body, "projects")
+                out = DP.tell_sessions(commit.strip(), commits, files, restart=restart, worker=worker, projects=projects)
+                if out["notified"]:
+                    self.board.overview.wake.set()
+                log(f"部署通知（{who.name}）：{out['msg']}")
+                return self._json(200, out)
             if act == "ephemeral/push":
                 res, wake = EP.push(body, who=who.name, who_role=who.role)
                 pid = res.pop("project", None)
@@ -2044,6 +2061,7 @@ ROUTES = [
     _R("GET", r"/api/admin/deploy", "deploy", admin=True),             # 部署（#164）：在跑哪个提交、平台操作、日志里的 Traceback
     _R("GET", r"/api/admin/backup", "backup", admin=True, lan=True),   # 冷备（#163）：笔记本每天经内网入口来取一份（backup pull），不含秘密；公网入口不给（#17）
     _R("POST", r"/api/admin/deploy", "deploy", admin=True, lan=True),  # 收 git bundle 快进、重启：等于在这台上跑新代码，只在内网入口
+    _R("POST", r"/api/deploy/tell", "deploy", admin=True, lan=True),   # 部署验收通过后经 records.tell 通知活跃实验会话（#275）
     _R("POST", r"/api/worker/start", "deploy", admin=True, lan=True),  # 拉起 worker（部署后、labmon worker start）：要连服务器、推代码，仍只在内网入口
     # 命令行（#162，api.py）：会改整台主机、借卡、改主机清单在用不在用的要 admin 令牌（实验会话的 project 令牌做不了，交给用户）
     _R("POST", r"/api/worker/(stop|limit)", "admin", admin=True),

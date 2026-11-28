@@ -24,6 +24,8 @@ BRANCH = "main"
 DOCS = ("docs/", "skills/", ".github/", "tests/", "tools/", ".claude/")    # 加上 *.md：看板服务与 worker 都不 import 它们，改了不用重启
 WORKER = "labmon/labmon_worker.py"
 WORKER_DIR = "labmon/worker/"
+CLI_FILES = ("labmon/__main__.py", "labmon/client.py", "labmon/projsync.py", "labmon/dist.py", "labmon/labmon_ephemeral.py")
+TELL_COMMITS_MAX = 5
 IDLE_MAX_S = 1800        # 部署后等平台操作做完再重启，最多等这么久
 IDLE_POLL_S = 5
 RUNNING: dict = {"commit": None, "started": None}
@@ -50,6 +52,74 @@ def is_page(f: str) -> bool:
 
 def has_worker(files: list[str]) -> bool:
     return any(is_worker(f) for f in files)
+
+
+def is_skill(f: str) -> bool:
+    return f.startswith("skills/")
+
+
+def is_cli(f: str) -> bool:
+    return f in CLI_FILES
+
+
+def has_skill(files: list[str]) -> bool:
+    return any(is_skill(f) for f in files)
+
+
+def has_cli(files: list[str]) -> bool:
+    return any(is_cli(f) for f in files)
+
+
+def should_notify(files: list[str]) -> bool:
+    """本次部署是否包含值得通知实验会话的代码或 skill/CLI 改动（纯文档、测试、工具不骚扰）。"""
+    return any(f.startswith("labmon/") or f.startswith("skills/") for f in files)
+
+
+def tell_text(commit: str, commits: list[str], files: list[str], *,
+              restart: bool | None = None, worker: bool | None = None) -> str:
+    """拼出部署验收通过后经 records.tell 发给实验会话的中文提示。"""
+    short = commit.strip()[:7]
+    restarted = any(not is_doc(f) for f in files) if restart is None else bool(restart)
+    wk = has_worker(files) if worker is None else bool(worker)
+    parts = []
+    if restarted:
+        parts.append("已重启看板")
+    if wk:
+        parts.append("已更新 worker")
+    if has_skill(files):
+        parts.append("已更新 skill")
+    if has_cli(files):
+        parts.append("已更新 CLI（按需运行 labmon update）")
+    scope = f"（{'、'.join(parts)}）" if parts else ""
+    clean = [" ".join(c.split())[:100] for c in commits if isinstance(c, str) and c.strip()]
+    summary = "；".join(clean[:TELL_COMMITS_MAX])
+    if len(clean) > TELL_COMMITS_MAX:
+        summary += f" 等共 {len(clean)} 条"
+    return f"看板已部署到 {short}{scope}：{summary}" if summary else f"看板已部署到 {short}{scope}"
+
+
+def tell_sessions(commit: str, commits: list[str] = (), files: list[str] = (), *,
+                  restart: bool | None = None, worker: bool | None = None,
+                  projects: list[str] | None = None) -> dict:
+    """部署验收通过后经 records.tell 通知未归档的活跃实验会话（#275）：仅主服务可写，可选 projects 定向过滤。"""
+    from . import lease as LS
+    from . import projects as PJ
+    from . import records as RC
+
+    LS.need("通知实验会话部署更新")
+    active = PJ.project_ids()
+    if projects is None:
+        targets, skipped = list(active), []
+    else:
+        req = list(dict.fromkeys(p.strip() for p in projects if isinstance(p, str) and p.strip()))
+        active_set = set(active)
+        targets = [p for p in req if p in active_set]
+        skipped = [p for p in req if p not in active_set]
+    text = tell_text(commit, list(commits), list(files), restart=restart, worker=worker)
+    for pid in targets:
+        RC.tell(pid, "deploy", text, src="部署")
+    msg = f"已通知 {len(targets)} 个活跃项目" + (f"（跳过 {len(skipped)} 个非活跃项目）" if skipped else "")
+    return {"notified": targets, "skipped": skipped, "text": text, "msg": msg}
 
 
 def git(*args: str, timeout: float = 120) -> str:
