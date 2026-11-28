@@ -1102,7 +1102,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         等了多久（屏障、launch 记的 wait）只算没被临时指令、依赖挡住的时间：挡住期间不算，解除后从那时重新起算
         （否则 pause 半小时一 resume，队首立刻满 wait_cap 成屏障，别的项目全让位）；单元从申请时刻起算。"""
         old = self.wsince.get(r["key"])
-        r["est"] = _S.estimate(self.hist, r)
+        r["est"] = _S.estimate(self.hist, r, live=self.live_cpu())
         r["held"] = self.override_hit(r)
         # 依赖没满足（dep_block）、成组的还不能排队（gang_block）：同被临时指令挡住
         r["dep"] = None if r["held"] else self.dep_block(r, now) or self.gang_block(r, now)

@@ -974,8 +974,9 @@ class MeasureMixin:
                 w = t - pw[0]
                 for k, v in (("cores_peak", (u["cpu_s"] - pw[1]) / w), ("rd_peak", (u["rd_b"] - pw[2]) / w / _C.MIB), ("wr_peak", (u["wr_b"] - pw[3]) / w / _C.MIB)):
                     u[k] = round(max(v, u.get(k) or 0), 2)
-                # 近 CPU_WARM_S 内各 1 分钟窗口的核数 [[窗口结束时刻, 核数]]：CPU 记账的回收（Worker.acct）按它
-                u["pks"] = [x for x in u.get("pks") or [] if t - x[0] < _C.CPU_WARM_S] + [[round(t), round((u["cpu_s"] - pw[1]) / w, 2)]]
+                # 近 max(CPU_WARM_S, CPU_FIT_WARM_S) 内各 1 分钟窗口的核数 [[窗口结束时刻, 核数]]：acct 回收取近 CPU_WARM_S 子窗最大值，cpu_fit 取整段平均（#65、#292）
+                keep_w = max(_C.CPU_WARM_S, _C.CPU_FIT_WARM_S)
+                u["pks"] = [x for x in u.get("pks") or [] if t - x[0] < keep_w] + [[round(t), round((u["cpu_s"] - pw[1]) / w, 2)]]
             if not pw or t - pw[0] >= _C.PEAK_WIN:
                 u["pw"] = [t, u["cpu_s"], u["rd_b"], u["wr_b"]]
             if on:                            # 同卡平均几条 labmon 任务（含自己，按时间加权；多卡取各卡平均）：duration 按它挑同类记录（#67）

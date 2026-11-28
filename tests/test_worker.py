@@ -686,7 +686,7 @@ class AdmissionUnitTest(UnitBase):
         self.assertEqual(self.w.cpu_block, {})
         self.w.running["j"]["use"] = {"cores": 0.5}                                 # 记 4 核、实测 0.5：实际空着的够，是记账挡住的
         self.assertEqual(self.place(r), ("CPU 不够：要 1 核（提示值），按记账只剩 0.0 核（配额 4：在跑 1 个记 4 核，其中 1 个记账比实测多（实测共 0.5 核））；"
-                                         "实际空着的够，是在跑的记账比实测多，开跑满 10 分钟后按实测回收", True))
+                                         "实际空着的够，是在跑的记账比实测多，开跑满 3 分钟后按实测回收", True))
         self.assertEqual(r["code"], "cpu_est")
         self.assertIsNone(tick(r))
         self.hosts.advance(self.m.CPU_ALERT_S - 1)
@@ -719,10 +719,10 @@ class AdmissionUnitTest(UnitBase):
         self.assertEqual([self.w.acct(self.w.running[k])["cpu"] for k in "abcd"], [1.0, 1.0, 2.0, 2.0])
         r = self.req(key="k", name="u", cpus=2)
         self.assertEqual(self.place(r), ("CPU 不够：要 2 核（提示值），按记账只剩 0.0 核（配额 6：在跑 4 个记 6 核，其中 2 个记账比实测多（实测共 2.0 核））；"
-                                         "实际空着的够，是在跑的记账比实测多，开跑满 10 分钟后按实测回收", True))
+                                         "实际空着的够，是在跑的记账比实测多，开跑满 3 分钟后按实测回收", True))
         self.assertEqual(r["code"], "cpu_est")
         for k in ("c", "d"):
-            self.w.running[k]["use"]["pk0"] = now - warm                       # 满 10 分钟：按近 10 分钟窗口核数的最大值 1.4 记
+            self.w.running[k]["use"]["pk0"] = now - warm                       # 满 3 分钟：按近 3 分钟窗口核数的最大值 1.4 记
         self.assertEqual([self.w.acct(self.w.running[k])["cpu"] for k in "abcd"], [1.0, 1.0, 1.4, 1.4])
         self.assertIsNone(self.place(self.req(key="k2", name="u2", cpus=1)))  # 6 − 4.8 = 1.2 核：要 1 核的放得下
         c = self.w.running["c"]
@@ -730,7 +730,20 @@ class AdmissionUnitTest(UnitBase):
         r = self.req(key="k", name="u", cpus=1)                                # 刚放的 u2 记 1 核：只剩 0.2
         self.assertEqual(self.place(r), ("CPU 不够：要 1 核（提示值），按记账只剩 0.2 核（配额 6：在跑 5 个记 5.8 核）", True))
         self.assertEqual(r["code"], "cpu")                                     # 核真会被用到：正常排队，不算“记账比实测多”、不告警
-        c["use"]["cores"] = 3.0                                                # 后段又冒尖：跟着实测涨回去
+        # #292：开头加载高核留在近 3 分钟子窗内时不贸然回收，滑出 3 分钟子窗后平滑回落；突增当轮立即跟进不欠记账
+        c["est"]["cpus"] = 6
+        c["use"].update(t=now, pk0=now - warm, cores=1.0, cores_peak=5.5,
+                        pks=[[now - 120, 5.5], [now - 60, 1.0], [now, 1.0]])
+        self.assertEqual(self.w.acct(c)["cpu"], 5.5)                           # 加载尖峰仍在近 3 分钟窗内：保持 5.5
+        c["use"].update(t=now + 60, pks=[[now - 120, 5.5], [now - 60, 1.0], [now, 1.0], [now + 60, 1.0]])
+        self.assertEqual(self.w.acct(c)["cpu"], 1.0)                           # 滑出 3 分钟子窗：平滑回落到 1.0（旧窗仍保留供 cpu_fit）
+        c["use"]["cores"] = 4.5                                                # 后段突增：当轮立即跟进到 4.5，不欠记账
+        self.assertEqual(self.w.acct(c)["cpu"], 4.5)
+        # cpu_fit 仍守 10 分钟（CPU_FIT_WARM_S）观察窗，不因回收提速到 3 分钟提前误报
+        c["use"].update(t=now, pk0=now - warm, cores=1.0, cores_peak=1.0, pks=[[now - 60, 1.0], [now, 1.0]])
+        self.assertIsNone(self.m.cpu_fit(dict(c, gpus=["GPU-a"], est={"cpus": 6, "cpu_src": "提示值", "ram": 1.0, "vram": 1.0}), 6, {"GPU-a": 30}))
+        c["est"]["cpus"] = 2
+        c["use"].update(t=now, pk0=now - warm, cores=3.0, pks=[[now, 1.0]])    # 后段又冒尖：跟着实测涨回去
         self.assertEqual(self.w.acct(c)["cpu"], 3.0)
         c["use"].update(cores=0.2, pks=[[now, 0.2]])                           # 几乎不用：不低于 1 核
         self.assertEqual(self.w.acct(c)["cpu"], 1.0)
@@ -780,7 +793,7 @@ class AdmissionUnitTest(UnitBase):
         self.assertIn("y_s1：CPU 不够：要 3 核（同名 近 1 次峰值 ×1.1；估计 10 核，封顶为 3 核（labmon 全停时能给的）），按记账只剩 1.5 核（配额 4：在跑 1 个记 2 核；", fit("y_s1"))
         # #86：核被谁记着与真放行同一个 cpu_held；在跑的还没回收、此刻只用 0.5 核，加回去就够：句尾同真放行写会回收
         self.hosts.status("t", info=info, room=room, running=[running_job("r", "b", acct={"ram": 1.0, "vram": 0, "cpu": 2.0}, use={"cores": 0.5, "t": now})])
-        self.assertIn("其中 1 个记账比实测多（实测共 0.5 核）；labmon 之外占 0.5）；实际空着的够，是在跑的记账比实测多，开跑满 10 分钟后按实测回收 → 排在已有车道后面", fit("x_s1"))
+        self.assertIn("其中 1 个记账比实测多（实测共 0.5 核）；labmon 之外占 0.5）；实际空着的够，是在跑的记账比实测多，开跑满 3 分钟后按实测回收 → 排在已有车道后面", fit("x_s1"))
         self.hosts.status("t", info=info, room=dict(room, cpu=3.5), running=[])
         self.assertIn("y_s1：可以开车道并行", fit("y_s1"))
         # #112：fit 与 worker status 每台都写配额与已记的核（cpu_line），status 的运行行写这个任务记几核
@@ -1631,15 +1644,15 @@ class AdmissionUnitTest(UnitBase):
                          "缺省 1 核")                                               # 本机没有这条历史
 
     def test_estimate_cpu_shrink(self):
-        # #91：写了 cpus= 的同类至少 3 次、近 5 次每次都“给多了”（峰值 ≤ 一半且少至少 1 核，开跑给的核不少于现在写的），没开跑的按实测记账；
-        # 开跑仍按 cpus= 给（cpu_threads：LABMON_CPUS、线程数不变）
+        # #91、#292：写了 cpus= 的同类已有 ≥1 次有效历史，且开跑给的核不少于现在写的、按实测峰值 ×1.1 取整至少比声明小 1 核，
+        # 没开跑的即连续收敛记账；开跑仍按 cpus= 给（cpu_threads：LABMON_CPUS、线程数不变）
         r = {"project": "pb", "name": "a_s9", "tag": "sm", "ram": 1.0, "vram": 0.0, "cpus": 4.0}
         row = lambda i, pk, give=4, **kw: dict(usage_row("a_s%d" % i, "pb", 100 * i, 100 * i + 600, tag="sm", ram_peak=1.0,   # noqa: E731
                                                          cores_peak=pk, est={"cpus": give, "cpu_src": "提示值"}, give=give), host="o", **kw)
         est = lambda hist, **kw: {k: v for k, v in self.m.estimate(hist, dict(r, **kw)).items() if k.startswith("cpu")}   # noqa: E731
-        hist = [row(1, 1.0), row(2, 1.2)]
-        self.assertEqual(est(hist), {"cpus": 4, "cpu_src": "提示值"})                 # 只有 2 次：不收
-        hist.append(row(3, 1.1))
+        hist = [row(1, 1.0)]
+        self.assertEqual(est(hist), {"cpus": 1, "cpus_set": 4, "cpu_src": "清单 cpus=4 偏大：同 tag 同名 近 1 次峰值 1.0 核 ×1.1（开跑仍给 4 核）"})
+        hist += [row(2, 1.2), row(3, 1.1)]
         e = est(hist)
         self.assertEqual(e, {"cpus": 1, "cpus_set": 4, "cpu_src": "清单 cpus=4 偏大：同 tag 同名 近 3 次峰值 1.2 核 ×1.1（开跑仍给 4 核）"})
         self.assertEqual(self.m.cpu_threads(e), 4)
@@ -1649,9 +1662,11 @@ class AdmissionUnitTest(UnitBase):
         hist += [dict(row(4, 1.5), est={"cpus": 1, "cpus_set": 4, "cpu_src": "清单 cpus=4 偏大"}, give=4), row(5, 1.0)]
         self.assertEqual(est(hist)["cpus"], 2)                                         # 峰值最大 1.5 ×1.1 取整
         self.assertEqual(est(hist, cpus=8.0), {"cpus": 8, "cpu_src": "提示值"})       # 改大了：旧行给的核比现在写的少，不算证据
-        self.assertEqual(est(hist, cpus=2.0), {"cpus": 2, "cpu_src": "提示值"})       # 峰值 1.5 过了 2 的一半：不收
+        self.assertEqual(est(hist, cpus=2.0), {"cpus": 2, "cpu_src": "提示值"})       # 峰值 1.5 ×1.1 取整 = 2，不比 2 小：不收
         self.assertEqual(est(hist, cpus=0), {"cpus": 0, "cpu_src": "提示值"})          # cpus=0 不记账，不动
-        self.assertEqual(est(hist + [row(6, 2.5)]), {"cpus": 4, "cpu_src": "提示值"})   # 近 5 次里有一次过了一半：不收
+        # #292 连续校准：峰值 2.5 过了 4 的一半，但 cpu_from_peak(2.5)=3 仍比 4 少 1 核，照样收敛到 3；峰值 3.3 则 cpu_from_peak(3.3)=4 不收
+        self.assertEqual(est(hist + [row(6, 2.5)])["cpus"], 3)
+        self.assertEqual(est(hist + [row(6, 3.3)]), {"cpus": 4, "cpu_src": "提示值"})
         self.assertEqual(est([dict(h, est=None, give=None) for h in hist]), {"cpus": 4, "cpu_src": "提示值"})   # 旧行不知道给了几核：不收
         self.assertEqual(est([{k: v for k, v in h.items() if k != "give"} for h in hist]), {"cpus": 4, "cpu_src": "提示值"})   # 没记导出核数的行（#99 之前）：不算证据
         # #99（Codex 审 #97）：按那次实际导出的 LABMON_CPUS 认，不按估计。cpus=8 收小过的任务在配额 2 核的主机上跑，导出的只有 2 核，
@@ -1662,6 +1677,56 @@ class AdmissionUnitTest(UnitBase):
         self.assertEqual(est(hist, tag=None)["cpu_src"], "清单 cpus=4 偏大：同名 近 5 次峰值 1.5 核 ×1.1（开跑仍给 4 核）")   # 没 tag：按去种子号同名
         self.assertEqual(est(hist + [row(7, 0.5, rc="1", min=1.0)])["cpus"], 2)        # 没跑成功、不满 5 分钟的不算历史
         self.assertEqual(est([dict(h, queue="jobs/other.txt") for h in hist], tag="other", name="b")["cpus"], 4)   # 同队列一档不收（同一份清单里可以是不同任务）
+
+    def test_cpu_shrink_from_live_running_and_peers(self):
+        # #292：长任务尚无完赛历史，但同变体在跑满 CPU_LIVE_SHRINK_S（10 分钟）后，排队行按在跑峰值连续收敛记账；
+        # 开跑仍按声明值导出 LABMON_CPUS；严格同变体隔离（#282），且支持跨主机 peer_st 与推演 queue_durs 刷新
+        now = self.hosts.now()
+        q, = self.hosts.queues({"c": ["long_a_s1|echo $LABMON_CPUS > out.txt   # gpus=0 cpus=8 tag=exp"]}, "p")
+        for d in (q["state"], q["logs"]):
+            os.makedirs(d)
+        self.w.info = {"mem": {"limit": 100.0, "used": 5.0, "anon": 5.0}, "cpu_quota": 10.0}
+        # 同变体在跑仅 5 分钟（不满 10 分钟）：不收敛排队记账
+        live_use = {"t": now, "pk0": now - 300, "pks": [[now - 60, 1.2], [now, 1.2]], "cores": 1.2, "cores_peak": 1.2}
+        self.w.running["r0"] = {"key": "r0", "project": "p", "name": "long_a_s0", "tag": "exp", "t0": now - 300, "ngpu": 0, "gpus": [],
+                                "est": {"ram": 1.0, "vram": 0.0, "cpus": 8, "cpu_src": "提示值"}, "use": dict(live_use)}
+        (name, cmd), = self.m.list_jobs(q)
+        mk = lambda: self.w.prep(self.m.new_req("queue", "c", "p", q=q, root=q["root"], queue=q["jobs"],
+                                                **dict(self.m.hints(cmd), name=name, cmd=cmd.strip())), now, {})
+        r0 = mk()
+        self.assertEqual((r0["est"]["cpus"], r0["est"].get("cpus_set")), (8, None))
+        # 满 10 分钟稳定观察期：无完赛历史也收敛到 1 核（1.2 * 1.1 取整），开跑仍导出 8 核，queue_durs/forecast 同步刷新
+        self.w.running["r0"]["use"]["pk0"] = now - self.m.CPU_LIVE_SHRINK_S
+        r1 = mk()
+        self.assertEqual((r1["est"]["cpus"], r1["est"]["cpus_set"]), (1, 8))
+        self.assertIn("同 tag 同名 在跑 1 个峰值 1.2 核 ×1.1（开跑仍给 8 核）", r1["est"]["cpu_src"])
+        self.assertEqual(self.w.cpus_for({"est": r1["est"], "ngpu": 0, "gpus": []}), 8)
+        self.w.queue_durs([q])
+        self.assertEqual(self.w.qest[q["key"]][name]["cpus"], 1)
+        # 同变体在跑峰值抬头至 3.8 核：queue_durs 缓存自动失效并刷新为 4 核（3.8 * 1.1 = 4.18 -> 4）
+        self.w.running["r0"]["use"]["cores_peak"] = 3.8
+        self.w.queue_durs([q])
+        self.assertEqual(self.w.qest[q["key"]][name]["cpus"], 4)
+        # #282 变体隔离：同 tag 下不同变体（long_b_s0）在跑满 10 分钟，不得把 long_a_s1 收小
+        self.w.running["r0"]["name"] = "long_b_s0"
+        self.w.running["r0"]["use"]["cores_peak"] = 1.0
+        r_iso = mk()
+        self.assertEqual((r_iso["est"]["cpus"], r_iso["est"].get("cpus_set")), (8, None))
+        # 跨主机 peer_st 在跑同变体满 10 分钟：配额够（give=8 >= 8）可收敛，小配额主机（give=2 < 8）不收敛（#99 护栏）
+        self.w.running.clear()
+        peer_job = {"project": "p", "name": "long_a_s0", "tag": "exp", "ngpu": 0, "gpus": [],
+                    "est": {"ram": 1.0, "vram": 0.0, "cpus": 8, "cpu_src": "提示值"},
+                    "use": {"t": now, "pk0": now - self.m.CPU_LIVE_SHRINK_S, "pks": [[now, 1.5]], "cores": 1.5, "cores_peak": 1.5}}
+        self.w.peer_st = {"small": {"info": {"cpu_quota": 2.0, "gpus": []}, "running": [peer_job]}}
+        self.assertEqual((mk()["est"]["cpus"], mk()["est"].get("cpus_set")), (8, None))
+        self.w.peer_st = {"big": {"info": {"cpu_quota": 16.0, "gpus": []}, "running": [peer_job]}}
+        r_peer = mk()
+        self.assertEqual((r_peer["est"]["cpus"], r_peer["est"]["cpus_set"]), (2, 8))
+        # 回归测试（PR #298 审查阻塞）：同项目同时存在有 tag（str）和无 tag（None）的满 10 分钟在跑任务时，queue_durs 不得因 sorted(None vs str) 抛 TypeError
+        notag_job = dict(peer_job, name="plain_s0", tag=None)
+        self.w.running["r_notag"] = dict(notag_job, key="r_notag", t0=now - self.m.CPU_LIVE_SHRINK_S)
+        self.w.queue_durs([q])
+        self.assertEqual(self.w.qest[q["key"]][name]["cpus"], 2)
 
     def test_cpu_shrunk_admits_but_labmon_cpus_kept(self):
         # #91：清单写 cpus=4、同 tag 近 3 次峰值只有 1 核出头：排队的按 1 核记账（配额 5、别的任务记着 3 核时照样放得下），
