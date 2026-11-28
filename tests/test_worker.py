@@ -7100,6 +7100,95 @@ class PressTest(UnitBase):
         self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 80})
         self.assertEqual(low_all2["cpu_fit"]["how"], "high")
 
+    def test_cpu_low_suppressed_for_singlethread_jobs(self):
+        # #286：单线程 GPU 任务在 cpus=1 与 cpus=2 下不再触发 cpu_low ↔ cpu_high 互斥告警；
+        # gpu_slack（fit / offers）共用同一抑制口径
+        t = self.hosts.now()
+        use = lambda avg, peak=None: {   # noqa: E731
+            "t": t, "pk0": t - 700, "pks": [[t - 60 * i, avg] for i in range(10)],
+            "cores": avg, "cores_peak": avg if peak is None else peak,
+        }
+        self.w.info = dict(self.w.info, cpu_quota=8.0)
+        util = {"GPU-a": 30}
+        cards = [{"i": 0, "uuid": "GPU-a", "util": 30}]
+
+        # 1) 队列 .env 显式设 OMP_NUM_THREADS=1：cpus=1 + 稳定 1.0 核 + GPU 30% 不报 cpu_low，gpu_slack 也不标 bound
+        qdir = os.path.join(self.tmp.name, "st_env_proj")
+        os.makedirs(qdir, exist_ok=True)
+        envf = os.path.join(qdir, "q.env")
+        with open(envf, "w") as f:
+            f.write("OMP_NUM_THREADS=1\n")
+        q = {"key": "q_env1", "root": qdir, "jobs": "q.txt", "env": envf, "project": "pa"}
+        j_env = {"key": "e1", "name": "det_s1", "project": "pa", "t0": t - 700, "gpus": ["GPU-a"], "q": q,
+                 "root": qdir, "queue": "q.txt", "cmd": "python train.py # cpus=1",
+                 "est": {"ram": 1.0, "vram": 1.0, "cpus": 1, "cpu_src": "提示值"}, "use": use(1.0)}
+        self.w.running = {"e1": j_env}
+        self.w.cpu_hints(self.w.snapshot({}), util)
+        self.assertIsNone(j_env["cpu_fit"])
+        self.assertEqual(self.m.gpu_slack(cards, [j_env], None, 8, hist=self.w.hist, env_of=self.w.qenv)["bound"], {})
+        # 静态路径（fit 读 status.json，不传 q 与 env_of，只带 root/queue/cmd）同样生效
+        j_st = {k: v for k, v in j_env.items() if k != "q"}
+        self.assertEqual(self.m.gpu_slack(cards, [j_st], None, 8, hist=self.w.hist)["bound"], {})
+
+        # 边界：.env 中通过变量引用固定为 1（需 qenv 展开）同样识别；引用 LABMON_CPUS 则不视为写死
+        envf_var = os.path.join(qdir, "qvar.env")
+        with open(envf_var, "w") as f:
+            f.write("MY_TH=1\nOMP_NUM_THREADS=$MY_TH\n")
+        q_var = dict(q, key="q_var", env=envf_var, jobs="qvar.txt")
+        self.assertEqual(self.m.job_thread_cap({"q": q_var, "cmd": "python train.py"}, env_of=self.w.qenv), 1)
+        envf_dyn = os.path.join(qdir, "qdyn.env")
+        with open(envf_dyn, "w") as f:
+            f.write("OMP_NUM_THREADS=${LABMON_CPUS:-1}\n")
+        q_dyn = dict(q, key="q_dyn", env=envf_dyn, jobs="qdyn.txt")
+        j_dyn = dict(j_env, key="e_dyn", q=q_dyn, cpu_fit=None)
+        self.w.running = {"e_dyn": j_dyn}
+        self.w.cpu_hints(self.w.snapshot({}), util)
+        self.assertEqual(j_dyn["cpu_fit"]["how"], "low")
+        # 边界：.env 写 OMP_NUM_THREADS=1 但命令行覆盖为 OMP_NUM_THREADS=4：不抑制
+        j_ovr = dict(j_env, key="e_ovr", cmd="OMP_NUM_THREADS=4 python train.py # cpus=1", cpu_fit=None)
+        self.w.running = {"e_ovr": j_ovr}
+        self.w.cpu_hints(self.w.snapshot({}), util)
+        self.assertEqual(j_ovr["cpu_fit"]["how"], "low")
+        # 边界：无 .env 但命令行显式写 OMP_NUM_THREADS=1：抑制
+        j_cmd = dict(j_env, key="e_cmd", q=None, root=None, queue=None, cmd="OMP_NUM_THREADS=1 python train.py # cpus=1", cpu_fit=None)
+        self.w.running = {"e_cmd": j_cmd}
+        self.w.cpu_hints(self.w.snapshot({}), util)
+        self.assertIsNone(j_cmd["cpu_fit"])
+        # 边界：同时设 OMP_NUM_THREADS=1 与 OPENBLAS_NUM_THREADS=4（max=4 > give=1）：不抑制
+        self.assertEqual(self.m.thread_cap(env_text="OMP_NUM_THREADS=1\nOPENBLAS_NUM_THREADS=4\n"), 4)
+
+        # 2) 未设 .env，但同类历史在 give=2 下 cores_peak=1.0：cpus=1 不再报 cpu_low（含连跑多轮 cpus=1 后仍有效）
+        self.w.hist = [
+            {"project": "pa", "name": "solo_s0", "tag": "t1", "rc": "0", "cores_peak": 1.0, "give": 2},
+            *[{"project": "pa", "name": f"solo_s{i}", "tag": "t1", "rc": "0", "cores_peak": 1.0, "give": 1} for i in range(1, 7)],
+        ]
+        j_hist = {"key": "h1", "name": "solo_s7", "tag": "t1", "project": "pa", "t0": t - 700, "gpus": ["GPU-a"],
+                  "est": {"ram": 1.0, "vram": 1.0, "cpus": 1, "cpu_src": "提示值"}, "use": use(1.0)}
+        self.w.running = {"h1": j_hist}
+        self.w.cpu_hints(self.w.snapshot({}), util)
+        self.assertIsNone(j_hist["cpu_fit"])
+        self.assertEqual(self.m.gpu_slack(cards, [j_hist], None, 8, hist=self.w.hist)["bound"], {})
+
+        # 3) 反例：真正吃多核的任务（无锁 .env 且无更高 give 低核历史）仍正常报 cpu_low
+        j_multi_fresh = {"key": "m0", "name": "fresh_multi_s1", "project": "pa", "t0": t - 700, "gpus": ["GPU-a"],
+                         "est": {"ram": 1.0, "vram": 1.0, "cpus": 1, "cpu_src": "提示值"}, "use": use(1.0)}
+        self.w.running = {"m0": j_multi_fresh}
+        self.w.cpu_hints(self.w.snapshot({}), util)
+        self.assertEqual((j_multi_fresh["cpu_fit"]["how"], j_multi_fresh["cpu_fit"]["sug"]), ("low", 2))
+        self.assertIn("GPU-a", self.m.gpu_slack(cards, [j_multi_fresh], None, 8, hist=self.w.hist)["bound"])
+
+        # 反例：历史在 give=2 下确实跑到了 1.8 核，cpus=1 时仍正常报 cpu_low（且同 tag 下不同变体按 tag_name 隔离）
+        self.w.hist = [
+            {"project": "pa", "name": "solo_s0", "tag": "t1", "rc": "0", "cores_peak": 1.0, "give": 2},
+            {"project": "pa", "name": "multi_s0", "tag": "t1", "rc": "0", "cores_peak": 1.8, "give": 2},
+        ]
+        j_multi = {"key": "m1", "name": "multi_s1", "tag": "t1", "project": "pa", "t0": t - 700, "gpus": ["GPU-a"],
+                   "est": {"ram": 1.0, "vram": 1.0, "cpus": 1, "cpu_src": "提示值"}, "use": use(1.0)}
+        self.w.running = {"m1": j_multi}
+        self.w.cpu_hints(self.w.snapshot({}), util)
+        self.assertEqual((j_multi["cpu_fit"]["how"], j_multi["cpu_fit"]["sug"]), ("low", 2))
+        self.assertIn("GPU-a", self.m.gpu_slack(cards, [j_multi], None, 8, hist=self.w.hist)["bound"])
+
     def test_cpu_low_sug_within_quota(self):
         # #112：配额 7 核，同一类两条车道各给 2 核、都跑满了：旧的建议各自是 2 倍 = 4（只封顶到配额），两条照改就要 8 核；
         # 现在按配额减同机别的任务已记的、同类同时在跑的条数均分：每条最多 3 核。别的项目、本项目别的类记的核先扣掉

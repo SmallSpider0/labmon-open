@@ -425,7 +425,7 @@ class OffersMixin:
         now = _C.time.time()
         u10, gs = self.util10(now), self.info.get("gpus") or []
         cards = [{"i": g["i"], "uuid": g["uuid"], "util": u10.get(g["uuid"]), "backend": g.get("backend")} for g in gs]
-        sl = _S.gpu_slack(cards, list(self.running.values()), self.throttle(now), _M.cpu_cap(self.info.get("cpu_quota")))
+        sl = _S.gpu_slack(cards, list(self.running.values()), self.throttle(now), _M.cpu_cap(self.info.get("cpu_quota")), hist=self.hist, env_of=self.qenv)
         if sl["throttle"] is not None:
             return None, sl["throttle"] + "：先减线程，不在这台多开车道"
         if cards and all(c.get("backend") == "mps" for c in cards):
