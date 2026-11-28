@@ -5639,6 +5639,58 @@ class OffersTest(UnitBase):
         self.assertIn("插在 %s/jobs/r_real.txt 里 b1 前面" % q["root"], s["text"])
         self.assertLess(s["to"], s["from"])
 
+    def test_insert_before_skipped_when_moved_job_has_waiting_after_dep(self):
+        # #291：目标清单存在未满足 after= 阻塞行 b1，而被迁任务 a5 自身也带有未满足的 after=ext_a 依赖（即使与 b1 无环）：
+        # 禁止插在 b1 前面（避免逆序依赖或用未就绪迁移行反阻塞前段），改为追加到目标清单末尾，不产生「插在 X 前面」文案
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(5)]
+                    + ["a5|true   # est_min=120 vram=20 after=ext_a"], run=1)
+        self.origin(["ext_a|true   # est_min=60 vram=20", "ext_b|true   # est_min=120 vram=20"], run=2, host="o2", name="ext")
+        q, r = self.local_lane(["b0|true   # est_min=60 vram=20", "b1|true   # est_min=60 vram=20 after=ext_b"], name="r_wait")
+        o = self.cross([q], [r])
+        self.assertEqual((o["lane"], o["before"]), ([q["root"], "jobs/r_wait.txt"], None))
+        self.assertTrue(o["jobs"])
+        self.assertTrue(o["jobs"][0]["dep"])
+        s = self.suggest()["pa"]
+        self.assertIsNone(s["before"])
+        self.assertIn("接在 %s/jobs/r_wait.txt 后面" % q["root"], s["text"])
+        self.assertNotIn("插在", s["text"])
+
+    def test_insert_before_still_applies_when_moved_job_after_is_done(self):
+        # #291：被迁任务 a5 的 after=pre_done 已完成（dep_waiting 为假），目标清单存在真实未满足 after= 阻塞行 b1 时，照常插在 b1 前面
+        self.hosts.usage("t", [usage_row("pre_done", "pa", self.now - 7200, self.now - 3600, ram_peak=1.0, vram_peak=1000.0, gpus=["GPU-a"])])
+        self.w.reload_hist()
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(5)]
+                    + ["a5|true   # est_min=120 vram=20 after=pre_done"], run=1)
+        self.origin(["ext_b|true   # est_min=240 vram=20"], run=4, host="o2", name="ext")
+        q, r = self.local_lane(["b0|true   # est_min=60 vram=20", "b1|true   # est_min=60 vram=20 after=ext_b"], name="r_done_src")
+        o = self.cross([q], [r])
+        self.assertEqual((o["lane"], o["before"]), ([q["root"], "jobs/r_done_src.txt"], "b1"))
+        self.assertTrue(o["jobs"])
+        self.assertFalse(o["jobs"][0]["dep"])
+        s = self.suggest()["pa"]
+        self.assertIn("插在 %s/jobs/r_done_src.txt 里 b1 前面" % q["root"], s["text"])
+
+    def test_rebalance_suggest_and_text_drop_before_when_job_has_dep(self):
+        # #291：看板侧兜底（兼容未升级的旧 worker）：若选中迁移行含 dep=True，即使 offer 带了 before，也归一为 None 且不输出「插在 X 前面」
+        t, H = self.now, self.H
+        base_offer = {
+            "project": "pa", "lane": ["/r", "jobs/r.txt"], "before": "b1", "idle": False,
+            "free": t + 4 * H,
+            "ends": {"o|/r|jobs/q.txt": t + 10 * H},
+            "why": None, "stop": None,
+            "jobs": [{"host": "o", "root": "/r", "queue": "jobs/q.txt", "name": "a5",
+                      "there": t + 10 * H, "rest": t + 6 * H, "end": t + 6 * H, "own": t + 4 * H, "dep": True}],
+        }
+        s_dep = RB.suggest([{"id": "t", "label": "t", "worker_up": True, "status": {"offers": [base_offer]}}], None, t)["pa"]
+        self.assertIsNone(s_dep["before"])
+        self.assertIn("接在 /r/jobs/r.txt 后面", s_dep["text"])
+        self.assertNotIn("插在", s_dep["text"])
+        # 对照：dep=False 时照常保留 before 与「插在 X 前面」
+        ok_offer = dict(base_offer, jobs=[dict(base_offer["jobs"][0], dep=False)])
+        s_ok = RB.suggest([{"id": "t", "label": "t", "worker_up": True, "status": {"offers": [ok_offer]}}], None, t)["pa"]
+        self.assertEqual(s_ok["before"], "b1")
+        self.assertIn("插在 /r/jobs/r.txt 里 b1 前面", s_ok["text"])
+
 
 class ForecastTest(UnitBase):
     """推演写进状态的 plan（forecast）：运行中的单元是 run 条，等待中的单元排在它后面、after 写着等谁，放不下的写原因；输入没变不重算。"""

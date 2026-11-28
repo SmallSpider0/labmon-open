@@ -180,9 +180,12 @@ class OffersMixin:
     def move_before(self, p, cands, q):
         """项目 p 挪来的几行 cands 接进本机清单 q（这一遍推演里的那条，forecast 的 qs 项）时插在哪一行前面：q 里第一条仍有未满足
         after=/afterany= 依赖（dep_waiting）的行（它要等别的任务，清单顺序也算依赖，接在它后面会被它堵住，#43；前置已 done 的不插队）；
-        挪来的有（直接或经别的清单间接）等它或它后面哪一行的不插（插在前面就成环，Codex 审 #63），为 None：接在末尾。跨主机接过来（offers）与同机挪到另一条清单（lane_offer）共用。"""
+        挪来的行里有自身带未满足 after=/afterany= 依赖（dep_waiting）的，或（直接或经别的清单间接）等它或它后面哪一行的不插
+        （插在前面会违背同文件拓扑序、成环或用未就绪迁移行反阻塞目标清单前段，#43、#291），为 None：接在末尾。跨主机接过来（offers）与同机挪到另一条清单（lane_offer）共用。"""
         b = next((x["name"] for x in q["jobs"] if self.dep_waiting(p, x)), None)
         if b:
+            if any(self.dep_waiting(p, c["h"]) for c in cands):
+                return None
             tj = [x["name"] for x in q["jobs"]]
             if self.dep_reaches([k[:2] for c in cands for k in _DP.dep_keys(dict(c["h"], project=p))], {(p, n) for n in tj[tj.index(b):]}):
                 return None

@@ -105,7 +105,7 @@ def _text(p: dict, proj: str, label: dict, t: float, pool_target: dict | None = 
     dep = [j["name"] for j in p["jobs"] if j.get("dep")]
     tail = f"；带 after= 的 {'、'.join(dep)} 放最后" if dep and len(dep) < len(p["jobs"]) else ""
     lane = p.get("lane") and f"{p['lane'][0].rstrip('/')}/{p['lane'][1]}"
-    where = (f"插在 {lane} 里 {p['before']} 前面（避开其 after= 阻塞）" if lane and p.get("before")
+    where = (f"插在 {lane} 里 {p['before']} 前面（避开其 after= 阻塞）" if lane and p.get("before") and not dep
              else f"接在 {lane} 后面" if lane else None)
     add_to = (pool_target or {}).get(tid)
     if p.get("local") and lane:        # 同机挪到另一条早跑完的清单（#110）：车道数不变，原清单在同一台排到别的清单跑完后才跑完
@@ -323,7 +323,9 @@ def suggest(hosts: list[dict], prev: dict | None, t: float, sw: dict | None = No
                 new = _finish(o, k)
                 if f is not None and new is not None and new > f:
                     continue
-                opt = {"target": hid, "lane": o["lane"], "before": o.get("before"), "jobs": o["jobs"][:k], "from": f, "to": new,
+                opt = {"target": hid, "lane": o["lane"],
+                       "before": None if any(j.get("dep") for j in o["jobs"][:k]) else o.get("before"),
+                       "jobs": o["jobs"][:k], "from": f, "to": new,
                        "local": bool(o.get("local")), "gpus": o.get("gpus"), "_orig": orig_o}
                 there = _idle_gain(o["jobs"][:k], GAIN_MIN_S * half) if o.get("idle") and not o.get("local") else False
                 if there is not False:
