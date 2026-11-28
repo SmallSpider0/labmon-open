@@ -1436,5 +1436,109 @@ pool = "P"
         self.assertNotIn("pool_label", by_bob["h1"])
 
 
+class PoolLeasePreferenceTest(Base):
+    """算力池落机租期软偏好（#272）：
+    - 档 1（ok）与档 2（busy）：两台同类机中优先选剩余租期够跑完队首（lease_end - MARGIN_S >= t + dur）的那台；
+    - 两台均短于 dur（均撞租期）时仍照常落机，绝不硬挡、不饿死；
+    - 无估时（dur=None）时退回原排序逻辑。"""
+
+    def setUp(self):
+        super().setUp()
+        self.t = 1_700_000_000.0
+        pools_toml = """
+[pools.a100]
+label = "A100 池"
+hosts = ["h1", "h2"]
+members = ["alice"]
+"""
+        (self.d / "hosts.toml").write_text(SHARED_HOSTS.format(pools=pools_toml))
+
+    def _run_tick(self, h1_lease: float | None, h2_lease: float | None, fit_res: dict) -> list[tuple[str, dict, str, str]]:
+        h1 = make_host_entry("h1", t=self.t, pool_heads={
+            "pool:a100|/r/p1|jobs/q1.txt": {"pool": "pool:a100", "pool_id": "a100", "head": "j1", "n": 2},
+        })
+        h2 = make_host_entry("h2", t=self.t)
+        h1["lease_end"] = h1_lease
+        h2["lease_end"] = h2_lease
+        regs = [{"host": "pool:a100", "queues": [{"root": "/r/p1", "jobs": "jobs/q1.txt", "project": "p1"}]}]
+        moves: list[tuple[str, dict, str, str]] = []
+        with mock.patch.object(P, "LS") as mls:
+            mls.primary.return_value = True
+            P.tick([h1, h2], regs, {"owner": {"p1": "alice"}}, self.t,
+                   move_fn=lambda to, it, pid, rsn: moves.append((to, it, pid, rsn)),
+                   fit_fn=lambda pcfg, it, hs: fit_res)
+        return moves
+
+    def test_ok_prefers_host_with_enough_lease(self):
+        # 队首估时 180 分钟（3h），需要剩余租期 >= 3h + 1h(MARGIN_S) = 4h
+        # h1 仅剩 2h（撞租期），h2 剩 10h（充裕），尽管 h1 id 靠前且更空，仍优先选 h2
+        fit_res = {
+            "head": "j1", "need": {"ngpu": 1}, "dur": 180,
+            "hosts": {
+                "h1": {"ok": True, "load": {"running": 0, "queued": 0, "until": 0}, "free_cards": 2, "free_vram": 80000},
+                "h2": {"ok": True, "load": {"running": 1, "queued": 0, "until": self.t + 600}, "free_cards": 1, "free_vram": 40000},
+            },
+        }
+        moves = self._run_tick(self.t + 2 * 3600, self.t + 10 * 3600, fit_res)
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(moves[0][0], "h2")
+
+        # 无租期限制（lease_end=None）的主机视作够跑完，优先于撞租期主机
+        moves_none = self._run_tick(self.t + 2 * 3600, None, fit_res)
+        self.assertEqual(len(moves_none), 1)
+        self.assertEqual(moves_none[0][0], "h2")
+
+    def test_busy_prefers_host_with_enough_lease(self):
+        # 全池忙（档 2）：h1 更快空出但撞租期（剩 2h < 4h），h2 稍晚空出但租期充裕（剩 12h），优先选 h2
+        fit_res = {
+            "head": "j1", "need": {"ngpu": 1}, "dur": 180,
+            "hosts": {
+                "h1": {"ok": False, "nofit": False, "load": {"running": 1, "queued": 0, "until": self.t + 300}, "free_cards": 0},
+                "h2": {"ok": False, "nofit": False, "load": {"running": 1, "queued": 0, "until": self.t + 900}, "free_cards": 0},
+            },
+        }
+        moves = self._run_tick(self.t + 2 * 3600, self.t + 12 * 3600, fit_res)
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(moves[0][0], "h2")
+
+    def test_all_short_lease_still_places_without_blocking(self):
+        # 两台均短于 dur + MARGIN_S（都只剩 2h < 4h）：绝不硬挡、照常按原排序落到 h1
+        fit_res = {
+            "head": "j1", "need": {"ngpu": 1}, "dur": 180,
+            "hosts": {
+                "h1": {"ok": True, "load": {"running": 0, "queued": 0, "until": 0}, "free_cards": 2, "free_vram": 80000},
+                "h2": {"ok": True, "load": {"running": 1, "queued": 0, "until": self.t + 600}, "free_cards": 1, "free_vram": 40000},
+            },
+        }
+        moves = self._run_tick(self.t + 2 * 3600, self.t + 2 * 3600, fit_res)
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(moves[0][0], "h1")
+
+        # 档 2 两台均撞租期同样照常落到预计最快空出的 h1
+        fit_busy = {
+            "head": "j1", "need": {"ngpu": 1}, "dur": 180,
+            "hosts": {
+                "h1": {"ok": False, "nofit": False, "load": {"running": 1, "queued": 0, "until": self.t + 300}, "free_cards": 0},
+                "h2": {"ok": False, "nofit": False, "load": {"running": 1, "queued": 0, "until": self.t + 900}, "free_cards": 0},
+            },
+        }
+        moves_b = self._run_tick(self.t + 2 * 3600, self.t + 2 * 3600, fit_busy)
+        self.assertEqual(len(moves_b), 1)
+        self.assertEqual(moves_b[0][0], "h1")
+
+    def test_no_dur_falls_back_to_original_order(self):
+        # 无估时（dur=None）：不触发租期软偏好，按原拥挤度选 h1
+        fit_res = {
+            "head": "j1", "need": {"ngpu": 1}, "dur": None,
+            "hosts": {
+                "h1": {"ok": True, "load": {"running": 0, "queued": 0, "until": 0}, "free_cards": 2, "free_vram": 80000},
+                "h2": {"ok": True, "load": {"running": 1, "queued": 0, "until": self.t + 600}, "free_cards": 1, "free_vram": 40000},
+            },
+        }
+        moves = self._run_tick(self.t + 2 * 3600, self.t + 10 * 3600, fit_res)
+        self.assertEqual(len(moves), 1)
+        self.assertEqual(moves[0][0], "h1")
+
+
 if __name__ == "__main__":
     unittest.main()

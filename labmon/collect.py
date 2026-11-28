@@ -665,6 +665,9 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
         if link_step(hs, None if lan_off and h["ssh"] else p is not None, t) == "down":
             hs["down"] = err
         hd: dict = {"id": h["id"], "label": h["label"], "ok": p is not None, "error": err, "borrow": lent.get(h["id"]) or h.get("borrow")}
+        le = (w_hosts.get(h["id"]) or {}).get("lease_end")
+        if le is not None:
+            hd["lease_end"] = le
         hp = host_pool(h["id"], pm) if pm else None
         if hp and _owner_can_see_pool(cfg["id"], hp["id"], pm):
             hd["pool_id"], hd["pool_label"] = hp["id"], hp["label"]

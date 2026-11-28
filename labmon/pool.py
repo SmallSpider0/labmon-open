@@ -22,6 +22,7 @@ from . import projects as PJ
 from . import users as U
 from . import workerctl as W
 from .records import tell
+from .renew import MARGIN_S
 from .state import load_json, save_json, snapshot, state_dir
 from .worker.pure import POOL, is_pool_id, other_load, other_load_text, person_use, pool_host_id, same_list
 from .worker.sched import fair_key
@@ -307,10 +308,19 @@ def _est_card_hours(fit_res: dict | None) -> float:
     return max(0.1, ngpu * hours)
 
 
-def _rank_ok(hid: str, info: dict) -> tuple:
-    """档 1（ok == True 可立刻开跑）：拥挤度轻 → 预计忙到早 → 空卡多 → 空显存多 → 同项目缓存亲和 → 主机 id。"""
+def _lease_pen(lease_end: float | None, t: float, dur_s: float | None) -> int:
+    """租期软偏好（0 优先于 1）：队首有估时 dur_s 且主机有租期时，优先选剩余租期够跑完队首
+    （lease_end - MARGIN_S >= t + dur_s）或无租期限制的主机；均撞租期或无估时同档，绝不硬挡。"""
+    if not dur_s or dur_s <= 0 or lease_end is None:
+        return 0
+    return 0 if float(lease_end) - MARGIN_S >= t + dur_s else 1
+
+
+def _rank_ok(hid: str, info: dict, *, lease_end: float | None = None, t: float = 0.0, dur_s: float | None = None) -> tuple:
+    """档 1（ok == True 可立刻开跑）：租期软偏好 → 拥挤度轻 → 预计忙到早 → 空卡多 → 空显存多 → 同项目缓存亲和 → 主机 id。"""
     ld = info.get("load") or {}
-    return (int(ld.get("running") or 0) + int(ld.get("queued") or 0),
+    return (_lease_pen(lease_end, t, dur_s),
+            int(ld.get("running") or 0) + int(ld.get("queued") or 0),
             float(ld.get("until") or 0.0),
             -int(info.get("free_cards") or 0),
             -float(info.get("free_vram") or 0.0),
@@ -318,11 +328,12 @@ def _rank_ok(hid: str, info: dict) -> tuple:
             hid)
 
 
-def _rank_busy(hid: str, info: dict) -> tuple:
-    """档 2（全池忙时即时落机）：预计最快空出 → 拥挤度轻 → 空卡多 → 主机 id。"""
+def _rank_busy(hid: str, info: dict, *, lease_end: float | None = None, t: float = 0.0, dur_s: float | None = None) -> tuple:
+    """档 2（全池忙时即时落机）：租期软偏好 → 预计最快空出 → 拥挤度轻 → 空卡多 → 主机 id。"""
     ld = info.get("load") or {}
     u = ld.get("until")
-    return (float(u) if u is not None else math.inf,
+    return (_lease_pen(lease_end, t, dur_s),
+            float(u) if u is not None else math.inf,
             int(ld.get("running") or 0) + int(ld.get("queued") or 0),
             -int(info.get("free_cards") or 0),
             hid)
@@ -623,10 +634,12 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
                     it["orig_nofit"] = True
             cand_evals = {h: h_res[h] for h in avail if h in h_res and not h_res[h].get("skip")}
             ok_hosts = {h: v for h, v in cand_evals.items() if v.get("ok")}
+            dur_min = res.get("dur")
+            dur_s = float(dur_min) * 60.0 if dur_min and float(dur_min) > 0 else None
             target = None
             tier = None
             if ok_hosts:
-                target = min(ok_hosts, key=lambda h: _rank_ok(h, ok_hosts[h]))
+                target = min(ok_hosts, key=lambda h: _rank_ok(h, ok_hosts[h], lease_end=(by_host.get(h) or {}).get("lease_end"), t=t, dur_s=dur_s))
                 tier = "ok"
             else:
                 # 档 2：全池忙
@@ -634,7 +647,7 @@ def tick(hosts: list[dict], regs: list[dict], sw: dict | None, t: float, *,
                     continue                                  # 已在健康机排队且非 nofit：不搬防抖动
                 fit_hosts = {h: v for h, v in cand_evals.items() if not v.get("nofit")}
                 if fit_hosts:
-                    target = min(fit_hosts, key=lambda h: _rank_busy(h, fit_hosts[h]))
+                    target = min(fit_hosts, key=lambda h: _rank_busy(h, fit_hosts[h], lease_end=(by_host.get(h) or {}).get("lease_end"), t=t, dur_s=dur_s))
                     tier = "busy"
             if target:
                 rsn = it["reason"] + ("（立刻可放行）" if tier == "ok" else "（全池忙，即时落到预计最快空出主机）")

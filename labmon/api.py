@@ -20,6 +20,7 @@ from . import projects as PJ
 from . import users as U
 from . import workerctl as W
 from .config import GIB, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, host_platform, host_pool, host_share, host_ssh_key, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pool_id_of, pools, resolve_pool, set_returned, set_sched_ovr, user_hosts
+from .health import lease_end as _lease_end
 from .worker import cpu_line, ka_lines, unacct_lines
 from .worker.pure import is_wsl_mnt, other_load, other_load_text, wsl_mnt_warn
 from .records import EVENT_KINDS, project_rows
@@ -86,6 +87,7 @@ def hosts(who: U.Ident | None = None) -> dict:
         pm = pools()
     except ConfigError:
         pm = {}
+    snap_hosts = {str(e["id"]): e for e in (snapshot() or {}).get("hosts") or [] if e.get("id")}
     out = []
     for raw in user_hosts():
         if filter_other and is_other_member_auto(raw, who):
@@ -101,8 +103,11 @@ def hosts(who: U.Ident | None = None) -> dict:
             except PF.PlatformError:
                 fp = None
         hp = host_pool(hid, pm)
+        se = snap_hosts.get(hid)
+        le = None if raw.get("returned") else ((se.get("lease_end") if se else None) or _lease_end(None, h.get("lease_days"), h.get("lease_until")))
         out.append({
             **{k: raw.get(k) for k in keys},
+            "lease_end": le,
             "worker_home": h.get("worker_home"),
             "data_root": h.get("data_root"),
             "local_dir": h.get("local_dir"),
@@ -477,7 +482,8 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
     if (snap.get("lan") or {}).get("ok") is False:
         o.p("  看板那台此刻不在内网：数据是离开前的")
     o.p("主机：")
-    wst = {e.get("id"): e.get("status") for e in (glob or {}).get("hosts") or [] if e.get("worker_up")}   # worker 不在时状态是旧的，不报保活
+    g_hosts = {e.get("id"): e for e in (glob or {}).get("hosts") or [] if e.get("id")}
+    wst = {hid: e.get("status") for hid, e in g_hosts.items() if e.get("worker_up")}   # worker 不在时状态是旧的，不报保活
     for h in snap.get("hosts") or []:
         name = h.get("label") or h["id"]
         if h.get("returned"):
@@ -501,7 +507,8 @@ def status(pid: str, glob: dict | None = None, now: float | None = None) -> dict
         cards = "，".join(_card(g) for g in h.get("gpus") or [])
         hst = (wst.get(h["id"]) or {}) if h.get("ok") else {}
         other = other_load_text(other_load(hst, pid)) if hst else ""
-        o.p(f"  {name}：{st}" + (f"；{cards}" if cards else "") + (f"；{other}" if other else "") + (f"；{borrow_text(h['borrow'])}" if h.get("borrow") else ""))
+        le = h.get("lease_end") or ((g_hosts.get(h["id"]) or {}).get("lease_end"))
+        o.p(f"  {name}：{st}" + (f"；{cards}" if cards else "") + (f"；{other}" if other else "") + (f"；{borrow_text(h['borrow'])}" if h.get("borrow") else "") + (f"；租期到 {fmt_time(le)}" if le else ""))
         for ln in ka_lines(hst) + unacct_lines(hst) + [cpu_line(hst)] if hst else []:   # 这台的 GPU 保活（#61）、外部占卡（#114）与 CPU 配额、已记的核（#112）
             if ln:
                 o.p(f"    {ln}")

@@ -1149,6 +1149,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
       <ul>
         <li><b>强校验</b>：池内主机须为同 <code>worker_home</code>（同一共享盘）的常驻远端主机（不含本机、<code>standalone</code> 独立机与借用机），一台主机至多属一个池；池 id 不得与任何主机重名。</li>
         <li><b>清单限制</b>：入池仅拒绝指定卡号（<code>--gpus</code>）与成组起跑（<code>gang=</code>）；默认停法 <code>boundary</code> 与占位任务 <code>hold_*</code> 均可入池。空清单连续 2 天同样自动休眠，改文件即唤醒。</li>
+        <li><b>租期软偏好</b>：落机选台（<code>_rank_ok</code> / <code>_rank_busy</code>）在队首有估时时，优先选剩余租期够跑完队首（扣除到期前 1 小时续租余量 <code>MARGIN_S</code>）或无租期限制的主机；若全池主机均撞租期或无估时，仍照常落机、绝不硬挡。</li>
         <li><b>空闲窃取与撤离</b>：窃取仅搬未在跑的排队清单，受 <code>600 秒</code>（10 分钟）冷却防抖保护防乒乓；主机离线或 worker 失联满 10 分钟（<code>POOL_DOWN_S</code>）、进入 <code>drain</code>、预备续租、归还或移出池配置时自动撤离，并向实验会话发送变更通知。</li>
       </ul>
       <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/fleet.md#算力池">fleet.md「算力池」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/api.md">api.md</a></p>
