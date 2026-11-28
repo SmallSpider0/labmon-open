@@ -82,10 +82,16 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
         out.append(e)
         put[r["lane"]].add(r["_i"])
 
+    rest_box = [()]
+
     def place_(r):
         if r.get("gpar") and r["ngpu"] > 0 and sum(1 for y in S["jobs"] if (y.get("lane") or y["key"]) == r["lane"]) >= r["gpar"]:
             return "并行清单的门槛此刻不给加要卡的行（卡吃满）", False   # forecast 的 gpar：逐行放行时按已排上的核，同一轮放了一行就到顶；不用卡的照排
-        cs, why, res = _S.place(r, S, t)
+        S["gpu_cpu_dyn"] = _S.gpu_dyn_reserve(S, rest_box[0], t) if _S.job_ngpu(r) == 0 else 0.0
+        try:
+            cs, why, res = _S.place(r, S, t)
+        finally:
+            S["gpu_cpu_dyn"] = 0.0
         r["code"] = S["code"]                     # admit 按它认成组留下的（同 Worker.place）
         gstuck.pop(r["lane"], None)
         if cs is not None:
@@ -117,7 +123,8 @@ def simulate(now, snap, queues, focus, cut=None, horizon=None, pol=None, use=Non
                     if d:                         # 等依赖的时间不算排队（同真放行：依赖满足后才开始等）
                         since[k] = r["since"] = max(r["since"], d)
                     reqs.append(r)
-        last.update({r["lane"]: why for r, why, _ in _S.admit(reqs, focus, pol, used(), t, place_, shadow)})
+        last.update({r["lane"]: why for r, why, _ in _S.admit(reqs, focus, pol, used(), t, place_, shadow,
+                                                              before=lambda r, rest: rest_box.__setitem__(0, rest))})
         # 成组：这一轮没重新留的（让位给屏障）放掉；本机的成员都留好了、别的主机上的预计都到点（at）了就一起开跑，没到点的到点再看（同 Worker.gang_commit）
         S["gholds"] = {k: h for k, h in S["gholds"].items() if h["seen"] >= t}
         for gk, g in sorted(gangs.items()):

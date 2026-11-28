@@ -161,21 +161,72 @@ def cpu_room_for(x, S):
 
 
 def cpu_free_for(x, S):
-    """快照里此刻还能给请求 x 多少核与尚未填满的 GPU 保底核数 (cores, rsv_left)（place、fit、推演共用，#225）：
-    读不到配额为 (None, 0.0)。GPU 任务沿用 cpu_free(S)；纯 CPU 任务在有 GPU 保底时，
-    若在跑 GPU 任务已记核数不足 rsv，则扣掉尚未填满的 (rsv - gpu_used) 给 GPU 保底（等价于 cpu_room - cpu_only_used - max(gpu_used, rsv)）；
-    在跑 GPU 任务已用满或超过 rsv 时不重复扣除，不浪费余核。"""
+    """快照里此刻还能给请求 x 多少核与尚未填满的 GPU 保底/动态预留核数 (cores, rsv_left)（place、fit、推演共用，#225）：
+    读不到配额为 (None, 0.0)。GPU 任务沿用 cpu_free(S)；纯 CPU 任务在有 GPU 保底或本轮存在待跑 GPU 动态预留
+    （S["gpu_cpu_dyn"]，由 gpu_dyn_reserve 算得）时，取 max(static_rsv - gpu_used, min(dyn, cpu_room - gpu_used))
+    作为纯 CPU 的临时预留核数 rsv_left：无待跑 GPU 时在跑 GPU 已用满 static_rsv 即不重复扣、不浪费余核；
+    有待跑 GPU 时保护其所需核数，避免交接间隙被纯 CPU 长任务抢占。"""
     cores = cpu_free(S)
     if cores is None:
         return None, 0.0
     if job_ngpu(x) > 0:
         return cores, 0.0
     rsv = gpu_cpu_reserve(snap_ngpus(S), S["cpu_cap"])
-    if rsv <= 0:
+    dyn = max(0.0, float(S.get("gpu_cpu_dyn") or 0.0))
+    if rsv <= 0 and dyn <= 0:
         return cores, 0.0
     gpu_used = sum(j["cpu"] for j in S["jobs"] if not j["hold"] and job_ngpu(j) > 0)
-    rsv_left = max(0.0, rsv - gpu_used)
+    static_left = max(0.0, rsv - gpu_used) if rsv > 0 else 0.0
+    dyn_left = min(dyn, max(0.0, S["cpu_room"] - gpu_used)) if dyn > 0 else 0.0
+    rsv_left = max(static_left, dyn_left)
     return cores - rsv_left, rsv_left
+
+
+def gpu_dyn_reserve(S, reqs, t, check=None):
+    """本轮剩余待跑非占位 GPU 请求此刻的动态核预留（真放行与 simulate 推演共用）：
+    只计入此刻除 CPU 核外其余条件（卡数、显存、内存、独占、tag、截止、成组、并行门槛等）均满足、且与已在跑及
+    已计入的待跑 GPU 合计不超过 S["cpu_room"] 的待跑 GPU 请求所需核数。无 GPU 配额、无可用卡或无满足条件的
+    待跑 GPU 时返回 0.0，避免纯 CPU 白白浪费核。
+    check(r, S_probe) 可选：将请求 r 转为 _place 认的 job_spec 并做真放行侧只读前置检查（缺文件、par_gate、
+    磁盘/内存闸门、本地依赖未就绪等），不满足返回 None。"""
+    if not reqs or S["cpu_cap"] is None or S["cpu_room"] is None or snap_ngpus(S) <= 0 or not S["cards"]:
+        return 0.0
+    cands = [r for r in reqs if not (r.get("hold") or _C.is_hold(r.get("name"))) and job_ngpu(r) > 0]
+    if not cands:
+        return 0.0
+    gpu_used = sum(j["cpu"] for j in S["jobs"] if not j["hold"] and job_ngpu(j) > 0)
+    max_want = max(0.0, S["cpu_room"] - gpu_used)
+    if max_want <= 1e-6:
+        return 0.0
+    S_probe = dict(S, jobs=list(S["jobs"]), holds=dict(S["holds"]), gholds=dict(S.get("gholds") or {}),
+                   gfirst={}, cpu_cap=None, cpu_room=None, brief=True, gpu_cpu_dyn=0.0)
+    want = 0.0
+    for r in cands:
+        if check is not None:
+            x = check(r, S_probe)
+            if x is None:
+                continue
+        else:
+            if r.get("gpar") and sum(1 for y in S_probe["jobs"] if (y.get("lane") or y["key"]) == (r.get("lane") or r["key"])) >= r["gpar"]:
+                continue
+            x = r
+        if x.get("hold") or job_ngpu(x) <= 0:
+            continue
+        if x.get("gang") and _DP.gang_until(S, x, t) is None:
+            continue
+        n, _ = cpu_need(x, S)
+        if n <= 0 or n > S["cpu_room"] + 1e-6:
+            continue
+        if want + n > max_want + 1e-6:
+            continue
+        cs, _, _ = _place(x, S_probe, t)
+        if cs is None:
+            continue
+        want += float(n)
+        S_probe["jobs"].append(acct_job(x, cs, t, None, S["cpu_cap"], snap_ngpus(S)))
+        if want >= max_want - 1e-6:
+            return max_want
+    return min(want, max_want)
 
 
 def gpu_cpu_flex(x, S, n, blocked=()):
@@ -529,7 +580,11 @@ def _place(x, S, t, pre=None):
             mine = [c for c in mine if c["uuid"] in idle_u]
         else:
             code, held = cpu_held(S, cores, n, rsv_left)
-            return None, w(code, held=held, cpus=n, src=src, left=max(0.0, cores), cap=S["cpu_cap"], warm=_C.CPU_WARM_S // 60), True
+            # 纯 CPU 请求若因让核给本轮待跑 GPU（动态预留 > 0 且不扣预留时本来够核）而被挡，不成屏障（res=False），
+            # 否则会反向挡住后续待跑 GPU 请求并造成死锁
+            gpu_yield = (job_ngpu(x) == 0 and (S.get("gpu_cpu_dyn") or 0.0) > 0 and rsv_left > 0
+                         and n <= cores + rsv_left + 1e-6)
+            return None, w(code, held=held, cpus=n, src=src, left=max(0.0, cores), cap=S["cpu_cap"], warm=_C.CPU_WARM_S // 60), not gpu_yield
     kept = "，已扣给对方的预留" if S["kept"] else ""
 
     if x["excl"] == "gpu" and x["ngpu"] > 0:
@@ -589,13 +644,14 @@ def fair_key(r, focus, pol, use, tot=None):
     return (mine, p not in focus, use.get(p, 0.0) / (pol["w"].get(p) or 1.0), r["since"])
 
 
-def admit(reqs, focus, pol, use, now, place, shadow=lambda r: None):
+def admit(reqs, focus, pol, use, now, place, shadow=lambda r: None, before=None):
     """一轮放行的规则（tick 真放行与 simulate 推演共用，规则只在这一处）。每次取排在最前的一个（fair_key）：先比人（同一人的几个项目的用量合起来）；
     同一人的项目之间 focus 的先，再比衰减后的 GPU 用量 ÷ 权重（use，卡·时；pol["w"] 里没写的为 1），小的先，放行一个就记上它预计的卡·时（r["charge"]），
     成组成员留下资源（place 的原因代码 gang_hold，记在 r["code"]）同样记上：留着就占着，后面的按记上之后的排；
     项目内先来先跑。独占任务不另排前面，轮到它时才留卡（place 里）。等得久不另排前面（否则单卡跑长任务时轮到的总是等了一整个任务的那个，
     权重不起作用），只防被越过：place(r) 放行返回 None，否则返回 (原因, 是否卡在资源上)；按这个顺序第一个卡在资源上又等满 pol["cap"] 的
     成为屏障，shadow(r) 给它预计最早能放行的时刻，排在它后面的（占位任务除外）只有预计在那之前跑完的才放（回填，fits_before），其余让位。
+    before(r, left) 可选：在调用 place(r) 前传入当前剩余待评估请求列表 left（供真放行与推演统一计算动态 GPU 核预留）。
     返回没放行的 [(请求, 原因, 排位)]：排位 {n 在没放行的里排第几, puse 轮到它时这人（项目主人）的用量, focus, ratio 轮到它时项目的 用量÷权重, barrier 是屏障,
     behind 被哪个屏障挡着 [项目, 任务]}，看板的等待表据此逐条解释。"""
     use, left, barrier, until, out = dict(use), list(reqs), None, False, []
@@ -614,6 +670,8 @@ def admit(reqs, focus, pol, use, now, place, shadow=lambda r: None):
                     "；它预计 %s 能放行，这之前跑得完的才放" % _C.now_str(until)[5:16] if until else ""),
                     dict(pos, behind=[barrier["project"], barrier["name"]])))
                 continue
+        if before is not None:
+            before(r, left)
         res = place(r)
         if res is None or r.get("code") == "gang_hold":
             use[r["project"]] = use.get(r["project"], 0.0) + (r.get("charge") or 0.0)
