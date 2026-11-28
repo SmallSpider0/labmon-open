@@ -970,14 +970,15 @@ def cpu_line(st):
     return s
 
 
-def cpu_fit(j, cap, util, room=None, cards=()):
+def cpu_fit(j, cap, util, room=None, cards=(), hist_peak=None):
     """在跑的任务 j（状态 running 的形状：name、gpus、est、use）开跑时给的核数是给少了还是给多了（#46；#37 的“被 CPU 卡住”也是它）。
     从开始量窗口核数起满 CPU_WARM_S（cpu_warm）才判；给的核数 give 是开跑时导出的 LABMON_CPUS（cpus_export(cpu_threads)）；util 各卡近 UTIL_WIN_S 的利用率 {uuid: %}。
     - low（给少了、被 CPU 卡住）：近 CPU_WARM_S 各 1 分钟窗口核数（use.pks）的平均不少于 give × CPU_BOUND_FRAC，且所用的卡里有利用率低于 UTIL_LOW 的
       （卡吃饱了加核也没用；不用卡的不判，单线程脚本本来就只用 1 核）。sug 建议写的 cpus= 是 give 的 2 倍，封顶到这一类每条最多能给的（room：cpu_budget 的结果，#112；
       不给时封顶到记账上限 cap）；不比 give 多（已给到上限、配额被别的任务与同类分完了）为 None。low 另带 room 原样（看板写进告警：配额、别的任务记了多少）。
     - high（给多了）：估计来自清单的 cpus=（est.cpu_src 是“提示值”；按历史估的会往实测靠、按实测收小了记账的已经让出，都不判），跑到现在的 1 分钟峰值 use.cores_peak
-      不超过 give × CPU_SPARE_FRAC、且少至少 CPU_SPARE_MIN 核（看整段峰值：开头加载阶段用过的核不算多给）。sug 按峰值估（cpu_from_peak，同 estimate）。
+      （若传了同类历史完成最高峰值 hist_peak，则与它取大，避免已知后段高核的多阶段同类任务在前段早判）不超过 give × CPU_SPARE_FRAC、且少至少 CPU_SPARE_MIN 核
+      （看整段峰值：开头加载阶段用过的核不算多给）。sug 按实测峰值估（cpu_from_peak，同 estimate）。
     返回 {how, avg 近 10 分钟平均核数, peak 整段峰值, give, sug}（low 另有 room），都不是为 None。占位任务、没有估计的不判。
     gpu_slack（fit 开车道）只取 low；状态里运行中任务的 cpu_fit 是它，看板据此出只给实验会话的 cpu_low:、cpu_high: 告警。"""
     u, e = j.get("use") or {}, j.get("est")
@@ -990,7 +991,8 @@ def cpu_fit(j, cap, util, room=None, cards=()):
     if avg >= give * _C.CPU_BOUND_FRAC and any((util.get(g) is not None and util[g] < _C.UTIL_LOW) for g in j.get("gpus") or []):
         lim = room["per"] if room else cap
         return dict(out, how="low", sug=2 * give if lim is None else min(2 * give, lim) if lim > give else None, room=room)
-    if e.get("cpu_src") == "提示值" and e.get("cpus") and peak <= give * _C.CPU_SPARE_FRAC and give - peak >= _C.CPU_SPARE_MIN:
+    eff_peak = max(peak, hist_peak) if hist_peak is not None else peak
+    if e.get("cpu_src") == "提示值" and e.get("cpus") and eff_peak <= give * _C.CPU_SPARE_FRAC and give - eff_peak >= _C.CPU_SPARE_MIN:
         return dict(out, how="high", sug=cpu_from_peak(peak))
     return None
 
@@ -1495,14 +1497,39 @@ class SchedMixin:
         self.pool_reg_cache = {d: c for d, c in self.pool_reg_cache.items() if d in live_dirs}
         return out
 
+    def cpu_hist_peak(self, j):
+        """运行中任务 j 同类历史完成记录的最高 1 分钟核数峰值（同 tag › 去种子号同名第一档，跑成功、非 OOM 的近 HIST_N 条）：
+        供 cpu_hints 传入 cpu_fit，避免已知后段高核的多阶段同类任务在前 10 分钟低核阶段早判 cpu_high；无历史为 None。"""
+        for kind in (("tag", "name") if j.get("tag") else ("name",)):
+            k = _C.hist_key(j, kind)
+            same = [h for h in self.hist if _C.hist_key(h, kind) == k and ran_ok(h) and not h.get("oom")]
+            cr = peak_rows(same, "cores_peak")
+            if cr:
+                return max(h["cores_peak"] for h in cr)
+        return None
+
     def cpu_hints(self, S, util):
-        """运行中任务开跑核数给少、给多（cpu_fit，#46）：同一次运行一旦判出来就留到跑完（j 的 cpu_fit，写进状态、接管时找回）。
-        测量在门槛两侧来回时不反复出现、消失：看板的 cpu_low:、cpu_high: 只在条件出现时叫醒一次，消失后 6 小时内再出现不再叫醒（waits._new_alerts）。
+        """运行中任务开跑核数给少、给多（cpu_fit，#46）：
+        - low（给少了）：同一次运行一旦判出来就留到跑完（j 的 cpu_fit，写进状态、接管时找回），避免 avg/util 在门槛两侧波动时反复出现、消失；
+        - high（给多了）：仅在整段峰值 cores_peak（及同类历史完成峰值）仍显著低于声明核数时保留；若任务后续进入高核阶段使峰值抬头、不再满足 high，
+          自动清除 j["cpu_fit"]（因 cores_peak 单调不减，不会再抖回 high），且本次运行不再反转判为 low，避免多阶段任务产生 cpu_high ↔ cpu_low 反向乒乓。
         给少了的建议核数按这台此刻的快照 S 封顶（cpu_budget：配额减同机别的任务已记的、同类几条同时在跑就均分，#112）。
         fit 开车道（gpu_slack）要的是此刻的样子，照旧现算，不用这份。"""
         for j in self.running.values():
-            if not j.get("cpu_fit"):
-                j["cpu_fit"] = cpu_fit(j, S["cpu_cap"], util, cpu_budget(S, j), snap_ngpus(S))
+            prev = j.get("cpu_fit")
+            if prev and prev.get("how") == "low":
+                continue
+            cur = cpu_fit(j, S["cpu_cap"], util, cpu_budget(S, j), snap_ngpus(S), hist_peak=self.cpu_hist_peak(j))
+            if prev and prev.get("how") == "high":
+                if cur and cur.get("how") == "high":
+                    j["cpu_fit"] = cur
+                else:
+                    j["cpu_fit"] = None
+                    j["cpu_high_cleared"] = True
+            elif cur and cur.get("how") == "low" and j.get("cpu_high_cleared"):
+                j["cpu_fit"] = None
+            else:
+                j["cpu_fit"] = cur
 
     def io_suspect(self, now):
         """读写拥塞嫌疑（只记录、不拦，#4 维护者定）：在跑的任务已跑过同类历史预计时长（duration 的 same）的 SLOW_RATIO 倍，
