@@ -93,26 +93,32 @@ const flagText = (k, p) => p[k].hosts ? `（只在 ${flagHosts(p[k])}）` : p[k]
 const schSb = (p, act, cls, ic, text, hint) => `<button class="btn mini-btn ${cls}" data-sch="${act}" data-p="${esc(p.id)}" ${tip(hint)}>${ic ? icon(ic) : ""}${text}</button>`;
 const schGo = (p, act, text) => `<button class="btn pri" data-sch="${act}" data-p="${esc(p.id)}" ${POP?.busy ? "disabled" : ""}>${POP?.busy ? "正在保存…" : text}</button>`;
 const schErr = () => POP?.err ? `<div class="rn-err">${esc(POP.err)}</div>` : "";
-// 一个项目的权重胶囊「权重 − ×1 +」（调度卡的权重格、项目「管理」抽屉的调度节同一个；#143 维护者定：不弹浮窗，点一下就改）。
+// 一个项目的权重胶囊「权重 − ×1 +」（调度卡的权重格、项目「管理」抽屉的调度节同一个；#143、#280：不弹浮窗，点一下就改，点数值可内联输入）。
 // −、+ 在 W_STEPS 的相邻档间走（set_weight 认 0 到 1000），现值不在档上的往最近的那一档走；到头的那个键禁用。
-// 点了先显示新值（SWB：项目 id → {w, post 正在写回, t}），写回期间这个项目的键禁用；写回后立即采集。
-// 快照里的权重取 worker 状态的 share.weight（overview.sched_view），worker 读到新的 sched.json 要再过一轮，所以立即采集回来的多半还是旧值：
-// 写成功的值留到快照里的权重等于它（swCur 收掉），最多留 W_HOLD_MS（Codex 审查 #147）
+// 点击 −、+ 不锁按钮，立即乐观更新 SWB 并联动 schedOn / shareBar 的「应得份额」，连续点击按 W_DEBOUNCE_MS（350ms）防抖合并成一次 POST /sched/weight；
+// 请求期间若用户又改了新值，旧请求回包（按 seq 核对）不覆盖新值；失败时回滚到上一次已确认权重并提示。写回成功后不强制 collectNow(true)，避免整页闪卡。
+// 后端 sched_view 已优先合并主机清单 [sched.weight]，下次轮询快照确认后 swCur 自动收掉乐观值（最多留 W_HOLD_MS）。
 const W_HOLD_MS = 5 * 60000;
+const W_DEBOUNCE_MS = 350;
 const W_STEPS = [0.1, 0.25, 0.5, 0.75, 1, 1.5, 2, 3, 4, 5, 6, 8, 10, 15, 20, 30, 50, 100, 200, 500, 1000];
 const wStep = (w, d) => d < 0 ? W_STEPS.filter(s => s < w - 1e-9).pop() : W_STEPS.find(s => s > w + 1e-9);
 const SWB = new Map();
+let WED = null;                    // 正在内联输入权重的项目：{pid, val}
 function swCur(p) {
   const e = SWB.get(p.id);
-  if (e && !e.post && (Math.abs(p.w - e.w) < 1e-9 || Date.now() - e.t > W_HOLD_MS)) { SWB.delete(p.id); return null; }
+  if (e && !e.post && !e.timer && (Math.abs(p.w - e.w) < 1e-9 || Date.now() - e.t > W_HOLD_MS)) { SWB.delete(p.id); return null; }
   return e;
 }
+const swVal = p => { const e = swCur(p); return e ? e.w : p.w; };
 function schedW(p) {
-  const e = swCur(p), w = e ? e.w : p.w;
+  const w = swVal(p), ed = canWeight() && WED?.pid === p.id;
   const b = (act, d, ch, what) => { const to = wStep(w, d);
-    return `<button class="btn wb" data-sch="${act}" data-p="${esc(p.id)}" aria-label="权重${what}" ${to == null || e?.post ? "disabled" : ""} ${tip(to == null ? `已是最${d < 0 ? "低" : "高"}的一档` : `${what}到 ×${wtxt(to)}`)}>${ch}</button>`; };
-  return `<span class="flag wcap"><span class="k" ${tip("同一人的几个项目之间：近期用量除以它再比，小的先放，所以权重大的能在这人的份额里多用（不改这人和别人之间的份额）。没写的项目为 1；写进主机清单的 [sched.weight]，各 worker 约 1 分钟内生效")}>权重</span>`
-    + (canWeight() ? b("wd", -1, "−", "调低") : "") + `<b class="num">×${wtxt(w)}</b>` + (canWeight() ? b("wu", 1, "+", "调高") : "") + `</span>`;
+    return `<button type="button" class="btn wb" data-sch="${act}" data-p="${esc(p.id)}" aria-label="权重${what}" ${to == null ? "disabled" : ""} ${tip(to == null ? `已是最${d < 0 ? "低" : "高"}的一档` : `${what}到 ×${wtxt(to)}`)}>${ch}</button>`; };
+  const mid = !canWeight() ? `<b class="num">×${wtxt(w)}</b>`
+    : ed ? `<input type="text" inputmode="decimal" class="num win" data-win="${esc(p.id)}" value="${esc(WED.val)}" aria-label="自定义权重（0 到 1000）" autocomplete="off">`
+    : `<button type="button" class="num wval" data-sch="we" data-p="${esc(p.id)}" aria-label="输入权重" ${tip("点击直接输入自定义权重（0–1000，不含 0）")}>×${wtxt(w)}</button>`;
+  return `<span class="flag wcap"><span class="k" ${tip("同一人的几个项目之间：近期用量除以它再比，小的先放，所以权重大的能在这人的份额里多用（不改这人和别人之间的份额）。没写的项目为 1；写进主机清单的 [sched.weight]，各 worker 约 1 分钟内按新权重放行")}>权重</span>`
+    + (canWeight() ? b("wd", -1, "−", "调低") : "") + mid + (canWeight() ? b("wu", 1, "+", "调高") : "") + `</span>`;
 }
 // 一个项目的优先或暂停按钮（k：focus / paused）与弹窗（调度卡每行末尾、项目「管理」抽屉的调度节）：项目级的有了就换成撤销、恢复；暂停、恢复会给实验会话一条消息。
 // 优先、撤销优先只给管理员（与权重同一个 canWeight）；项目级暂停有了时，「恢复」只给管理员与下暂停的本人（pauseMine，#16）
@@ -138,15 +144,15 @@ const who = p => p.person || (p.pk ? "其他人" : "看板上没有的项目");
 function schedOn() {
   const on = (D.sched?.projects || []).filter(p => p.use > 0.005 || p.cards || p.queued || p.waiting);
   return {on, su: D.sched?.use_sum || 0, n: new Set(on.map(pkOf)).size,
-          sw: pk => on.filter(p => pkOf(p) === pk).reduce((a, p) => a + p.w, 0)};
+          sw: pk => on.filter(p => pkOf(p) === pk).reduce((a, p) => a + swVal(p), 0)};
 }
 // 几个人在用卡（调度卡按人分组、排位解释写不写人都看它）：近期在用的人超过一个
 const schedPeople = () => schedOn().n > 1;
 function shareBar(p) {
-  const {on, su, n, sw} = schedOn(), u = su ? 100 * p.use / su : 0, ws = sw(pkOf(p)), d = on.some(x => x.id === p.id) && ws ? 100 / n * p.w / ws : null;
-  const split = n > 1 ? `${who(p)} 应得 1 ÷ ${n} 人，在这人近期在用的项目之间按权重分（${wtxt(p.w)} ÷ ${wtxt(ws)}）` : `${wtxt(p.w)} ÷ ${wtxt(ws)}`;
+  const {on, su, n, sw} = schedOn(), w = swVal(p), u = su ? 100 * p.use / su : 0, ws = sw(pkOf(p)), d = on.some(x => x.id === p.id) && ws ? 100 / n * w / ws : null;
+  const split = n > 1 ? `${who(p)} 应得 1 ÷ ${n} 人，在这人近期在用的项目之间按权重分（${wtxt(w)} ÷ ${wtxt(ws)}）` : `${wtxt(w)} ÷ ${wtxt(ws)}`;
   return d == null ? `<span class="sm mut">近期没用卡</span>` : `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1;min-width:90px" ${tip(
-    `近期用量 ${g1(p.use)} 卡·时，占 ${Math.round(u)}%；权重 ${wtxt(p.w)}，应得 ${Math.round(d)}%（${split}）\n先比人：这人几个项目的用量合起来比别人小的先放；同一人的项目之间比用量 ÷ 权重（${g1(p.use / p.w)}），小的先\n竖线是应得的位置`)}><i style="width:${u}%;background:${color(p.id)}"></i><b class="due" style="left:${d}%"></b></div>
+    `近期用量 ${g1(p.use)} 卡·时，占 ${Math.round(u)}%；权重 ${wtxt(w)}，应得 ${Math.round(d)}%（${split}）\n先比人：这人几个项目的用量合起来比别人小的先放；同一人的项目之间比用量 ÷ 权重（${g1(p.use / w)}），小的先\n竖线是应得的位置`)}><i style="width:${u}%;background:${color(p.id)}"></i><b class="due" style="left:${d}%"></b></div>
     <span class="sm num nw">${Math.round(u)}% <span class="mut">/ ${Math.round(d)}%</span></span></div>`;
 }
 // 一个人的「已用 / 应得」（调度卡按人分组时人那一行）：颜色条是这人名下各项目合起来的用量占比（puse：看板按完整的用量算，含已归档、卡上不列的项目，
@@ -519,11 +525,11 @@ function schedCard() {
   for (const p of ps) { const g = groups.find(g => pkOf(g[0]) === pkOf(p)); g ? g.push(p) : groups.push([p]); }
   const gUse = g => g[0].puse;
   if (many) groups.sort((a, b) => gUse(a) - gUse(b));
-  const list = g => (g.some(p => on.includes(p)) ? g.filter(p => on.includes(p)) : g).map(p => `${esc(pname(p.id))} ×${wtxt(p.w)}`).join("、");
+  const list = g => (g.some(p => on.includes(p)) ? g.filter(p => on.includes(p)) : g).map(p => `${esc(pname(p.id))} ×${wtxt(swVal(p))}`).join("、");
   // 标题行只留短句（谁优先、按份额轮流、谁暂停），算法细节在旁边的 ⓘ 里
   const rule = [fo.length ? `${fo.map(p => esc(pname(p.id) + flagText("focus", p))).join("、")} 优先${many ? "（在各自主人的项目里）" : ""}` : "",
     many ? `按人轮流（${groups.filter(g => g.some(p => on.includes(p))).map(g => `${esc(who(g[0]))}：${list(g)}`).join("；")}）`
-      : `${fo.length ? "其余" : ""}按份额轮流（${(on.length ? on : ps).map(p => `${esc(pname(p.id))} ×${wtxt(p.w)}`).join("、")}）`,
+      : `${fo.length ? "其余" : ""}按份额轮流（${(on.length ? on : ps).map(p => `${esc(pname(p.id))} ×${wtxt(swVal(p))}`).join("、")}）`,
     pa.length ? `${pa.map(p => esc(pname(p.id) + flagText("paused", p))).join("、")} 暂停中` : ""].filter(Boolean).join("；");
   const how = `份额按人算：先比人，同一人的几个项目的近期 GPU 用量合起来算一份，小的先放；同一人的项目之间优先的先，再比用量 ÷ 权重，小的先（用量是所有主机上的卡·时，${wtxt(S.hl_h)} 小时减半）。卡在资源上等满 ${wtxt(S.cap_min)} 分钟的成为屏障，后面只放它放行前跑得完的。`;
   const edit = ps.some(p => canWrite(p.id));
@@ -547,28 +553,95 @@ function schedCard() {
 // 调度的写回（POST /sched/<what>）：回执写进 SMSG（smsg），1 分钟后收起
 let SMT = 0;
 const smsg = m => { SMSG = m; clearTimeout(SMT); SMT = setTimeout(() => { SMSG = null; render(false); }, 60000); };
-async function schedPost(what, body) {
+async function schedPost(what, body, quiet = false) {
   const r = await postJSON(`sched/${what}`, body);
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
-  smsg(j.msg);
+  if (!quiet) smsg(j.msg);
+  return j;
+}
+function schedWeightSet(pid, to) {
+  const p = D.sched?.projects.find(x => x.id === pid);
+  if (!p) return;
+  const norm = +(Number(to).toFixed(3));
+  if (!Number.isFinite(norm) || norm <= 0 || norm > 1000) return;
+  const prev = swCur(p);
+  if (prev?.timer) clearTimeout(prev.timer);
+  const seq = (prev?.seq || 0) + 1;
+  const base = prev ? prev.base : p.w;
+  const e = {w: norm, base, timer: 0, seq, post: !!prev?.post, t: Date.now()};
+  SWB.set(pid, e);
+  render(false);
+  e.timer = setTimeout(() => schedWeightFlush(pid, seq), W_DEBOUNCE_MS);
+}
+async function schedWeightFlush(pid, seq) {
+  const e = SWB.get(pid);
+  if (!e || e.seq !== seq) return;
+  e.timer = 0; e.post = true;
+  const to = e.w;
+  try {
+    const j = await schedPost("weight", {project: pid, weight: to}, true);
+    const cur = SWB.get(pid);
+    if (cur && cur.seq === seq) {
+      cur.post = false; cur.base = to; cur.t = Date.now();
+      smsg(j.msg);
+      render(false);
+    } else if (cur) {
+      // 期间用户又调了新值：不覆盖新值与提示，只刷新回滚基准
+      cur.base = to;
+    }
+  } catch (err) {
+    const cur = SWB.get(pid);
+    if (cur && cur.seq === seq) {
+      smsg("改权重没成：" + (err.message || err));
+      const p = D.sched?.projects.find(x => x.id === pid);
+      if (cur.base != null && (!p || Math.abs(p.w - cur.base) >= 1e-9)) {
+        SWB.set(pid, {w: cur.base, base: cur.base, timer: 0, seq, post: false, t: Date.now()});
+      } else {
+        SWB.delete(pid);
+      }
+      render(false);
+    }
+  }
+}
+function schedWCancel() {
+  if (!WED) return;
+  WED = null;
+  render(false);
+}
+function schedWCommit(pid, raw) {
+  if (!WED || WED.pid !== pid) return;
+  WED = null;
+  const s = String(raw ?? "").trim().replace(/^[×xX]\s*/, "");
+  if (!s) return render(false);
+  const v = Number(s);
+  if (!Number.isFinite(v) || v <= 0 || v > 1000) {
+    smsg("权重要写 0 到 1000 之间的正数");
+    return render(false);
+  }
+  const p = D.sched?.projects.find(x => x.id === pid), norm = +(v.toFixed(3));
+  if (p && Math.abs(norm - swVal(p)) < 1e-9) return render(false);
+  schedWeightSet(pid, norm);
 }
 async function schedAct(act, pid) {
   if (!canWrite(pid)) return;
   const P = POP;
+  if (act === "we") {
+    if (!canWeight()) return;
+    const p = D.sched?.projects.find(x => x.id === pid);
+    if (!p) return;
+    WED = {pid, val: wtxt(swVal(p))};
+    render(false);
+    const inp = document.querySelector?.(`input[data-win="${typeof CSS !== "undefined" && CSS.escape ? CSS.escape(pid) : pid}"]`);
+    if (inp) { inp.focus?.(); inp.select?.(); }
+    return;
+  }
   if (act === "wd" || act === "wu") {
-    const p = D.sched?.projects.find(x => x.id === pid), cur = p && swCur(p), to = p && wStep(cur ? cur.w : p.w, act === "wd" ? -1 : 1);
-    if (to == null || cur?.post) return;
-    const e = {w: to, post: true, t: Date.now()}; SWB.set(pid, e); render(false);
-    try {
-      await schedPost("weight", {project: pid, weight: to});
-    } catch (err) {
-      smsg("改权重没成：" + (err.message || err));
-      if (SWB.get(pid) === e) cur ? SWB.set(pid, cur) : SWB.delete(pid);      // 退回上一次写成功的值（没有就按快照）
-      return render(false);
-    }
-    e.post = false; e.t = Date.now();
-    return collectNow(true);
+    if (!canWeight()) return;
+    WED = null;
+    const p = D.sched?.projects.find(x => x.id === pid), to = p && wStep(swVal(p), act === "wd" ? -1 : 1);
+    if (to == null) return;
+    return schedWeightSet(pid, to);
   }
   if (act === "f") popToggle("sf", pid, whenInit());
   else if (act === "uf") popToggle("su", pid);
@@ -591,7 +664,7 @@ async function schedAct(act, pid) {
 function rankTip(x, ws) {
   if (!x.pos) return x.held ? "被临时指令挡住，不参与排队" : x.dep ? "依赖还没满足，不参与排队（满足后从那时起排）" : "";
   const P = x.pos, cap = D.sched?.cap_min ?? 30, same = ws.filter(y => y.h === x.h && y.pos), prev = same.find(y => y.pos.n === P.n - 1);
-  const sp = y => D.sched?.projects.find(p => p.id === y.project), w = sp(x)?.w ?? 1, many = schedPeople();
+  const sp = y => D.sched?.projects.find(p => p.id === y.project), w = sp(x) ? swVal(sp(x)) : 1, many = schedPeople();
   const mate = prev && pkOf(sp(prev) || {}) === pkOf(sp(x) || {});      // 前面那个与它同一人（或都不知道是谁）
   const ahead = !prev ? "没有排在它前面的" : !mate && (prev.pos.puse ?? 0) < (P.puse ?? 0) - 1e-9 ? `前面的 ${pname(prev.project)} 是${who(sp(prev) || {})}的，这人近期用得更少（${g1(prev.pos.puse)} < ${g1(P.puse)} 卡·时）`
     : prev.pos.focus && !P.focus ? `前面的 ${pname(prev.project)} 优先`

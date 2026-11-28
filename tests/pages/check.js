@@ -201,9 +201,12 @@ t("overview", "调度卡：规则一句话短，算法细节（减半）只在 �
   ok(!/data-sch="w"[ >]/.test(h), "调度卡的权重不该再是弹窗按钮"); has(h, run(O, "schedW(D.sched.projects[0])"), "调度卡与抽屉该是同一个 schedW");
   ok(run(O, "[wStep(2.5, -1), wStep(2.5, 1), wStep(1, -1), wStep(0.1, -1), wStep(1000, 1)].join()") === "2,3,0.75,,", run(O, "[wStep(2.5, -1), wStep(2.5, 1), wStep(1, -1)].join()"));
   const top = run(O, "schedW({id: 'x', w: 1000})"); ok(/data-sch="wu" data-p="x" aria-label="权重调高" disabled/.test(top) && !/data-sch="wd" data-p="x" aria-label="权重调低" disabled/.test(top), "到最高档时 + 该禁用、− 不禁用");
-  run(O, `POP = null; SF = []; fetch = (u, o) => { SF.push([u, JSON.parse(o.body)]); return new Promise(() => {}); }; schedAct("wd", "proj-b")`);
-  ok(run(O, "POP") === null && run(O, "JSON.stringify(SF)") === JSON.stringify([["sched/weight", {project: "proj-b", weight: 1.5}]]), "调度卡点 −：" + run(O, "JSON.stringify(SF)"));
-  run(O, "SWB.clear()");
+  run(O, `POP = null; SF = []; WTM = []; const _st = setTimeout; setTimeout = (f, ms) => { if (ms === W_DEBOUNCE_MS) { WTM.push(f); return WTM.length; } return _st(f, ms); };
+    fetch = (u, o) => { SF.push([u, JSON.parse(o.body)]); return new Promise(() => {}); }; schedAct("wd", "proj-b")`);
+  ok(run(O, "POP") === null && run(O, "SF.length") === 0 && run(O, "WTM.length") === 1, "点 − 先防抖不立刻发请求");
+  run(O, "WTM.pop()()");
+  ok(run(O, "JSON.stringify(SF)") === JSON.stringify([["sched/weight", {project: "proj-b", weight: 1.5}]]), "防抖到期后发 POST：" + run(O, "JSON.stringify(SF)"));
+  run(O, "SWB.clear(); WED = null");
 });
 t("overview", "#23 份额按人：几个人在用卡时调度卡按人分组、应得按人均分再按权重分，排位解释先比人；只有一人时照旧", () => {
   const r = run(O, `(() => { const S = D.sched, old = JSON.stringify(S.projects), h = D.hosts[0];
@@ -1244,12 +1247,17 @@ t("manage", "调度（可改，与调度卡同一套按钮与同一个「已用 
   ok(!sa.includes('data-p="proj-b"'), "只该有这一个项目的按钮");
   const bar = run(O, "shareBar(D.sched.projects[0])"); has(bar, 'class="due"'); has(sa, bar, "抽屉的份额条"); has(sa, "已用 / 应得（竖线）· 此刻占 1 张卡 · 排队 2 个");
   has(page(O, "#/"), bar, "调度卡的份额条该是同一个"); page(O, "#/p/proj-a/manage");
-  // 点权重 +：不出弹窗，当场 POST /sched/weight，写回期间胶囊显示新值、这个项目的 −、+ 禁用；回执写在调度节
-  run(O, `POP = null; SF = []; fetch = (u, o) => { SF.push([u, JSON.parse(o.body)]); return new Promise(() => {}); }; schedAct("wu", "proj-a")`);
+  // 点权重 +（#280）：不出弹窗、不锁按钮，立即乐观更新胶囊与份额条，350ms 防抖后发 POST /sched/weight；回执写在调度节
+  run(O, `POP = null; SF = []; WTM = []; const _st2 = setTimeout; setTimeout = (f, ms) => { if (ms === W_DEBOUNCE_MS) { WTM.push(f); return WTM.length; } return _st2(f, ms); };
+    fetch = (u, o) => { SF.push([u, JSON.parse(o.body)]); return new Promise(() => {}); }; schedAct("wu", "proj-a")`);
   ok(run(O, "POP") === null, "点权重不该再开弹窗");
+  const pend = drw(O, "#/p/proj-a/manage");
+  has(pend, "×1.5", "乐观更新立刻显示新值");
+  ok(!/data-sch="wu" data-p="proj-a" aria-label="权重调高" disabled/.test(pend), "调整期间 + 不应锁死");
+  has(pend, "/ 43%", "应得份额应随乐观权重立即联动（1.5 ÷ 3.5 ≈ 43%）");
+  run(O, "WTM.pop()()");
   ok(run(O, "JSON.stringify(SF)") === JSON.stringify([["sched/weight", {project: "proj-a", weight: 1.5}]]), run(O, "JSON.stringify(SF)"));
-  const pend = drw(O, "#/p/proj-a/manage"); has(pend, "×1.5", "写回期间显示新值"); ok(/data-sch="wu" data-p="proj-a" aria-label="权重调高" disabled/.test(pend), "写回期间 + 没禁用");
-  run(O, `SWB.clear(); SMSG = "改好了"`); has(drw(O, "#/p/proj-a/manage"), "改好了"); run(O, "SMSG = null");
+  run(O, `SWB.clear(); WED = null; SMSG = "改好了"`); has(drw(O, "#/p/proj-a/manage"), "改好了"); run(O, "SMSG = null");
   const b = drw(O, "#/p/proj-b/manage"); has(b, "暂停中</span>（只在 "); has(tips(b), "labmon resume proj-b --host srv-a", "单独下的暂停悬停写撤销命令");
   has(b, "×2");
   has(drw(O, "#/p/没有的项目/manage"), "看板服务里没有这个项目");
@@ -2402,20 +2410,59 @@ t("common", "本机存的设置只有 common.js 的 mkStore；两页的键名不
   ok(run(P, 'SS.get("scroll", 0)') === 5 && run(P, 'LS.get("nope", 7)') === 7);
 });
 
-ta("overview", "权重胶囊（#143，Codex 审查 #147）：写回成功、立即采集回来的快照还是旧权重（worker 还没回传）时，照旧显示刚写的值，再点接着往下一档走；快照确认了才收；失败时退回上一次写成功的值", async () => {
+ta("overview", "权重胶囊（#143、#280）：连点不锁按钮并 350ms 防抖合并、立即联动应得份额、不强制整页 collect、旧回包不覆盖新值、失败优雅回滚、支持内联输入自定义权重", async () => {
   const O = ovCtx(OV, RR);
-  run(O, `SF = []; FAIL = false; fetch = (u, o) => { SF.push([u, o?.body ? JSON.parse(o.body) : null]);
-    if (u.startsWith("sched/")) return Promise.resolve(FAIL ? {ok: false, json: () => Promise.resolve({error: "写不了"})} : {ok: true, json: () => Promise.resolve({msg: "改好了"})});
-    const snap = JSON.parse(JSON.stringify(D)); return Promise.resolve({ok: true, json: () => Promise.resolve(snap)}); }`);
-  const w = () => run(O, `(D.sched.projects.find(p => p.id === "proj-a").w) + "|" + (/<b class="num">×([^<]*)</.exec(schedW(D.sched.projects.find(p => p.id === "proj-a")))[1])`);
-  await run(O, `schedAct("wu", "proj-a")`);
-  ok(run(O, "SF.some(x => x[0].startsWith('collect'))"), "写回后没立即采集");
-  ok(w() === "1|1.5", "采集回来的快照还是旧权重，胶囊却退回了旧值：" + w());
-  await run(O, `schedAct("wu", "proj-a")`);
-  ok(run(O, "JSON.stringify(SF.filter(x => x[0] === 'sched/weight').map(x => x[1].weight))") === "[1.5,2]", "再点 + 没接着走到下一档：" + run(O, "JSON.stringify(SF)"));
-  run(O, "FAIL = true"); await run(O, `schedAct("wu", "proj-a")`);
-  ok(w() === "1|2", "写回失败后该退回上一次写成功的值：" + w()); ok(/改权重没成：写不了/.test(run(O, "SMSG")), "失败回执：" + run(O, "SMSG"));
-  run(O, `D.sched.projects.find(p => p.id === "proj-a").w = 2`); ok(w() === "2|2" && !run(O, 'SWB.has("proj-a")'), "快照确认了还留着乐观值");
+  run(O, `SF = []; REQS = []; WTM = new Map(); WID = 0;
+    setTimeout = (f, ms) => { if (ms === W_DEBOUNCE_MS) { const id = ++WID; WTM.set(id, f); return id; } return 0; };
+    clearTimeout = id => { WTM.delete(id); };
+    fetch = (u, o) => {
+      const body = o?.body ? JSON.parse(o.body) : null;
+      SF.push([u, body]);
+      return new Promise(res => REQS.push({u, body, res}));
+    };`);
+  const wVal = () => run(O, `swVal(D.sched.projects.find(p => p.id === "proj-a"))`);
+  const due = id => run(O, `(/\\/ (\\d+)%/.exec(shareBar(D.sched.projects.find(p => p.id === "${id}"))) || [])[1]`);
+  const drain = () => new Promise(r => setImmediate(r));
+  // 1) 连点 + 三次（1 -> 1.5 -> 2 -> 3）：不锁按钮、份额立即联动（3 ÷ (3+2) = 60%），防抖只保留最后一次
+  run(O, `schedAct("wu", "proj-a"); schedAct("wu", "proj-a"); schedAct("wu", "proj-a")`);
+  ok(wVal() === 3, "连点 3 次应立即乐观更新到 3：" + wVal());
+  ok(due("proj-a") === "60" && due("proj-b") === "40", `份额未即时联动：a=${due("proj-a")}% b=${due("proj-b")}%`);
+  ok(run(O, "SF.length") === 0 && run(O, "WTM.size") === 1, "防抖合并后应只剩 1 个待发定时");
+  // 防抖触发：只发一次 weight=3
+  run(O, `[...WTM.values()].forEach(f => f()); WTM.clear()`);
+  ok(run(O, "JSON.stringify(SF)") === JSON.stringify([["sched/weight", {project: "proj-a", weight: 3}]]), "防抖后应只发最后目标值：" + run(O, "JSON.stringify(SF)"));
+  // 2) 请求在途期间继续点 + 到 4：按钮不锁、乐观值立即变成 4；此时旧请求(3)失败回包绝不覆盖新值(4)
+  run(O, `schedAct("wu", "proj-a")`);
+  ok(wVal() === 4, "在途期间继续点击应立即升到 4：" + wVal());
+  run(O, `REQS.shift().res({ok: false, json: () => Promise.resolve({error: "旧请求超时"})})`);
+  await drain();
+  ok(wVal() === 4 && run(O, "SMSG") === null, "旧请求失败回包覆盖了新值或提示");
+  // 防抖触发发 weight=4 并成功：不触发 collectNow(true)
+  run(O, `[...WTM.values()].forEach(f => f()); WTM.clear()`);
+  run(O, `REQS.shift().res({ok: true, json: () => Promise.resolve({msg: "把 proj-a 的调度权重改成 4：worker 约 1 分钟内生效"})})`);
+  await drain();
+  ok(!run(O, "SF.some(x => x[0].startsWith('collect'))"), "写回成功后不应强制调用 collectNow(true)");
+  ok(wVal() === 4 && /改成 4/.test(run(O, "SMSG")), "成功回执异常：" + run(O, "SMSG"));
+  // 3) 再点 + 到 5 但后端失败：优雅回滚到上一次已确认权重 4，份额同步回滚
+  run(O, `schedAct("wu", "proj-a"); [...WTM.values()].forEach(f => f()); WTM.clear()`);
+  run(O, `REQS.shift().res({ok: false, json: () => Promise.resolve({error: "写不了"})})`);
+  await drain();
+  ok(wVal() === 4 && /改权重没成：写不了/.test(run(O, "SMSG")), "失败未回滚到上一次确认值 4：" + wVal() + " / " + run(O, "SMSG"));
+  ok(due("proj-a") === "67", "回滚后应得份额应恢复 4 ÷ 6 ≈ 67%：" + due("proj-a"));
+  // 4) 快照同步到 4 后 swCur 自动清理 SWB
+  run(O, `D.sched.projects.find(p => p.id === "proj-a").w = 4`);
+  ok(wVal() === 4 && !run(O, 'SWB.has("proj-a")'), "快照确认后应自动收掉 SWB");
+  // 5) 内联输入自定义权重：点击数值渲染输入框、Esc 取消、非法值拦截、合法值生效
+  run(O, `schedAct("we", "proj-a")`);
+  has(run(O, `schedW(D.sched.projects.find(p => p.id === "proj-a"))`), 'data-win="proj-a"', "点击权重数值应出现内联输入框");
+  run(O, `schedWCancel()`);
+  ok(run(O, "WED") === null && wVal() === 4, "Esc 取消应退出编辑且不改值");
+  run(O, `schedAct("we", "proj-a"); schedWCommit("proj-a", "0")`);
+  ok(wVal() === 4 && /0 到 1000/.test(run(O, "SMSG")), "非法权重 0 应拦截并提示");
+  run(O, `schedAct("we", "proj-a"); schedWCommit("proj-a", "×2.5")`);
+  ok(wVal() === 2.5, "内联输入 2.5 应立即乐观生效：" + wVal());
+  run(O, `[...WTM.values()].forEach(f => f()); WTM.clear()`);
+  ok(run(O, "SF.at(-1)[1].weight") === 2.5, "内联输入防抖后应提交 2.5");
 });
 
 t("overview", "写请求经 postJSON：带 JSON 类型与 JSON 请求体，看板只认 application/json 的 POST（#158）；原来没带类型的立即采集（两页）、续租预备、探测也经它", () => {
@@ -2478,6 +2525,7 @@ ta("overview", "看板服务连不上（#177）：顶栏一句人话、提早重
   const W = run(O, 'netText("write")');
   run(O, `SF = []; POP = null; ${NETFAIL}`);
   await run(O, `schedAct("wu", "proj-a")`);
+  await new Promise(r => setImmediate(r));
   ok(run(O, "SF.filter(u => u.startsWith('sched/')).length") === 1, "改权重连不上时重发了：" + run(O, "JSON.stringify(SF)"));
   ok(run(O, "SMSG") === "改权重没成：" + W, "改权重的提示：" + run(O, "SMSG"));
   await run(O, `renewAct("reserve", "srv-a")`);
