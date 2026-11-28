@@ -685,54 +685,68 @@ def admit(reqs, focus, pol, use, now, place, shadow=lambda r: None, before=None)
 
 def estimate(hist, r):
     """资源估计：显存、内存取同类任务最近几次峰值的最大值 × 1.1，及单跑（同卡没有别的任务）时的平均 GPU 利用率。只看量到了用量的记录。worker 准入、推演与 fit 都用它。
-    显存、内存逐项依次看（#61 维护者定）：同 tag、去掉种子编号后同名的历史（两项一起取自先找到的那一档）› 清单写的提示值（vram=、ram=，> 0 才算写了）
-    › 同一条队列的历史（同一份清单里可以是完全不同的任务，最弱，不盖过明写的提示值）› 0。“近几次”按跑成功的数，跑满 5 分钟后失败的（非 OOM）
+    显存、内存逐项依次看（#61、#282）：同 tag 下去种子同名（tag_name）› 同 tag › 去掉种子编号后同名的历史 › 清单写的提示值（vram=、ram=，> 0 才算写了）
+    › 同一条队列的历史（同一份清单里可以是完全不同的任务，最弱，不盖过明写的提示值）› 0。这样同一批次 tag 下的轻量变体已有自身历史时不被重变体污染，
+    尚无自身历史的新变体仍可回退到同 tag。“近几次”按跑成功的数，跑满 5 分钟后失败的（非 OOM）
     只在比这几次里最旧的新时参与取最大值：没跑完的峰值只是下限，只能抬高、不占名额（peak_rows，#134）。来源：显存 src、内存 ram_src；util 跟着显存的来源走
     （显存用的是提示值时为 None，不拿别的任务的利用率）。
-    CPU（cpus 整数核，job_cpus 取整；cpu_src 来源）：清单的 cpus= 优先（来源“提示值”），否则同类（同 tag › 同名 › 同队列）近几次 1 分钟峰值核数（cores_peak，
+    CPU（cpus 整数核，job_cpus 取整；cpu_src 来源）：清单的 cpus= 优先（来源“提示值”），否则同类（同 tag 同名 › 同 tag › 同名 › 同队列）近几次 1 分钟峰值核数（cores_peak，
     期 1 起才记，旧行当没有历史）的最大值 × 1.1，都没有按 CPU_DEFAULT（#4 维护者定：cpus= 优先于历史，历史优先于缺省）。
     写了的 cpus= 同类实测一直远低于它时只收小记账（cpu_shrink，#91）：cpus 是记账核数，cpus_set 记下清单写的值（开跑仍按它给，cpu_threads）。
-    OOM 后抬高（#62 维护者定）：用量行标了 oom 的（finish 经 oom_of 记）不进历史（它的峰值是被当时可用的量截住的）；同 tag、同名两档里，
-    各取这一档最近一次跑成功之后的 OOM 记录，给 OOM 的那一项（vram 或 ram）一个下限 max(那次放行时的估计 est × 2, 那次的峰值 × 1.1)，几条取大；
+    OOM 后抬高（#62、#282）：用量行标了 oom 的（finish 经 oom_of 记）不进历史（它的峰值是被当时可用的量截住的）；同 tag 同名、同 tag、同名各档里，
+    取这一档最近一次跑成功之后的 OOM 记录，给 OOM 的那一项（vram 或 ram）一个下限 max(那次放行时的估计 est × 2, 那次的峰值 × 1.1)，几条取大；
+    其中粗粒度同 tag 档的 OOM 下限仅在该变体在同 tag 同名档尚无自身画像（无跑成功记录、且对该项无有效峰值及自身 OOM）时才回退采纳，避免重变体 OOM 污染已有自身样本的轻变体；
     这一项的估计 = max(上面按顺序取的值, 下限)，提示值写小了的同样抬高。连续 OOM 连续翻倍（每条的 est 已含上一次的下限），封顶照 card_need、ram_need；
     这一档有一次新的跑成功（退出码 0；跑了 5 分钟后被停下、别的错误退出的不算）就回到按实测估。同队列一档的 OOM 不算（同一份清单里可以是完全不同的任务）。来源是下限时 util 为 None。"""
-    keys = ([("tag", r["project"], r["tag"])] if r.get("tag") else []) + [("name", r["project"], _C.base_name(r["name"]))]
+    keys = ([("tag_name", r["project"], r["tag"], _C.base_name(r["name"])),
+             ("tag", r["project"], r["tag"])] if r.get("tag") else []) + [("name", r["project"], _C.base_name(r["name"]))]
     if r.get("queue"):
         keys.append(("queue", r["root"], r["queue"]))
     ok = lambda h: not h.get("oom") and (ran_ok(h) or (h.get("min") or 0) >= 5)     # noqa: E731 — 跑成功的，或跑了 5 分钟以上、不是 OOM 的（没跑成功的只能抬高：peak_rows）
-    label = {"tag": "同 tag", "name": "同名", "queue": "同队列"}
+    label = {"tag_name": "同 tag 同名", "tag": "同 tag", "name": "同名", "queue": "同队列"}
     rpeak = None                                  # 内存取自的那一档历史：(档, 记录)
     vpeak = None                                  # 显存取自的那一档历史：(档, 记录)（跳过 MPS 等 vram_peak=None 的记录）
     floor = {"vram": (0.0, None), "ram": (0.0, None)}   # OOM 后的下限：(GiB, 来源)
+    tn_has = {"vram": False, "ram": False}        # tag_name 档对该资源是否已有自身画像（跑成功 / 有效峰值 / 自身 OOM）：有则不继承粗粒度 tag 档 OOM 下限
     cpu = (_M.job_cpus(r["cpus"]), "提示值") if r.get("cpus") is not None else None
-    shrink = None                                 # 写了 cpus= 时，同 tag › 同名第一档有峰值的历史（cpu_shrink 看）
+    shrink = None                                 # 写了 cpus= 时，同 tag 同名 › 同 tag › 同名第一档有峰值的历史（cpu_shrink 看）
     for k in keys:
-        rows = [h for h in hist if _C.hist_key(h, k[0]) == k]   # hist 按结束时刻排好（load_hist）
+        kind = k[0]
+        rows = [h for h in hist if _C.hist_key(h, kind) == k]   # hist 按结束时刻排好（load_hist）
         same = [h for h in rows if ok(h)]
         hrs = peak_rows(same, "ram_peak")
         if hrs and rpeak is None:
-            rpeak = (k[0], hrs)
+            rpeak = (kind, hrs)
         hvs = peak_rows(same, "vram_peak")
         if hvs and vpeak is None:
-            vpeak = (k[0], hvs)
+            vpeak = (kind, hvs)
         cr = peak_rows(same, "cores_peak")
         cs = [h["cores_peak"] for h in cr]
         if cs and cpu is None:
-            cpu = (cpu_from_peak(max(cs)), "%s 近 %d 次峰值 ×1.1" % (label[k[0]], len(cs)))
-        if k[0] == "queue":
+            cpu = (cpu_from_peak(max(cs)), "%s 近 %d 次峰值 ×1.1" % (label[kind], len(cs)))
+        if kind == "queue":
             continue
         if cr and shrink is None:
-            shrink = (label[k[0]], cr)
+            shrink = (label[kind], cr)
         last = max((i for i, h in enumerate(rows) if h.get("rc") == "0"), default=-1)   # 只认真跑成功的：跑了 5 分钟后被停下、别的错误退出的不算资源够了
+        if kind == "tag_name":
+            if last >= 0 or hrs:
+                tn_has["ram"] = True
+            if last >= 0 or hvs:
+                tn_has["vram"] = True
         for h in rows[last + 1:]:
             f = h.get("oom")
             if f not in floor:
                 continue
+            if kind == "tag" and tn_has[f]:
+                continue
+            if kind == "tag_name":
+                tn_has[f] = True
             e = (h.get("est") or {}).get(f) or 0.0
             pk = (h.get("vram_peak") or 0) / 1024 / max(1, len(h.get("gpus") or [1])) if f == "vram" else h.get("ram_peak") or 0
             for v, s in ((2 * e, "放行时估 %.1f GiB ×2" % e), (1.1 * pk, "OOM 时峰值 %.1f GiB ×1.1" % pk)):
                 if round(v, 2) > floor[f][0]:
-                    floor[f] = (round(v, 2), "%s 上次 OOM：%s" % (label[k[0]], s))
+                    floor[f] = (round(v, 2), "%s 上次 OOM：%s" % (label[kind], s))
     cpu = cpu or (_C.CPU_DEFAULT, "缺省 %d 核" % _C.CPU_DEFAULT)
     set_ = None
     if cpu[1] == "提示值" and shrink:
@@ -1556,9 +1570,9 @@ class SchedMixin:
         return out
 
     def cpu_hist_peak(self, j):
-        """运行中任务 j 同类历史完成记录的最高 1 分钟核数峰值（同 tag › 去种子号同名第一档，跑成功、非 OOM 的近 HIST_N 条）：
+        """运行中任务 j 同类历史完成记录的最高 1 分钟核数峰值（同 tag 同名 › 同 tag › 去种子号同名第一档，跑成功、非 OOM 的近 HIST_N 条）：
         供 cpu_hints 传入 cpu_fit，避免已知后段高核的多阶段同类任务在前 10 分钟低核阶段早判 cpu_high；无历史为 None。"""
-        for kind in (("tag", "name") if j.get("tag") else ("name",)):
+        for kind in (("tag_name", "tag", "name") if j.get("tag") else ("name",)):
             k = _C.hist_key(j, kind)
             same = [h for h in self.hist if _C.hist_key(h, kind) == k and ran_ok(h) and not h.get("oom")]
             cr = peak_rows(same, "cores_peak")

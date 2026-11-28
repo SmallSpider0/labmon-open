@@ -436,7 +436,7 @@ def _host_allowed_projects(h: dict) -> set[str] | None:
 def _hist_payload(h: dict, projects: list[dict], t: float, snap: dict | None = None) -> dict | None:
     """为独立主机裁剪并拼装跨机同类历史载荷 hist_shared.json（唯一实现，#114）：
     只筛选该机已登记队列所属项目（尚无登记时取当前活跃项目）；若该机归属普通用户，强制按其名下项目过滤，绝不泄露他人项目历史。
-    按 (project, tag/base_name, gpu) 每类留最近 RATIO_N 条、整份封顶 HIST_SHARED_MAX 条；仅含估时与峰值所需字段。"""
+    按 (project, tag, base_name, gpu) 每类留最近 RATIO_N 条、整份封顶 HIST_SHARED_MAX 条；仅含估时与峰值所需字段。"""
     if not is_standalone(h):
         return None
     hid = str(h["id"])
@@ -466,7 +466,7 @@ def _hist_payload(h: dict, projects: list[dict], t: float, snap: dict | None = N
     counts: dict[tuple, int] = {}
     rows = []
     for src_hid, r in cands:
-        key = (r.get("p"), r.get("tag") or base_name(r.get("n") or ""), r.get("gpu"))
+        key = (r.get("p"), r.get("tag"), base_name(r.get("n") or ""), r.get("gpu"))
         if counts.get(key, 0) >= RATIO_N:
             continue
         counts[key] = counts.get(key, 0) + 1
