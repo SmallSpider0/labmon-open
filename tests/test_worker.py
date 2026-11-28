@@ -1476,6 +1476,135 @@ class AdmissionUnitTest(UnitBase):
         self.assertEqual(w.cpu_hist_peak({"project": "p", "name": "exp_light_s1", "tag": "batch_a"}), 1.5)
         self.assertEqual(w.cpu_hist_peak({"project": "p", "name": "exp_new_s0", "tag": "batch_a"}), 12.0)
 
+    def test_estimate_outlier_drop_and_boundaries(self):
+        # #294：内存/显存连续 3 次跑成功且非 OOM 峰值均严格低于窗口最大值 50%（且期间及之后无同资源 OOM）时淘汰旧离群高点；
+        # 覆盖：56→14 连续 3 次滑出、仅 1-2 次不滑出、刚好 50% 不滑出、中间穿插高点重置、非 OOM 失败高点兜底、
+        # 近期 OOM（瘦身后/瘦身中/瘦身前）边界、多卡单卡显存折算、与 #282 协同、以及 cores_peak 不受影响
+        q = dict(root="/r", queue="jobs/q.txt", tag="leakfix", gpus=["GPU-a"])
+        r = {"project": "p", "name": "train_s9", "tag": "leakfix", "ram": 0.0, "vram": 0.0, "root": "/r", "queue": "jobs/q.txt"}
+        ok = lambda i, ram, vram=8192.0, **kw: usage_row("train_s%d" % i, "p", 100 * i, 100 * i + 600, ram_peak=ram, vram_peak=vram, **dict(q, **kw))  # noqa: E731
+        # 1. 仅 1-2 次瘦身（56 → 14×2）：不淘汰旧高点
+        h2 = [ok(0, 56.0), ok(1, 14.0), ok(2, 14.0)]
+        e2 = self.m.estimate(h2, r)
+        self.assertEqual((e2["ram"], e2["ram_src"]), (61.6, "同 tag 同名 近 3 次峰值 ×1.1"))
+        # 2. 连续 3 次瘦身（56 → 14×3）：自动滑出旧高点，按 14 × 1.1 = 15.4 估
+        h3 = h2 + [ok(3, 14.0)]
+        e3 = self.m.estimate(h3, r)
+        self.assertEqual((e3["ram"], e3["ram_src"]), (15.4, "同 tag 同名 近 3 次峰值 ×1.1"))
+        # 第 4 次正常波动（56 → 16, 14, 14, 14）：保留瘦身后全部 4 条连续低峰，不提前丢掉 16
+        h4 = [ok(0, 56.0), ok(1, 16.0), ok(2, 14.0), ok(3, 14.0), ok(4, 14.0)]
+        e4 = self.m.estimate(h4, r)
+        self.assertEqual((e4["ram"], e4["ram_src"]), (17.6, "同 tag 同名 近 4 次峰值 ×1.1"))
+        # 3. 刚好 50%（56 → 28×3）：不满足严格低于 50%，不淘汰
+        e_half = self.m.estimate([ok(0, 56.0), ok(1, 28.0), ok(2, 28.0), ok(3, 28.0)], r)
+        self.assertEqual(e_half["ram"], 61.6)
+        # 4. 中间穿插高点（56 → 14 → 40 → 14 → 14）：重置计数，仅 2 次连续低峰不淘汰；再补 1 次 14 后连续 3 次滑出
+        h_mid = [ok(0, 56.0), ok(1, 14.0), ok(2, 40.0), ok(3, 14.0), ok(4, 14.0)]
+        self.assertEqual(self.m.estimate(h_mid, r)["ram"], 61.6)
+        self.assertEqual(self.m.estimate(h_mid + [ok(5, 14.0)], r)["ram"], 15.4)
+        # 5. 低峰后穿插跑满 5 分钟但非 OOM 失败的高点（40 GiB）：#134 失败峰值只能抬高，不淘汰
+        fail_hi = usage_row("train_s10", "p", 1000, 1600, rc="1", ram_peak=40.0, vram_peak=8192.0, **q)
+        self.assertEqual(self.m.estimate(h3 + [fail_hi], r)["ram"], 61.6)
+        # 6. 近期 OOM 边界：
+        # 6a. 瘦身 3 次后发生内存 OOM：不淘汰旧高点，且 OOM 下限仍兜底
+        oom_low = usage_row("train_s4", "p", 500, 560, rc="1", oom="ram", ram_peak=16.0, est={"ram": 15.4, "vram": 8.8}, **q)
+        e_oom_after = self.m.estimate(h3 + [oom_low], r)
+        self.assertEqual(e_oom_after["ram"], 61.6)                                       # 旧高点未被淘汰（61.6 > floor 30.8）
+        oom_hi = usage_row("train_s4", "p", 500, 560, rc="1", oom="ram", ram_peak=60.0, est={"ram": 40.0, "vram": 8.8}, **q)
+        e_oom_floor = self.m.estimate(h3 + [oom_hi], r)
+        self.assertEqual(e_oom_floor["ram"], 80.0)                                       # OOM 下限 80.0 兜底
+        self.assertIn("上次 OOM", e_oom_floor["ram_src"])
+        # 6b. 瘦身中间夹杂内存 OOM（56 → 14 → OOM → 14×2）：OOM 后仅 2 次成功，不淘汰旧高点
+        h_mid_oom = [ok(0, 56.0), ok(1, 14.0), oom_low, ok(2, 14.0), ok(3, 14.0)]
+        self.assertEqual(self.m.estimate(h_mid_oom, r)["ram"], 61.6)
+        # 6c. 修复 OOM 后连续 3 次瘦身（56 → OOM → 14×3）：正常滑出旧高点并解除 OOM 下限
+        h_fix_oom = [ok(0, 56.0), oom_hi, ok(1, 14.0), ok(2, 14.0), ok(3, 14.0)]
+        e_fix_oom = self.m.estimate(h_fix_oom, r)
+        self.assertEqual((e_fix_oom["ram"], e_fix_oom["ram_src"]), (15.4, "同 tag 同名 近 3 次峰值 ×1.1"))
+        # 6d. 跨资源 OOM 隔离：vram OOM 不阻断 ram 的连续 3 次瘦身
+        oom_vram = usage_row("train_s4", "p", 500, 560, rc="1", oom="vram", ram_peak=14.0, vram_peak=40960.0, est={"ram": 15.4, "vram": 32.0}, **q)
+        e_cross = self.m.estimate(h3 + [oom_vram], r)
+        self.assertEqual(e_cross["ram"], 15.4)
+        self.assertEqual(e_cross["vram"], 64.0)
+        # 7. 显存 vram_peak 连续瘦身（含多卡单卡 GiB 折算：2 卡 80 GiB = 每卡 40 GiB → 1 卡 12 GiB × 3）
+        hv = [
+            ok(0, 14.0, vram=81920.0, gpus=["GPU-a", "GPU-b"]),                          # 每卡 40 GiB
+            ok(1, 14.0, vram=12288.0, gpus=["GPU-a"]),                                   # 每卡 12 GiB (< 20 GiB)
+            ok(2, 14.0, vram=12288.0, gpus=["GPU-a"]),
+        ]
+        self.assertEqual(self.m.estimate(hv, r)["vram"], 44.0)                           # 仅 2 次不滑出
+        hv.append(ok(3, 14.0, vram=12288.0, gpus=["GPU-a"]))
+        ev = self.m.estimate(hv, r)
+        self.assertEqual((ev["vram"], ev["src"]), (13.2, "同 tag 同名 近 3 次峰值 ×1.1"))
+        # 8. 与 #282 协同：同 tag 重变体高点及 OOM 不干扰已瘦身的轻变体，重变体自身也不误降
+        heavy_hi = usage_row("heavy_s0", "p", 50, 650, ram_peak=58.0, vram_peak=32768.0, **q)
+        heavy_oom = usage_row("heavy_s1", "p", 700, 760, rc="1", oom="ram", ram_peak=60.0, est={"ram": 60.0, "vram": 36.0}, **q)
+        self.assertEqual(self.m.estimate([heavy_hi] + h3 + [heavy_oom], r)["ram"], 15.4)
+        self.assertEqual(self.m.estimate([heavy_hi] + h3 + [heavy_oom], dict(r, name="heavy_s2"))["ram"], 120.0)
+        # 9. cores_peak 不触发硬资源离群淘汰（保持近 HIST_N 次窗口）
+        hc = [ok(0, 14.0, cores_peak=10.0), ok(1, 14.0, cores_peak=2.0), ok(2, 14.0, cores_peak=2.0), ok(3, 14.0, cores_peak=2.0)]
+        self.assertEqual(self.m.estimate(hc, r)["cpus"], 11)
+
+    def test_outlier_drop_admit_forecast_and_multi_host(self):
+        # #294：多主机（Hosts）跨机历史下，56→14 GiB 仅 2 次瘦身仍被旧高点阻塞并发，连续 3 次成功后 admit 真放行与 forecast 推演一致并发
+        now = self.hosts.now()
+        self.hosts.queues({"q1": [
+            "# labmon: par=3",
+            "train_s10|true   # tag=leakfix est_min=20",
+            "train_s11|true   # tag=leakfix est_min=20",
+            "train_s12|true   # tag=leakfix est_min=20",
+        ]}, project="p")
+        self.hosts.register("t", "q1", "p")
+        w = self.w
+        w.info = {"gpus": [{"i": 0, "uuid": "GPU-a", "name": "A100", "total": 49152.0, "free": 48000.0}],
+                  "mem": {"limit": 64.0, "anon": 0.0}, "cpu_quota": 16.0}
+        # 阶段 1：另一主机 u 上有 1 次 56 GiB 旧尖峰 + 2 次 14 GiB 瘦身（不足 3 次）→ 记账 61.6 GiB（封顶 56 GiB），只放得下 1 条
+        self.hosts.usage("u", [
+            usage_row("train_s0", "p", now - 4000, now - 3400, tag="leakfix", gpus=["GPU-a"], ram_peak=56.0, vram_peak=6144.0, cores_peak=2.0, min=20.0),
+            usage_row("train_s1", "p", now - 3000, now - 2400, tag="leakfix", gpus=["GPU-a"], ram_peak=14.0, vram_peak=6144.0, cores_peak=2.0, min=20.0),
+            usage_row("train_s2", "p", now - 2000, now - 1400, tag="leakfix", gpus=["GPU-a"], ram_peak=14.0, vram_peak=6144.0, cores_peak=2.0, min=20.0),
+        ])
+        w.reload_hist()
+        qs = w.registry()
+        w.queue_durs(qs)
+        reqs2 = [w.prep(r, now, {}) for r in w.requests(qs, False)[1]]
+        self.assertTrue(all(r["est"]["ram"] == 61.6 for r in reqs2))
+        snap2 = w.snapshot({})
+        placed2 = []
+        def _run_admit(reqs, snap, placed):
+            def _place_sim(r):
+                x = w.as_job(r)
+                cs, why, res = self.m.place(x, snap, now)
+                if cs is None:
+                    return why, res
+                placed.append(r["name"])
+                snap["jobs"].append(self.m.acct_job(x, cs, now, now + 1200, snap["cpu_cap"], self.m.snap_ngpus(snap)))
+                return None
+            return self.m.admit(reqs, set(), self.m.POLICY, {}, now, _place_sim)
+        _run_admit(reqs2, snap2, placed2)
+        self.assertEqual(placed2, ["train_s10"])
+        w.forecast(qs, reqs2, {}, now, self.m.POLICY)
+        self.assertEqual([j["t0"] == round(now) for j in w.plan["lanes"][0]["jobs"]], [True, False, False])
+        # 阶段 2：再完成第 3 次 14 GiB 瘦身（跨主机落盘）→ 旧高点滑出，按 15.4 GiB 记账，3 条同时在 now 并发放行且 forecast 一致
+        self.hosts.usage("u", [
+            usage_row("train_s0", "p", now - 4000, now - 3400, tag="leakfix", gpus=["GPU-a"], ram_peak=56.0, vram_peak=6144.0, cores_peak=2.0, min=20.0),
+            usage_row("train_s1", "p", now - 3000, now - 2400, tag="leakfix", gpus=["GPU-a"], ram_peak=14.0, vram_peak=6144.0, cores_peak=2.0, min=20.0),
+            usage_row("train_s2", "p", now - 2000, now - 1400, tag="leakfix", gpus=["GPU-a"], ram_peak=14.0, vram_peak=6144.0, cores_peak=2.0, min=20.0),
+            usage_row("train_s3", "p", now - 1000, now - 400, tag="leakfix", gpus=["GPU-a"], ram_peak=14.0, vram_peak=6144.0, cores_peak=2.0, min=20.0),
+        ])
+        w.reload_hist()
+        w.queue_durs(qs)
+        reqs3 = [w.prep(r, now, {}) for r in w.requests(qs, False)[1]]
+        self.assertTrue(all(r["est"]["ram"] == 15.4 for r in reqs3))
+        snap3 = w.snapshot({})
+        placed3 = []
+        left3 = _run_admit(reqs3, snap3, placed3)
+        self.assertEqual(placed3, ["train_s10", "train_s11", "train_s12"])
+        self.assertEqual(left3, [])
+        w.forecast(qs, reqs3, {}, now, self.m.POLICY)
+        self.assertEqual([(j["name"], j["t0"]) for j in w.plan["lanes"][0]["jobs"]],
+                         [("train_s10", round(now)), ("train_s11", round(now)), ("train_s12", round(now))])
+
     def test_estimate_failed_runs_only_raise(self):
         # #134：跑满 5 分钟后失败（没标 oom）的峰值没跑完、只是下限：不占近 5 次的名额，只能抬高；以前近 5 次全是这种失败时估计掉到它们的小峰值
         q = dict(root="/r", queue="jobs/q.txt", tag="sm", gpus=["GPU-a"])
