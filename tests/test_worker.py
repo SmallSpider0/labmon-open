@@ -6797,6 +6797,61 @@ class PressTest(UnitBase):
         self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 30})
         self.assertIsNone(k["cpu_fit"])
 
+    def test_cpu_hints_high_clears_without_pingpong(self):
+        # 多阶段任务：前 10 分钟低核判出 cpu_high，后段真实 CPU 峰值抬头后自动清除 cpu_high，
+        # 且同一次运行不再反转为 cpu_low（避免 cpu_high ↔ cpu_low 反向乒乓）；
+        # 同类已有高核历史完成峰值时，新任务前段低核不再早判 cpu_high；持续全程低核仍正常报 cpu_high
+        t = self.hosts.now()
+        use = lambda avg, peak=None: {   # noqa: E731
+            "t": t, "pk0": t - 700, "pks": [[t - 60 * i, avg] for i in range(10)],
+            "cores": avg, "cores_peak": avg if peak is None else peak,
+        }
+        mk = lambda key, name, u: {   # noqa: E731
+            "key": key, "name": name, "project": "pa", "t0": t - 700, "gpus": ["GPU-a"],
+            "est": {"ram": 1.0, "vram": 1.0, "cpus": 6, "cpu_src": "提示值"}, "use": u,
+        }
+        self.w.info = dict(self.w.info, cpu_quota=8.0)
+        # 1) 前 10 分钟低核判 high → 后段峰值抬头清除 high → 后续高核低 GPU 利用率不反转为 low
+        j = mk("a", "stage_s1", use(1.0, 1.2))
+        self.w.running = {"a": j}
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 80})
+        self.assertEqual(j["cpu_fit"]["how"], "high")
+        j["use"] = use(4.5, 4.5)                                             # 后段峰值抬头，不再满足 high
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 80})
+        self.assertIsNone(j["cpu_fit"])
+        j["use"] = use(5.8, 5.8)                                             # 后段纯 CPU 阶段（GPU 利用率低、吃满声明核）：不反转为 low
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 10})
+        self.assertIsNone(j["cpu_fit"])
+        # 2) 前段判 high 后直接一步切到高核 + 低 GPU 利用率：同样清为 None，不直接跳成 low
+        j2 = mk("a2", "stage_s2", use(1.0, 1.2))
+        self.w.running = {"a2": j2}
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 80})
+        self.assertEqual(j2["cpu_fit"]["how"], "high")
+        j2["use"] = use(5.8, 5.8)
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 10})
+        self.assertIsNone(j2["cpu_fit"])
+        # 3) 持续全程低核（峰值略升但仍在 high 门槛内）：仍正常报 cpu_high 并刷新峰值
+        low_all = mk("b", "steady_s1", use(0.9, 1.1))
+        self.w.running = {"b": low_all}
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 80})
+        self.assertEqual(low_all["cpu_fit"]["how"], "high")
+        low_all["use"] = use(1.2, 1.6)
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 80})
+        self.assertEqual(low_all["cpu_fit"]["how"], "high")
+        self.assertEqual(low_all["cpu_fit"]["peak"], 1.6)
+        # 4) 同类已有跑完的高核历史峰值：新任务前 10 分钟低核不再早判 cpu_high
+        self.w.hist = [{"project": "pa", "name": "stage_s1", "rc": "0", "cores_peak": 5.8, "give": 6}]
+        j3 = mk("a3", "stage_s3", use(1.0, 1.2))
+        self.w.running = {"a3": j3}
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 80})
+        self.assertIsNone(j3["cpu_fit"])
+        # 同类历史峰值仍低核时照常报 cpu_high
+        self.w.hist = [{"project": "pa", "name": "steady_s0", "rc": "0", "cores_peak": 1.4, "give": 6}]
+        low_all2 = mk("b2", "steady_s2", use(1.0, 1.2))
+        self.w.running = {"b2": low_all2}
+        self.w.cpu_hints(self.w.snapshot({}), {"GPU-a": 80})
+        self.assertEqual(low_all2["cpu_fit"]["how"], "high")
+
     def test_cpu_low_sug_within_quota(self):
         # #112：配额 7 核，同一类两条车道各给 2 核、都跑满了：旧的建议各自是 2 倍 = 4（只封顶到配额），两条照改就要 8 核；
         # 现在按配额减同机别的任务已记的、同类同时在跑的条数均分：每条最多 3 核。别的项目、本项目别的类记的核先扣掉
