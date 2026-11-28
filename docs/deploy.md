@@ -39,6 +39,8 @@ labmon secret rm platform [--user 账号]    # 删掉（连同存着的平台登
 
 两种模式核对前都先等结果落地（#70）：最后一次采集后，快照早于采集请求（采集超时）、或拉起成了的主机状态还早于拉起（新 worker 还没写出第一份），就每 10 秒再带 `fresh` 采一次，最多等 2 分钟（`SETTLE_S`）；等不到照样核对，由核对报没过。
 
+全部核对通过且本次有 `labmon/` 或 `skills/` 改动时（纯文档、测试、工具变动不打扰），脚本会自动调用 `POST /api/deploy/tell` 经 `records.tell` 向所有未归档的活跃项目发一条简短部署提示（含目标 commit、最多 5 条提交摘要、是否重启看板/更新 worker/更新 skill 或 CLI），让挂着 `labmon wait` 的实验会话及时知晓；支持 `--no-notify` 关闭或 `--tell <项目>` 定向通知，通知失败仅打警告、不影响已成功的部署退出码（#275）。
+
 ```toml
 # ~/.config/labmon/deploy.toml（笔记本上；迁移那天写，#171）
 url = "https://<dashboard-host 内网 IP>:8443/"

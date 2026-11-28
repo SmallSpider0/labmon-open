@@ -104,7 +104,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /collect` | `project` 或 `deploy`，只给管理员（普通用户用 `POST /p/<id>/collect` 采自己的项目） |
 | `GET /api/admin/deploy` | `deploy`，只给管理员 |
 | `GET /api/admin/backup`（冷备，回 `.tar.gz`） | `backup`，只给管理员，只在内网入口（#17） |
-| `POST /api/admin/deploy`、`/api/worker/start` | `deploy`，只给管理员，只在内网入口 |
+| `POST /api/admin/deploy`、`/api/deploy/tell`、`/api/worker/start` | `deploy`，只给管理员，只在内网入口（`/api/deploy/tell` 仅主服务可写，备用看板回 409） |
 | `GET /api/hosts`、`GET /api/client/install.sh`、`GET /api/client/wheel`、`GET /api/client/ephemeral.py` | `read` |
 | `POST /api/fleet/manage`（组员服务器切换接入本人调度 / 仅监控，#224） | `project`；`own="fleet_manage"`：普通用户仅限持有人本人（`users.need_holder`，非持有人或不存在 403），管理员须具平台操作许可（`users.can_ops`）；仅主服务可写 |
 | `POST /api/ephemeral/push`（推模式临时主机心跳上报，#213） | `project`；校验 `project` 归属（`users.need_project`），单请求 ≤ 128 KiB，仅主服务可写 |
@@ -189,6 +189,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 |---|---|
 | `GET /api/admin/deploy` | `{"commit"（在跑的）, "started", "head"（checkout 现在的）, "busy"（正在做平台操作的服务器）, "tracebacks"（这次启动以来服务日志里每个 Traceback 的异常行）}` |
 | `POST /api/admin/deploy {"bundle": git bundle 的 base64}` | `{"old", "new", "commits", "files", "restart", "worker", "msg"}`；不部署回 409 与原因 |
+| `POST /api/deploy/tell {"commit", "commits"?, "files"?, "restart"?, "worker"?, "projects"?}` | `{"notified", "skipped", "text", "msg"}`：部署验收通过后经 `records.tell(pid, "deploy", text, src="部署")` 通知未归档活跃项目（`projects` 指定时仅发指定活跃项目）并唤醒全局采集；仅主服务可写，备用看板回 409（#275） |
 | `POST /api/worker/start {"host"}` | `{"rc", "out", "err"}`：拉起这台的 worker（推上去的是 checkout 里 main 上已提交的版本）；`labmon worker start` 与部署脚本（本机、远端模式）都经它 |
 
 - 收 bundle 前查：checkout 在 main、没有未提交的改动、没有进行中的平台操作、没有另一次部署在做。bundle 先 `git bundle verify`，`git fetch` 后要是快进（checkout 现在的提交在新提交的历史里），再 `merge --ff-only`；服务端的 main 有别处来的提交就拒绝，不覆盖。
