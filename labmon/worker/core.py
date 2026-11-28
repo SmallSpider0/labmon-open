@@ -523,26 +523,31 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         if n and n >= lv:
             self.par_hi[k] = (n, now)
 
-    def par_gate(self, r, now):
+    def par_gate(self, r, now, dry=False, running_n=None):
         """并行清单加行的门槛（#147）：这条清单已有行在跑时，再加一行要过它（第一行不过，同以前）。返回 (能放的卡号或 None 不限, 不加的原因或 None)。
         与 fit、offers 同机多开车道同一条规则（local_cards：容器在限流不加；近 10 分钟利用率不低于 UTIL_FULL 的卡、利用率低而上面在跑的被 CPU 卡住的卡不放），
         不用卡的行只看限流；要卡的另外同一条清单两次往上加行至少隔 PAR_STEP_S（利用率窗口来得及反映新加的那行）。
         补位（在跑的少于 par_level，#176）不等间隔、不因卡吃满不补：那个行数刚跑过、门槛没否掉它；只在有没吃满的卡时放在它们上面（同推演的 allowed）。
-        容器在限流时补位也不补，记的行数降到此刻在跑的。真放行在 place 的 pre 里调；推演按此刻的结论当常量（forecast）。"""
+        容器在限流时补位也不补，记的行数降到此刻在跑的。真放行在 place 的 pre 里调；推演按此刻的结论当常量（forecast）。
+        dry=True 时只读探测（不修改 par_hi），用于 gpu_dyn_reserve；running_n 可传入模拟快照里该清单已在跑的行数。"""
         k = r["q"]["key"] if r["kind"] == "queue" else None
-        n = len(self.lane(k)) if k else 0
+        actual_n = len(self.lane(k)) if k else 0
+        n = actual_n if running_n is None else running_n
         if not n:
             return None, None
         cards, why = self.local_cards()
         hot = why and self.throttle(now)
         if hot:                                   # 限流：补位也不补，记的行数降到此刻在跑的，之后往上加照间隔与利用率来
-            self.par_hi[k] = (n, now)
+            if not dry:
+                self.par_hi[k] = (n, now)
             return None, why.replace("不在这台多开车道", "不再给这条清单加行")
         if r["ngpu"] <= 0:                        # 不用卡的行：只看限流（CPU 记账另由 place 管），不等利用率
             return None, None
         if n < self.par_level(k, now):            # 补位：有这条清单能用的、没吃满的卡就只放它们，没有（卡都吃满）不限（同推演的 allowed 与 gpar）
             allowed = r["q"].get("gpus")
             return (cards if cards and [i for i in cards if allowed is None or i in allowed] else None), None
+        if dry and n > actual_n:                  # 只读探测已往上模拟加过一行：再加需等 PAR_STEP_S，本轮不会再放
+            return None, "这条清单本轮已往上加行，需等利用率窗口稳定后再加（并行 par=%d）" % (r["q"].get("par") or 1)
         left = _C.PAR_STEP_S - (now - self.par_t.get(k, 0))
         if left > 0:
             return None, "这条清单刚加过一行，%d 秒后看卡的利用率再决定加不加（并行 par=%d）" % (math.ceil(left), r["q"].get("par") or 1)
@@ -1178,6 +1183,25 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             return why, res
         return (launch or self.launch)(r, cards)
 
+    def _gpu_probe_spec(self, r, S_probe, now):
+        """只读探测待跑 GPU 请求此刻是否满足除 CPU 核外的前置条件（供 gpu_dyn_reserve 使用，无副作用）。"""
+        if self.missing(r) is not None or (self.disk_gate or {}).get("on") or self.gate:
+            return None
+        k = r["q"]["key"] if r["kind"] == "queue" else None
+        lane_n = sum(1 for y in S_probe["jobs"] if (y.get("lane") or y["key"]) == k) if k else 0
+        ok, gate = self.par_gate(r, now, dry=True, running_n=lane_n)
+        if gate:
+            return None
+        if r["kind"] == "queue" and r.get("needs"):
+            if (r["key"], r["name"]) in self.stagers or any(c["copy"] for c in _Q.check_needs(r, self.qenv(r["q"]))):
+                return None
+        x = self.as_job(r)
+        if k:
+            x["lane"] = k
+        if ok is not None:
+            x["allowed"] = [i for i in ok if x["allowed"] is None or i in x["allowed"]]
+        return x
+
     def tick(self, queues, first):
         """一轮：收尾跑完的、读指令与设置 → 收集各队列队首与单元申请 → 采样、补全请求 → 保活与 GPU 现状 → 按 admit 放行 → 推演 → 记等待 → 扫本地与共享盘 → 写状态。"""
         limits, pol = self.settle(queues)
@@ -1203,8 +1227,17 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         use = self.share(now, pol)
         self.io_suspect(now)                      # 只记录：已跑过同类历史 1.5 倍、共享盘又慢的任务记一条事件（用 share 里 peers 读的同机任务）
         waiting += [dict(r, why=(r["held"] or r["dep"])[1]) for r in reqs if r["held"] or r["dep"]]     # 被临时指令、依赖挡住的不参与排队（没有排位）
-        for r, why, pos in _S.admit([r for r in reqs if not r["held"] and not r["dep"]], focus, pol, use, now, lambda r: self.place(r, self.snapshot(limits, gpus, apps)),
-                                 lambda r: self.shadow(r, now, pol, focus, limits)):
+        rest_box = [()]
+
+        def place_tick(r):
+            S = self.snapshot(limits, gpus, apps)
+            if _S.job_ngpu(r) == 0:
+                S["gpu_cpu_dyn"] = _S.gpu_dyn_reserve(S, rest_box[0], now, lambda q, sp: self._gpu_probe_spec(q, sp, now))
+            return self.place(r, S)
+
+        for r, why, pos in _S.admit([r for r in reqs if not r["held"] and not r["dep"]], focus, pol, use, now,
+                                    place_tick, lambda r: self.shadow(r, now, pol, focus, limits),
+                                    before=lambda r, rest: rest_box.__setitem__(0, rest)):
             waiting.append(dict(r, why=why, pos=pos))
         self.gang_recheck(limits, gpus, apps, now)   # 成组：放掉这一轮没重新留的；这一轮回填的可能用了留着的资源，留着的成员按放行后的快照再看一遍
         self.gang_commit(reqs, waiting, now)      # 成组：本机成员都留好、别的主机的都此刻就能，一起放行

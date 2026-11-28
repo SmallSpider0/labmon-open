@@ -9676,6 +9676,228 @@ class GpuCpuReserveTest(unittest.TestCase):
         self.assertIn("为 GPU 保底留 2 核，纯 CPU 上限 15 核", line2)
         self.assertNotIn("纯 CPU 最多", line2)
 
+    def test_dynamic_gpu_reserve_prevents_cpu_steal_in_handover_gap(self):
+        # 17 核 + 1 卡主机：GPU par=3, cpus=2 已有 1 路在跑、另 2 路待跑；纯 CPU par=2, cpus=7 已有 1 路（7 核 / 8 核）在跑、
+        # 第 2 路待跑。纯 CPU 项目 card_share=0 在 fair_key 排前，动态预留必须拦下第 2 路纯 CPU、放行 2 路待跑 GPU，
+        # 且真放行（Worker.tick 的 admit 链路）与 simulate 推演结论完全一致。
+        for cpu1_used in (7.0, 8.0):
+            S = self.snap(
+                [self.card(0, free=45000.0, total=46068.0)],
+                [self.ran("g1", ["GPU-a"], cpu=2.0, ngpu=1, project="pg", t1=self.now + 3600),
+                 self.ran("c1", [], cpu=cpu1_used, ngpu=0, project="pc", t1=self.now + 3600)],
+                cpu_cap=17,
+            )
+            S["jobs"][0]["lane"] = "qg"
+            S["jobs"][1]["lane"] = "qc"
+            q_gpu = {
+                "key": "qg", "kind": "queue", "project": "pg", "allowed": None, "since": self.now, "par": 3,
+                "jobs": [
+                    dict(self.job("g2", ngpu=1, cpus=2, vram=8.0, dur=60.0), project="pg"),
+                    dict(self.job("g3", ngpu=1, cpus=2, vram=8.0, dur=60.0), project="pg"),
+                ],
+            }
+            q_cpu = {
+                "key": "qc", "kind": "queue", "project": "pc", "allowed": None, "since": self.now, "par": 2,
+                "jobs": [
+                    dict(self.job("c2", ngpu=0, cpus=7, dur=120.0), project="pc"),
+                ],
+            }
+            # 1) simulate 推演：pg 已有高 GPU 用量、pc 用量为 0，pc 排前但仍让核给 g2/g3，g2/g3 在 t=now 放行，c2 排在 t+3600 之后
+            out, stuck = self.m.simulate(self.now, S, [q_cpu, q_gpu], set(), use={"pg": 10.0, "pc": 0.0})
+            self.assertEqual(stuck, {})
+            t0s = {e["name"]: e["t0"] for e in out}
+            self.assertEqual(t0s["g2"], self.now)
+            self.assertEqual(t0s["g3"], self.now)
+            self.assertEqual(t0s["c2"], self.now + 3600)
+
+            # 2) 真放行链路（Worker + _gpu_probe_spec + admit + place）：结果与推演完全一致
+            w = self.m.Worker("h_dyn")
+            os.makedirs(w.p.dir, exist_ok=True)
+            w.info = {"gpus": [{"i": 0, "uuid": "GPU-a", "name": "fake", "total": 46068.0, "free": 45000.0}],
+                      "cpu_quota": 17.0, "mem": {"limit": 100.0, "anon": 5.0}}
+            w.running = {
+                "qg:g1": {"key": "qg:g1", "lane": "qg", "kind": "queue", "project": "pg", "name": "g1", "ngpu": 1,
+                          "gpus": ["GPU-a"], "t0": self.now - 60,
+                          "est": {"ram": 1.0, "vram": 8.0, "cpus": 2, "cpu_src": "提示值"}, "use": {"cores": 2.0}},
+                "qc:c1": {"key": "qc:c1", "lane": "qc", "kind": "queue", "project": "pc", "name": "c1", "ngpu": 0,
+                          "gpus": [], "t0": self.now - 60,
+                          "est": {"ram": 1.0, "vram": 0.0, "cpus": 7, "cpu_src": "提示值"}, "use": {"cores": cpu1_used}},
+            }
+            w.par_hi["qg"] = (3, self.now - 10)   # 此前跑过 3 路，此刻属交接补位
+            q_g_meta = {"key": "qg", "gpus": None, "par": 3}
+            q_c_meta = {"key": "qc", "gpus": None, "par": 2}
+            reqs = [
+                {"key": "qc:c2", "kind": "queue", "q": q_c_meta, "project": "pc", "name": "c2", "ngpu": 0,
+                 "excl": None, "tag": None, "dur": 120.0, "cut": 144.0, "since": self.now, "charge": 0.0,
+                 "deps": [], "deps_any": [], "needs": [],
+                 "est": {"vram": 0.0, "src": "提示值", "ram": 1.0, "ram_src": "提示值", "cpus": 7, "cpu_src": "提示值"}},
+                {"key": "qg:g2", "kind": "queue", "q": q_g_meta, "project": "pg", "name": "g2", "ngpu": 1,
+                 "excl": None, "tag": None, "dur": 60.0, "cut": 72.0, "since": self.now, "charge": 1.0,
+                 "deps": [], "deps_any": [], "needs": [],
+                 "est": {"vram": 8.0, "src": "提示值", "ram": 1.0, "ram_src": "提示值", "cpus": 2, "cpu_src": "提示值"}},
+                {"key": "qg:g3", "kind": "queue", "q": q_g_meta, "project": "pg", "name": "g3", "ngpu": 1,
+                 "excl": None, "tag": None, "dur": 60.0, "cut": 72.0, "since": self.now, "charge": 1.0,
+                 "deps": [], "deps_any": [], "needs": [],
+                 "est": {"vram": 8.0, "src": "提示值", "ram": 1.0, "ram_src": "提示值", "cpus": 2, "cpu_src": "提示值"}},
+            ]
+            launched = []
+
+            def fake_launch(r, cards):
+                launched.append(r["name"])
+                w.running[r["key"]] = {
+                    "key": r["key"], "lane": r["q"]["key"], "kind": "queue", "project": r["project"], "name": r["name"],
+                    "ngpu": r["ngpu"], "gpus": [c["uuid"] for c in cards], "t0": self.now,
+                    "est": r["est"], "use": {},
+                }
+                return None
+
+            rest_box = [()]
+
+            def place_tick(r):
+                snap = w.snapshot({}, gpus=[(0, "GPU-a", 45000.0)], gp=[])
+                if self.m.job_ngpu(r) == 0:
+                    snap["gpu_cpu_dyn"] = self.m.gpu_dyn_reserve(snap, rest_box[0], self.now,
+                                                                 lambda q, sp: w._gpu_probe_spec(q, sp, self.now))
+                return w.place(r, snap, launch=fake_launch)
+
+            waits = self.m.admit(reqs, set(), self.m.POLICY, {"pg": 10.0, "pc": 0.0}, self.now,
+                                 place_tick, lambda r: None, before=lambda r, rest: rest_box.__setitem__(0, rest))
+            self.assertEqual(launched, ["g2", "g3"])
+            self.assertEqual([r["name"] for r, _, _ in waits], ["c2"])
+            self.assertIn("为 GPU 预留 4 核", waits[0][1])
+
+    def test_dynamic_gpu_reserve_zero_when_no_fit_gpu_and_capped(self):
+        # 1) 无待跑 GPU 时，纯 CPU 按原静态保底上限正常放行不浪费核
+        S_busy_gpu = self.snap(
+            [self.card(0, free=45000.0, total=46068.0)],
+            [self.ran("g1", ["GPU-a"], cpu=2.0, ngpu=1, project="pg", t1=self.now + 3600),
+             self.ran("c1", [], cpu=7.0, ngpu=0, project="pc", t1=self.now + 3600)],
+            cpu_cap=17,
+        )
+        self.assertEqual(self.m.gpu_dyn_reserve(S_busy_gpu, [], self.now), 0.0)
+        q_cpu = {"key": "qc", "kind": "queue", "project": "pc", "allowed": None, "since": self.now, "par": 2,
+                 "jobs": [dict(self.job("c2", ngpu=0, cpus=7, dur=60.0), project="pc")]}
+        out_no_gpu, stuck_no_gpu = self.m.simulate(self.now, S_busy_gpu, [q_cpu], set())
+        self.assertEqual(stuck_no_gpu, {})
+        self.assertEqual(out_no_gpu[0]["t0"], self.now)
+
+        # 2) 待跑 GPU 显存不够（卡已满）或外部占卡（unacct）放不下新 GPU 任务时，动态预留为 0，纯 CPU 照常放行
+        S_vram_full = self.snap(
+            [self.card(0, free=4000.0, total=46068.0)],
+            [self.ran("g1", ["GPU-a"], cpu=2.0, ngpu=1, project="pg", t1=self.now + 3600),
+             self.ran("c1", [], cpu=7.0, ngpu=0, project="pc", t1=self.now + 3600)],
+            cpu_cap=17,
+        )
+        S_vram_full["jobs"][0]["vram"] = {"GPU-a": 40000.0}
+        g_big_vram = dict(self.job("g_big", ngpu=1, cpus=4, vram=20.0, dur=60.0), project="pg")
+        self.assertEqual(self.m.gpu_dyn_reserve(S_vram_full, [g_big_vram], self.now), 0.0)
+        q_gpu_full = {"key": "qg", "kind": "queue", "project": "pg", "allowed": None, "since": self.now,
+                      "jobs": [g_big_vram]}
+        out_full, stuck_full = self.m.simulate(self.now, S_vram_full, [q_cpu, q_gpu_full], set(), use={"pg": 10.0, "pc": 0.0})
+        self.assertEqual(stuck_full, {})
+        t0s_full = {e["name"]: e["t0"] for e in out_full}
+        self.assertEqual(t0s_full["c2"], self.now)
+
+        S_unacct = dict(S_busy_gpu, unacct={"GPU-a"}, unacct_info={"GPU-a": {"busy": True, "deduct": 2048.0, "why": "外部占卡"}})
+        self.assertEqual(self.m.gpu_dyn_reserve(S_unacct, [dict(self.job("g2", ngpu=1, cpus=4, vram=8.0), project="pg")], self.now), 0.0)
+
+        # 3) 待跑 GPU 核需求之和超整机 cpu_room - gpu_used 时封顶不超上限
+        S_cap = self.snap([self.card(0), self.card(1)],
+                          [self.ran("g0", ["GPU-a"], cpu=2.0, ngpu=1, project="pg")], cpu_cap=10, cpu_room=10.0)
+        g_6a = dict(self.job("g6a", ngpu=1, cpus=6, vram=4.0), project="pg")
+        g_6b = dict(self.job("g6b", ngpu=1, cpus=6, vram=4.0), project="pg")
+        g_2c = dict(self.job("g2c", ngpu=1, cpus=2, vram=4.0), project="pg")
+        # 已有 2 核 GPU，上限 10 -> 最多预留 8 核：g6a(6) 计入，g6b(6) 超 8 跳过，g2c(2) 计入，合计 8.0
+        self.assertEqual(self.m.gpu_dyn_reserve(S_cap, [g_6a, g_6b, g_2c], self.now), 8.0)
+
+    def test_dynamic_gpu_reserve_cpu_yield_does_not_become_barrier(self):
+        # 关键防死锁：纯 CPU 待跑任务已等满 wait_cap（40 分钟 >= 30 分钟）且在 fair_key 排前，
+        # 因让核给待跑 GPU 被挡下时绝不能成为挡住后续待跑 GPU 的公平份额屏障（真放行 + 推演均不死锁）。
+        S = self.snap(
+            [self.card(0, free=45000.0, total=46068.0)],
+            [self.ran("g1", ["GPU-a"], cpu=2.0, ngpu=1, project="pg", t1=self.now + 3600),
+             self.ran("c1", [], cpu=7.0, ngpu=0, project="pc", t1=self.now + 3600)],
+            cpu_cap=17,
+        )
+        old_since = self.now - 2400.0   # 已等 40 分钟 >= cap(1800s)
+        c2 = dict(self.job("c2", ngpu=0, cpus=7, dur=120.0), kind="queue", project="pc", since=old_since, charge=0.0)
+        g2 = dict(self.job("g2", ngpu=1, cpus=2, vram=8.0, dur=60.0), kind="queue", project="pg", since=self.now, charge=1.0)
+        g3 = dict(self.job("g3", ngpu=1, cpus=2, vram=8.0, dur=60.0), kind="queue", project="pg", since=self.now, charge=1.0)
+
+        # 1) 直接走 admit + place（模拟真放行）：c2 不成屏障，g2/g3 顺利放行
+        S_live = dict(S, jobs=[dict(j) for j in S["jobs"]], holds={}, gholds={}, gfirst={})
+        launched = []
+        rest_box = [()]
+
+        def do_place(r):
+            S_live["gpu_cpu_dyn"] = self.m.gpu_dyn_reserve(S_live, rest_box[0], self.now) if self.m.job_ngpu(r) == 0 else 0.0
+            try:
+                cs, why, res = self.m.place(r, S_live, self.now)
+            finally:
+                S_live["gpu_cpu_dyn"] = 0.0
+            if cs is not None:
+                launched.append(r["name"])
+                S_live["jobs"].append(self.m.acct_job(r, cs, self.now, self.now + 3600, S_live["cpu_cap"], self.m.snap_ngpus(S_live)))
+                return None
+            return why, res
+
+        waits = self.m.admit([c2, g2, g3], set(), self.m.POLICY, {"pg": 10.0, "pc": 0.0}, self.now,
+                             do_place, shadow=lambda r: self.now, before=lambda r, rest: rest_box.__setitem__(0, rest))
+        self.assertEqual(launched, ["g2", "g3"])
+        self.assertEqual([r["name"] for r, _, _ in waits], ["c2"])
+        self.assertFalse(waits[0][2].get("barrier"))
+
+        # 2) simulate 推演同样不死锁：g2/g3 在 t=now 放行，c2 排在 t+3600
+        q_cpu = {"key": "qc", "kind": "queue", "project": "pc", "allowed": None, "since": old_since, "par": 2,
+                 "jobs": [dict(self.job("c2", ngpu=0, cpus=7, dur=120.0), project="pc")]}
+        q_gpu = {"key": "qg", "kind": "queue", "project": "pg", "allowed": None, "since": self.now, "par": 3,
+                 "jobs": [dict(self.job("g2", ngpu=1, cpus=2, vram=8.0, dur=60.0), project="pg"),
+                          dict(self.job("g3", ngpu=1, cpus=2, vram=8.0, dur=60.0), project="pg")]}
+        out, stuck = self.m.simulate(self.now, S, [q_cpu, q_gpu], set(), use={"pg": 10.0, "pc": 0.0})
+        self.assertEqual(stuck, {})
+        t0s = {e["name"]: e["t0"] for e in out}
+        self.assertEqual((t0s["g2"], t0s["g3"], t0s["c2"]), (self.now, self.now, self.now + 3600))
+
+        # 3) 对比：无待跑 GPU 时（dyn=0），纯 CPU 因静态保底核被挡仍保持 res=True（不破坏既有屏障契约）
+        S_static = self.snap([self.card(0)], [self.ran("c15", [], cpu=15.0, ngpu=0)], cpu_cap=17)
+        cs_st, why_st, res_st = self.m.place(self.job("c1", ngpu=0, cpus=1), S_static, self.now)
+        self.assertIsNone(cs_st)
+        self.assertTrue(res_st)
+        self.assertIn("为 GPU 预留 2 核", why_st)
+
+    def test_dynamic_gpu_reserve_parallel_ramp_vs_refill(self):
+        # 并行清单初次爬坡（actual_n >= par_level）本轮受 PAR_STEP_S 最多加 1 行，只预留 1 路核；
+        # 交接补位（actual_n < par_level）可同时补齐，预留全部可补位路数核。
+        w = self.m.Worker("h_par")
+        os.makedirs(w.p.dir, exist_ok=True)
+        w.info = {"gpus": [{"i": 0, "uuid": "GPU-a", "name": "fake", "total": 46068.0, "free": 45000.0}],
+                  "cpu_quota": 17.0, "mem": {"limit": 100.0, "anon": 5.0}}
+        w.running = {
+            "qg:g1": {"key": "qg:g1", "lane": "qg", "kind": "queue", "project": "pg", "name": "g1", "ngpu": 1,
+                      "gpus": ["GPU-a"], "t0": self.now - 600,
+                      "est": {"ram": 1.0, "vram": 8.0, "cpus": 2, "cpu_src": "提示值"}, "use": {"cores": 2.0}},
+        }
+        q_g_meta = {"key": "qg", "gpus": None, "par": 3}
+        reqs = [
+            {"key": "qg:g2", "kind": "queue", "q": q_g_meta, "project": "pg", "name": "g2", "ngpu": 1,
+             "excl": None, "tag": None, "dur": 60.0, "cut": 72.0, "since": self.now, "charge": 1.0,
+             "deps": [], "deps_any": [], "needs": [],
+             "est": {"vram": 8.0, "src": "提示值", "ram": 1.0, "ram_src": "提示值", "cpus": 2, "cpu_src": "提示值"}},
+            {"key": "qg:g3", "kind": "queue", "q": q_g_meta, "project": "pg", "name": "g3", "ngpu": 1,
+             "excl": None, "tag": None, "dur": 60.0, "cut": 72.0, "since": self.now, "charge": 1.0,
+             "deps": [], "deps_any": [], "needs": [],
+             "est": {"vram": 8.0, "src": "提示值", "ram": 1.0, "ram_src": "提示值", "cpus": 2, "cpu_src": "提示值"}},
+        ]
+        snap = w.snapshot({}, gpus=[(0, "GPU-a", 45000.0)], gp=[])
+        # 初次爬坡：par_hi 为空（par_level=1），只应预留 1 路（2.0 核）
+        w.par_hi.clear()
+        dyn_ramp = self.m.gpu_dyn_reserve(snap, reqs, self.now, lambda q, sp: w._gpu_probe_spec(q, sp, self.now))
+        self.assertEqual(dyn_ramp, 2.0)
+        # 交接补位：此前跑过 3 路（par_level=3），应预留全部 2 路（4.0 核）
+        w.par_hi["qg"] = (3, self.now - 10)
+        dyn_refill = self.m.gpu_dyn_reserve(snap, reqs, self.now, lambda q, sp: w._gpu_probe_spec(q, sp, self.now))
+        self.assertEqual(dyn_refill, 4.0)
+
     def test_cpu_affinity_staggered_alloc_and_release(self):
         # 未绑 cpuset 的 Linux CFS 容器下，纯 CPU 任务按声明 cpus 错峰分配互不重叠的逻辑核，退出回收，不足时轮转补齐
         w = self.m.Worker("h0")
