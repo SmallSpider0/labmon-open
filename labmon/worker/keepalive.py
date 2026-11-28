@@ -351,6 +351,11 @@ def gpu_owners(apps, procs, owner, ka_full=None, no_ka=False):
     return gp
 
 
+def guest_ram_hi(ram_keep):
+    """借来的主机：对方内存触发退让的滞回上限（GiB），超出 keep["ram"] + max(0.5, 0.1 * keep["ram"]) 才计入连续确认。"""
+    return ram_keep + max(_C.GUEST_RAM_HYST_MIN, _C.GUEST_RAM_HYST_FRAC * ram_keep)
+
+
 class KeepaliveMixin:
 
     # ---- 保活 ----
@@ -684,7 +689,7 @@ class KeepaliveMixin:
         连着两轮都在才算对方回来了（end_away），这一轮起按普通规则；新起的 ka.sh 停不了的保活不算回来，只挡它那张卡（#37）。勾上前已记的超出（back_last 里早于这次开始的，卡也算）这一轮起不挡。
         基线在这次第一轮读到 GPU 表时取；到点、作废、指令不带 away 时清掉，下次重新取（约定时间相同也一样）。worker 重启后以重启时对方已有的进程为准。"""
         if not self.guest():
-            self.back, self.back_last, self.tight, self.cpu_hot, self.away_base = {}, {}, None, 0, None
+            self.back, self.back_last, self.tight, self.cpu_hot, self.ram_hot, self.away_base = {}, {}, None, 0, 0, None
             return
         k, o, over = self.keep(), self.other, {}
         new = set()                                    # 说好不用开始以后新出现对方 GPU 进程的卡
@@ -708,8 +713,28 @@ class KeepaliveMixin:
                 over[g["uuid"]] = "卡 %d：对方用 %.1f GiB 显存" % (g["i"], mb / 1024) + (
                     "，其中保活 PID %s 不归 ka.sh 管、停不了，要停请对方停" % "、".join(map(str, ka)) if ka else
                     "，预留 %g" % k["vram"] if lim else "，说好不用、这是新出现的" if away else "，借来时对方空着")
-        if k and not away and o["ram"] is not None and o["ram"] > k.get("ram", 0.0):
-            over["ram"] = "内存：对方用 %.1f GiB，预留 %g" % (o["ram"], k["ram"])
+        # 对方内存：连续多轮超滞回上限（guest_ram_hi）才触发退让，退让后回落至 <= keep["ram"] 才清零并进入冷却，
+        # 防止常驻内存贴线微幅波动反复重置 GUEST_QUIET_S；容器整机收不回内存到 TIGHT_MEM（95%）时硬底线立即生效。
+        if k and o["ram"] is not None:
+            ram_keep = k.get("ram", 0.0)
+            ram_hi = guest_ram_hi(ram_keep)
+            m = self.info.get("mem") or {}
+            mem_tight = bool(m.get("limit") and m["anon"] / m["limit"] >= _C.TIGHT_MEM)
+            in_ram = "ram" in self.back
+            if o["ram"] <= ram_keep:
+                self.ram_hot = 0
+            elif mem_tight:
+                self.ram_hot = max(self.ram_hot + 1, _C.GUEST_RAM_HOT)
+            elif o["ram"] > ram_hi:
+                self.ram_hot += 1
+            elif in_ram:
+                self.ram_hot = max(self.ram_hot, _C.GUEST_RAM_HOT)
+            else:
+                self.ram_hot = 0
+            if not away and (mem_tight and o["ram"] > ram_keep or self.ram_hot >= _C.GUEST_RAM_HOT):
+                over["ram"] = "内存：对方用 %.1f GiB，预留 %g" % (o["ram"], k["ram"])
+        else:
+            self.ram_hot = 0
         # cpu_hot 是“对方 CPU 连着几轮超出预留”这件事本身，说好不用期间照样累计，只是不判超出；作废那一轮起已连着两轮的立刻算超出
         self.cpu_hot = self.cpu_hot + 1 if k and o["cpu"] is not None and o["cpu"] > k.get("cpu", 0.0) else 0
         if self.cpu_hot >= 2 and not away:             # 连着两轮才算：刚停的保活那一段的核数会算到对方头上（ka_cores），一轮的尖峰不算

@@ -60,6 +60,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         # 各卡上 labmon 之外的 GPU 进程（宿主机 PID）、ka.sh 停不了的保活进程树占的核（cpu_room 另扣；只在 worker 内存里，不写进状态）
         self.back, self.back_last = {}, {}    # 借来的主机：对方此刻超出预留的几项（卡 UUID、ram、cpu → 说明），各项最近一次超出的时刻
         self.cpu_hot = 0                      # 借来的主机：对方的 CPU 连着几轮超出预留（两轮才算超出，一轮的尖峰不算）
+        self.ram_hot = 0                      # 借来的主机：对方的内存连着几轮超出滞回上限（两轮才算超出，贴线抖动不重置冷却窗）
         self.ka_ticks = {}                    # 上一轮保活进程树的 CPU 累计之和 {树: (时刻, ticks)}（ka_cores；"all" 所有保活合起来，(pid, 启动时刻) 各棵保活树分开记）
         self.ka_roots = {}                    # 上一轮认作保活的 GPU 进程 {pid: (启动时刻, 是不是 ka.sh 停不了的)}：这一轮没认出来（nvidia-smi 超时等）但还在的照样算保活
         self.tight = None                     # 借来的主机快撞上限的说明（guest_tight）
