@@ -21,7 +21,7 @@ from __future__ import annotations
 
 import re
 
-from .config import STALE_S, fmt_dur, fmt_time, member_owner
+from .config import STALE_S, fmt_dur, fmt_time, member_owner, pool_host_id
 
 GAIN_S = 3600          # 整批完工至少提前这么多秒才建议（剩余时间短的批按 GAIN_SHORT_FRAC 放宽，不低于 GAIN_MIN_S）
 GAIN_MIN_S = 900
@@ -74,7 +74,7 @@ def _needs_miss(jobs: list) -> list[str]:
     return list(seen)
 
 
-def _text(p: dict, proj: str, label: dict, t: float) -> str:
+def _text(p: dict, proj: str, label: dict, t: float, pool_target: dict | None = None) -> str:
     """建议的一句话（告警与两个页面都用它）：把哪台哪条清单（写全目录：同项目几个目录下常有同名清单）的哪几行挪到哪台、接在哪
     （要新建的写出原清单的目录与项目 id：任务在清单的目录下跑、读这条清单的 .env，挪来的一批同一种环境）、整批从何时提前到何时、
     目标主机缺可自补本地文件时的并发预建提醒（#190）、按几点的推演。"""
@@ -105,16 +105,18 @@ def _text(p: dict, proj: str, label: dict, t: float) -> str:
     lane = p.get("lane") and f"{p['lane'][0].rstrip('/')}/{p['lane'][1]}"
     where = (f"插在 {lane} 里 {p['before']} 前面（避开其 after= 阻塞）" if lane and p.get("before")
              else f"接在 {lane} 后面" if lane else None)
+    add_to = (pool_target or {}).get(tid)
     if p.get("local") and lane:        # 同机挪到另一条早跑完的清单（#110）：车道数不变，原清单在同一台排到别的清单跑完后才跑完
         return f"把 {what} 挪到同一台上另一条早跑完的清单（{where}{tail}）：{when}{par_dep}{cache}{TAIL % fmt_time(t, date=False)}"
     if p.get("local"):                 # 同机多开一条车道（#43）：剪到新的长期清单，与原清单同目录、同环境
-        # 推演只在没吃满的卡上排（offer 的 gpus）：登记时照样限卡，否则真放行可能放到吃满的卡上（Codex 审 #63）
-        gp = f" --gpus {','.join(map(str, p['gpus']))}" if p.get("gpus") else ""
+        # 推演只在没吃满的卡上排（offer 的 gpus）：单机登记时照样限卡，否则真放行可能放到吃满的卡上（Codex 审 #63）；
+        # 独占共有池（add_to）须经池入口提交，不带单机专属的 --gpus
+        gp = f" --gpus {','.join(map(str, p['gpus']))}" if p.get("gpus") and not add_to else ""
         return (f"在 {label.get(tid, tid)} 上多开一条车道：把 {what} 剪到同目录新清单（独立 QUEUE_STATE/QUEUE_LOGS，见 alerts.md）并 "
-                f"labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}{gp}{tail}："
+                f"labmon worker add {add_to or tid} {p['jobs'][0]['root']} 新清单 --project {proj}{gp}{tail}："
                 f"{when}{par_dep}{cache}{TAIL % fmt_time(t, date=False)}")
     where = where or (f"新建同目录清单（独立 QUEUE_STATE/QUEUE_LOGS，见 alerts.md）并 "
-                      f"labmon worker add {tid} {p['jobs'][0]['root']} 新清单 --project {proj}")
+                      f"labmon worker add {add_to or tid} {p['jobs'][0]['root']} 新清单 --project {proj}")
     return f"把 {what} 挪到 {label.get(tid, tid)}（{where}{tail}）：{when}{par_dep}{cache}{TAIL % fmt_time(t, date=False)}"
 
 
@@ -187,6 +189,7 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
     {key "rebalance:<项目>:est", est: True, text 让会话写 est_min= 或 fit --list, why, from}（#43；同样只给会话、只叫醒一次）；都没有的项目不列。"""
     prev = prev or {}
     label = {e["id"]: e.get("label") or e["id"] for e in hosts}
+    pool_target = {e["id"]: pool_host_id(e["pool_id"]) for e in hosts if e.get("pool_exclusive") and e.get("pool_id")}
     late = {f"{e['id']}|{x.get('root')}|{x.get('queue')}" for e in hosts for x in (e.get("borrow") or {}).get("late") or []}
     offs: dict = {}
     live = _live(hosts)
@@ -264,11 +267,11 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
                 best["needs_miss"] = miss
             if any(j.get("par_dep_full") for j in best["jobs"]):
                 best["par_dep_full"] = True
-            best["text"] = _text(best, proj, label, t)
+            best["text"] = _text(best, proj, label, t, pool_target)
             if under:                  # 有吃不满的主机（#145）：句首写合计还能开几条、还有多少行排队；不是按整批门槛收下的，key 按吃不满的那几台
                 best["room"] = {"hosts": {h: r["lanes"] for h, r in sorted(under.items())}, "busy": {h: r["busy"] for h, r in sorted(under.items())},
                                 "lanes": sum(r["lanes"] for r in under.values()), "rows": _queued(hosts, proj)}
-                best["text"] = _room_text(best, proj, label) + best["text"]
+                best["text"] = _room_text(best, proj, label, pool_target) + best["text"]
                 if best.get("loose") or best.get("idle"):
                     best["key"] = f"rebalance:{proj}:room:{','.join(sorted(under))}"
             out[proj] = best
@@ -303,16 +306,17 @@ def _queued(hosts: list[dict], proj: str) -> int:
     return n
 
 
-def _room_text(p: dict, proj: str, label: dict) -> str:
+def _room_text(p: dict, proj: str, label: dict, pool_target: dict | None = None) -> str:
     """有吃不满的主机时建议句前面的一句（#145）：哪几台吃不满、合计此刻还能多开几条车道、本项目还有多少行排队，先 fit --list 再把行摊开；
     后面接的挪法只是其中一批（一次至多 MOVE_MAX 行、一个目标）。"""
     rm, j = p["room"], p["jobs"][0]
     hs = list(rm["hosts"])
+    fit_to = (pool_target or {}).get(hs[0]) or hs[0]
     busy = "、".join(f"{label.get(h, h)} {rm['busy'][h]:.0f}%" for h in hs)
     each = f"（{'、'.join(f'{label.get(h, h)} {n}' for h, n in rm['hosts'].items())}）" if len(hs) > 1 else ""
     rows = f"，本项目还有约 {rm['rows']} 行在排队" if rm["rows"] else ""
     return (f"{'、'.join(label.get(h, h) for h in hs)} 吃不满（30 分钟 {busy}），合计还可开 {rm['lanes']} 条车道{each}{rows}："
-            f"先跑 labmon worker fit {hs[0]} {j['root']} {j['queue']} --list --project {proj} 摊开排队行（见 alerts.md）；示例挪法：")
+            f"先跑 labmon worker fit {fit_to} {j['root']} {j['queue']} --list --project {proj} 摊开排队行（见 alerts.md）；示例挪法：")
 
 
 def move_key(proj: str, p: dict) -> str:
