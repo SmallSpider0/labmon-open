@@ -2964,3 +2964,121 @@ class PoolChangeTellTest(unittest.TestCase):
                     self.assertNotIn("p_alice", got)
                     self.assertNotIn("p_bob", got)
                     self.assertIn("原入口 pool，", got["p_boss"][0]["msg"])
+
+
+class ResetHistApiTest(unittest.TestCase):
+    """POST /api/worker/reset-hist 与 labmon worker reset-hist 的权限、参数校验、共享盘去重与独立主机透传（#300）。"""
+
+    def _post(self, base: str, path: str, token: str, body: dict):
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        req = urllib.request.Request(
+            base + path,
+            data=json.dumps(body).encode(),
+            method="POST",
+            headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        )
+        try:
+            with opener.open(req, timeout=5) as r:
+                return r.status, json.loads(r.read().decode())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read().decode())
+
+    def test_reset_hist_api_auth_validation_dedup_and_cli(self):
+        import io
+        from labmon import __main__ as CLI
+        from labmon import client as CL
+        from labmon import lease as LS
+        from labmon import overview as OV
+        from labmon import projects as PJ
+        from labmon import workerctl as WC
+        from fixtures import board, make_token
+
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            shared_home = d / "shared_labmon"
+            ext_home = d / "ext_labmon"
+            hf = d / "hosts.toml"
+            hf.write_text(
+                f'[[hosts]]\nid = "h1"\nssh = "u@10.0.0.1"\npython = "{sys.executable}"\nworker_home = "{shared_home}"\nusers = ["alice"]\n'
+                f'[[hosts]]\nid = "h2"\nssh = "u@10.0.0.2"\npython = "{sys.executable}"\nworker_home = "{shared_home}"\nusers = ["alice"]\n'
+                f'[[hosts]]\nid = "ext1"\nssh = "u@10.0.0.3"\npython = "{sys.executable}"\nworker_home = "{ext_home}"\nstandalone = true\nowner = "alice"\n'
+                f'[[hosts]]\nid = "h_bob"\nssh = "u@10.0.0.4"\npython = "{sys.executable}"\nworker_home = "{d / "bob_labmon"}"\nusers = ["bob"]\n'
+                '[pools.a100]\nlabel = "A100"\nhosts = ["h1", "h2"]\nmembers = ["alice"]\n'
+            )
+            env = {
+                "LABMON_STATE": str(d / "state"),
+                "LABMON_HOSTS": str(hf),
+                "LABMON_NO_NOTIFY": "1",
+                "LABMON_NO_KEYCHAIN": "1",
+            }
+            with mock.patch.dict(os.environ, env):
+                srv = board(self, scopes=("admin",), name="boss", role="admin")
+                admin_tok = make_token("boss", role="admin", scopes=("admin",))
+                alice_tok = make_token("alice", role="user", scopes=("read", "project"))
+                bob_tok = make_token("bob", role="user", scopes=("read", "project"))
+                base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+                PJ.put_config("p_alice", 'id = "p_alice"\ntitle = "Alice"\n', owner="alice")
+                PJ.put_config("p_bob", 'id = "p_bob"\ntitle = "Bob"\n', owner="bob")
+
+                with mock.patch.object(LS, "primary", return_value=True):
+                    # 1. 参数校验：缺 project / tag 与 name 全空 / 多余 args 均返 400
+                    st, out = self._post(base, "/api/worker/reset-hist", alice_tok, {"host": "h1", "tag": "heavy"})
+                    self.assertEqual(st, 400, out)
+                    st, out = self._post(base, "/api/worker/reset-hist", alice_tok, {"host": "h1", "project": "p_alice"})
+                    self.assertEqual(st, 400, out)
+                    st, out = self._post(base, "/api/worker/reset-hist", alice_tok, {"host": "h1", "project": "p_alice", "tag": "heavy", "args": ["extra"]})
+                    self.assertEqual(st, 400, out)
+
+                    # 2. 权限校验：无权项目返 403、无权主机返 403
+                    st, out = self._post(base, "/api/worker/reset-hist", bob_tok, {"host": "h_bob", "project": "p_alice", "tag": "heavy"})
+                    self.assertEqual(st, 403, out)
+                    st, out = self._post(base, "/api/worker/reset-hist", alice_tok, {"host": "h_bob", "project": "p_alice", "tag": "heavy"})
+                    self.assertEqual(st, 403, out)
+
+                    # 3. pool 目标共享盘去重（h1 与 h2 共用 shared_home，只调用一次 ssh）
+                    calls = []
+                    real_ssh = WC.ssh
+
+                    def spy_ssh(h, remote, stdin="", timeout=None):
+                        calls.append(h["id"])
+                        return real_ssh(dict(h, ssh=""), remote, stdin, timeout)
+
+                    with mock.patch.object(WC, "ssh", side_effect=spy_ssh):
+                        st, out = self._post(base, "/api/worker/reset-hist", alice_tok, {
+                            "host": "pool", "project": "p_alice", "tag": "heavy", "name": "train_seed0",
+                        })
+                    self.assertEqual(st, 200, out)
+                    self.assertEqual(out["rc"], 0, out)
+                    self.assertEqual(len(calls), 1, calls)
+                    self.assertIn("任务前缀=train", out["out"])
+                    self.assertIn("h1、h2", out["out"])
+                    rf = json.loads((shared_home / "hist_reset.json").read_text())
+                    self.assertEqual(len(rf["rules"]), 1)
+                    self.assertEqual((rf["rules"][0]["project"], rf["rules"][0]["tag"], rf["rules"][0]["name"]),
+                                     ("p_alice", "heavy", "train"))
+
+                    # 4. all 目标：管理员对 p_bob 写入，bob 独立/共享目录写入；随后核对 ext1（属 alice）的 _hist_payload 只透传 p_alice 的 resets，不泄露 p_bob
+                    with mock.patch.object(WC, "ssh", side_effect=spy_ssh):
+                        st, out = self._post(base, "/api/worker/reset-hist", admin_tok, {
+                            "host": "all", "project": "p_bob", "tag": "t_bob",
+                        })
+                    self.assertEqual(st, 200, out)
+                    self.assertEqual(out["rc"], 0, out)
+                    self.assertTrue((ext_home / "hist_reset.json").is_file())
+                    ext_h = {"id": "ext1", "standalone": True, "owner": "alice"}
+                    hp = OV._hist_payload(ext_h, [{"id": "p_alice", "lanes": []}, {"id": "p_bob", "lanes": []}], time.time(), {})
+                    self.assertIsNotNone(hp)
+                    self.assertEqual([r["project"] for r in hp.get("resets") or []], ["p_alice"])
+
+                # 5. CLI 调用与参数校验
+                with mock.patch.object(CL, "run", return_value=0) as mrun:
+                    rc = CLI.main(["worker", "reset-hist", "pool", "--project", "p_alice", "--tag", "heavy", "--name", "train_s0"])
+                    self.assertEqual(rc, 0)
+                    mrun.assert_called_once()
+                    args_c, _ = mrun.call_args
+                    self.assertEqual(args_c[:2], ("POST", "/api/worker/reset-hist"))
+                    self.assertEqual(args_c[2], {"host": "pool", "args": [], "project": "p_alice", "tag": "heavy", "name": "train_s0"})
+                with self.assertRaises(SystemExit) as cm, mock.patch("sys.stderr", io.StringIO()):
+                    CLI.main(["worker", "reset-hist", "h1", "--project", "p_alice"])
+                self.assertEqual(cm.exception.code, 2)

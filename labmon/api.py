@@ -21,14 +21,14 @@ from . import users as U
 from . import workerctl as W
 from .config import GIB, HOSTS_LOCK, ConfigError, active_hosts, all_hosts, fmt_dur, fmt_time, home_peers, host_platform, host_pool, host_share, host_ssh_key, hosts_file, is_other_member_auto, is_pool_id, is_standalone, member_owner, own_hosts, pool_id_of, pools, resolve_pool, set_returned, set_sched_ovr, user_hosts
 from .health import lease_end as _lease_end
-from .worker import cpu_line, ka_lines, unacct_lines
+from .worker import base_name, cpu_line, ka_lines, unacct_lines
 from .worker.pure import is_wsl_mnt, other_load, other_load_text, wsl_mnt_warn
-from .records import EVENT_KINDS, project_rows
+from .records import EVENT_KINDS, log_events, project_rows
 from .state import load_json, snapshot
 
 OVR = {"pause": ("add", "pause"), "resume": ("rm", "pause"), "focus": ("add", "focus"), "unfocus": ("rm", "focus"),
        "drain": ("add", "drain"), "undrain": ("rm", "drain")}
-WORKER_ACTS = ("start", "stop", "status", "add", "rm", "limit", "fit", "clean")
+WORKER_ACTS = ("start", "stop", "status", "add", "rm", "limit", "fit", "clean", "reset-hist")
 
 
 class Out:
@@ -313,6 +313,73 @@ def worker(sub: str, hid: str, rest: list[str], gpus: str | None = None, project
     if extra:
         out = out.rstrip("\n") + "\n" + extra
     return {"rc": rc, "out": out, "err": ""}
+
+
+def reset_hist(hid: str, project: str | None, tag: str | None = None, name: str | None = None, *,
+               may=None, who: U.Ident | None = None) -> dict:
+    """labmon worker reset-hist <主机|pool|pool:<id>|all> --project <项目> [--tag <tag>] [--name <任务名或前缀>]（#300）：
+    向目标主机所在的 worker_home 写入轻量历史峰值水印（绝不删 usage.jsonl、不影响时间线与 share.use），
+    同一共享盘只写一次，同步记入看板本机副本与操作日志并返回中文回执。"""
+    o = Out()
+    proj = (project or "").strip()
+    tg = (tag or "").strip() or None
+    nm = (name or "").strip() or None
+    if not hid or not proj:
+        return usage("用法：labmon worker reset-hist <主机|pool|all> --project <项目 id> [--tag <tag>] [--name <任务名或前缀>]")
+    if not tg and not nm:
+        return usage("worker reset-hist 需要至少指定 --tag 或 --name（防止误清全项目历史）")
+    if bad := unknown_project(proj, require=True):
+        o.err(f"[labmon] {bad}")
+        return o.done(3)
+    try:
+        if hid == "all":
+            pool_hosts = own_hosts(who)
+            targets = [h for h in pool_hosts if may is None or may(str(h["id"]))]
+            if not targets:
+                o.err("[labmon] 没有可用的在用主机可写入历史峰值水印")
+                return o.done(3)
+        elif is_pool_id(hid) or hid.startswith("pool:"):
+            pcfg = resolve_pool(hid)
+            if pcfg is None:
+                o.err("[labmon] 主机清单（hosts.toml）尚未配置共有型算力池（[pools.<id>]）")
+                return o.done(3)
+            act = {str(h["id"]): h for h in active_hosts()}
+            targets = [act[x] for x in pcfg["active_hosts"] if x in act and (may is None or may(x))]
+            if not targets:
+                o.err(f"[labmon] 算力池「{pcfg['label']}」（{pcfg['host_id']}）目前没有可用的在用主机")
+                return o.done(3)
+        else:
+            targets = [W.host_conf(hid)]
+        res = W.reset_hist(targets, proj, tag=tg, name=nm)
+    except ConfigError as e:
+        o.err(f"[labmon] {e}")
+        return o.done(3)
+    norm_name = base_name(nm) if nm else None
+    scope = "、".join(([f"tag={tg}"] if tg else []) + ([f"任务前缀={norm_name}"] if norm_name else []))
+    ok_hosts, latest_t, rc = [], None, 0
+    for r in res:
+        hlist = "、".join(r["hosts"])
+        if r["rc"] == 0:
+            ok_hosts.extend(r["hosts"])
+            if r.get("t") is not None:
+                latest_t = max(latest_t, float(r["t"])) if latest_t is not None else float(r["t"])
+            when = fmt_time(r["t"], year=True) if r.get("t") else "此刻"
+            o.p(f"[labmon] 已为项目 {proj}（{scope}）写入历史峰值水印（{when}），覆盖主机：{hlist}（经 {r['via']} 写入 {r['home'].rstrip('/')}/hist_reset.json）")
+        else:
+            rc |= r["rc"] or 1
+            detail = (r.get("out") or "").strip() or f"退出码 {r['rc']}"
+            o.err(f"[labmon] 写入历史峰值水印失败（主机：{hlist}，经 {r['via']}）：{detail}")
+    if ok_hosts:
+        from . import overview as O
+        wt = latest_t or time.time()
+        O.save_board_hist_reset(proj, tg, norm_name, wt)
+        who_s = f"（{who.name}）" if who and getattr(who, "name", None) else ""
+        log_events([{
+            "kind": "worker", "project": proj, "hosts": ok_hosts,
+            "msg": f"重置历史峰值水印{who_s}：项目 {proj}（{scope}），覆盖 {'、'.join(ok_hosts)}",
+        }])
+        o.p("[labmon] 旧资源峰值（ram/vram/cores）与 OOM 下限将在 worker 下一轮 tick 失效；usage.jsonl、时间线、公平份额与时长统计不受影响。")
+    return o.done(rc)
 
 
 def home_text(hid: str, may=None, *, who: U.Ident | None = None) -> str:

@@ -259,7 +259,7 @@ class ForecastMixin:
             hit = cur and pend and self.override_hit(dict(pend[0][1], q=q, key=k, kind="queue", name=pend[0][0], project=q["project"]), lasting=True)
             if hit and hit[0] != "deadline":
                 pend = []
-            jobs = [self.job_spec(n, h, self.qest.get(k, {}).get(n) or _S.estimate(self.hist, dict(h, name=n, project=q["project"]), live=self.live_cpu()),
+            jobs = [self.job_spec(n, h, self.qest.get(k, {}).get(n) or _S.estimate(self.hist, dict(h, name=n, project=q["project"]), live=self.live_cpu(), resets=getattr(self, "hist_resets", None)),
                                   self.req_dur(x), self.dur_k(dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"])), self.req_dur(x, cut=True))
                     for n, h in pend for x in [{"key": k, "name": n, "project": q["project"], "gang": None if _C.is_hold(n) else h["gang"]}]]
             par, wpar, allowed, gpar, gpar_until = q.get("par") or 1, None, q["gpus"], None, None

@@ -429,6 +429,114 @@ def clear_overrides(hid: str, *, home: str | None = None, borrow_only: bool = Fa
 CHANGE = ("start", "stop", "add", "rm", "limit")     # 改 worker 的子命令（备用时不做）
 
 
+def _reset_hist_cmd(home: str, project: str, tag: str | None = None, name: str | None = None) -> str:
+    """在远端用 Python 3.8+ 原子更新 <worker_home>/hist_reset.json（#300）：
+    在 hist_reset.json.lock 锁内读改写，name 按 base_name 归一化，按 (project, tag, name) 去重只留最新 t（取远端服务器时钟），
+    清理超过 90 天的旧规则，原子替换后输出单行 JSON 回执。"""
+    spec = {"home": home.rstrip("/"), "project": project, "tag": tag or None, "name": name or None}
+    code = (
+        "import fcntl, json, os, re, sys, time\n"
+        "cfg = json.loads(sys.argv[1])\n"
+        "home = os.path.expanduser(cfg['home'])\n"
+        "os.makedirs(home, exist_ok=True)\n"
+        "p = os.path.join(home, 'hist_reset.json')\n"
+        "now = round(time.time(), 3)\n"
+        "cutoff = now - 90 * 86400\n"
+        "proj = cfg['project'].strip()\n"
+        "tag = cfg['tag'].strip() if isinstance(cfg['tag'], str) and cfg['tag'].strip() else None\n"
+        "raw_name = cfg['name'].strip() if isinstance(cfg['name'], str) and cfg['name'].strip() else None\n"
+        "norm_name = re.sub(r'([_-](s|seed|rep)\\d+)+$', '', raw_name) if raw_name else None\n"
+        "with open(p + '.lock', 'w') as lk:\n"
+        "    try:\n"
+        "        fcntl.flock(lk, fcntl.LOCK_EX)\n"
+        "    except OSError:\n"
+        "        pass\n"
+        "    rules = []\n"
+        "    if os.path.exists(p):\n"
+        "        try:\n"
+        "            d = json.loads(open(p).read() or '{}')\n"
+        "            if isinstance(d, dict) and isinstance(d.get('rules'), list):\n"
+        "                rules = d['rules']\n"
+        "        except (OSError, ValueError):\n"
+        "            rules = []\n"
+        "    best = {}\n"
+        "    for r in rules:\n"
+        "        if not isinstance(r, dict):\n"
+        "            continue\n"
+        "        rp = r.get('project')\n"
+        "        if not isinstance(rp, str) or not rp.strip():\n"
+        "            continue\n"
+        "        rtg = r.get('tag').strip() if isinstance(r.get('tag'), str) and r.get('tag').strip() else None\n"
+        "        rnm = re.sub(r'([_-](s|seed|rep)\\d+)+$', '', r.get('name').strip()) if isinstance(r.get('name'), str) and r.get('name').strip() else None\n"
+        "        if not rtg and not rnm:\n"
+        "            continue\n"
+        "        try:\n"
+        "            rt = float(r.get('t'))\n"
+        "        except (TypeError, ValueError):\n"
+        "            continue\n"
+        "        if rt < cutoff:\n"
+        "            continue\n"
+        "        k = (rp.strip(), rtg, rnm)\n"
+        "        if k not in best or rt > best[k]:\n"
+        "            best[k] = rt\n"
+        "    best[(proj, tag, norm_name)] = now\n"
+        "    out_rules = [{'project': k[0], 'tag': k[1], 'name': k[2], 't': best[k]}\n"
+        "                 for k in sorted(best, key=lambda x: (x[0], x[1] or '', x[2] or ''))]\n"
+        "    tmp = '%s.tmp.%d' % (p, os.getpid())\n"
+        "    with open(tmp, 'w') as f:\n"
+        "        f.write(json.dumps({'rules': out_rules}, ensure_ascii=False))\n"
+        "    os.replace(tmp, p)\n"
+        "print(json.dumps({'ok': True, 't': now, 'name': norm_name, 'count': len(out_rules)}, ensure_ascii=False))\n"
+    )
+    return f"{shlex.quote(code)} {shlex.quote(json.dumps(spec, ensure_ascii=False))}"
+
+
+def reset_hist(hosts: list[dict], project: str, *, tag: str | None = None, name: str | None = None, ssh_fn=None) -> list[dict]:
+    """向目标主机所在的 worker_home 原子写入历史峰值水印（#300）：
+    - 按 config.home_key 分组去重，同一共享盘只写一次；独立主机各自独立写入；
+    - 组内优先挑全局快照里在线且 worker 运行中的主机，SSH 不可达（rc == 255）顺延试下一台；
+    - 返回每组结果 [{"hosts": [...], "via": str, "home": str, "rc": int, "t": float|None, "name": str|None, "out": str}]。"""
+    LS.need("重置历史峰值水印")
+    run = ssh_fn or ssh
+    snap_hosts = {str(e.get("id")): e for e in (snapshot() or {}).get("hosts") or []}
+    groups: dict[tuple, list[dict]] = {}
+    for raw in hosts:
+        h = host_defaults(dict(raw))
+        key = home_key(h)
+        groups.setdefault(key, []).append(h)
+    results = []
+    for _key, cands in groups.items():
+        ids = [str(c["id"]) for c in cands]
+        ordered = sorted(
+            cands,
+            key=lambda h: 0 if (snap_hosts.get(str(h["id"])) and not snap_hosts[str(h["id"])].get("error")
+                                and snap_hosts[str(h["id"])].get("worker_up")) else 1,
+        )
+        home = ordered[0]["worker_home"]
+        rc, out, via_id, wt, wname = 255, "", str(ordered[0]["id"]), None, None
+        for cand in ordered:
+            via_id = str(cand["id"])
+            cmd = f"{shlex.quote(cand['python'])} -c {_reset_hist_cmd(cand['worker_home'], project, tag, name)}"
+            rc, out = run(cand, cmd)
+            if rc == 0:
+                for ln in reversed((out or "").splitlines()):
+                    ln = ln.strip()
+                    if ln.startswith("{"):
+                        try:
+                            parsed = json.loads(ln)
+                            if isinstance(parsed, dict) and parsed.get("ok"):
+                                wt = parsed.get("t")
+                                wname = parsed.get("name")
+                                break
+                        except ValueError:
+                            pass
+                break
+            if rc != 255:
+                break
+        results.append({"hosts": ids, "via": via_id, "home": home, "rc": rc, "t": wt, "name": wname, "out": out})
+    return results
+
+
 def _check_standalone_root(h: dict, root: str) -> str | None:
     """看板侧独立主机路径边界前置校验（与 worker/common.py:queue_root_ok 同口径，防旧 worker 绕过）：
     仅当 data_root 与 root 均为明确路径（或本机无 ssh 可展开）时校验；远端含 ~ 的另由远端 worker 经 realpath 校验。"""

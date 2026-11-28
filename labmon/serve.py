@@ -796,7 +796,9 @@ class Handler(BaseHTTPRequestHandler):
             args = _worker_args(sub, body)
             hid = s("host")
             p, rm_checked = None, False
-            if is_pool_id(hid) or hid.startswith("pool:"):
+            if sub == "reset-hist" and hid == "all":
+                pass
+            elif is_pool_id(hid) or hid.startswith("pool:"):
                 res_err = None
                 try:
                     p = resolve_pool(hid)
@@ -828,6 +830,8 @@ class Handler(BaseHTTPRequestHandler):
             elif sub == "clean":
                 if not body.get("project"):
                     raise U.Denied(403, "普通用户运行 worker clean 必须通过 --project 指定自己的项目")
+                U.need_project(who, s("project"))
+            elif sub == "reset-hist":
                 U.need_project(who, s("project"))
             elif body.get("project"):
                 U.need_project(who, s("project"))
@@ -1442,12 +1446,18 @@ class Handler(BaseHTTPRequestHandler):
         if act.startswith("worker/"):
             sub = act[len("worker/"):]
             args = _worker_args(sub, body)
-            r = A.worker(sub, s("host"), args, body.get("gpus") or None, project=body.get("project") or None,
-                         stop=body.get("stop") or None, own=who.role != "admin", lst=bool(body.get("list")),
-                         may=None if who.role == "admin" else lambda hid: U.may_host(who, hid), who=who,
-                         cache=bool(body.get("cache")), scratch=bool(body.get("scratch")),
-                         dry_run=bool(body.get("dry_run")), yes=bool(body.get("yes")))
-            what = f"worker {sub} {s('host')} {' '.join(args)}"
+            may = None if who.role == "admin" else lambda hid: U.may_host(who, hid)
+            if sub == "reset-hist":
+                r = A.reset_hist(s("host"), body.get("project") or None, body.get("tag") or None, body.get("name") or None,
+                                 may=may, who=who)
+                what = f"worker reset-hist {s('host')} project={s('project')} tag={s('tag')} name={s('name')}"
+            else:
+                r = A.worker(sub, s("host"), args, body.get("gpus") or None, project=body.get("project") or None,
+                             stop=body.get("stop") or None, own=who.role != "admin", lst=bool(body.get("list")),
+                             may=may, who=who,
+                             cache=bool(body.get("cache")), scratch=bool(body.get("scratch")),
+                             dry_run=bool(body.get("dry_run")), yes=bool(body.get("yes")))
+                what = f"worker {sub} {s('host')} {' '.join(args)}"
         elif act.startswith("override/"):
             verb = act[len("override/"):]
             now = body.get("now", False)
@@ -1801,12 +1811,21 @@ def _worker_args(sub: str, body: dict) -> list[str]:
         raise U.Denied(400, "args 只接受位置参数，选项请单独传")
     if body.get("list") not in (None, False, True) or (body.get("list") and (sub != "fit" or len(args) != 2 or not body.get("project"))):
         raise U.Denied(400, "list 只用于 worker fit：位置参数是 ROOT JOBS，要写 project")
-    if (sub in ("add", "rm") and len(args) != 2) or (sub in ("start", "stop", "status", "clean") and args) or (sub == "fit" and not args):
+    if (sub in ("add", "rm") and len(args) != 2) or (sub in ("start", "stop", "status", "clean", "reset-hist") and args) or (sub == "fit" and not args):
         raise U.Denied(400, f"worker {sub} 的位置参数数量不对")
     if sub == "clean":
         for flag in ("cache", "scratch", "dry_run", "yes"):
             if body.get(flag) not in (None, False, True):
                 raise U.Denied(400, f"worker clean 的 {flag} 要是布尔值")
+    if sub == "reset-hist":
+        for key in ("project", "tag", "name"):
+            v = body.get(key)
+            if v is not None and (not isinstance(v, str) or "\x00" in v or v.strip().startswith("-")):
+                raise U.Denied(400, f"worker reset-hist 的 {key} 要是有效的字符串")
+        if not (body.get("project") or "").strip():
+            raise U.Denied(400, "worker reset-hist 必须指定 project")
+        if not ((body.get("tag") or "").strip() or (body.get("name") or "").strip()):
+            raise U.Denied(400, "worker reset-hist 必须至少指定 tag 或 name")
     for key in ("project", "gpus") if sub == "add" else ("project", "gpus", "stop"):
         if body.get(key) is not None and (not isinstance(body[key], str) or "\x00" in body[key] or body[key].startswith("-")):
             raise U.Denied(400, f"worker 的 {key} 要是有效的字符串")
@@ -2101,7 +2120,7 @@ ROUTES = [
     _R("POST", r"/api/worker/start", "deploy", admin=True, lan=True),  # 拉起 worker（部署后、labmon worker start）：要连服务器、推代码，仍只在内网入口
     # 命令行（#162，api.py）：会改整台主机、借卡、改主机清单在用不在用的要 admin 令牌（实验会话的 project 令牌做不了，交给用户）
     _R("POST", r"/api/worker/(stop|limit)", "admin", admin=True),
-    _R("POST", r"/api/worker/(add|rm|status|fit|clean)", "project", own="worker"),
+    _R("POST", r"/api/worker/(add|rm|status|fit|clean|reset-hist)", "project", own="worker"),
     _R("POST", r"/api/hosts/external", "project", own="ext_host"),     # 外部主机双入口（#114）：管理员走 can_ops，普通用户限本人私有（上限 3 台）
     _R("PUT", EXT_HOST_PATH.pattern, "project", own="ext_host"),
     _R("DELETE", EXT_HOST_PATH.pattern, "project", own="ext_host"),

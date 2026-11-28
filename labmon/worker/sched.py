@@ -702,7 +702,40 @@ def live_cpu_rows(running, cap, cards=()):
     return out
 
 
-def estimate(hist, r, live=None):
+def hist_after_reset(rows, resets):
+    """按历史峰值水印（hist_reset.json，#300）过滤早于匹配水印的记录（estimate 与 cpu_hist_rows 唯一实现）：
+    - 匹配口径：rule["project"] == h 的项目（同 hist_key），若 rule["tag"] 非空则 h.get("tag") == rule["tag"]，
+      若 rule["name"] 非空则 base_name(h.get("name") or "") == rule["name"]（tag 与 name 全空规则跳过）；
+    - 记录结束时刻（t1，兼容 e）严格早于任意匹配水印的 t 时过滤；t1 >= t 的新记录保留；
+    - 绝不影响 usage.jsonl、share.use 与 duration。"""
+    if not rows or not resets:
+        return rows
+    valid = [r for r in resets if isinstance(r, dict) and r.get("project") and (r.get("tag") or r.get("name")) and r.get("t") is not None]
+    if not valid:
+        return rows
+    out = []
+    for h in rows:
+        proj = h.get("project") or (_C.project_of(h["root"]) if h.get("root") else None)
+        t1 = h.get("t1") if h.get("t1") is not None else (h.get("e") or 0)
+        htag = h.get("tag")
+        hname = _C.base_name(h.get("name") or "")
+        drop = False
+        for r in valid:
+            if r["project"] != proj:
+                continue
+            if r.get("tag") and htag != r["tag"]:
+                continue
+            if r.get("name") and hname != r["name"]:
+                continue
+            if t1 < r["t"]:
+                drop = True
+                break
+        if not drop:
+            out.append(h)
+    return out
+
+
+def estimate(hist, r, live=None, resets=None):
     """资源估计：显存、内存取同类任务最近几次峰值的最大值 × 1.1，及单跑（同卡没有别的任务）时的平均 GPU 利用率。只看量到了用量的记录。worker 准入、推演与 fit 都用它。
     显存、内存逐项依次看（#61、#282）：同 tag 下去种子同名（tag_name）› 同 tag › 去掉种子编号后同名的历史 › 清单写的提示值（vram=、ram=，> 0 才算写了）
     › 同一条队列的历史（同一份清单里可以是完全不同的任务，最弱，不盖过明写的提示值）› 0。这样同一批次 tag 下的轻量变体已有自身历史时不被重变体污染，
@@ -720,6 +753,8 @@ def estimate(hist, r, live=None):
     其中粗粒度同 tag 档的 OOM 下限仅在该变体在同 tag 同名档尚无自身画像（无跑成功记录、且对该项无有效峰值及自身 OOM）时才回退采纳，避免重变体 OOM 污染已有自身样本的轻变体；
     这一项的估计 = max(上面按顺序取的值, 下限)，提示值写小了的同样抬高。连续 OOM 连续翻倍（每条的 est 已含上一次的下限），封顶照 card_need、ram_need；
     这一档有一次新的跑成功（退出码 0；跑了 5 分钟后被停下、别的错误退出的不算）就回到按实测估。同队列一档的 OOM 不算（同一份清单里可以是完全不同的任务）。来源是下限时 util 为 None。"""
+    if resets:
+        hist = hist_after_reset(hist, resets)
     keys = ([("tag_name", r["project"], r["tag"], _C.base_name(r["name"])),
              ("tag", r["project"], r["tag"])] if r.get("tag") else []) + [("name", r["project"], _C.base_name(r["name"]))]
     if r.get("queue"):
@@ -1162,11 +1197,13 @@ def job_thread_cap(j, env_of=None):
     return thread_cap(env_text=env_text, env=env, cmd=j.get("cmd"))
 
 
-def cpu_hist_rows(hist, j):
+def cpu_hist_rows(hist, j, resets=None):
     """运行中任务 j 同类已完成非 OOM 历史记录（同 tag 同名 › 同 tag › 去种子号同名第一档有 cores_peak 的）：
-    cpu_hist_peak 与 cpu_higher_peak 共用，保持 #282 变体隔离。"""
+    cpu_hist_peak 与 cpu_higher_peak 共用，保持 #282 变体隔离与 #300 水印过滤。"""
     if not hist or not j.get("name"):
         return []
+    if resets:
+        hist = hist_after_reset(hist, resets)
     for kind in (("tag_name", "tag", "name") if j.get("tag") else ("name",)):
         k = _C.hist_key(j, kind)
         same = [h for h in hist if _C.hist_key(h, kind) == k and ran_ok(h) and not h.get("oom") and h.get("cores_peak") is not None]
@@ -1175,12 +1212,12 @@ def cpu_hist_rows(hist, j):
     return []
 
 
-def cpu_higher_peak(hist, j, give):
+def cpu_higher_peak(hist, j, give, resets=None):
     """同类历史中曾分配 give > 当前 give 的最近 HIST_N 次完成的最高 1 分钟峰值核数（无为 None）：
     供 cpu_fit 与 gpu_slack 判定加核是否真能吃进去，避免单线程任务在 cpus=1 ↔ cpus=2 之间触发互斥告警。"""
     if not give:
         return None
-    hi = [h for h in cpu_hist_rows(hist, j) if (h.get("give") or 0) > give][-_C.HIST_N:]
+    hi = [h for h in cpu_hist_rows(hist, j, resets=resets) if (h.get("give") or 0) > give][-_C.HIST_N:]
     return max(h["cores_peak"] for h in hi) if hi else None
 
 
@@ -1215,7 +1252,7 @@ def cpu_fit(j, cap, util, room=None, cards=(), hist_peak=None, thread_cap=None, 
     return None
 
 
-def gpu_slack(cards, jobs, th, cap, hist=None, env_of=None):
+def gpu_slack(cards, jobs, th, cap, hist=None, env_of=None, resets=None):
     """卡吃不满是不是真有余量（fit 开车道、offers 同机多开车道共用一条规则，#35、#37）：
     cards [{uuid, util 近 10 分钟利用率 %（样本不够为 None）}]；jobs 在跑的（状态 running 的形状：name、gpus、est、use）；
     th 是状态的 throttle（Worker.throttle：这一段限流，门槛 THR_HOT、THR_COOL 只在 thr_step；没在限流为 None）；cap 记账上限（cpu_cap）；
@@ -1229,7 +1266,7 @@ def gpu_slack(cards, jobs, th, cap, hist=None, env_of=None):
         e = j.get("est")
         give = cpus_export(cpu_threads(e), cap, job_ngpu(j), cards) if e else None
         tc = job_thread_cap(j, env_of=env_of) if give is not None else None
-        hp = cpu_higher_peak(hist, j, give) if (hist and give is not None) else None
+        hp = cpu_higher_peak(hist, j, give, resets=resets) if (hist and give is not None) else None
         b = cpu_fit(j, cap, util, cards=cards, thread_cap=tc, higher_peak=hp)
         for u in j.get("gpus") or []:
             if b and b["how"] == "low" and u in low:
@@ -1369,8 +1406,13 @@ class SchedMixin:
 
     def reload_hist(self):
         h = _C.load_hist(self.hist_cache, host=self.host, standalone=self.is_standalone())
+        rs = _C.load_hist_resets(self.hist_reset_cache, host=self.host, standalone=self.is_standalone())
         if h is not None:
-            self.hist, self.hist_v = h, self.hist_v + 1
+            self.hist = h
+        if rs is not None:
+            self.hist_resets = rs
+        if h is not None or rs is not None:
+            self.hist_v += 1
 
     def queue_durs(self, queues):
         """各队列清单里每个任务的预计时长（duration，写进状态）与资源估计（estimate），推演（forecast）与截止前的准入用；
@@ -1414,7 +1456,8 @@ class SchedMixin:
                     out[n] = dict(d, min=round(d["min"], 1))
                 k = (q["key"], h["tag"], _C.base_name(n), h["ram"], h["vram"], h["cpus"])      # 同类任务的估计一样，清单长时省得每个都扫一遍历史
                 if k not in memo:
-                    memo[k] = estimate(self.hist, dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"]), live=live)
+                    memo[k] = estimate(self.hist, dict(h, name=n, project=q["project"], root=q["root"], queue=q["jobs"]),
+                                       live=live, resets=getattr(self, "hist_resets", None))
                 est[n] = memo[k]
 
     def k_now(self):
@@ -1733,7 +1776,7 @@ class SchedMixin:
     def cpu_hist_peak(self, j):
         """运行中任务 j 同类历史完成记录的最高 1 分钟核数峰值（同 tag 同名 › 同 tag › 去种子号同名第一档，跑成功、非 OOM 的近 HIST_N 条）：
         供 cpu_hints 传入 cpu_fit，避免已知后段高核的多阶段同类任务在前 10 分钟低核阶段早判 cpu_high；无历史为 None。"""
-        cr = cpu_hist_rows(self.hist, j)[-_C.HIST_N:]
+        cr = cpu_hist_rows(self.hist, j, resets=getattr(self, "hist_resets", None))[-_C.HIST_N:]
         return max(h["cores_peak"] for h in cr) if cr else None
 
     def cpu_hints(self, S, util):
@@ -1752,7 +1795,7 @@ class SchedMixin:
             e = j.get("est")
             give = cpus_export(cpu_threads(e), S["cpu_cap"], job_ngpu(j), ngpus) if e else None
             tc = job_thread_cap(j, env_of=self.qenv) if give is not None else None
-            hp = cpu_higher_peak(self.hist, j, give) if give is not None else None
+            hp = cpu_higher_peak(self.hist, j, give, resets=getattr(self, "hist_resets", None)) if give is not None else None
             cur = cpu_fit(j, S["cpu_cap"], util, cpu_budget(S, j), ngpus,
                           hist_peak=self.cpu_hist_peak(j), thread_cap=tc, higher_peak=hp)
             if prev and prev.get("how") == "high":

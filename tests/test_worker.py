@@ -10597,5 +10597,162 @@ class GpuCpuReserveTest(unittest.TestCase):
             self.assertEqual(picked, [4, 5, 6, 7])
 
 
+class HistResetTest(UnitBase):
+    """历史峰值水印（#300）：显式过滤水印之前的资源峰值与 OOM 下限，不删 usage.jsonl，不影响 share.use 与 duration。"""
+
+    def test_reset_filters_ram_vram_cores_and_oom_floor(self):
+        t_reset = 2000.0
+        hist = [
+            {"project": "pa", "name": "train_s0", "tag": "heavy", "t0": 1000, "t1": 1500, "rc": "0",
+             "ram_peak": 80.0, "vram_peak": 32768.0, "cores_peak": 12.0, "give": 16, "gpus": ["GPU-a"], "min": 50},
+            {"project": "pa", "name": "train_s1", "tag": "heavy", "t0": 1600, "t1": 1800, "rc": "1",
+             "oom": "ram", "est": {"ram": 80.0, "vram": 32.0}, "ram_peak": 84.0, "gpus": ["GPU-a"], "min": 3},
+        ]
+        req = {"project": "pa", "name": "train_s2", "tag": "heavy", "ram": 18.0, "vram": 8.0, "cpus": None}
+        # 未设水印：旧 OOM 下限 160 GiB 与旧显存/CPU 峰值均生效
+        e0 = self.m.estimate(hist, req)
+        self.assertGreaterEqual(e0["ram"], 160.0)
+        self.assertGreater(e0["vram"], 30.0)
+        self.assertGreater(e0["cpus"], 10)
+        self.assertEqual(len(self.m.cpu_hist_rows(hist, req)), 1)
+        self.assertEqual(self.m.cpu_higher_peak(hist, req, 4), 12.0)
+
+        # 设水印 t_reset=2000：旧峰值与 OOM 下限全部失效，立即回退到清单提示值
+        resets = [{"project": "pa", "tag": "heavy", "name": "train", "t": t_reset}]
+        e1 = self.m.estimate(hist, req, resets=resets)
+        self.assertEqual((e1["ram"], e1["ram_src"]), (18.0, "提示值"))
+        self.assertEqual((e1["vram"], e1["src"]), (8.0, "提示值"))
+        self.assertEqual(e1["cpus"], self.m.CPU_DEFAULT)
+        self.assertEqual(self.m.cpu_hist_rows(hist, req, resets=resets), [])
+        self.assertIsNone(self.m.cpu_higher_peak(hist, req, 4, resets=resets))
+
+        # 水印之后新跑完的记录（t1 >= t_reset）正常参与统计
+        hist_new = hist + [
+            {"project": "pa", "name": "train_s2", "tag": "heavy", "t0": 2000, "t1": 2100, "rc": "0",
+             "ram_peak": 16.0, "vram_peak": 6144.0, "cores_peak": 3.0, "give": 4, "gpus": ["GPU-a"], "min": 48},
+        ]
+        e2 = self.m.estimate(hist_new, req, resets=resets)
+        self.assertEqual(e2["ram"], round(1.1 * 16.0, 2))
+        self.assertEqual(e2["vram"], round(1.1 * 6.0, 2))
+        self.assertEqual(e2["cpus"], self.m.cpu_from_peak(3.0))
+        self.assertEqual(len(self.m.cpu_hist_rows(hist_new, req, resets=resets)), 1)
+
+    def test_reset_isolation_tag_name_and_combo(self):
+        hist = [
+            {"project": "pa", "name": "alpha_s0", "tag": "t1", "t0": 100, "t1": 200, "rc": "0", "ram_peak": 60.0, "vram_peak": 20480.0, "gpus": ["GPU-a"]},
+            {"project": "pa", "name": "beta_s0", "tag": "t1", "t0": 100, "t1": 200, "rc": "0", "ram_peak": 50.0, "vram_peak": 16384.0, "gpus": ["GPU-a"]},
+            {"project": "pa", "name": "alpha_s0", "tag": "t2", "t0": 100, "t1": 200, "rc": "0", "ram_peak": 40.0, "vram_peak": 12288.0, "gpus": ["GPU-a"]},
+            {"project": "pb", "name": "alpha_s0", "tag": "t1", "t0": 100, "t1": 200, "rc": "0", "ram_peak": 70.0, "vram_peak": 24576.0, "gpus": ["GPU-a"]},
+        ]
+        # 1) 仅按 (tag, name) 组合：只清 pa 的 (t1, alpha)，不误伤 pa 的 (t1, beta)、(t2, alpha) 和 pb
+        r_combo = [{"project": "pa", "tag": "t1", "name": "alpha", "t": 500.0}]
+        got_combo = self.m.hist_after_reset(hist, r_combo)
+        self.assertEqual([(h["project"], h["tag"], h["name"]) for h in got_combo],
+                         [("pa", "t1", "beta_s0"), ("pa", "t2", "alpha_s0"), ("pb", "t1", "alpha_s0")])
+
+        # 2) 仅按 tag：清 pa 下 tag=t1 的所有变体，不误伤 pa 的 t2 和 pb 的 t1
+        r_tag = [{"project": "pa", "tag": "t1", "name": None, "t": 500.0}]
+        got_tag = self.m.hist_after_reset(hist, r_tag)
+        self.assertEqual([(h["project"], h["tag"], h["name"]) for h in got_tag],
+                         [("pa", "t2", "alpha_s0"), ("pb", "t1", "alpha_s0")])
+
+        # 3) 仅按 name（经 base_name 归一化）：清 pa 下 alpha_* 所有 tag，不误伤 beta 与 pb
+        r_name = self.m.normalize_hist_resets([{"project": "pa", "tag": None, "name": "alpha_seed9", "t": 500.0}], now=600.0)
+        self.assertEqual(r_name[0]["name"], "alpha")
+        got_name = self.m.hist_after_reset(hist, r_name)
+        self.assertEqual([(h["project"], h["tag"], h["name"]) for h in got_name],
+                         [("pa", "t1", "beta_s0"), ("pb", "t1", "alpha_s0")])
+
+    def test_reset_keeps_share_and_duration_and_usage_jsonl(self):
+        now = time.time()
+        usage_p = Path(self.w.p.usage)
+        usage_p.parent.mkdir(parents=True, exist_ok=True)
+        row = {"project": "pa", "name": "train_s0", "tag": "heavy", "t0": now - 3600, "t1": now - 600,
+               "rc": "0", "cards": 1.0, "min": 50.0, "est_min": 50.0, "ram_peak": 80.0, "vram_peak": 32768.0, "gpus": ["GPU-a"]}
+        usage_p.write_text(json.dumps(row, ensure_ascii=False) + "\n")
+        self.w.reload_hist()
+        share_before = self.w.share(now, self.m.POLICY)
+        dur_before = self.m.duration(self.w.hist, {"project": "pa", "name": "train_s1", "tag": "heavy", "est_min": 50.0})
+
+        # 写水印并热加载
+        Path(self.m.hist_reset_path()).write_text(json.dumps({
+            "rules": [{"project": "pa", "tag": "heavy", "name": "train_s99", "t": now}]
+        }, ensure_ascii=False))
+        self.w.reload_hist()
+
+        # usage.jsonl 未被删除或改写；share.use 与 duration 保持一致
+        self.assertEqual(len(usage_p.read_text().splitlines()), 1)
+        self.assertAlmostEqual(self.w.share(now, self.m.POLICY).get("pa", 0.0), share_before.get("pa", 0.0), places=5)
+        dur_after = self.m.duration(self.w.hist, {"project": "pa", "name": "train_s1", "tag": "heavy", "est_min": 50.0})
+        self.assertEqual(dur_after["min"], dur_before["min"])
+
+    def test_reload_hist_hot_reloads_and_matches_admit_forecast_fit(self):
+        # 多主机共享 worker_home：旧尖峰 80 GiB 在 64 GiB 容器内存上放不下（nofit_ram），写入水印后两台 worker 与 FitHost 同步放行
+        now = time.time()
+        self.cards(48000.0)
+        self.w.info["mem"] = {"limit": 64.0, "anon": 4.0}
+        self.w.info["cpu_quota"] = 8.0
+        q, = self.hosts.queues({"s": ["# labmon: par=2", "train_s1|true  # ram=18 vram=8 tag=heavy est_min=30",
+                                      "train_s2|true  # ram=18 vram=8 tag=heavy est_min=30"]}, "pa")
+        self.hosts.register("t", "s", "pa")
+        usage_p = Path(self.w.p.usage)
+        usage_p.parent.mkdir(parents=True, exist_ok=True)
+        usage_p.write_text(json.dumps({
+            "project": "pa", "name": "train_s0", "tag": "heavy", "t0": now - 3600, "t1": now - 100,
+            "rc": "0", "ram_peak": 80.0, "vram_peak": 8192.0, "gpus": ["GPU-a"], "min": 30.0,
+        }, ensure_ascii=False) + "\n")
+        self.w.reload_hist()
+        w2 = self.hosts.worker("o")
+        qs = self.w.registry()
+        self.w.queue_durs(qs)
+        self.assertGreater(self.w.qest[q["key"]]["train_s1"]["ram"], 64.0)
+
+        # 写入共享盘 hist_reset.json，验证两台 worker 热加载、prep/forecast/admit 与 FitHost 口径一致
+        old_v = self.w.hist_v
+        Path(self.m.hist_reset_path()).write_text(json.dumps({
+            "rules": [
+                {"project": "pa", "tag": "heavy", "name": "train", "t": now},
+                {"project": "pa", "tag": "old", "name": None, "t": now - self.m.HIST_RESET_KEEP_S - 100},  # 超 90 天应被清理
+            ]
+        }, ensure_ascii=False))
+        self.w.reload_hist()
+        w2.reload_hist()
+        self.assertGreater(self.w.hist_v, old_v)
+        self.assertEqual(len(self.w.hist_resets), 1)
+        self.assertEqual(len(w2.hist_resets), 1)
+        self.w.queue_durs(qs)
+        self.assertEqual(self.w.qest[q["key"]]["train_s1"]["ram"], 18.0)
+
+        _, reqs = self.w.requests(qs, False)
+        for r in reqs:
+            self.w.prep(r, now, {})
+        self.assertEqual(reqs[0]["est"]["ram"], 18.0)
+        self.assertIsNone(reqs[0]["stall"])
+        self.w.forecast(qs, reqs, {}, now, self.m.POLICY)
+        plan_jobs = [j["name"] for ln in self.w.plan["lanes"] for j in ln["jobs"]]
+        self.assertIn("train_s1", plan_jobs)
+        self.assertIn("train_s2", plan_jobs)
+
+        # FitHost 同步尊重水印
+        st = {"t": now, "info": self.w.info, "room": {"gpus": {"GPU-a": 48000.0}, "ram": 60.0, "margin": 8.0, "cpu_cap": 8, "cpu": 8.0},
+              "running": [], "gpu_procs": [], "limits": {}, "overrides": []}
+        fh = self.m.FitHost("t", st, self.w.hist, {}, resets=self.w.hist_resets)
+        _, e_fit, _ = fh.req(q, "train_s1", "true  # ram=18 vram=8 tag=heavy est_min=30", "pa")
+        self.assertEqual(e_fit["ram"], 18.0)
+
+    def test_standalone_merges_hist_shared_resets(self):
+        # 独立主机合并本地 hist_reset.json 与看板下发的 hist_shared.json["resets"]
+        now = time.time()
+        sf = Path(self.m.HOME) / "hosts" / "ext1" / "hist_shared.json"
+        sf.parent.mkdir(parents=True, exist_ok=True)
+        sf.write_text(json.dumps({
+            "t": round(now), "rows": [],
+            "resets": [{"project": "pa", "tag": "heavy", "name": "train", "t": now - 10}],
+        }, ensure_ascii=False))
+        got = self.m.load_hist_resets({}, host="ext1", standalone=True, now=now)
+        self.assertEqual(len(got), 1)
+        self.assertEqual((got[0]["project"], got[0]["tag"], got[0]["name"]), ("pa", "heavy", "train"))
+
+
 if __name__ == "__main__":
     unittest.main()
