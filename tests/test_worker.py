@@ -9607,6 +9607,215 @@ class GpuCpuReserveTest(unittest.TestCase):
         self.assertIn("为 GPU 保底留 2 核，纯 CPU 上限 15 核", line2)
         self.assertNotIn("纯 CPU 最多", line2)
 
+    def test_cpu_affinity_staggered_alloc_and_release(self):
+        # 未绑 cpuset 的 Linux CFS 容器下，纯 CPU 任务按声明 cpus 错峰分配互不重叠的逻辑核，退出回收，不足时轮转补齐
+        w = self.m.Worker("h0")
+        os.makedirs(w.p.dir, exist_ok=True)
+        root = self.d / "proj_aff"
+        (root / "state").mkdir(parents=True)
+        (root / "logs").mkdir()
+        q = {"key": "q", "root": str(root), "jobs": "jobs/q.txt", "jobs_path": str(root / "jobs" / "q.txt"),
+             "state": str(root / "state"), "logs": str(root / "logs"), "env": None, "project": "pa",
+             "gpus": None, "stop": "term", "par": 4}
+        w.info = {"gpus": [{"i": 0, "uuid": "GPU-a"}], "cpu_quota": 12.0, "mem": {"limit": 64.0, "anon": 4.0}}
+        set_calls = []
+        next_pid = [50000]
+
+        def fake_popen(args, **kw):
+            preexec = kw.get("preexec_fn")
+            if preexec is not None:
+                preexec()
+            next_pid[0] += 1
+            pr = mock.Mock()
+            pr.pid = next_pid[0]
+            return pr
+
+        def fake_setaff(pid, mask):
+            set_calls.append((pid, tuple(mask)))
+
+        def mk_job(name, cpus, ngpu=0):
+            return {"key": "q|" + name, "name": name, "cmd": "echo " + name, "ngpu": ngpu, "vram": 0.0, "ram": 1.0,
+                    "cpus": cpus, "excl": None, "tag": None, "est": {"vram": 0.0, "ram": 1.0, "cpus": int(cpus or 0), "cpu_src": "提示值"}}
+
+        with mock.patch.dict(os.environ, {"LABMON_OS": "linux"}), \
+             mock.patch.object(self.m, "is_wsl", return_value=False), \
+             mock.patch.object(self.m, "cpu_quota", return_value=12.0), \
+             mock.patch.object(os, "sched_getaffinity", create=True, return_value=set(range(16))), \
+             mock.patch.object(os, "sched_setaffinity", create=True, side_effect=fake_setaff), \
+             mock.patch("subprocess.Popen", side_effect=fake_popen):
+            self.assertIsNone(w.start(q, mk_job("c1", 4), []))
+            self.assertIsNone(w.start(q, mk_job("c2", 4), []))
+            self.assertIsNone(w.start(q, mk_job("c3", 2.2), []))  # ceil(2.2) == 3
+            self.assertEqual(set_calls, [
+                (0, (0, 1, 2, 3)),
+                (0, (4, 5, 6, 7)),
+                (0, (8, 9, 10)),
+            ])
+            self.assertEqual(w.cpu_aff["q|c1"], [0, 1, 2, 3])
+            self.assertEqual(w.cpu_aff["q|c2"], [4, 5, 6, 7])
+            self.assertEqual(w.cpu_aff["q|c3"], [8, 9, 10])
+            # 退出回收 c1，释放 [0, 1, 2, 3]
+            (root / "state" / "c1.rc").write_text("0\n")
+            w.finish("q|c1")
+            self.assertNotIn("q|c1", w.cpu_aff)
+            # 再起 c4 声明 10 核（12 核 CFS + 1 GPU → 纯 CPU 上限 10 核）：当前空闲核 9 个全部优先挑出，剩余 1 个轮转补齐
+            self.assertIsNone(w.start(q, mk_job("c4", 10), []))
+            c4_mask = set(set_calls[-1][1])
+            self.assertEqual(len(c4_mask), 10)
+            self.assertTrue({0, 1, 2, 3, 11, 12, 13, 14, 15}.issubset(c4_mask))
+
+    def test_cpu_affinity_respects_gpu_reserve_cap(self):
+        # 16 核 CFS + 1 GPU（可见 32 核）：GPU 保底 2 核，纯 CPU 上限 14 核，gpus=0 cpus=16 绑核数应封顶为 14（与 LABMON_CPUS 一致）
+        w = self.m.Worker("h0")
+        os.makedirs(w.p.dir, exist_ok=True)
+        w.info = {"gpus": [{"i": 0, "uuid": "GPU-a"}], "cpu_quota": 16.0}
+        job16 = {"name": "c16", "ngpu": 0, "cpus": 16}
+        with mock.patch.dict(os.environ, {"LABMON_OS": "linux"}), \
+             mock.patch.object(self.m, "is_wsl", return_value=False), \
+             mock.patch.object(self.m, "cpu_quota", return_value=16.0), \
+             mock.patch.object(os, "sched_getaffinity", create=True, return_value=set(range(32))), \
+             mock.patch.object(os, "sched_setaffinity", create=True):
+            picked_gpu_host, _ = w._pick_cpu_affinity(job16)
+            self.assertEqual(len(picked_gpu_host), 14)
+            # self.info 未填 cpu_quota 时，回退使用 _cpu_affinity_pool 返回的真实 CFS quota 同样封顶为 14
+            w.info = {"gpus": [{"i": 0, "uuid": "GPU-a"}]}
+            picked_fallback_q, _ = w._pick_cpu_affinity(job16)
+            self.assertEqual(len(picked_fallback_q), 14)
+            # 无 GPU 主机（16 核 CFS，可见 32 核）：不扣 GPU 保底，cpus=16 绑 16 核，cpus=20 封顶到 16 核
+            w.info = {"gpus": [], "cpu_quota": 16.0}
+            picked_no_gpu, _ = w._pick_cpu_affinity(job16)
+            self.assertEqual(len(picked_no_gpu), 16)
+            picked_over, _ = w._pick_cpu_affinity({"name": "c20", "ngpu": 0, "cpus": 20})
+            self.assertEqual(len(picked_over), 16)
+
+    def test_cpu_affinity_skip_gpu_hold_zero_cpuset_and_non_linux(self):
+        # GPU 任务、cpus=0 / 未声明 cpus、占位任务、已有 cpuset、无 CFS 配额、macOS、WSL2 均不绑核
+        w = self.m.Worker("h0")
+        os.makedirs(w.p.dir, exist_ok=True)
+        root = self.d / "proj_aff_skip"
+        (root / "state").mkdir(parents=True)
+        (root / "logs").mkdir()
+        q = {"key": "q", "root": str(root), "jobs": "jobs/q.txt", "jobs_path": str(root / "jobs" / "q.txt"),
+             "state": str(root / "state"), "logs": str(root / "logs"), "env": None, "project": "pa",
+             "gpus": None, "stop": "term", "par": 4}
+        w.info = {"gpus": [{"i": 0, "uuid": "GPU-a"}], "cpu_quota": 8.0, "mem": {"limit": 64.0, "anon": 4.0}}
+        seen_preexec = []
+        next_pid = [51000]
+
+        def fake_popen(args, **kw):
+            seen_preexec.append(kw.get("preexec_fn"))
+            next_pid[0] += 1
+            pr = mock.Mock()
+            pr.pid = next_pid[0]
+            return pr
+
+        def mk_job(name, cpus, ngpu=0):
+            return {"key": "q|" + name, "name": name, "cmd": "echo " + name, "ngpu": ngpu, "vram": 0.0, "ram": 1.0,
+                    "cpus": cpus, "excl": None, "tag": None, "est": {"vram": 0.0, "ram": 1.0, "cpus": int(cpus or 0), "cpu_src": "提示值"}}
+
+        # Linux 未绑 cpuset 环境下，测试 GPU / cpus=0 / cpus=None / hold 跳过
+        with mock.patch.dict(os.environ, {"LABMON_OS": "linux"}), \
+             mock.patch.object(self.m, "is_wsl", return_value=False), \
+             mock.patch.object(self.m, "cpu_quota", return_value=8.0), \
+             mock.patch.object(os, "sched_getaffinity", create=True, return_value=set(range(16))), \
+             mock.patch.object(os, "sched_setaffinity", create=True), \
+             mock.patch("subprocess.Popen", side_effect=fake_popen):
+            self.assertIsNone(w.start(q, mk_job("g1", 4, ngpu=1), [{"i": 0, "uuid": "GPU-a"}]))
+            self.assertIsNone(w.start(q, mk_job("z1", 0, ngpu=0), []))
+            self.assertIsNone(w.start(q, mk_job("n1", None, ngpu=0), []))
+            self.assertIsNone(w.start(q, mk_job("hold_wait", 4, ngpu=0), []))
+        self.assertEqual(seen_preexec, [None, None, None, None])
+        self.assertEqual(w.cpu_aff, {})
+
+        # 已有 cpuset（len(avail) <= quota）
+        with mock.patch.dict(os.environ, {"LABMON_OS": "linux"}), \
+             mock.patch.object(self.m, "is_wsl", return_value=False), \
+             mock.patch.object(self.m, "cpu_quota", return_value=8.0), \
+             mock.patch.object(os, "sched_getaffinity", create=True, return_value=set(range(8))), \
+             mock.patch.object(os, "sched_setaffinity", create=True):
+            self.assertEqual(w._pick_cpu_affinity(mk_job("c1", 4)), (None, None))
+
+        # 无 CFS 配额
+        with mock.patch.dict(os.environ, {"LABMON_OS": "linux"}), \
+             mock.patch.object(self.m, "is_wsl", return_value=False), \
+             mock.patch.object(self.m, "cpu_quota", return_value=None), \
+             mock.patch.object(os, "sched_getaffinity", create=True, return_value=set(range(16))), \
+             mock.patch.object(os, "sched_setaffinity", create=True):
+            self.assertEqual(w._pick_cpu_affinity(mk_job("c1", 4)), (None, None))
+
+        # macOS（darwin）
+        with mock.patch.dict(os.environ, {"LABMON_OS": "darwin"}), \
+             mock.patch.object(self.m, "cpu_quota", return_value=8.0), \
+             mock.patch.object(os, "sched_getaffinity", create=True, return_value=set(range(16))), \
+             mock.patch.object(os, "sched_setaffinity", create=True):
+            self.assertEqual(w._pick_cpu_affinity(mk_job("c1", 4)), (None, None))
+
+        # WSL2
+        with mock.patch.dict(os.environ, {"LABMON_OS": "linux"}), \
+             mock.patch.object(self.m, "is_wsl", return_value=True), \
+             mock.patch.object(self.m, "cpu_quota", return_value=8.0), \
+             mock.patch.object(os, "sched_getaffinity", create=True, return_value=set(range(16))), \
+             mock.patch.object(os, "sched_setaffinity", create=True):
+            self.assertEqual(w._pick_cpu_affinity(mk_job("c1", 4)), (None, None))
+
+    def test_cpu_affinity_oserror_fallback_adopt_and_rekey(self):
+        # sched_setaffinity 抛 OSError 时静默降级不阻断启动；adopt 重启接管恢复核占用；rekey 迁移键名
+        w = self.m.Worker("h0")
+        os.makedirs(w.p.dir, exist_ok=True)
+        root = self.d / "proj_aff_fb"
+        (root / "state").mkdir(parents=True)
+        (root / "logs").mkdir()
+        (root / "jobs").mkdir()
+        (root / "jobs" / "q.txt").write_text("# labmon: par=4\nc1 | echo c1 # gpus=0 cpus=4\n")
+        q = {"key": "q", "root": str(root), "jobs": "jobs/q.txt", "jobs_path": str(root / "jobs" / "q.txt"),
+             "state": str(root / "state"), "logs": str(root / "logs"), "env": None, "project": "pa",
+             "gpus": None, "stop": "term", "par": 4}
+        w.info = {"gpus": [], "cpu_quota": 8.0, "mem": {"limit": 64.0, "anon": 4.0}}
+        preexec_ran = [False]
+
+        def fake_popen(args, **kw):
+            fn = kw.get("preexec_fn")
+            self.assertIsNotNone(fn)
+            fn()  # 内部捕获 OSError，不应向外抛异常
+            preexec_ran[0] = True
+            pr = mock.Mock()
+            pr.pid = 52001
+            return pr
+
+        job = {"key": "q|c1", "name": "c1", "cmd": "echo c1", "ngpu": 0, "vram": 0.0, "ram": 1.0,
+               "cpus": 4, "excl": None, "tag": None, "est": {"vram": 0.0, "ram": 1.0, "cpus": 4, "cpu_src": "提示值"}}
+        with mock.patch.dict(os.environ, {"LABMON_OS": "linux"}), \
+             mock.patch.object(self.m, "is_wsl", return_value=False), \
+             mock.patch.object(self.m, "cpu_quota", return_value=8.0), \
+             mock.patch.object(os, "sched_getaffinity", create=True, return_value=set(range(16))), \
+             mock.patch.object(os, "sched_setaffinity", create=True, side_effect=PermissionError("denied")), \
+             mock.patch("subprocess.Popen", side_effect=fake_popen):
+            self.assertIsNone(w.start(q, job, []))
+        self.assertTrue(preexec_ran[0])
+        self.assertEqual(w.cpu_aff["q|c1"], [0, 1, 2, 3])
+        # rekey 迁移键名
+        q_new = dict(q, key="q_new")
+        w.rekey(q_new)
+        self.assertNotIn("q|c1", w.cpu_aff)
+        self.assertEqual(w.cpu_aff["q_new|c1"], [0, 1, 2, 3])
+
+        # adopt 接管运行中的纯 CPU 任务时恢复其当前亲和度核集合，新任务自动错峰
+        w2 = self.m.Worker("h0")
+        w2.info = {"gpus": [], "cpu_quota": 8.0}
+        def fake_getaff(pid):
+            return {0, 1, 2, 3} if pid == 53001 else set(range(16))
+
+        with mock.patch.dict(os.environ, {"LABMON_OS": "linux"}), \
+             mock.patch.object(self.m, "is_wsl", return_value=False), \
+             mock.patch.object(self.m, "cpu_quota", return_value=8.0), \
+             mock.patch.object(os, "sched_getaffinity", create=True, side_effect=fake_getaff), \
+             mock.patch.object(os, "sched_setaffinity", create=True), \
+             mock.patch.object(self.m, "alive", return_value=True):
+            w2.adopt(q, ("c1", 53001, time.time(), "h0"))
+            self.assertEqual(w2.cpu_aff["q|c1"], [0, 1, 2, 3])
+            picked, _ = w2._pick_cpu_affinity(dict(job, name="c2", cpus=4))
+            self.assertEqual(picked, [4, 5, 6, 7])
+
 
 if __name__ == "__main__":
     unittest.main()

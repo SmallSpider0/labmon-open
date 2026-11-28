@@ -523,7 +523,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
     <details><summary>细节：保底核公式、封顶规则与弹性边界</summary><div class="in">
       <ul>
         <li><b>保底核</b>：仅对带 GPU 主机生效，<code>reserve = min(卡数 × 2, floor(配额 / 4))</code>，纯 CPU 可用上限为 <code>配额 − reserve</code>；无 GPU 主机（如纯 CPU 独立机）不扣减。</li>
-        <li><b>纯 CPU 自动封顶与降优</b>：<code>gpus=0</code> 任务声明 <code>cpus=</code> 超过纯 CPU 上限但未超过容器总配额时，不报“放不下”，而是自动封顶到纯 CPU 上限并导出封顶后的 <code>LABMON_CPUS</code>（仍超过总配额才报放不下）；启动时自动加 <code>nice +10</code>，避免与 GPU 训练的数据加载线程争抢 CPU 时间片。</li>
+        <li><b>纯 CPU 自动封顶与降优</b>：<code>gpus=0</code> 任务声明 <code>cpus=</code> 超过纯 CPU 上限但未超过容器总配额时，不报“放不下”，而是自动封顶到纯 CPU 上限并导出封顶后的 <code>LABMON_CPUS</code>（仍超过总配额才报放不下）；启动时自动加 <code>nice +10</code>，避免与 GPU 训练的数据加载线程争抢 CPU 时间片。在未绑 <code>cpuset</code> 的 Linux CFS 配额容器下，声明了 <code>cpus≥1</code> 的纯 CPU 清单任务还会按声明核数错峰绑定互不重叠的逻辑核（<code>sched_setaffinity</code>），从内核层防止多子进程打爆容器配额连坐同机 GPU 任务（GPU 任务保持不绑核）。</li>
         <li><b>低核 GPU 有限弹性放行</b>：若纯 CPU 任务实测超核把总记账挤满、而机器仍有空闲 GPU，允许低核 GPU 任务在保底核内放行（要求放到空闲卡，且该机所有在跑 GPU 任务的 CPU 核数之和不超过保底核），防止空卡饿死又不无限超卖。</li>
       </ul>
       <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/worker.md#准入">worker.md「准入」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/workbench.md#工作台">workbench.md「工作台」</a></p>

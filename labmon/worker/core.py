@@ -7,6 +7,7 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import traceback
 
@@ -37,6 +38,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.wdisk = _D.WorkDisk(host) if self.standalone else None   # 独立主机隔离工作盘（仅扫 <data_root>，不扫根盘 /，#114）
         self.disk_gate = {"on": False, "why": None, "free_gb": None, "stop_gb": None, "quota_gb": None, "work_gb": None}
         self.running = {}     # 请求 key（run_key：串行清单是队列 key、并行清单是 队列 key|任务名；单元是 slot:<id>）→ 运行中的任务或单元
+        self.cpu_aff = {}     # 运行中纯 CPU 任务 key → 绑定的逻辑核列表（Linux 未绑 cpuset 的 CFS 容器错峰绑核）
+        self._aff_cursor = 0  # 纯 CPU 逻辑核槽位轮转游标
         self.par_t = {}       # 队列 key → 这条清单上次往上加行的时刻（并行清单两次加行至少隔 PAR_STEP_S，par_gate；补位不算，#176）
         self.par_hi = {}      # 队列 key → (近来同时跑到过的行数, 最后一次跑着这么多行的时刻)：补到它以内是补位（par_level、par_note，#176）
         self.active = set()   # 本次已写 lock、记过“队列启动”的队列
@@ -321,6 +324,64 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         r["wait"] = None if _C.is_hold(r["name"]) or not r.get("since") else round((_C.time.time() - r["since"]) / 60, 1)
         return self.start(r["q"], r, gpus) if r["kind"] == "queue" else self.grant(r, gpus)
 
+    @staticmethod
+    def _cpu_affinity_pool():
+        """返回适合纯 CPU 任务错峰绑核的 (逻辑核有序列表, 真实 cgroup CFS 配额)；不适用时返回 (None, None)。
+        仅在以下条件同时满足时启用：
+        1. Linux（非 macOS、非 WSL2）；
+        2. 平台支持 os.sched_getaffinity / os.sched_setaffinity；
+        3. 容器存在 cgroup CFS 配额（复用 measure.cpu_quota，不含配置软配额或 macOS 默认配额）；
+        4. 当前进程可见逻辑核数大于 CFS 配额（未绑 cpuset）。"""
+        if _M.is_darwin() or _M.is_wsl():
+            return None, None
+        ov = os.environ.get("LABMON_OS")
+        if ov:
+            if ov.lower() != "linux":
+                return None, None
+        elif not sys.platform.startswith("linux"):
+            return None, None
+        get_aff = getattr(os, "sched_getaffinity", None)
+        set_aff = getattr(os, "sched_setaffinity", None)
+        if not (callable(get_aff) and callable(set_aff)):
+            return None, None
+        quota = _M.cpu_quota()
+        if not quota or quota <= 0:
+            return None, None
+        try:
+            avail = sorted(get_aff(0))
+        except OSError:
+            return None, None
+        if len(avail) <= quota:
+            return None, None
+        return avail, quota
+
+    def _pick_cpu_affinity(self, job):
+        """为纯 CPU 清单任务挑选互不重叠的逻辑核子集；返回 (核列表, 新游标) 或 (None, None)。
+        仅对 gpus=0、非占位且显式声明 cpus>=1 的任务生效；GPU 任务与 cpus=0 轻量脚本不绑核。
+        绑核数复用 sched.cpu_give 按纯 CPU 上限封顶（带 GPU 主机扣除 GPU 保底核），与 LABMON_CPUS 口径一致；
+        优先挑选未被其他运行中纯 CPU 任务占用的核，不足时按轮转游标补齐。"""
+        if (job.get("ngpu", 1) or 0) > 0 or _C.is_hold(job.get("name")):
+            return None, None
+        cpus = job.get("cpus")
+        if cpus is None or cpus < 1:
+            return None, None
+        avail, quota = self._cpu_affinity_pool()
+        if not avail:
+            return None, None
+        cap = _M.cpu_cap(self.info.get("cpu_quota") or quota)
+        eff = _S.cpu_give(int(math.ceil(cpus)), cap, 0, self.info.get("gpus") or ())
+        k = min(max(1, int(eff)), len(avail))
+        used = {}
+        for cores in self.cpu_aff.values():
+            for c in cores:
+                used[c] = used.get(c, 0) + 1
+        n = len(avail)
+        start = self._aff_cursor % n
+        ring = avail[start:] + avail[:start]
+        picked = sorted(ring, key=lambda c: used.get(c, 0))[:k]
+        picked.sort()
+        return picked, (start + k) % n
+
     def start(self, q, job, gpus):
         """开跑清单里的一个任务；返回 None。开跑前再核一次归属：这一轮收请求之后登记被 worker add 搬到别的主机或被移除（#95），
         或别的主机已放了这条清单（current 已在，#88），这次不放，返回 (等待原因, False)，下一轮按新的登记与 current 重来。
@@ -353,6 +414,17 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             script = ("echo %d > /proc/self/oom_score_adj 2>/dev/null; " % _C.GUEST_ADJ if self.guest() else "") \
                 + body + '; echo $? > "$3"'
             args = ["bash", "-c", script, "labmon-job:" + job["name"], q["env"] or "", job["cmd"], rcf]
+            aff_cores, aff_next = self._pick_cpu_affinity(job)
+            preexec = None
+            if aff_cores:
+                _mask = tuple(aff_cores)
+
+                def _apply_aff():
+                    try:
+                        os.sched_setaffinity(0, _mask)
+                    except OSError:
+                        pass
+                preexec = _apply_aff
             # 与 clean_local 共用 scratch_lock：建单格临时目录、起进程并写 active_scratch 原子互斥，防止 clean 扫描到删除窗口误删新起任务
             with _C.flock(self.p.scratch_lock):
                 for d in (sd, cd):
@@ -363,7 +435,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                     out.flush()
                     pr = subprocess.Popen(args,
                                           cwd=q["root"], env=env, stdout=out, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                          start_new_session=True)
+                                          start_new_session=True, preexec_fn=preexec)
                 self._note_scratch(q["project"], job["name"], pr.pid)
             if nice_inc and not use_nice_cmd:
                 try:
@@ -377,12 +449,15 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
             _C.write(cf, "".join(l + "\n" for l in (_C.read(cf) or "").splitlines() if l.split()) + "%s %d %s %s\n" % (job["name"], pr.pid, _C.now_str(t0), self.host))
             self.par_note(q["key"], t0, 1)            # 往上加行的：加行门槛的间隔从这次开跑算；补位的不算（par_gate，#176）
         gtxt = "，".join("GPU %d %s" % (c["i"], c["uuid"]) for c in gpus)
-        notes = ([gtxt] if gtxt else []) + ([job["flex"]] if job.get("flex") else []) + (["降优先级 nice +%d" % nice_inc] if nice_inc else [])
+        notes = ([gtxt] if gtxt else []) + ([job["flex"]] if job.get("flex") else []) + (["降优先级 nice +%d" % nice_inc] if nice_inc else []) + (["绑核 %d 个" % len(aff_cores)] if aff_cores else [])
         self.qlog(q, "开始 %s" % job["name"] + ("（%s）" % "；".join(notes) if notes else ""))
         k = _Q.run_key(q, job["name"])
         self.running[k] = dict(job, kind="queue", key=k, pid=pr.pid, t0=t0, q=q, gpus=[c["uuid"] for c in gpus], use={},
                                       project=q["project"], stop=q["stop"], oom0=_M.oom_kills(), fc0=_M.num(_M.cg("memory/memory.failcnt")))
-        ev_extra = ("；" + job["flex"] if job.get("flex") else "") + ("，降优先级 nice +%d" % nice_inc if nice_inc else "")
+        if aff_cores:
+            self.cpu_aff[k] = aff_cores
+            self._aff_cursor = aff_next
+        ev_extra = ("；" + job["flex"] if job.get("flex") else "") + ("，降优先级 nice +%d" % nice_inc if nice_inc else "") + ("，绑核 %d 个" % len(aff_cores) if aff_cores else "")
         self.event("start", "开始 %s%s%s%s" % (job["name"], "（%s）" % gtxt if gtxt else "",
                                               "，独占%s" % {"gpu": "卡", "host": "整机"}[job["excl"]] if job.get("excl") else "", ev_extra),
                    name=job["name"], project=q["project"], queue=q["jobs"])
@@ -486,6 +561,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         记失败而进程自己退出码为 0 的（成组的跟着失败的同伴停下、被作废，收到停止请求后正常退出），用量行的 rc 记 null：
         依赖（dep_state）、估时与看板都只认 rc "0" 为跑成功，别的主机按用量行认它失败。"""
         j = self.running.pop(key)
+        self.cpu_aff.pop(key, None)
         name, rc, oom, sq, requeue, failed = j["name"], None, None, None, False, False
         now = _C.time.time()
         mins = round(max(0.0, now - j["t0"] - _M.job_sus(j, now)) / 60, 1)
@@ -658,6 +734,15 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         k = job["key"] = self.free_key(q, name)
         if local and _C.alive(pid, ("labmon-job:" + name,)):
             self.running[k] = job
+            if (job.get("ngpu", 1) or 0) == 0 and not _C.is_hold(name) and job.get("cpus") is not None and job["cpus"] >= 1:
+                avail, _ = self._cpu_affinity_pool()
+                if avail:
+                    try:
+                        cur_aff = sorted(os.sched_getaffinity(pid))
+                        if cur_aff and len(cur_aff) < len(avail):
+                            self.cpu_aff[k] = cur_aff
+                    except OSError:
+                        pass
             self.active.add(q["key"])
             self.par_note(q["key"], _C.time.time())  # 重启接管：上一个 worker 同时跑着的行数算达到过的，跑完补回不等间隔（#176）
             _C.write(os.path.join(q["state"], "lock"), str(os.getpid()))   # lock 改指本进程，看板才认得队列还在
@@ -690,6 +775,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 nk = self.free_key(q, j["name"])
                 if nk not in self.running:
                     self.running[nk] = dict(self.running.pop(k), key=nk, q=q)
+                    if k in self.cpu_aff:
+                        self.cpu_aff[nk] = self.cpu_aff.pop(k)
                 if old in self.active:
                     self.active.discard(old)
                     self.active.add(q["key"])
