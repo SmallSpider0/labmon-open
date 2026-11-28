@@ -759,7 +759,7 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
     snap = {"generated": t, "hosts": all_view_hosts, "colors": colors, "notices": notices, "lan": lan, "wake": wake,
             "host_notices": per_host,                 # 各主机这一轮的掉线、恢复（serve.Overview.once 另推给能用这台的人，#167）
             # 各项目的挪法建议（worker 的 offers 汇的；项目看板据此告警）；不在内网时沿用上一轮的，回来后不重复叫醒
-            "rebalance": RB.suggest(hosts, old.get("rebalance"), t) if lan["ok"] else old.get("rebalance") or {},
+            "rebalance": RB.suggest(hosts, old.get("rebalance"), t, sw=sw) if lan["ok"] else old.get("rebalance") or {},
             "event_kinds": EVENT_KINDS, "event_cats": EVENT_CATS,
             "fleet": fleet, "disk": disk, "pool": pool_data, "occ": occupancy(all_view_hosts, projects, t - KEEP_S),
             "sched": sched_view(hosts, projects, t, {**sw, "weight": sw.get("weight") or {}}, people),

@@ -22,6 +22,8 @@ from __future__ import annotations
 import re
 
 from .config import STALE_S, fmt_dur, fmt_time, member_owner, pool_host_id
+from .worker.pure import is_hold, person_use
+from .worker.sched import fair_key
 
 GAIN_S = 3600          # 整批完工至少提前这么多秒才建议（剩余时间短的批按 GAIN_SHORT_FRAC 放宽，不低于 GAIN_MIN_S）
 GAIN_MIN_S = 900
@@ -172,10 +174,92 @@ def _fresh(o: dict, live: dict) -> dict:
     return o
 
 
-def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
+def _order_projects(projs: list[str], hosts: list[dict], sw: dict | None, t: float) -> list[str]:
+    """全局联合规划的项目评估顺序（#289）：复用 worker.sched.fair_key 与 worker.pure.person_use，
+    按个人近期用量、同人内 focus 优先、项目近期用量 ÷ 权重从小到大排；打平时权重高者优先，再按项目 ID 稳定排序。
+    share 口径与 overview.sched_view 一致（排除 ephemeral，优先非 standalone 的最新 share）；无 share/sw 时稳定回退按项目 ID 排。"""
+    valid = [h for h in hosts if not h.get("ephemeral")]
+    cluster = [h["status"] for h in valid if not h.get("standalone") and (h.get("status") or {}).get("share")]
+    sts = cluster or [h["status"] for h in valid if (h.get("status") or {}).get("share")]
+    sh = max(sts, key=lambda s: s.get("t", 0))["share"] if sts else {}
+    sw = sw or {}
+    w = {**(sh.get("weight") or {}), **(sw.get("weight") or {})}
+    pol = {"own": dict(sw.get("owner") or {}), "w": w}
+    use = dict(sh.get("use") or {})
+    focus = set(sw.get("focus") or ())
+    for h in valid:
+        for o in (h.get("status") or {}).get("overrides") or []:
+            if o.get("kind") == "focus" and o.get("target") and (o.get("until") is None or o["until"] > t):
+                focus.add(o["target"])
+    tot = person_use(pol, use)
+    return sorted(projs, key=lambda p: (fair_key({"project": p, "since": 0.0}, focus, pol, use, tot), -float(w.get(p) or 1.0), p))
+
+
+def _host_cap(e: dict, host_offers: list[dict]) -> int:
+    """目标主机当前可用于承接新挪入车道的并发槽位数（#289）：
+    取空闲卡数（总卡数减非占位在跑任务已占卡数）与本轮该主机 offers 中 room.lanes 最大值，至少为 1。"""
+    st = e.get("status") or {}
+    gpus = (st.get("info") or {}).get("gpus") or []
+    if gpus:
+        busy = {g for j in st.get("running") or [] if not is_hold(j.get("name")) for g in (j.get("gpus") or ())}
+        idle_cards = max(0, len(gpus) - len(busy))
+    else:
+        idle_cards = 0
+    max_room = max(((o.get("room") or {}).get("lanes") or 0 for o in host_offers), default=0)
+    return max(1, idle_cards, max_room)
+
+
+def _apply_reserved(o: dict, res: dict | None, t: float) -> dict:
+    """在评估低优项目对目标机的 offer 前，叠加高优项目已选定挪入该机的虚拟负载（#289）：
+    - 同机挪到另一条已有清单（local 且 lane 非 None）不新增车道，不扣减；
+    - 取最早可用槽位的延迟 shift = min(slots)，将 jobs[i]["end"]（及目标机本有排队时的 own）往后平移 shift；
+    - 目标机已被高优项目占用（used > 0）时清除 idle，并将 room["lanes"] 扣减 used（扣至 0 则清掉 room）。"""
+    if not res or res["used"] <= 0 or (o.get("local") and o.get("lane")):
+        return o
+    shift = min(res["slots"])
+    o2 = dict(o)
+    if shift > 0:
+        has_own = o.get("free") is not None and o["free"] > t
+        o2["jobs"] = [
+            dict(j, end=j["end"] + shift,
+                 own=(j["own"] + shift if has_own and j.get("own") is not None else j.get("own")))
+            for j in o["jobs"]
+        ]
+    o2["idle"] = False
+    if o.get("room"):
+        rem = max(0, (o["room"].get("lanes") or 0) - res["used"])
+        o2["room"] = dict(o["room"], lanes=rem) if rem > 0 else None
+    return o2
+
+
+def _reserve_target(reserved: dict, tid: str, best: dict, orig_o: dict, t: float) -> None:
+    """高优项目选定往 tid 挪前 k 行后，把新增负载跨度计入 tid 最早可用的槽位并递增已占车道数（#289）。
+    同机挪到另一条已有清单（local 且 lane 非 None）不新增车道，不扣减。"""
+    if best.get("local") and best.get("lane"):
+        return
+    res = reserved.get(tid)
+    if not res:
+        return
+    k = len(best["jobs"])
+    orig_end = orig_o["jobs"][k - 1]["end"]
+    if not best.get("local") and best.get("lane") and not best.get("before"):
+        base0 = max(t, orig_o["free"]) if orig_o.get("free") is not None else t
+        span = max(0.0, orig_end - base0)
+    else:
+        span = max(0.0, orig_end - t)
+    i = min(range(len(res["slots"])), key=lambda idx: res["slots"][idx])
+    res["slots"][i] += span
+    res["used"] += 1
+
+
+def suggest(hosts: list[dict], prev: dict | None, t: float, sw: dict | None = None) -> dict:
     """各项目的挪法建议 {项目: 建议}。hosts：工作台这一轮的各主机（worker 状态在 status，借用的 borrow.late 已由 borrow.check 补上）；
-    prev：上一轮的结果（滞回用）。只读 worker 在跑、状态新鲜、这轮连上了的主机（过期、worker stop 过的不读；本机不在内网时 overview 沿用上一轮的结果）；
+    prev：上一轮的结果（滞回用）；sw：当前调度设置（weight、focus、owner，用于全局联合规划排序，缺省时从 hosts 的 share 回退）。
+    只读 worker 在跑、状态新鲜、这轮连上了的主机（过期、worker stop 过的不读；本机不在内网时 overview 沿用上一轮的结果）；
     这轮读失败的读 keep_offers 沿用的 offers_kept。offers 里已不在原处的行按这一轮读到的来源状态截掉（_fresh）。
+    多项目全局联合规划（#289）：按 _order_projects（复用 fair_key + person_use）确定先后顺序，高优项目选定目标机后，
+    通过 _reserve_target / _apply_reserved 扣减该机并发槽位、平移后续低优项目发往同一目标机的 end/own 并清除/扣减 idle/room，
+    消除多项目同时瞄准同一空闲机互相打架。
     key 带挪法（move_key：目标与第一行，#109）：同一挪法一直在、推演在抖时只叫醒一次，换目标、换清单、第一行换了算新的。
     报过建议的项目门槛减半（滞回）；上一轮的目标主机仍够门槛、跑完的时刻比最优的晚不到 STICK_S 时沿用它，免得几台一样空时每轮换一句。
     建议 {key 告警 key, target 挪到哪台, lane 接在它哪条清单后面, before 插在那条清单里哪一行前面（它写了依赖；None 接在末尾）,
@@ -192,6 +276,7 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
     pool_target = {e["id"]: pool_host_id(e["pool_id"]) for e in hosts if e.get("pool_exclusive") and e.get("pool_id")}
     late = {f"{e['id']}|{x.get('root')}|{x.get('queue')}" for e in hosts for x in (e.get("borrow") or {}).get("late") or []}
     offs: dict = {}
+    host_offs: dict[str, list[dict]] = {}
     live = _live(hosts)
     has_ma = any(e.get("member_auto") for e in hosts)
     owner_fn = acc_fn = None
@@ -218,14 +303,20 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
                         continue
                 elif po != ma_owner:
                     continue
-            offs.setdefault(o["project"], []).append((e["id"], _fresh(o, live)))
+            fo = _fresh(o, live)
+            offs.setdefault(o["project"], []).append((e["id"], fo))
+            host_offs.setdefault(e["id"], []).append(fo)
+    reserved = {e["id"]: {"slots": [0.0] * _host_cap(e, host_offs.get(e["id"], [])), "used": 0} for e in hosts}
     out = {}
-    for proj, xs in sorted(offs.items()):
+    for proj in _order_projects(list(offs), hosts, sw, t):
+        raw_xs = offs[proj]
+        xs_pairs = [(hid, _apply_reserved(o, reserved.get(hid), t), o) for hid, o in raw_xs]
+        xs = [(hid, o) for hid, o, _ in xs_pairs]
         was = prev.get(proj) or {}
         opts, why, est, idles = [], [], [], []
         half = 0.5 if was.get("key") else 1
         under = _under(xs, set(((was.get("room") or {}).get("hosts")) or ()))
-        for hid, o in xs:
+        for hid, o, orig_o in xs_pairs:
             f = _top(list(o["ends"].values()) + [o["free"]])
             most = None                    # 这台空着时按行比成立的最多几行（#62）
             for k in range(1, len(o["jobs"]) + 1):
@@ -233,7 +324,7 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
                 if f is not None and new is not None and new > f:
                     continue
                 opt = {"target": hid, "lane": o["lane"], "before": o.get("before"), "jobs": o["jobs"][:k], "from": f, "to": new,
-                       "local": bool(o.get("local")), "gpus": o.get("gpus")}
+                       "local": bool(o.get("local")), "gpus": o.get("gpus"), "_orig": orig_o}
                 there = _idle_gain(o["jobs"][:k], GAIN_MIN_S * half) if o.get("idle") and not o.get("local") else False
                 if there is not False:
                     most = dict(opt, idle=True, there=there, done=o["jobs"][k - 1]["end"])
@@ -262,6 +353,7 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
                 rank = lambda x: (-len(x["jobs"]), x["done"])
                 best, same = min(idles, key=rank), [x for x in idles if x["target"] == was.get("target") and not was.get("local")]
             best = dict(min(same or [best], key=rank))
+            orig_o = best.pop("_orig")
             best["key"] = move_key(proj, best)
             best["cut"] = sorted({_lane(j) for j in best["jobs"]} & late)
             miss = _needs_miss(best["jobs"])
@@ -276,6 +368,7 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
                 best["text"] = _room_text(best, proj, label, pool_target) + best["text"]
                 if best.get("loose") or best.get("idle"):
                     best["key"] = f"rebalance:{proj}:room:{','.join(sorted(under))}"
+            _reserve_target(reserved, best["target"], best, orig_o, t)
             out[proj] = best
         elif why or est:
             out[proj] = {"why": why, "from": _top([_top(list(o["ends"].values()) + [o["free"]]) for _, o in xs])}
