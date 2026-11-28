@@ -225,7 +225,13 @@ function drawer(r) {
   DKEY = key;
 }
 document.addEventListener("selectionchange", () => { if (PENDING && !selecting()) render(false); });
-document.addEventListener("focusout", () => setTimeout(() => { if (PENDING && !selecting()) render(false); }));
+document.addEventListener("focusout", e => {
+  if (e.target?.dataset?.win && WED?.pid === e.target.dataset.win) {
+    const pid = e.target.dataset.win, val = e.target.value;
+    setTimeout(() => { if (WED?.pid === pid) schedWCommit(pid, val); }, 0);
+  }
+  setTimeout(() => { if (PENDING && !selecting()) render(false); });
+});
 document.addEventListener("change", e => {               // 批量续租的勾选、弹窗里的「可以中断」与借用表单、向导里的勾选与镜像、共享盘目录归属、保活守护的开关
   const t = e.target, d = t.dataset || {};
   if (t.classList?.contains("when-in")) return whenInput(t);      // 时刻的下拉：有的浏览器只发 change
@@ -268,6 +274,7 @@ document.addEventListener("input", e => {               // 输入框的值先记
   if (e.target.dataset?.extf && e.target.type !== "checkbox") extInput(e.target, "input");
   if (e.target.dataset?.plf && e.target.type !== "checkbox") poolInput(e.target, "input");
   if (e.target.dataset?.popField && POP?.draft) POP.draft[e.target.dataset.popField] = e.target.value;
+  if (e.target.dataset?.win && WED?.pid === e.target.dataset.win) WED.val = e.target.value;
 });
 
 // 悬停提示的外壳在 common.js（tipBind）；这里只管小曲线的十字线（XH：正画着十字线的组）与嵌着的项目页
@@ -303,6 +310,10 @@ document.addEventListener("toggle", e => {
 document.addEventListener("keydown", e => {
   if (e.key === "[" && !e.metaKey && !e.ctrlKey && !e.altKey && !e.target.closest?.("input,textarea,select,[contenteditable]")) {
     e.preventDefault(); return document.querySelector("[data-side]")?.click();
+  }
+  if (e.target.dataset?.win) {
+    if (e.key === "Enter") { e.preventDefault(); return schedWCommit(e.target.dataset.win, e.target.value); }
+    if (e.key === "Escape") { e.preventDefault(); e.stopPropagation(); return schedWCancel(); }
   }
   if (e.key === "Enter" && e.target.id === "fcapin" && FCAP) { e.preventDefault(); return fopAct("go"); }
   if (e.key === "Enter" && !e.isComposing && FIN[e.target.id]?.[0] === "G") { e.preventDefault(); return gdSave(); }

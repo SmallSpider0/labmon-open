@@ -761,7 +761,8 @@ def collect(projects: list[dict] | None = None, use_ssh: bool = True) -> dict | 
             # 各项目的挪法建议（worker 的 offers 汇的；项目看板据此告警）；不在内网时沿用上一轮的，回来后不重复叫醒
             "rebalance": RB.suggest(hosts, old.get("rebalance"), t) if lan["ok"] else old.get("rebalance") or {},
             "event_kinds": EVENT_KINDS, "event_cats": EVENT_CATS,
-            "fleet": fleet, "disk": disk, "pool": pool_data, "occ": occupancy(all_view_hosts, projects, t - KEEP_S), "sched": sched_view(hosts, projects, t, sw, people),
+            "fleet": fleet, "disk": disk, "pool": pool_data, "occ": occupancy(all_view_hosts, projects, t - KEEP_S),
+            "sched": sched_view(hosts, projects, t, {**sw, "weight": sw.get("weight") or {}}, people),
             "regs": regs,   # 登记的全局视图：项目「管理」抽屉的主机与队列
             # 各项目的摘要：页面要的字段只在 serve.Overview.proj_info 一处定，这里照带；running 只给 _to_worker 写 eta.json，不进快照（#139）
             "projects": [{k: v for k, v in p.items() if k != "running"} for p in projects],
@@ -801,7 +802,11 @@ def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | Non
                 ids.append(j["project"])
     recent = [(r.get("p"), r.get("wait")) for h in hosts for r in load_rows(usage_file(h["id"])) if r["s"] >= t - WAIT_WINDOW_S]
     recent += [(r.get("project"), r.get("wait")) for st in allst for r in st.get("running") or [] if (r.get("t0") or 0) >= t - WAIT_WINDOW_S]
+    sw_given = sw is not None
     sw = sched(t) if sw is None else sw
+    # 权重优先取主机清单最新落盘的 [sched.weight]（未写视为 1），让刷新/采集立刻所见即所得；
+    # 仅在调用方显式传入 sw 且未带 "weight" 键时回退 worker 回报的 share.weight（兼容单测夹具）
+    cfg_w = (sw.get("weight") or {}) if (not sw_given or "weight" in sw) else None
     by = pause_by()
     people = F.project_people(ids) if people is None else people
     def flag(kind, pid):
@@ -819,7 +824,8 @@ def sched_view(hosts: list[dict], projects: list[dict], t: float, sw: dict | Non
     for pid in ids:
         waits = [w for p, w in recent if p == pid and w is not None]
         who, pk = people.get(pid), keys.get(pid)
-        out.append({"id": pid, "person": who, "pk": pk, "puse": round(puse.get(pk, 0.0), 3), "w": sh["weight"].get(pid, 1), "use": sh["use"].get(pid, 0.0),
+        w = cfg_w.get(pid, 1) if cfg_w is not None else sh["weight"].get(pid, 1)
+        out.append({"id": pid, "person": who, "pk": pk, "puse": round(puse.get(pk, 0.0), 3), "w": w, "use": sh["use"].get(pid, 0.0),
                     "cards": round(sum(r[1] for st in allst for r in (st.get("share") or {}).get("run") or [] if r[0] == pid), 2),
                     "queued": sum(1 for st in allst for ln in (st.get("plan") or {}).get("lanes") or [] if ln.get("project") == pid
                                   for j in ln["jobs"] if not j.get("run")),

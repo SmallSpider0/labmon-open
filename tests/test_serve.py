@@ -548,6 +548,34 @@ class ServeTest(unittest.TestCase):
         self.assertEqual((b["w"], b["queued"], b["waiting"], b["paused"], b["focus"]), (1, 2, 1, {"until": None, "hosts": ["x"], "by": {"x": None}}, None))
         self.assertEqual((b["wait_avg"], b["wait_n"]), (1.0, 70))
 
+    def test_sched_view_prefers_hosts_weight(self):
+        # #280：sched_view 优先合并主机清单最新落盘的 [sched.weight]，不等 worker 上一轮旧 share.weight
+        now = time.time()
+        hosts = [fake_host("x", status=dict(share={"wait_cap_min": 30.0, "half_life_h": 24.0, "weight": {"a1": 2.0, "b1": 3.0}, "use": {"a1": 1.0, "b1": 1.0}, "run": []}))]
+        projs = [{"id": "a1"}, {"id": "b1"}]
+        # 1) sw 带 weight：以 hosts.toml 最新值为准，不在 weight 里的立即恢复为 1
+        v1 = O.sched_view(hosts, projs, now, {"weight": {"a1": 5}})
+        self.assertEqual({p["id"]: p["w"] for p in v1["projects"]}, {"a1": 5, "b1": 1})
+        # 2) 所有项目都改回 1（[sched.weight] 清空，sw["weight"] == {}）：不回退到 worker 旧值
+        v2 = O.sched_view(hosts, projs, now, {"weight": {}})
+        self.assertEqual({p["id"]: p["w"] for p in v2["projects"]}, {"a1": 1, "b1": 1})
+        # 3) sw=None 从 hosts.toml 现读：改完即生效，删行即恢复 1
+        hf = Path(self.tmp.name) / "hosts.toml"
+        old_hf = os.environ.get("LABMON_HOSTS")
+        os.environ["LABMON_HOSTS"] = str(hf)
+        try:
+            hf.write_text('[sched.weight]\na1 = 4\n')
+            v3 = O.sched_view(hosts, projs, now)
+            self.assertEqual({p["id"]: p["w"] for p in v3["projects"]}, {"a1": 4, "b1": 1})
+            hf.write_text("")
+            v4 = O.sched_view(hosts, projs, now)
+            self.assertEqual({p["id"]: p["w"] for p in v4["projects"]}, {"a1": 1, "b1": 1})
+        finally:
+            if old_hf is None:
+                os.environ.pop("LABMON_HOSTS", None)
+            else:
+                os.environ["LABMON_HOSTS"] = old_hf
+
     def test_events_only_this_project(self):
         # 项目页时间线的事件：同机别的项目的作废、对它的暂停不给（会画进本项目的事件带、被当成空档原因），整台主机的照给
         from labmon.serve import proj_events
