@@ -483,8 +483,8 @@
    实现：worker 的 `Worker.io_yield`（`Disk.step` 的 `defer`、`stage_bg` 调它；状态的 `disk.yield`）；页面上 `diskProg`（overview_js/storage.js）
 133. **读写拥塞嫌疑**：读写拥塞嫌疑（在跑的已跑过同类历史 `SLOW_RATIO` 倍、共享盘又慢：只记事件、同一任务一次；同一物理机按共享盘 `addr` 归并、计数不相加）
    实现：worker 的 `Worker.io_suspect`（`duration` 的 `same`、运行中任务的 `io_sus`、`peers` 记的 `peer_box`）；事件种类 `io_suspect`
-134. **清单的 `cpus=`、`io=`提示与开跑导出的 `LABMON_CPUS`；核数取整与记账上限**：清单的 `cpus=`（进 CPU 记账）、`io=`（只记录）提示与开跑导出的 `LABMON_CPUS`（开跑时给这个任务记账的核数；满 3 分钟后记账按实测回收，它不变；没设的 `OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`OPENBLAS_NUM_THREADS` 缺省同它，清单任务与单元共用，#38）；核数取整（四舍五入至少 1，`cpus=0` 是 0）与记账上限（配额向下取整）
-   实现：worker 的 `hints`、`job_cpus`、`cpu_cap`（容器配额 `cpu_quota`）、`cpu_env`（`THREAD_VARS`；`Worker.start` 与 `slot_main` 共用）；页面上 `hintText`、`estText`（overview_js/home.js）
+134. **清单的 `cpus=`、`io=`提示与开跑导出的 `LABMON_CPUS`；核数取整与记账上限；纯 CPU 任务亲和度绑核**：清单的 `cpus=`（进 CPU 记账）、`io=`（只记录）提示与开跑导出的 `LABMON_CPUS`（开跑时给这个任务记账的核数；满 3 分钟后记账按实测回收，它不变；没设的 `OMP_NUM_THREADS`、`MKL_NUM_THREADS`、`OPENBLAS_NUM_THREADS` 缺省同它，清单任务与单元共用，#38）；核数取整（四舍五入至少 1，`cpus=0` 是 0）与记账上限（非 CFS 为配额向下取整；真实 Linux cgroup CFS 配额 `cpu_quota_src == "cfs"` 另扣安全留白 `max(CFS_HEADROOM_MIN, int(quota * CFS_HEADROOM_FRAC + 0.5))`、低配保底 1 核，#301）；未绑 `cpuset` 的 Linux CFS 容器下，声明 `cpus>=1` 的纯 CPU 清单任务错峰绑核（`sched_setaffinity`），触发 `cpu_shrink` 收小记账时绑核上限再封顶为 `min(原绑核上限, ceil(收小后记账核数) + 1)`（#301）
+   实现：worker 的 `hints`、`job_cpus`、`cpu_cap`（容器配额 `cpu_quota`、`CFS_HEADROOM_FRAC`、`CFS_HEADROOM_MIN`、`host_info` 的 `cpu_quota_src = "cfs"`）、`cpu_env`（`THREAD_VARS`；`Worker.start` 与 `slot_main` 共用）、`Worker._cpu_affinity_pool`、`Worker._pick_cpu_affinity`；页面上 `hintText`、`estText`（overview_js/home.js）
 135. **任务日志里这一次的输出**：任务日志里这一次的输出（每次开跑写的分隔行之后：最后一行、进度、状态里的日志末尾、OOM 判断；逐字出现过的行算套话，最后一行跳过、日志末尾折叠、OOM 看原文）
    实现：worker 的 `START_RE`、`log_tail`（`fold`）；探针在服务器上跑、不 import worker，另有一份 `START_RE` 与去重（probe.py 取 `current` 那段）
 136. **外来 GPU 进程；独占任务会被谁打扰**：外来 GPU 进程（不是 labmon 的）；独占任务会被谁打扰（放行前等腾空、只为 labmon 的留卡，与运行中作废共用一个判定）

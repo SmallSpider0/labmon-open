@@ -360,6 +360,8 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         """为纯 CPU 清单任务挑选互不重叠的逻辑核子集；返回 (核列表, 新游标) 或 (None, None)。
         仅对 gpus=0、非占位且显式声明 cpus>=1 的任务生效；GPU 任务与 cpus=0 轻量脚本不绑核。
         绑核数复用 sched.cpu_give 按纯 CPU 上限封顶（带 GPU 主机扣除 GPU 保底核），与 LABMON_CPUS 口径一致；
+        若任务已触发 cpu_shrink 收小排队记账（est.cpus_set 存在且 est.cpus < est.cpus_set），再封顶到
+        ceil(est.cpus) + 1（不超过原绑核上限与纯 CPU 上限），避免按低核放行后中途冲高顶爆容器（#301）；
         优先挑选未被其他运行中纯 CPU 任务占用的核，不足时按轮转游标补齐。"""
         if (job.get("ngpu", 1) or 0) > 0 or _C.is_hold(job.get("name")):
             return None, None
@@ -369,8 +371,12 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         avail, quota = self._cpu_affinity_pool()
         if not avail:
             return None, None
-        cap = _M.cpu_cap(self.info.get("cpu_quota") or quota)
+        q_info = self.info.get("cpu_quota")
+        cap = _M.cpu_cap(q_info if q_info else quota, self.info.get("cpu_quota_src") if q_info else "cfs")
         eff = _S.cpu_give(int(math.ceil(cpus)), cap, 0, self.info.get("gpus") or ())
+        est = job.get("est") or {}
+        if est.get("cpus_set") and est.get("cpus") is not None and est["cpus"] < est["cpus_set"]:
+            eff = min(eff, int(math.ceil(est["cpus"])) + 1)
         k = min(max(1, int(eff)), len(avail))
         used = {}
         for cores in self.cpu_aff.values():

@@ -1110,7 +1110,7 @@ def cpu_line(st):
         host = "nproc 报的 %d 是宿主机的核数" % n if n else ""
     if not q:
         return "CPU：容器没设配额，不按核记账" + ("（%s）" % host if host else "")
-    cap = room.get("cpu_cap") or _M.cpu_cap(q)
+    cap = room.get("cpu_cap") or _M.cpu_cap(q, info.get("cpu_quota_src"))
     cards = info.get("gpus") or ()
     rsv = gpu_cpu_reserve(cards, cap)
     run = [j for j in st.get("running") or [] if (j.get("acct") or {}).get("cpu")]
@@ -1281,10 +1281,11 @@ class SchedMixin:
     # ---- 估计与记账 ----
     def live_cpu(self):
         """本机与同共享盘活跃主机上满 CPU_LIVE_SHRINK_S 的在跑任务实测峰值轨迹（供 estimate 的 cpu_shrink 共用，#292）。"""
-        rows = live_cpu_rows(self.running.values(), _M.cpu_cap(self.info.get("cpu_quota")), self.info.get("gpus") or ())
+        rows = live_cpu_rows(self.running.values(), _M.cpu_cap(self.info.get("cpu_quota"), self.info.get("cpu_quota_src")), self.info.get("gpus") or ())
         for st in (self.peer_st or {}).values():
-            info = st.get("info") or {}
-            rows.extend(live_cpu_rows(st.get("running") or (), _M.cpu_cap(info.get("cpu_quota")), info.get("gpus") or ()))
+            info, room = st.get("info") or {}, st.get("room") or {}
+            cap = room.get("cpu_cap") if room.get("cpu_cap") is not None else _M.cpu_cap(info.get("cpu_quota"), info.get("cpu_quota_src"))
+            rows.extend(live_cpu_rows(st.get("running") or (), cap, info.get("gpus") or ()))
         return rows
 
     def acct(self, j):
@@ -1294,7 +1295,7 @@ class SchedMixin:
         CPU 超用只是被限流变慢。写了 cpus=0 的给 0 核，回收后仍是 0。"""
         e, u = j.get("est") or {"ram": 0.0, "vram": 0.0}, j.get("use") or {}
         vb = u.get("vram_by") or {}
-        give = float(cpu_give(e.get("cpus", _C.CPU_DEFAULT), _M.cpu_cap(self.info.get("cpu_quota")), job_ngpu(j), self.info.get("gpus") or ()))
+        give = float(cpu_give(e.get("cpus", _C.CPU_DEFAULT), _M.cpu_cap(self.info.get("cpu_quota"), self.info.get("cpu_quota_src")), job_ngpu(j), self.info.get("gpus") or ()))
         if cpu_warm(u):
             win_pks = [x[1] for x in u["pks"] if u["t"] - x[0] < _C.CPU_WARM_S] or [u["pks"][-1][1]]
             give = min(give, max(1.0, max(win_pks)))
@@ -1305,7 +1306,7 @@ class SchedMixin:
     def cpus_for(self, j):
         """开跑时导出的 LABMON_CPUS：给的核数（cpu_threads：一般就是估计核数，按实测收小了记账的仍按清单的 cpus=）封顶到该任务在这台的上限（cpu_give），
         至少 1（写 cpus=0 的不记账，也给 1）。"""
-        return cpus_export(cpu_threads(j["est"]), _M.cpu_cap(self.info.get("cpu_quota")), job_ngpu(j), self.info.get("gpus") or ())
+        return cpus_export(cpu_threads(j["est"]), _M.cpu_cap(self.info.get("cpu_quota"), self.info.get("cpu_quota_src")), job_ngpu(j), self.info.get("gpus") or ())
 
     def mem_room(self):
         """labmon 的任务全停时容器内存还能放多少（GiB）：上限 − labmon 之外收不回的内存 − 借来的主机上给对方留着、对方还没用上的部分。
@@ -1325,7 +1326,7 @@ class SchedMixin:
         （对方还没用上的预留也扣；借来时对方空着的不预先留）。对方另起、ka.sh 停不了的保活不算对方的用量（不和预留取 max），
         它这一段占的核（other.ka_cpu）另扣，不看连着几轮（#37）。旧 gpu_queue.sh 的任务不记账，此刻用的核也算 labmon 之外。
         读不到配额为 None（不记 CPU）。在跑任务的记账由快照的 jobs 扣（cpu_free）。"""
-        cap = _M.cpu_cap(self.info.get("cpu_quota"))
+        cap = _M.cpu_cap(self.info.get("cpu_quota"), self.info.get("cpu_quota_src"))
         if cap is None:
             return None
         o = (self.other["cpu"] or 0.0) if self.cpu_n >= 2 else 0.0
@@ -1366,7 +1367,7 @@ class SchedMixin:
                   "unacct_why": (unacct.get(u) or {}).get("why") or ""}
                  for i, u, f in gpus]
         return {"cards": cards, "ngpus": max(len(info), len(cards)), "os": self.info.get("os"), "limit": m.get("limit"), "room": self.mem_room(), "margin": ram_margin(m["limit"]) if m.get("limit") else None,
-                "cpu_cap": _M.cpu_cap(self.info.get("cpu_quota")), "cpu_room": self.cpu_room(),
+                "cpu_cap": _M.cpu_cap(self.info.get("cpu_quota"), self.info.get("cpu_quota_src")), "cpu_room": self.cpu_room(),
                 "jobs": jobs, "ext": list(self.ext.values()), "gp": list(gp), "cpu": self.other["cpu"] if self.cpu_n >= 2 else None,
                 "holds": self.excl_hold, "tags": limits.get("tags") or {}, "owner": {u for u in self.back_last if u not in ("ram", "cpu")},
                 "unacct": block_unacct, "unacct_info": {u: unacct[u] for u in unacct_busy},
