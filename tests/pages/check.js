@@ -983,11 +983,11 @@ t("manage", "项目配置（#133）：控件一直显示、从现值起（没有
   ok(!sc.includes('data-cfb="edit"'), "不该再有「修改」");
   has(sc, 'data-cf="title" data-p="proj-a" value="Alpha 实验" maxlength="60"');
   has(sc, 'data-cf="interval" data-p="proj-a" value="120" min="30" max="3600" step="1"'); has(sc, 'data-cf="hide_done_hours" data-p="proj-a" value="24" min="1" max="720" step="any"');
-  ok(new RegExp(`class="cf-chip on" data-cfb="set:interval:120" data-p="proj-a"[^>]*>${run(O, `cfDur("interval", 120)`)}<span class="dft">缺省</span>`).test(sc), "现值那档该亮、缺省那档标出");
+  ok(new RegExp(`class="cf-chip on" data-cfb="set:interval:120" data-p="proj-a"[^>]*>${run(O, `cfDur("interval", 120)`)}<span class="cf-dft">缺省</span>`).test(sc), "现值那档该亮、缺省那档标出");
   has(sc, 'data-cfb="set:interval:30"'); has(sc, 'data-cfb="set:hide_done_hours:168"'); has(sc, 'class="rhy"');
   // 取值范围、缺省取 cfg.spec（config.cfg_spec），页面不另抄一份
   run(O, "D.projects[0].cfg.spec.interval.lo = 45; D.projects[0].cfg.spec.interval.dft = 60");
-  const s2 = cfSec(drw(O, "#/p/proj-a/manage")); has(s2, 'value="120" min="45" max="3600"'); ok(/data-cfb="set:interval:60"[^>]*>[^<]*<span class="dft">缺省/.test(s2), "缺省档没跟着 spec");
+  const s2 = cfSec(drw(O, "#/p/proj-a/manage")); has(s2, 'value="120" min="45" max="3600"'); ok(/data-cfb="set:interval:60"[^>]*>[^<]*<span class="cf-dft">缺省/.test(s2), "缺省档没跟着 spec");
   run(O, "D.projects[0].cfg.spec.interval.lo = 30; D.projects[0].cfg.spec.interval.dft = 120");
   // 只读的三块：看板上的配置（登记目录里，能复制）、项目 id、输出目录；项目目录里的是工作副本、wait 每轮同步（#161）
   has(sc, 'class="idg"'); has(sc, "<code>proj-a</code>"); has(sc, "看板上的配置"); has(sc, 'data-copy="/Users/me/.local/state/labmon/projects/proj-a/monitor.toml"');

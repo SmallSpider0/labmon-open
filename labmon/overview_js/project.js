@@ -387,7 +387,7 @@ function cfRow(X, f, ks, name, ctl, {hint = "", was = "", cls = ""} = {}) {
 // 时长一项：常用档小签（缺省那档标出）+ 自定义框；off：启动参数定死了，整排置灰
 function cfDurRow(X, k, unit, hint, extra = "", off = false) {
   const s = X.S[k] || {}, val = X.v[k], dis = off ? " disabled" : X.dis;
-  const chips = (CF_PRESET[k] || []).map(x => `<button class="cf-chip${+val === x && String(val).trim() !== "" ? " on" : ""}" data-cfb="set:${k}:${x}" ${X.da}${dis}>${cfDur(k, x)}${x === s.dft ? `<span class="dft">缺省</span>` : ""}</button>`).join("");
+  const chips = (CF_PRESET[k] || []).map(x => `<button class="cf-chip${+val === x && String(val).trim() !== "" ? " on" : ""}" data-cfb="set:${k}:${x}" ${X.da}${dis}>${cfDur(k, x)}${x === s.dft ? `<span class="cf-dft">缺省</span>` : ""}</button>`).join("");
   return cfRow(X, k, [k], esc(s.name || k), `<div class="cf-ln"><span class="chips" data-cfv="ch:${k}">${chips}</span><span class="cf-own"><span class="sm mut">自定义</span>`
     + `<input class="cf-num" type="number" inputmode="decimal" data-cf="${k}" ${X.da} value="${esc(val)}"${s.lo != null ? ` min="${s.lo}" max="${s.hi}"` : ""} step="${s.int ? 1 : "any"}" aria-label="${esc(s.name || k)}（${unit}）"${dis}><span class="sm mut">${unit}</span></span></div>${extra}`,
     {hint, was: cfDur(k, X.o[k]), cls: off ? "off" : ""});
