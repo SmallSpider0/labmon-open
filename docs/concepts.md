@@ -140,7 +140,7 @@
 | 131 | GPU 利用率的两种口径；近 24 小时平均；项目自己的平均利用率；页面上的利用率文字 | worker 的 `win_mean`（`Worker.util_window` 记 `uwin`、`bwin`；状态的 `util10`、`gpu_busy`（`Worker.busy_view`））；看板 `overview.gpu_busy`、项目快照的 `hosts[].busy`、`history[].busy`（`collect._hosts`）、`collect.gpu_mine`（`u`）；自用主机样本的 `gpus[].busy`（`fleet.from_worker`）；页面上 `utilText`、`utilAvg`、`utilMine`、`gpuBusy`（common.js），组内页取样本的 `fUtil`、`fCardU`（overview_js/fleet.js） |
 | 132 | 共享盘慢时推迟读写共享盘的事 | worker 的 `Worker.io_yield`（`Disk.step`、`defer`、`stage_bg`、`disk.yield`）；页面上 `diskProg`（overview_js/storage.js） |
 | 133 | 读写拥塞嫌疑 | worker 的 `Worker.io_suspect`（`duration`、`same`、`io_sus`、`peers`、`peer_box`）；事件种类 `io_suspect` |
-| 134 | 清单的 `cpus=`、`io=`提示与开跑导出的 `LABMON_CPUS`；核数取整与记账上限 | worker 的 `hints`、`job_cpus`、`cpu_cap`（`cpu_quota`）、`cpu_env`（`THREAD_VARS`、`Worker.start`、`slot_main`）；页面上 `hintText`、`estText`（overview_js/home.js） |
+| 134 | 清单的 `cpus=`、`io=`提示与开跑导出的 `LABMON_CPUS`；核数取整与记账上限；纯 CPU 任务亲和度绑核 | worker 的 `hints`、`job_cpus`、`cpu_cap`（`cpu_quota`）、`cpu_env`（`THREAD_VARS`、`Worker.start`、`slot_main`）、`Worker._cpu_affinity_pool`、`Worker._pick_cpu_affinity`；页面上 `hintText`、`estText`（overview_js/home.js） |
 | 135 | 任务日志里这一次的输出 | worker 的 `START_RE`、`log_tail`（`fold`）；探针另有一份 `START_RE` 与去重（probe.py） |
 | 136 | 外来 GPU 进程；独占任务会被谁打扰 | worker 的 `sample`、`other_cpu`、`intruders`、`void_check`、`void_job` |
 | 137 | 停下重排的任务与发停止请求 | worker 的 `note_stop`（`voided`、`how`）、`send_stop` |
