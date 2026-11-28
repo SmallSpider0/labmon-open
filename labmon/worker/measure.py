@@ -635,9 +635,18 @@ def job_cpus(v):
     return 0 if v == 0 else max(1, int(v + 0.5))
 
 
-def cpu_cap(quota):
-    """记账用的 CPU 上限：容器配额向下取整（7.5 核按 7）；没设上限为 None（不记 CPU）。"""
-    return max(1, int(quota)) if quota else None
+def cpu_cap(quota, src=None):
+    """记账用的 CPU 上限：没设上限或 <=0 为 None（不记 CPU）；
+    来自真实 Linux cgroup CFS 配额（src == "cfs"）时，从向下取整的配额中扣除安全留白
+    max(CFS_HEADROOM_MIN, int(quota * CFS_HEADROOM_FRAC + 0.5))（17 核留 1 核→16 核，低配 <=2 核保底至少 1 核），
+    吸收多任务 100ms 周期抖动与系统开销（#301）；非 CFS（macOS 默认、配置软配额或未标明来源）保持配额向下取整（7.5 核按 7），至少 1。"""
+    if not quota or quota <= 0:
+        return None
+    base = int(quota)
+    if src == "cfs":
+        reserve = max(_C.CFS_HEADROOM_MIN, int(quota * _C.CFS_HEADROOM_FRAC + 0.5))
+        return max(1, base - reserve)
+    return max(1, base)
 
 
 def host_cpu_ticks():
@@ -688,6 +697,8 @@ def host_info(gpus, data_root):
             if dm:
                 h["mem"] = dm
     h["cpu_quota"] = cpu_quota()
+    if h["cpu_quota"] is not None:
+        h["cpu_quota_src"] = "cfs"
     if _C.posix_fallback_ok() and is_darwin():
         h["os"] = "darwin"
         if not h.get("nproc"):
@@ -1056,13 +1067,22 @@ class MeasureMixin:
         cfg = (pol or {}).get("cpu_quota")
         if not (isinstance(info, dict) and cfg is not None and cfg > 0):
             return
+        orig = float(info["cpu_quota"]) if info.get("cpu_quota") else None
+        orig_src = info.get("cpu_quota_src")
         cands = [float(cfg)]
-        if info.get("cpu_quota") and info.get("cpu_quota_src") != "macos_default":
-            cands.append(float(info["cpu_quota"]))
+        if orig and orig_src != "macos_default":
+            cands.append(orig)
         if info.get("nproc"):
             cands.append(float(info["nproc"]))
-        info["cpu_quota"] = min(cands)
-        if info.get("cpu_quota_src") == "macos_default":
+        new_q = min(cands)
+        if orig and orig_src == "cfs":
+            cfs_cap = cpu_cap(orig, "cfs")
+            if max(1, int(new_q)) <= cfs_cap:
+                info["cpu_quota"] = new_q
+                info["cpu_quota_src"] = "config"
+            return
+        info["cpu_quota"] = new_q
+        if orig_src == "macos_default" or not orig or new_q < orig - 1e-9:
             info["cpu_quota_src"] = "config"
 
     def disk_events(self, info, pol):

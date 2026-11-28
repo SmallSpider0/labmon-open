@@ -7070,7 +7070,7 @@ class UsageTest(unittest.TestCase):
             self.assertEqual(list(w.back), ["GPU-bbb"])
             self.assertIn("保活 PID 5300 不归 ka.sh 管、停不了，要停请对方停", w.back["GPU-bbb"])
             self.assertIsNone(w.guest_block())
-            self.assertAlmostEqual(w.cpu_room(), 17 - 1.1 - 1.7, 2)              # 上限 − max(对方 0.3, 预留 1.1) − 停不了的保活 1.7
+            self.assertAlmostEqual(w.cpu_room(), 16 - 1.1 - 1.7, 2)              # 17 核 CFS 留 1 核安全余量（记账上限 16）− max(对方 0.3, 预留 1.1) − 停不了的保活 1.7
             self.assertAlmostEqual(w.mem_room(), 61 - 5.7 - (5.3 - 4.2), 2)      # 公式不变：保活的内存在收不回的里，对方没用上的预留照留
             S = w.snapshot({})
             self.assertEqual(S["owner"], {"GPU-bbb"})
@@ -7117,7 +7117,7 @@ class UsageTest(unittest.TestCase):
             os.makedirs(w.p.dir)
             self.run_ext(m, clock, ticks, w, [("", None, 0), ("", -0.6, 0), ("", -0.6, 0)])
             self.assertEqual(w.other["ka_cpu"], 0.0)
-            self.assertEqual(w.cpu_room(), 17)
+            self.assertEqual(w.cpu_room(), 16)                                    # 17 核 CFS 留 1 核安全余量，记账上限 16
 
     def test_ext_cores_ignore_low_extra(self):
         """停不了的保活稳态 1.7 核，这一轮 labmon 之外的只测到 1.0（测量误差）：另扣的核数按 /proc 里整棵树求差，仍约 1.7，不被压低（审查阻塞 1 现象 B）。"""
@@ -10457,10 +10457,10 @@ class GpuCpuReserveTest(unittest.TestCase):
              mock.patch.object(os, "sched_setaffinity", create=True):
             picked_gpu_host, _ = w._pick_cpu_affinity(job16)
             self.assertEqual(len(picked_gpu_host), 14)
-            # self.info 未填 cpu_quota 时，回退使用 _cpu_affinity_pool 返回的真实 CFS quota 同样封顶为 14
+            # self.info 未填 cpu_quota 时，回退使用 _cpu_affinity_pool 返回的真实 CFS quota（16 核留 1 核→15，再扣 GPU 保底 2 核→13）
             w.info = {"gpus": [{"i": 0, "uuid": "GPU-a"}]}
             picked_fallback_q, _ = w._pick_cpu_affinity(job16)
-            self.assertEqual(len(picked_fallback_q), 14)
+            self.assertEqual(len(picked_fallback_q), 13)
             # 无 GPU 主机（16 核 CFS，可见 32 核）：不扣 GPU 保底，cpus=16 绑 16 核，cpus=20 封顶到 16 核
             w.info = {"gpus": [], "cpu_quota": 16.0}
             picked_no_gpu, _ = w._pick_cpu_affinity(job16)
@@ -10595,6 +10595,93 @@ class GpuCpuReserveTest(unittest.TestCase):
             self.assertEqual(w2.cpu_aff["q|c1"], [0, 1, 2, 3])
             picked, _ = w2._pick_cpu_affinity(dict(job, name="c2", cpus=4))
             self.assertEqual(picked, [4, 5, 6, 7])
+
+    def test_cfs_cpu_cap_headroom_and_cpu_line(self):
+        """#301：Linux CFS 配额留安全余量（17 核→16、20 核→18、低配 <=2 核保底 1 核），非 CFS/macOS 不变，cpu_line 自然显示。"""
+        cap = self.m.cpu_cap
+        # Linux CFS 配额安全留白
+        self.assertEqual(cap(17.0, "cfs"), 16)
+        self.assertEqual(cap(16.0, "cfs"), 15)
+        self.assertEqual(cap(20.0, "cfs"), 18)
+        self.assertEqual(cap(7.5, "cfs"), 6)
+        # 低配容器保底 1 核不归零
+        self.assertEqual((cap(2.0, "cfs"), cap(1.0, "cfs"), cap(0.5, "cfs")), (1, 1, 1))
+        self.assertIsNone(cap(None, "cfs"))
+        self.assertIsNone(cap(0.0, "cfs"))
+        # 非 CFS（None / macOS 默认 / 配置软配额）保持向下取整不变
+        self.assertEqual(cap(17.0), 17)
+        self.assertEqual(cap(10.0, "macos_default"), 10)
+        self.assertEqual(cap(12.0, "config"), 12)
+        self.assertEqual(cap(7.5, "config"), 7)
+        # host_info 读到 cgroup CFS 时标注 cpu_quota_src="cfs"；apply_cpu_quota 收紧低于 CFS 切为 "config"，高于 CFS 保持 "cfs"
+        cg = self.d / "cg_cfs_301"
+        (cg / "cpu").mkdir(parents=True)
+        (cg / "cpu" / "cpu.cfs_quota_us").write_text("1700000\n")
+        (cg / "cpu" / "cpu.cfs_period_us").write_text("100000\n")
+        with mock.patch.dict(os.environ, {"LABMON_OS": "linux"}), \
+             mock.patch.object(self.m, "CG", str(cg)):
+            info = self.m.host_info([], str(self.d))
+        self.assertEqual((info["cpu_quota"], info.get("cpu_quota_src")), (17.0, "cfs"))
+        w = self.m.Worker("h0")
+        info_hi = dict(info, nproc=64)
+        w.apply_cpu_quota(info_hi, {"cpu_quota": 20.0})
+        self.assertEqual((info_hi["cpu_quota"], info_hi.get("cpu_quota_src")), (17.0, "cfs"))
+        self.assertEqual(cap(info_hi["cpu_quota"], info_hi.get("cpu_quota_src")), 16)
+        info_lo = dict(info, nproc=64)
+        w.apply_cpu_quota(info_lo, {"cpu_quota": 12.0})
+        self.assertEqual((info_lo["cpu_quota"], info_lo.get("cpu_quota_src")), (12.0, "config"))
+        self.assertEqual(cap(info_lo["cpu_quota"], info_lo.get("cpu_quota_src")), 12)
+        # 回归：配置落在 CFS 留白区间 (cfs_cap, orig) 时不得反超（20 核 CFS 留白得 18，配 19 仍为 18；配 18 切 config 得 18 不双扣）
+        info_20 = {"cpu_quota": 20.0, "cpu_quota_src": "cfs", "nproc": 64}
+        w.apply_cpu_quota(info_20, {"cpu_quota": 19.0})
+        self.assertEqual((info_20["cpu_quota"], info_20.get("cpu_quota_src")), (20.0, "cfs"))
+        self.assertEqual(cap(info_20["cpu_quota"], info_20.get("cpu_quota_src")), 18)
+        info_20_eq = {"cpu_quota": 20.0, "cpu_quota_src": "cfs", "nproc": 64}
+        w.apply_cpu_quota(info_20_eq, {"cpu_quota": 18.0})
+        self.assertEqual((info_20_eq["cpu_quota"], info_20_eq.get("cpu_quota_src")), (18.0, "config"))
+        self.assertEqual(cap(info_20_eq["cpu_quota"], info_20_eq.get("cpu_quota_src")), 18)
+        info_175 = {"cpu_quota": 17.5, "cpu_quota_src": "cfs", "nproc": 64}
+        w.apply_cpu_quota(info_175, {"cpu_quota": 17.0})
+        self.assertEqual((info_175["cpu_quota"], info_175.get("cpu_quota_src")), (17.5, "cfs"))
+        self.assertEqual(cap(info_175["cpu_quota"], info_175.get("cpu_quota_src")), 16)
+        # cpu_line：17 核 CFS 自然展示“配额 17 核（按 16 核记账；为 GPU 保底留 2 核，纯 CPU 上限 14 核）”
+        st = {
+            "info": {"cpu_quota": 17.0, "cpu_quota_src": "cfs", "nproc": 144, "gpus": [{"i": 0, "uuid": "GPU-a"}]},
+            "room": {"cpu": 16.0, "cpu_cap": 16},
+            "running": [],
+        }
+        line = self.m.cpu_line(st)
+        self.assertIn("配额 17 核（按 16 核记账；为 GPU 保底留 2 核，纯 CPU 上限 14 核）", line)
+        # room.cpu_cap 缺失时同样按 cpu_quota_src="cfs" 回退到 16
+        st_fallback = dict(st, room={"cpu": 16.0})
+        self.assertIn("配额 17 核（按 16 核记账；为 GPU 保底留 2 核，纯 CPU 上限 14 核）", self.m.cpu_line(st_fallback))
+
+    def test_cpu_affinity_shrink_cap_and_non_shrink(self):
+        """#301：触发 cpu_shrink 的纯 CPU 任务绑核封顶到 min(原绑核上限, ceil(收小记账)+1) 且不超纯 CPU 上限；未触发与 GPU 任务不变。"""
+        w = self.m.Worker("h0")
+        os.makedirs(w.p.dir, exist_ok=True)
+        # 17 核 CFS + 1 GPU → 留白后 cap=16，GPU 保底 2 核，纯 CPU 上限 14 核
+        w.info = {"gpus": [{"i": 0, "uuid": "GPU-a"}], "cpu_quota": 17.0, "cpu_quota_src": "cfs"}
+        with mock.patch.dict(os.environ, {"LABMON_OS": "linux"}), \
+             mock.patch.object(self.m, "is_wsl", return_value=False), \
+             mock.patch.object(self.m, "cpu_quota", return_value=17.0), \
+             mock.patch.object(os, "sched_getaffinity", create=True, return_value=set(range(32))), \
+             mock.patch.object(os, "sched_setaffinity", create=True):
+            # 1. 触发 cpu_shrink（声明 7 → 收小记账 4）：绑核封顶为 min(7, ceil(4)+1) = 5
+            j_shrunk = {"name": "c_shrunk", "ngpu": 0, "cpus": 7, "est": {"cpus": 4, "cpus_set": 7}}
+            picked_shrunk, _ = w._pick_cpu_affinity(j_shrunk)
+            self.assertEqual(len(picked_shrunk), 5)
+            # 2. 触发 cpu_shrink 但 ceil(收小)+1 超纯 CPU 上限（声明 16 → 收小 14，14+1=15 > 14）：仍封顶到纯 CPU 上限 14
+            j_hi = {"name": "c_hi", "ngpu": 0, "cpus": 16, "est": {"cpus": 14, "cpus_set": 16}}
+            picked_hi, _ = w._pick_cpu_affinity(j_hi)
+            self.assertEqual(len(picked_hi), 14)
+            # 3. 未触发 cpu_shrink（无 cpus_set）：保持原声明上限 7
+            j_norm = {"name": "c_norm", "ngpu": 0, "cpus": 7, "est": {"cpus": 7, "cpu_src": "提示值"}}
+            picked_norm, _ = w._pick_cpu_affinity(j_norm)
+            self.assertEqual(len(picked_norm), 7)
+            # 4. GPU 任务即使带有 cpu_shrink 标记，仍照旧不绑核
+            j_gpu = {"name": "g_shrunk", "ngpu": 1, "cpus": 7, "est": {"cpus": 4, "cpus_set": 7}}
+            self.assertEqual(w._pick_cpu_affinity(j_gpu), (None, None))
 
 
 class HistResetTest(UnitBase):

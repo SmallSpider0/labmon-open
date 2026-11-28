@@ -96,6 +96,12 @@ UNACCT_UTIL_COOL = 5.0   # 外部活跃占卡利用率滞回解除门槛（%，#
 MACOS_RESERVE_CPUS = 2   # macOS 桌面默认保留核数（#114）：避免实验把笔记本 CPU 吃死，可经 cpu_quota 覆盖
 
 
+CFS_HEADROOM_FRAC = 0.08  # Linux CFS 容器 CPU 配额安全留白比例（#301）：吸收多任务 100ms 周期抖动与系统开销
+
+
+CFS_HEADROOM_MIN = 1     # Linux CFS 容器 CPU 配额安全留白下限（核，低配容器记账上限仍保底 1 核，#301）
+
+
 MPS_MEM_FRAC = 0.65      # Apple Silicon MPS 逻辑卡默认显存上限占统一内存比例（#114）
 
 

@@ -629,7 +629,7 @@ function resCard(h) {
       ? `macOS 本机共 ${info.nproc ?? "—"} 核；当前配额 ${info.cpu_quota ? g1(info.cpu_quota) + " 核" : "未设"}${info.cpu_quota_src === "macos_default" ? "（默认留 2 核给桌面，可在主机配置中调整 cpu_quota）" : ""}`
       : `容器里 nproc 显示 ${info.nproc ?? "—"} 个逻辑核，那是宿主机的；配额${info.cpu_quota ? " " + g1(info.cpu_quota) + " 核" : "读不到，不记 CPU 账"}`;
     s += row("CPU", big(cs + seg(Math.max(0, 100 * (info.cpu_used - js.reduce((a, j) => a + (j.use?.cores || 0), 0)) / q), "var(--muted)", "其他进程", "", "hatch")),
-      `${g1(info.cpu_used)} / ${g1(q)} 核${st.room?.cpu_cap != null ? `<span class="mut" ${tip("记账 = 各任务记的核数合计：开跑后 10 分钟内取 max(估计核数（封顶到上限）, 实测核数)，满 10 分钟后估计那份换成近 10 分钟窗口核数的最大值（不超过开跑时给的核数、不低于 1）再与实测取大；上限是配额向下取整")}>记账 ${g1(acct)} / ${st.room.cpu_cap}</span>` : ""}${rc != null ? `<span class="mut" ${tip("可放 = 配额 − labmon 之外的（含旧 gpu_queue.sh 的任务）− 任务记账")}>可放 ${g1(Math.max(0, rc))}</span>` : ""}${thrTag(h, "mut")}`,
+      `${g1(info.cpu_used)} / ${g1(q)} 核${st.room?.cpu_cap != null ? `<span class="mut" ${tip("记账 = 各任务记的核数合计：开跑后 3 分钟内取 max(估计核数（封顶到上限）, 实测核数)，满 3 分钟后估计那份换成近 3 分钟窗口核数的最大值（不超过开跑时给的核数、不低于 1）再与实测取大；上限是配额向下取整（Linux CFS 容器另留约 8%、至少 1 核安全余量）")}>记账 ${g1(acct)} / ${st.room.cpu_cap}</span>` : ""}${rc != null ? `<span class="mut" ${tip("可放 = 记账上限 − labmon 之外的（含旧 gpu_queue.sh 的任务）− 任务记账")}>可放 ${g1(Math.max(0, rc))}</span>` : ""}${thrTag(h, "mut")}`,
       sp(r => r.cpu != null ? 100 * r.cpu / q : null),
       `${cpuHeadTip}\n放行按 CPU 记账：任务要的核数取清单的 cpus=，否则同类近 5 次峰值 ×1.1，都没有按 1 核；放不下的等着，原因写「CPU 不够」\n任务里的 $LABMON_CPUS 是开跑时给它记的核数（估计封顶到上限），不随之后的回收变；没设的 OMP/MKL/OPENBLAS 线程数缺省同它${psiT("cpu")}`);
   }
