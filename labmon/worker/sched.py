@@ -689,7 +689,9 @@ def estimate(hist, r):
     显存、内存逐项依次看（#61、#282）：同 tag 下去种子同名（tag_name）› 同 tag › 去掉种子编号后同名的历史 › 清单写的提示值（vram=、ram=，> 0 才算写了）
     › 同一条队列的历史（同一份清单里可以是完全不同的任务，最弱，不盖过明写的提示值）› 0。这样同一批次 tag 下的轻量变体已有自身历史时不被重变体污染，
     尚无自身历史的新变体仍可回退到同 tag。“近几次”按跑成功的数，跑满 5 分钟后失败的（非 OOM）
-    只在比这几次里最旧的新时参与取最大值：没跑完的峰值只是下限，只能抬高、不占名额（peak_rows，#134）。来源：显存 src、内存 ram_src；util 跟着显存的来源走
+    只在比这几次里最旧的新时参与取最大值：没跑完的峰值只是下限，只能抬高、不占名额（peak_rows，#134）。
+    连续瘦身离群淘汰（#294）：内存/显存窗口内若最近连续 OUTLIER_DROP_N（3）次跑成功且非 OOM 的记录（及期间/之后非 OOM 记录）峰值均严格低于窗口全量最大值的 OUTLIER_DROP_FRAC（50%），
+    且这批记录之间及之后没有同资源 OOM，认定负载已稳定瘦身，截断旧离群高点、仅按瘦身后的连续低峰计算 max × 1.1。来源：显存 src、内存 ram_src；util 跟着显存的来源走
     （显存用的是提示值时为 None，不拿别的任务的利用率）。
     CPU（cpus 整数核，job_cpus 取整；cpu_src 来源）：清单的 cpus= 优先（来源“提示值”），否则同类（同 tag 同名 › 同 tag › 同名 › 同队列）近几次 1 分钟峰值核数（cores_peak，
     期 1 起才记，旧行当没有历史）的最大值 × 1.1，都没有按 CPU_DEFAULT（#4 维护者定：cpus= 优先于历史，历史优先于缺省）。
@@ -715,10 +717,10 @@ def estimate(hist, r):
         kind = k[0]
         rows = [h for h in hist if _C.hist_key(h, kind) == k]   # hist 按结束时刻排好（load_hist）
         same = [h for h in rows if ok(h)]
-        hrs = peak_rows(same, "ram_peak")
+        hrs = peak_rows(same, "ram_peak", rows)
         if hrs and rpeak is None:
             rpeak = (kind, hrs)
-        hvs = peak_rows(same, "vram_peak")
+        hvs = peak_rows(same, "vram_peak", rows)
         if hvs and vpeak is None:
             vpeak = (kind, hvs)
         cr = peak_rows(same, "cores_peak")
@@ -767,7 +769,7 @@ def estimate(hist, r):
         vkind, vhs = vpeak
         vsrc = "%s 近 %d 次峰值 ×1.1" % (label[vkind], len(vhs))
         solo = [h["gpu_util"] for h in vhs if h.get("gpu_util") is not None and not [x for x in h.get("with_gpu") or [] if x != "GPU 保活"]]
-        out["vram"] = round(1.1 * max((h["vram_peak"] or 0) / 1024 / max(1, len(h.get("gpus") or [1])) for h in vhs), 2)
+        out["vram"] = round(1.1 * max(_peak_val(h, "vram_peak") for h in vhs), 2)
         out["src"] = vsrc
         v_util = round(sum(solo) / len(solo)) if solo else None
     elif rpeak and (rpeak[0] != "queue" or not rv) and not rv and not any(str(u).startswith("mps-") for h in rpeak[1] for u in (h.get("gpus") or ())):
@@ -809,13 +811,38 @@ def trusted(q):
     return _C.RATIO_OK[0] - 1e-9 <= q <= _C.RATIO_OK[1] + 1e-9
 
 
-def peak_rows(rows, f):
-    """estimate 取峰值 f（ram_peak、cores_peak）的那几条：rows 是同一档跑成功或跑满 5 分钟、非 OOM 的记录（按结束排好）。
+def _peak_val(h, f):
+    """单条用量记录的峰值口径（与 estimate 一致）：vram_peak 折算为单卡 GiB，ram_peak / cores_peak 取原值。"""
+    v = h.get(f) or 0.0
+    return v / 1024.0 / max(1, len(h.get("gpus") or [1])) if f == "vram_peak" else float(v)
+
+
+def peak_rows(rows, f, full=None):
+    """estimate 取峰值 f（ram_peak、vram_peak、cores_peak）的那几条：rows 是同一档跑成功或跑满 5 分钟、非 OOM 的记录（按结束排好）。
     取有 f 的里最近 HIST_N 次跑成功的（ran_ok），比其中最旧那条新的没跑成功的也带上：没跑完的峰值只是下限，只能抬高、不占近几次的名额（#134）；
-    这一档没有跑成功的，照旧取最近 HIST_N 条。"""
+    这一档没有跑成功的，照旧取最近 HIST_N 条。
+    连续瘦身离群淘汰（#294，仅内存/显存）：若窗口内自最后一个 >= max × OUTLIER_DROP_FRAC 的记录（且不早于该档全量 full 中最近一次同资源 OOM）
+    之后至少有连续 OUTLIER_DROP_N 条跑成功的记录，且期间及之后无高点与同资源 OOM，则截断旧离群高点，仅返回这段连续低峰记录。"""
     hs = [h for h in rows if h.get(f) is not None]
     good = [i for i, h in enumerate(hs) if ran_ok(h)][-_C.HIST_N:]
-    return hs[good[0]:] if good else hs[-_C.HIST_N:]
+    win = hs[good[0]:] if good else hs[-_C.HIST_N:]
+    if not win or f not in ("ram_peak", "vram_peak"):
+        return win
+    hi = max(_peak_val(h, f) for h in win)
+    if hi <= 0:
+        return win
+    lim = hi * _C.OUTLIER_DROP_FRAC - 1e-9
+    cut = max(i for i, h in enumerate(win) if _peak_val(h, f) >= lim) + 1
+    if full:
+        oom_kind = "ram" if f == "ram_peak" else "vram"
+        last_oom = max((i for i, h in enumerate(full) if h.get("oom") == oom_kind), default=-1)
+        if last_oom >= 0:
+            after_oom = {id(h) for h in full[last_oom + 1:]}
+            cut = max(cut, next((i for i, h in enumerate(win) if id(h) in after_oom), len(win)))
+    tail = win[cut:]
+    if sum(1 for h in tail if ran_ok(h)) >= _C.OUTLIER_DROP_N:
+        return tail
+    return win
 
 
 def rec_conc(h):
