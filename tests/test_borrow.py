@@ -1064,6 +1064,7 @@ class GuestWorkerTest(unittest.TestCase):
         self.assertAlmostEqual(self.w.mem_room(), 64 - 6 - 5)               # 收不回的 6（页缓存不算）；对方用 3、留 8：扣 5 GiB
         self.w.other["ram"] = 9.0
         self.w.guest_scan(t)
+        self.w.guest_scan(t + 10)
         self.assertIn("内存：对方用 9.0 GiB", self.block(self.req()))
         self.w.other["ram"] = 3.0
         self.w.guest_scan(t + 60)
@@ -1163,15 +1164,16 @@ class GuestWorkerTest(unittest.TestCase):
         self.guest(vram=0, ram=9.0)
         self.w.ovr[0]["keep"] = dict(self.KEEP, away=t - 1)
         self.w.guest_scan(t)
+        self.w.guest_scan(t + 10)
         self.assertIn("内存：对方用 9.0 GiB", self.block(self.req()))
         self.w.ovr[0]["keep"] = dict(self.KEEP, away=t + 3600)
-        self.w.guest_scan(t)
+        self.w.guest_scan(t + 20)
         self.assertIsNone(self.block(self.req()))
         self.w.oom_n = 4
         self.w.info["mem"]["oom_kill"] = 5
-        self.w.oom_check(t)
+        self.w.oom_check(t + 20)
         self.assertEqual(self.w.away_state()["why"], "内核杀了 labmon 之外的进程")
-        self.w.guest_scan(t + 10)
+        self.w.guest_scan(t + 30)
         self.assertIn("内存：对方用 9.0 GiB", self.block(self.req()))
 
     def test_guest_away_existing_gpu_proc_and_flicker(self):
@@ -1287,6 +1289,7 @@ class GuestWorkerTest(unittest.TestCase):
         t = time.time()
         self.guest(vram=0, ram=9.0)
         self.w.guest_scan(t)
+        self.w.guest_scan(t + 10)
         self.assertIn("内存：对方用 9.0 GiB", self.block(self.req()))
         ev = []
         self.w.event = lambda kind, msg, **kw: ev.append(msg)
@@ -1333,8 +1336,9 @@ class GuestWorkerTest(unittest.TestCase):
         self.w.info["gpus"][0]["free"] = 5000.0
         self.w.guest_tight(t + 10)
         self.assertIsNone(self.w.tight)
-        self.w.other["ram"] = 20.0                                          # 对方内存也超出预留
+        self.w.other["ram"] = 20.0                                          # 对方内存也超出预留（连续两轮确认）
         self.w.guest_scan(t + 20)
+        self.w.guest_scan(t + 25)
         self.w.info["mem"].update(used=63.0, anon=30.0)                      # 工作集满的是页缓存：不算快撞上限
         self.w.guest_tight(t + 20)
         self.assertIsNone(self.w.tight)

@@ -2131,15 +2131,17 @@ class GuestTest(UnitBase):
         self.assertIn("这部分不再放新任务", self.events("guest")[-1]["msg"])
         self.w.other["ram"] = 20.0
         self.w.guest_scan(t + 1)
+        self.assertEqual(sorted(self.w.back), ["GPU-b"])                                   # 内存首轮超滞回上限：尚未满两轮，暂不触发
+        self.w.guest_scan(t + 2)
         self.assertEqual(sorted(self.w.back), ["GPU-b", "ram"])
         self.assertEqual(self.w.guest_block(), "借来的主机：内存：对方用 20.0 GiB，预留 16，暂不放行")
         self.assertEqual(len(self.events("guest")), 1)                                   # 仍是“超出”：不重复记
         self.w.other = {"vram": {}, "ram": 1.0, "cpu": 0.5, "ka": {}}
-        self.w.guest_scan(t + 2)
+        self.w.guest_scan(t + 3)
         self.assertEqual((self.w.back, sorted(self.w.back_last)), ({}, ["GPU-b", "ram"]))  # 回落：仍记着，静默期内不放
         self.assertEqual(self.w.guest_block(), "借来的主机：对方的内存 0 分钟前超出预留，暂不放行")
         self.assertIn("回到预留以内", self.events("guest")[-1]["msg"])
-        self.w.guest_scan(t + 2 + self.m.GUEST_QUIET_S)
+        self.w.guest_scan(t + 3 + self.m.GUEST_QUIET_S)
         self.assertEqual((self.w.back_last, self.w.guest_block()), ({}, None))
         # 放行时那张卡不给：对方在卡 1 上超出（或刚回落），请求 1 张卡时只剩卡 0；两张卡都被对方占着就等，原因写明
         self.w.other["vram"] = {"GPU-b": 9000.0}
@@ -2213,6 +2215,74 @@ class GuestTest(UnitBase):
         tck = os.sysconf("SC_CLK_TCK")
         procs = {300: {"ppid": 1, "ticks": 10 * tck}, 301: {"ppid": 300, "ticks": 5 * tck}}
         self.assertAlmostEqual(self.w.ka_cores(procs, [300, 301], t + 10), 1.5)   # (10 + 5) 秒 / 10 秒
+
+    def test_guest_ram_hysteresis_and_two_rounds(self):
+        """借用机对方内存滤波（#263）：贴 4.0 GiB 预留线 4.0–4.3 GiB 抖动不触发退让也不重置冷却窗；
+        连续两轮超过滞回上限（4.5 GiB）触发退让，退让后需回落至 <= 4.0 GiB 才清零计数并进入 10 分钟冷却。"""
+        t = time.time()
+        self.guest(dict(self.KEEP, ram=4.0))
+        self.assertAlmostEqual(self.m.guest_ram_hi(4.0), 4.5)
+        self.assertAlmostEqual(self.m.guest_ram_hi(16.0), 17.6)
+        self.w.info["mem"] = {"limit": 64.0, "used": 20.0, "anon": 12.0}
+        # 1. 贴 4.0 GiB 线 4.0–4.3 GiB 多轮抖动：不触发退让
+        for i, r in enumerate((4.0, 4.1, 4.3, 4.2, 4.49, 4.05)):
+            self.w.other = {"vram": {}, "ram": r, "cpu": 0.5, "ka": {}}
+            self.w.guest_scan(t + 10 * i)
+            self.assertEqual((self.w.back, self.w.back_last, self.w.guest_block()), ({}, {}, None))
+            self.assertEqual(self.w.ram_hot, 0)
+        # 2. 单轮超 4.5 GiB 尖峰后回落滞回带：不触发退让
+        self.w.other["ram"] = 4.6
+        self.w.guest_scan(t + 100)
+        self.assertEqual((self.w.back, self.w.ram_hot), ({}, 1))
+        self.w.other["ram"] = 4.2
+        self.w.guest_scan(t + 110)
+        self.assertEqual((self.w.back, self.w.back_last, self.w.ram_hot), ({}, {}, 0))
+        # 3. 持续真实超线（连续两轮 > 4.5 GiB）：第 2 轮触发退让
+        self.w.other["ram"] = 4.8
+        self.w.guest_scan(t + 120)
+        self.assertEqual(self.w.back, {})
+        self.w.guest_scan(t + 130)
+        self.assertIn("ram", self.w.back)
+        self.assertEqual(self.w.back_last["ram"], t + 130)
+        self.assertIn("内存：对方用 4.8 GiB，预留 4", self.w.guest_block())
+        # 4. 退让后降至滞回带（4.2 GiB，仍 > 4.0）：维持退让并刷新 back_last
+        self.w.other["ram"] = 4.2
+        self.w.guest_scan(t + 140)
+        self.assertIn("ram", self.w.back)
+        self.assertEqual(self.w.back_last["ram"], t + 140)
+        # 5. 回落至 <= 4.0 GiB：清零计数、退出 back、进入 10 分钟冷却窗（t0 = t + 140）
+        self.w.other["ram"] = 3.9
+        self.w.guest_scan(t + 150)
+        self.assertEqual((self.w.back, self.w.ram_hot), ({}, 0))
+        self.assertEqual(self.w.back_last["ram"], t + 140)
+        # 6. 冷却窗内反复贴线 4.0–4.3 GiB 抖动及单轮 4.6 尖峰：绝不重置 back_last["ram"]
+        for dt, r in ((250, 4.1), (350, 4.3), (450, 4.6), (460, 4.2), (700, 4.25)):
+            self.w.other["ram"] = r
+            self.w.guest_scan(t + dt)
+            self.assertEqual(self.w.back, {})
+            self.assertEqual(self.w.back_last["ram"], t + 140)
+        # 7. 距最后一次退让（t + 140）满 GUEST_QUIET_S（600s）：顺利恢复放行
+        self.w.other["ram"] = 4.2
+        self.w.guest_scan(t + 140 + self.m.GUEST_QUIET_S)
+        self.assertEqual((self.w.back, self.w.back_last, self.w.guest_block()), ({}, {}, None))
+
+    def test_guest_ram_tight_mem_bypasses_hysteresis(self):
+        """容器整机收不回内存到 TIGHT_MEM（95%）硬底线：对方内存只要超过预留基线，首轮即刻触发退让与 guest_tight，不受滞回与两轮确认拖延（#263）。"""
+        t = time.time()
+        self.guest(dict(self.KEEP, ram=4.0))
+        self.w.info["mem"] = {"limit": 64.0, "used": 62.0, "anon": 61.0}            # 95.3% >= TIGHT_MEM (0.95)
+        # 对方未超预留基线（3.8 <= 4.0）：不误判为对方超预留
+        self.w.other = {"vram": {}, "ram": 3.8, "cpu": 0.5, "ka": {}}
+        self.w.guest_scan(t)
+        self.w.guest_tight(t)
+        self.assertEqual((self.w.back, self.w.tight), ({}, None))
+        # 对方仅在滞回带内（4.2 > 4.0 且 <= 4.5）且为首轮：硬底线立即触发
+        self.w.other["ram"] = 4.2
+        self.w.guest_scan(t + 10)
+        self.w.guest_tight(t + 10)
+        self.assertIn("ram", self.w.back)
+        self.assertIn("内存：对方用 4.2 GiB，预留 4", self.w.guest_block())
+        self.assertIn("容器内存（不算页缓存）61 / 64 GiB", self.w.tight)
 
     def test_cpu_room_ext_keepalive(self):
         """ka.sh 停不了的保活占的核（other.ka_cpu，#37）另从 cpu_room 扣：不和预留取 max（混在对方用量里时会被预留吃掉），
@@ -6387,7 +6457,8 @@ class UsageTest(unittest.TestCase):
                 self.assertAlmostEqual(w.other["ram"], 5.0, 2)                    # 只扣主进程会是 5.5，超出 5.3
                 self.assertNotIn("ram", w.back)
                 self.assertIsNone(w.guest_block())
-                mem(7.5)                                                          # 对方真涨到 6.5 GiB：整台不放
+                mem(7.5)                                                          # 对方真涨到 6.5 GiB：连续两轮确认后整台不放
+                w.sample([])
                 w.sample([])
             finally:
                 for k in env:

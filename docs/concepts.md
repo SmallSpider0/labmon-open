@@ -147,7 +147,7 @@
 | 138 | 借来的主机上约定归还挡住、这台不会再放的清单 | `borrow.late_jobs`（`borrow.check`、`borrow.late`）；该怎么办的那句 `borrow.late_do`（按截止来自约定还是对方租期；给会话的写进快照主机的 `borrow.late_do`（`borrow_cut`、`msg`、`borrow_due`），`user=True` 给用户的写进 `borrow.late_say`（`borrow_cut`、`alertsOf`、`borrow_due`））；`collect._lane` 的 `borrow_cut`，页面上 `alertsOf`（overview_js/core.js） |
 | 139 | 对方轻用时能不能借、对方在用什么 | `borrow.can_borrow`、`borrow.using` |
 | 140 | 给对方留的量 | `borrow.reserve_for`、`borrow._keep`、`borrow.keep_text`；页面上 `keepText`（common.js） |
-| 141 | 借来的主机上对方的用量、超出预留、扣预留准入、说好不用的时段与作废、快撞上限、被挤掉、OOM 先杀我们 | worker 的 `other`（`sample`）、`guest_scan`（`cpu_hot`、`away_base`）、`guest_block`、`held`、`keep_left`、`away`、`end_away`（`away_state`）、`guest_tight`、`squeezed_by`（`oom_of`）、`oom_check`、`GUEST_ADJ`；看板写、清 `borrow_away` 在 `borrow.begin`、`borrow.check` |
+| 141 | 借来的主机上对方的用量、超出预留、扣预留准入、说好不用的时段与作废、快撞上限、被挤掉、OOM 先杀我们 | worker 的 `other`（`sample`）、`guest_scan`（`cpu_hot`、`ram_hot`、`guest_ram_hi`、`away_base`）、`guest_block`、`held`、`keep_left`、`away`、`end_away`（`away_state`）、`guest_tight`、`squeezed_by`（`oom_of`）、`oom_check`、`GUEST_ADJ`；看板写、清 `borrow_away` 在 `borrow.begin`、`borrow.check` |
 | 142 | labmon 之外的内存与 CPU 要扣掉的保活 | `worker.pure.proc_tree`（worker 与 `fleet.analyze` 共用）；worker 的 `mem_of`、`Worker.ka_cores`（`ka_roots`）；组内服务器的 `fleet.analyze`（`mem_ka`）、探针 `fleet_probe.sh` 的 `pss` 段（字样由 `fleet.fetch` 传） |
 | 143 | 后台采集线程 | `serve._Collector` |
 | 144 | 页面连不上看板服务 | `api`（`NET_WAIT`）、`netText`、`pollNet`、`offBadge`（common.js） |
@@ -497,8 +497,8 @@
    实现：`borrow.can_borrow`、`borrow.using`
 140. **给对方留的量**：给对方留的量（按对方近 7 天轻用时的用量推荐、被挤到后调高；随 guest 指令下发，hold 定要不要预先留）
    实现：`borrow.reserve_for`、`borrow._keep`、`borrow.keep_text`；页面上 `keepText`（common.js）
-141. **借来的主机上对方的用量、超出预留、扣预留准入、说好不用的时段与作废、快撞上限、被挤掉、OOM 先杀我们**：借来的主机上对方的用量（内存按不算页缓存的 `mem.anon`；内存与 CPU 都不含任何保活的进程树，与预留同口径；`ka.sh` 停不了的保活占的核 `other.ka_cpu` 另由 `cpu_room` 扣）、超出预留（CPU 连着两轮才算）、扣预留准入（要不要预先留）、对方说好不用的时段与作废、快撞上限、被挤掉（失败是不是 OOM 的判定与 finish 记用量行的 `oom` 共用）、OOM 先杀我们
-   实现：worker 的 `other`（`sample` 里量）、`guest_scan`（`cpu_hot`；说好不用开始时对方已有的 GPU 进程 `away_base`）、`guest_block`、`held`、`keep_left`、`away`、`end_away`（状态的 `away_state`）、`guest_tight`、`squeezed_by`（判定 `oom_of`）、`oom_check`、`GUEST_ADJ`；看板写、清 `borrow_away` 在 `borrow.begin`、`borrow.check`
+141. **借来的主机上对方的用量、超出预留、扣预留准入、说好不用的时段与作废、快撞上限、被挤掉、OOM 先杀我们**：借来的主机上对方的用量（内存按不算页缓存的 `mem.anon`；内存与 CPU 都不含任何保活的进程树，与预留同口径；`ka.sh` 停不了的保活占的核 `other.ka_cpu` 另由 `cpu_room` 扣）、超出预留（CPU 连着两轮才算；内存连着两轮超过滞回上限 `keep.ram + max(0.5, 0.1 * keep.ram)` 才触发，回落至 `<= keep.ram` 才清零并进入 10 分钟冷却，整机收不回内存到 95% `TIGHT_MEM` 时硬底线立即触发，#263）、扣预留准入（要不要预先留）、对方说好不用的时段与作废、快撞上限、被挤掉（失败是不是 OOM 的判定与 finish 记用量行的 `oom` 共用）、OOM 先杀我们
+   实现：worker 的 `other`（`sample` 里量）、`guest_scan`（`cpu_hot`、`ram_hot`、`guest_ram_hi`；说好不用开始时对方已有的 GPU 进程 `away_base`）、`guest_block`、`held`、`keep_left`、`away`、`end_away`（状态的 `away_state`）、`guest_tight`、`squeezed_by`（判定 `oom_of`）、`oom_check`、`GUEST_ADJ`；看板写、清 `borrow_away` 在 `borrow.begin`、`borrow.check`
 142. **labmon 之外的内存与 CPU 要扣掉的保活**：labmon 之外的内存与 CPU 要扣掉的保活（GPU 上认作保活的进程整棵进程树，含借来主机上对方另起、`ka.sh` 停不了的；上一轮认过、这一轮漏认但 PID 与启动时刻没变的照样算，停不了的照样算停不了的）：内存扣各进程 PSS 之和（借用的预留与 worker 判超出靠它同口径）；CPU worker 扣这一段的核数，组内探针只有 `ps` 的 %CPU（生命期平均，口径不同）
    实现：`worker.pure.proc_tree`（worker 单元/保活与组内服务器 `fleet.analyze` 共用）；worker 的 `mem_of`、`Worker.ka_cores`（`ka_roots`，`sample` 里扣；上一轮的累计记两种：所有保活合起来、各棵保活树分开，停不了的核数按后者求和）；组内服务器的 `fleet.analyze`（`mem_ka`，序列行记 `mk`；`borrow.reserve_for` 直接取 `ma`），探针 `fleet_probe.sh` 的 `pss` 段只送命令行带保活字样的 GPU 进程与其子孙的 PSS（字样由 `fleet.fetch` 传；探针在未必有 Python 的镜像里跑，另留 awk 一份）
 143. **后台采集线程**：后台采集线程
