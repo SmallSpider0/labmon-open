@@ -46,7 +46,7 @@ from .health import container_step, lease_due, lease_end, link_step
 from .records import EVENT_CATS, EVENT_KINDS, log_events, told
 from .state import append_row, load_json, load_rows, parse_rows, save_json, snapshot, state_dir, usage_file, usage_hosts, write_atomic
 from .service import log
-from .worker import RATIO_N, base_name
+from .worker import RATIO_N, base_name, normalize_hist_resets
 from .worker.pure import is_hold, person_use
 from .workerctl import run_out, ssh
 
@@ -433,10 +433,27 @@ def _host_allowed_projects(h: dict) -> set[str] | None:
     return {pid for pid in registered() if U.owner_of(pid) == want}
 
 
+def load_board_hist_resets(now: float | None = None) -> list[dict]:
+    """读取看板本机保存的历史峰值水印副本（供独立主机 _hist_payload 透传兜底，#300）。"""
+    raw = load_json(state_dir() / "hist_reset.json", {})
+    rules = raw.get("rules") if isinstance(raw, dict) else []
+    return normalize_hist_resets(rules, now=now)
+
+
+def save_board_hist_reset(project: str, tag: str | None, name: str | None, t: float) -> list[dict]:
+    """写入/更新看板本机历史峰值水印副本（与 worker_home/hist_reset.json 同口径去重与 90 天清理，#300）。"""
+    cur = load_board_hist_resets(now=t)
+    cur.append({"project": project, "tag": tag, "name": name, "t": t})
+    out = normalize_hist_resets(cur, now=t)
+    save_json(state_dir() / "hist_reset.json", {"rules": out})
+    return out
+
+
 def _hist_payload(h: dict, projects: list[dict], t: float, snap: dict | None = None) -> dict | None:
     """为独立主机裁剪并拼装跨机同类历史载荷 hist_shared.json（唯一实现，#114）：
     只筛选该机已登记队列所属项目（尚无登记时取当前活跃项目）；若该机归属普通用户，强制按其名下项目过滤，绝不泄露他人项目历史。
-    按 (project, tag, base_name, gpu) 每类留最近 RATIO_N 条、整份封顶 HIST_SHARED_MAX 条；仅含估时与峰值所需字段。"""
+    按 (project, tag, base_name, gpu) 每类留最近 RATIO_N 条、整份封顶 HIST_SHARED_MAX 条；仅含估时与峰值所需字段。
+    同步透传仅属 target_pids 的历史峰值水印 resets（#300），确保离线独立主机上线后同样尊重最新水印。"""
     if not is_standalone(h):
         return None
     hid = str(h["id"])
@@ -451,6 +468,7 @@ def _hist_payload(h: dict, projects: list[dict], t: float, snap: dict | None = N
         target_pids = target_pids & allowed
     if not target_pids:
         return {"t": round(t), "rows": []} if (hid, "hist_shared.json") in _SENT else None
+    resets = [r for r in load_board_hist_resets(now=t) if r.get("project") in target_pids]
     cands = []
     for src_hid in usage_hosts():
         if src_hid == hid:
@@ -494,9 +512,12 @@ def _hist_payload(h: dict, projects: list[dict], t: float, snap: dict | None = N
         if len(rows) >= HIST_SHARED_MAX:
             break
     rows.sort(key=lambda x: (x.get("t1") or 0, x.get("host") or "", x.get("name") or ""))
-    if not rows and (hid, "hist_shared.json") not in _SENT:
+    if not rows and not resets and (hid, "hist_shared.json") not in _SENT:
         return None
-    return {"t": round(t), "rows": rows}
+    payload = {"t": round(t), "rows": rows}
+    if resets:
+        payload["resets"] = resets
+    return payload
 
 
 def _to_worker(projects: list[dict], t: float, sw: dict, snap: dict | None = None):

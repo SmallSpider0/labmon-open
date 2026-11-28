@@ -61,7 +61,7 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 - 长期清单：每台按资源类建立固定的长期清单，新任务追加到末尾，整体替换清单文件。
 - 多机与并行：同一台上多任务并行在清单声明 `# labmon: par=N`，不拆清单；跨主机或加车道先跑 `labmon worker fit <主机> <目录> <清单> --list --project <id>` 评估分配；多机同步写 `gang=组名:人数`。
 - 依赖：前后关系写 `after=` / `afterany=`，严禁在 GPU 命令里 sleep 轮询。
-- OOM：worker 自动抬高估计，不改名、不换 tag、不拆清单。
+- OOM 与旧峰值重置：worker 自动抬高估计，不改名、不换 tag、不拆清单；若代码修复内存/显存泄漏大幅瘦身后仍被旧历史尖峰或 OOM 下限卡住队首，用 `labmon worker reset-hist <主机|pool|all> --project <id> [--tag <tag>] [--name <任务名或前缀>]` 显式写入时间戳水印（不删 `usage.jsonl`，不影响公平份额与时长）。
 
 ## 跑和盯
 

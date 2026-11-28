@@ -181,6 +181,9 @@ VOID_KEEP_S = 86400      # 作废记录在状态里留这么久（看板据此�
 HIST_N = 5               # 估计值看同类任务最近几次
 
 
+HIST_RESET_KEEP_S = 90 * 86400   # 历史峰值水印（hist_reset.json，#300）陈旧规则保留期（90 天）
+
+
 OUTLIER_DROP_N = 3       # 内存/显存连续至少这么多次跑成功（ran_ok）且峰值均低于窗口最大值的 OUTLIER_DROP_FRAC 时，淘汰旧离群高点（peak_rows，#294）
 
 
@@ -697,6 +700,81 @@ def load_hist(cache, host=None, standalone=False):
     seen = {(h.get("host"), h.get("t0"), h.get("name")) for h in local_rows}
     merged = local_rows + [h for h in shared_rows if (h.get("host"), h.get("t0"), h.get("name")) not in seen]
     return sorted(merged, key=lambda h: h.get("t1") or 0)
+
+
+def hist_reset_path():
+    """历史峰值水印文件路径（worker_home 下共享一份，独立主机各存一份，#300）。"""
+    return os.path.join(HOME, "hist_reset.json")
+
+
+def normalize_hist_resets(rules, now=None):
+    """规整历史峰值水印规则：校验字段、name 经 base_name 归一化、按 (project, tag, name) 去重留最新 t、清理超期旧规则（HIST_RESET_KEEP_S）。"""
+    now = time.time() if now is None else now
+    cutoff = now - HIST_RESET_KEEP_S
+    best = {}
+    for r in rules or ():
+        if not isinstance(r, dict):
+            continue
+        proj = r.get("project")
+        if not isinstance(proj, str) or not proj.strip():
+            continue
+        proj = proj.strip()
+        tag = r.get("tag")
+        tag = tag.strip() if isinstance(tag, str) and tag.strip() else None
+        name = r.get("name")
+        name = base_name(name.strip()) if isinstance(name, str) and name.strip() else None
+        if not tag and not name:
+            continue
+        try:
+            t = float(r.get("t"))
+        except (TypeError, ValueError):
+            continue
+        if t < cutoff:
+            continue
+        key = (proj, tag, name)
+        if key not in best or t > best[key]:
+            best[key] = t
+    return [{"project": k[0], "tag": k[1], "name": k[2], "t": best[k]}
+            for k in sorted(best, key=lambda x: (x[0], x[1] or "", x[2] or ""))]
+
+
+def load_hist_resets(cache, host=None, standalone=False, now=None):
+    """按 fsig 缓存加载历史峰值水印（hist_reset.json；独立主机一并合并 hist_shared.json 中的 resets，#300）。
+    文件未变化返回 None；有变化（含首次加载或文件被删）返回规整后的规则列表。"""
+    changed = False
+    rf = hist_reset_path()
+    files = [(rf, "rules")]
+    if standalone and host:
+        files.append((os.path.join(HOME, "hosts", host, "hist_shared.json"), "resets"))
+    live = set()
+    for path, field in files:
+        try:
+            m = fsig(path)
+        except OSError:
+            if path in cache:
+                cache.pop(path, None)
+                changed = True
+            continue
+        live.add(path)
+        if cache.get(path, (None,))[0] != m:
+            try:
+                raw = json.loads(read(path, "") or "{}")
+                rows = raw.get(field) if isinstance(raw, dict) else []
+                rows = rows if isinstance(rows, list) else []
+            except ValueError:
+                rows = []
+            cache[path] = (m, rows)
+            changed = True
+    for k in list(cache):
+        if k not in live:
+            cache.pop(k, None)
+            changed = True
+    if not changed:
+        return None
+    merged = []
+    for _, rows in cache.values():
+        merged.extend(rows)
+    return normalize_hist_resets(merged, now=now)
 
 
 # 任务日志里每次开跑的分隔行（launch 写「===== 时刻 labmon 开始（GPU …）=====」；11-07 前写的是「… 开始（可能是续跑；…）=====」，也认）。

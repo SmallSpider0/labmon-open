@@ -24,6 +24,8 @@ labmon worker fit 29 ROOT JOBS --list --project a1      # 这条清单还会跑�
 labmon worker rm 29 /root/data1/alice/proj jobs/a6000.txt  # 按清单文件认登记：ROOT 与 JOBS 拼起来是同一个文件就算（status 列的 ROOT/JOBS 从哪里断开都行，目录已删也撤得掉），只删这一条；已归还的主机经与它共用 worker_home 的在用主机代办（不连已归还的那台）
 labmon worker clean ext-4090 [--project proj] [--cache] [--scratch] [--dry-run] [--yes]
                                                           # 仅清理 <LABMON_LOCAL>/{cache,jobs} 自管缓存与已结束任务的临时目录（跳过运行中任务），默认 --dry-run 仅列清单，显式 --yes 才删，绝不触碰 projects/ 产物
+labmon worker reset-hist 29|pool|all --project proj [--tag heavy] [--name train_a]
+                                                          # 写入轻量时间戳水印（<worker_home>/hist_reset.json），使该类任务水印之前的资源峰值（ram/vram/cores）与 OOM 下限失效，绝不删 usage.jsonl，不影响时间线、公平份额与时长（#300）
 labmon worker stop 29                                    # 停 worker；运行中的任务继续跑，下次启动时接管
 ```
 
@@ -45,7 +47,8 @@ worker 装在主机的 `worker_home`（缺省 `<data_root>/labmon`，`data_root`
 | `worker.log` | 文字日志（主机页的「worker 日志」）；出错崩掉时出错位置在这里 |
 | `overrides.json` | 临时指令；`overrides.json.lock`、`events.jsonl.lock` 是读改写的文件锁 |
 | `limits.json` | tag 上限（`labmon worker limit`） |
-| `eta.json`、`sched.json`、`returned.json`、`hist_shared.json` | 看板写来的（经同一条 SSH 的 stdin 管道落盘，避开 `ARG_MAX`）：运行中任务的预计结束（`jobs`）与其中真正按日志进度外推的任务键（`prog`，#149）；调度设置（主机清单的 `[sched]`，加上各项目算在谁名下的 `owner`，独立机另含 `standalone`、`disk_*`、`cpu_quota`、`allow_shared_gpu` 与 `mps_vram_gb`）；主机清单里已归还的主机（`offers` 不让它们挡）；独立主机专用的跨机裁剪历史 `hist_shared.json`（仅喂 `estimate`/`duration`，与公平份额、依赖、盘写入统计严格隔离，#114） |
+| `eta.json`、`sched.json`、`returned.json`、`hist_shared.json` | 看板写来的（经同一条 SSH 的 stdin 管道落盘，避开 `ARG_MAX`）：运行中任务的预计结束（`jobs`）与其中真正按日志进度外推的任务键（`prog`，#149）；调度设置（主机清单的 `[sched]`，加上各项目算在谁名下的 `owner`，独立机另含 `standalone`、`disk_*`、`cpu_quota`、`allow_shared_gpu` 与 `mps_vram_gb`）；主机清单里已归还的主机（`offers` 不让它们挡）；独立主机专用的跨机裁剪历史 `hist_shared.json`（仅喂 `estimate`/`duration`，并透传本机项目的 `resets` 水印，与公平份额、依赖、盘写入统计严格隔离，#114、#300） |
+| `../hist_reset.json`（位于 `worker_home` 根） | 显式历史峰值水印（`labmon worker reset-hist`，#300）：按 `(project, tag, base_name)` 记时间戳 `t`，仅在 `estimate` 与 `cpu_hist_rows` 过滤早于水印的旧记录，90 天自动清理陈旧规则；同一共享盘共用一份 |
 | `stopped` | `labmon worker stop` 的标记：看板见到它不自动拉起 |
 
 容器本地盘上 labmon 管的目录是 `/tmp/labmon/`（独立主机缺省 `<data_root>/.tmp/`）：单格临时目录、项目缓存、单元申请的交换文件（见下）。独立主机另用 `WorkDisk`（复用 `Disk` 限速与 `follow_symlinks=False`）仅扫描 `<data_root>`，并开启 `disk_gate` 准入闸门（默认预警 `20 GiB`、停止线 `10 GiB` + `2 GiB` 滞回，触发时只拦新任务、不杀在跑任务）；独立模式下 `peers()` 不扫别机，`dep_block`/`gang_block` 显式提示不支持跨主机依赖与成组。在 WSL2 下检测到 `data_root` 落在 `/mnt/[a-z]/`（Windows 9p 挂载）时，`worker status`、`labmon check`、`labmon host test` 与外部主机抽屉会给出性能风险提醒并建议迁到 Linux ext4 目录（不硬阻断）。

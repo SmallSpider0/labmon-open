@@ -847,14 +847,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("cmd", choices=["collect", "render", "check", "serve", "wait", "service", "host", "worker", "project", "fleet", "notify", "hostcheck", *OVR, "borrow", "user",
                                     "server", "secret", "backup", "login", "url", "update", "report", "colab", *READS],
                     help="见下面的用法；pause / resume / focus / unfocus / drain / undrain / borrow / user / server / secret / backup / login / colab / status / disk / records 各有自己的 --help")
-    ap.add_argument("sub", nargs="?", choices=["install", "add", "status", "restart", "stop", "list", "return", "restore", "start", "rm", "init", "limit", "probe", "boot", "import", "fit", "clean",
+    ap.add_argument("sub", nargs="?", choices=["install", "add", "status", "restart", "stop", "list", "return", "restore", "start", "rm", "init", "limit", "probe", "boot", "import", "fit", "clean", "reset-hist",
                                                "archive", "push", "pull", "test"],
                     help="service 的动作（install/status/restart/stop），host 的动作（list/return/restore/add/edit/test/key/rm），"
-                         "worker 的动作（start/stop/status/add/rm/limit/fit/clean），project 的动作（push/pull/init/archive/restore），fleet 的动作（status/probe/boot/import），notify 的动作（test）")
+                         "worker 的动作（start/stop/status/add/rm/limit/fit/clean/reset-hist），project 的动作（push/pull/init/archive/restore），fleet 的动作（status/probe/boot/import），notify 的动作（test）")
     ap.add_argument("target", nargs="?", help="host / worker / fleet 的主机 id；project init 的主机；project archive / restore 的项目 id；notify test 的文字")
     ap.add_argument("rest", nargs="*", help="worker add / rm 的 ROOT JOBS；worker fit 的任务名；project init 的项目名；fleet import 的 Json 文件")
     ap.add_argument("--gpus", help="worker add：这条队列只用这些卡（nvidia-smi 序号，逗号分隔）")
-    ap.add_argument("--project", help="worker add 必写（worker clean 可选）：看板的项目 id（monitor.toml 里的 id；pause、focus、借卡的“只给谁用”都按它认）")
+    ap.add_argument("--project", help="worker add / reset-hist 必写（worker clean 可选）：看板的项目 id（monitor.toml 里的 id；pause、focus、借卡的“只给谁用”都按它认）")
+    ap.add_argument("--tag", help="worker reset-hist：按任务 tag 重置历史资源峰值与 OOM 下限（--tag 与 --name 至少写一个）")
+    ap.add_argument("--name", help="worker reset-hist：按任务名或去种子前缀重置历史资源峰值与 OOM 下限（--tag 与 --name 至少写一个）")
     ap.add_argument("--stop", help="worker add：暂停时怎么停：boundary（缺省）/ term / file:<相对 ROOT 的路径>")
     ap.add_argument("--list", action="store_true", help="worker fit：位置参数是 ROOT JOBS，看这条清单还会跑的行能在共用 worker 目录的几台在用主机上再开几条车道（要 --project）")
     ap.add_argument("--cache", action="store_true", help="worker clean：仅清理自管缓存（<LOCAL>/cache）")
@@ -934,13 +936,24 @@ def main(argv: list[str] | None = None) -> int:
             ap.error("用法：labmon worker start|stop|status <主机> | labmon worker add <主机> ROOT JOBS --project <项目 id> [--gpus 0]"
                      " | labmon worker rm <主机> ROOT JOBS | labmon worker limit <主机> tag=N | labmon worker fit <主机> 任务名… [--project <项目 id>]"
                      " | labmon worker fit <主机> ROOT JOBS --list --project <项目 id>"
-                     " | labmon worker clean <主机> [--project <项目 id>] [--cache] [--scratch] [--dry-run] [--yes]")
+                     " | labmon worker clean <主机> [--project <项目 id>] [--cache] [--scratch] [--dry-run] [--yes]"
+                     " | labmon worker reset-hist <主机|pool|all> --project <项目 id> [--tag <tag>] [--name <任务名或前缀>]")
         if a.list and (a.sub != "fit" or len(a.rest) != 2 or not a.project):
             ap.error("--list 只用于 worker fit：labmon worker fit <主机> ROOT JOBS --list --project <项目 id>")
         if (a.cache or a.scratch or a.dry_run or a.yes) and a.sub != "clean":
             ap.error("--cache、--scratch、--dry-run、--yes 只用于 worker clean")
+        if (a.tag or a.name) and a.sub != "reset-hist":
+            ap.error("--tag、--name 只用于 worker reset-hist")
         if a.sub == "clean" and a.rest:
             ap.error("worker clean 不接受额外位置参数：labmon worker clean <主机> [--project <项目 id>] [--cache] [--scratch] [--yes]")
+        if a.sub == "reset-hist":
+            if a.rest:
+                ap.error("worker reset-hist 不接受额外位置参数：labmon worker reset-hist <主机|pool|all> --project <项目 id> [--tag <tag>] [--name <任务名或前缀>]")
+            if not a.project:
+                ap.error("worker reset-hist 需要 --project <项目 id>（monitor.toml 里的 id）")
+            if not (a.tag or a.name):
+                ap.error("worker reset-hist 需要至少指定 --tag 或 --name")
+            return client.run("POST", "/api/worker/reset-hist", {"host": a.target, "args": [], "project": a.project, "tag": a.tag, "name": a.name}, ap=ap)
         if a.sub == "fit" and not a.rest:
             ap.error("worker fit 需要任务名")
         if a.sub in ("add", "rm") and len(a.rest) != 2:

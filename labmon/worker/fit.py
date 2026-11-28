@@ -67,15 +67,15 @@ class FitHost:
     """fit 眼里的一台主机：它的状态（status.json）拼成的快照（fit_snapshot），这次 fit 假设开的车道按 acct_job 记进快照再判下一行（与推演同一做法）。
     请求拼法与临时指令借 Worker 的 job_spec、override_hit（只填它们要的 info、ovr、host），不另写。"""
 
-    def __init__(self, host, st, hist, eta):
-        self.host, self.st, self.hist, self.eta = host, st, hist, eta
+    def __init__(self, host, st, hist, eta, resets=None):
+        self.host, self.st, self.hist, self.eta, self.resets = host, st, hist, eta, resets
         self.w = object.__new__(_W.Worker)
         self.w.host, self.w.info, self.w.ovr = host, st.get("info") or {}, st.get("overrides") or []
         self.w.req_dur = lambda r, src=False, cut=False: ((r.get("cut"), r.get("cut_src")) if src else r.get("cut")) if cut else r.get("dur")   # override_hit 判截止前跑不跑得完要的时长与依据：fit 拼的请求里已有
         self.S = fit_snapshot(st)
         u10 = st.get("util10") or {}
         self.cards = [dict(c, util=u10.get(c["uuid"])) for c in self.S["cards"]]
-        self.slack = _S.gpu_slack(self.cards, st.get("running") or [], st.get("throttle"), self.S["cpu_cap"], hist=self.hist)
+        self.slack = _S.gpu_slack(self.cards, st.get("running") or [], st.get("throttle"), self.S["cpu_cap"], hist=self.hist, resets=self.resets)
         self.lanes, self.say, self.why = [], [], None     # 这次假设开的 [(任务, 卡号)] 与各行的说明；最近一行没开成的原因
         self.solo, self.solo_host = {}, None              # 这次分给只有提示值的行的卡 {uuid: 任务}（之后哪一行都不与它同卡）；不用卡的那种占了整台：任务名
         self.last_nofit = False                           # 最近一次 open 是否因整机硬件放不下（nofit）拒放
@@ -124,7 +124,7 @@ class FitHost:
         r = _Q.queue_req(q, _Q.job_of(n, cmd))
         if project:
             r["project"] = project
-        e = _S.estimate(self.hist, r, live=self.live_cpu())
+        e = _S.estimate(self.hist, r, live=self.live_cpu(), resets=self.resets)
         # 时长同真放行（queue_durs）：按此刻放一个新任务会遇到的同卡并行数（最空的那张卡，同 k_now；这次假设开的也算）与在跑同类的进度挑记录
         kn = min((1 + sum(1 for j in self.S["jobs"] if not j["hold"] and c["uuid"] in j["gpus"]) for c in self.S["cards"]), default=1)
         d = _S.duration(self.hist, r, self.model(), kn, self.runs(r))
@@ -274,7 +274,8 @@ def fit(p, names, project=None):
         print("%s：先 labmon worker start，再判断" % why)
         return 2
     hist = _C.load_hist({}, host=p.host) or []
-    fh = FitHost(p.host, st, hist, fit_eta(p))
+    resets = _C.load_hist_resets({}, host=p.host, standalone=os.environ.get("LABMON_STANDALONE") == "1") or []
+    fh = FitHost(p.host, st, hist, fit_eta(p), resets=resets)
     if not fh.cards:
         print("看不到 GPU")
         return 2
@@ -292,7 +293,7 @@ def fit(p, names, project=None):
                                     if _C.base_name(h.get("name") or "") == _C.base_name(n) and (h.get("project") or h.get("root"))), None)
             where = "（清单里没找到这一行，按名字估；先把它追加到已登记的清单（比如占着卡的那条末尾）再问）"
             r = _Q.new_req("queue", None, proj, n)
-            e = _S.estimate(hist, r, live=fh.live_cpu())
+            e = _S.estimate(hist, r, live=fh.live_cpu(), resets=resets)
             d = _S.duration(hist, r, fh.model())
             x = dict(fh.w.job_spec(n, r, e, d and d["min"], cut=d and d["cut"]), key="fit:%s" % n, project=proj, cut_src=d and "%s；%s" % (d["cut_src"], d["src"]), allowed=None)
         say, why = fh.open(r, e, x, now, bool(row))
@@ -333,6 +334,7 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
         print("读不到清单 %s" % path)
         return 2
     hist, fhs, skip = _C.load_hist({}, host=p.host) or [], [], {}
+    resets = _C.load_hist_resets({}, host=p.host, standalone=os.environ.get("LABMON_STANDALONE") == "1") or []
     running = set()
     for h in hosts if as_json else hosts or [p.host]:        # --json 只看给的几台（池目录没有 worker，不看这台）
         hp = _C.Paths(h)
@@ -341,7 +343,7 @@ def fit_list(p, root, jobs, project, hosts, as_json=False):
             skip[h] = why
             continue
         running |= {j["name"] for j in st.get("running") or [] if os.path.normpath(os.path.join(j.get("root") or "", j.get("queue") or "")) == path}
-        fh = FitHost(h, st, hist, fit_eta(hp))
+        fh = FitHost(h, st, hist, fit_eta(hp), resets=resets)
         hit = fh.w.override_hit({"project": q["project"], "name": ""}, ("drain", "guest", "pause"), lasting=True)
         if hit or not fh.cards:
             skip[h] = "%s：%s" % (h, hit[1] if hit else "看不到 GPU")

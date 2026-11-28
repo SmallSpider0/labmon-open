@@ -72,6 +72,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         self.oom_n, self.oom_ours, self.hit = None, 0, None   # 容器 oom_kill 计数（上一轮）、其间被杀的我们的任务数、最近一次杀了别人进程的时刻
         self.squeezed = {}                    # 任务名 → 借来的主机上被对方挤掉、重新排队的次数
         self.hist_cache, self.hist, self.hist_v = {}, [], 0   # 各主机的用量记录（load_hist），hist_v 每次有变化加一
+        self.hist_reset_cache, self.hist_resets = {}, []      # 历史峰值水印（load_hist_resets，#300）
         self.hinted, self.hint_v, self.hint_ix = set(), -1, None   # 已按跑完提前重扫过的用量行（disk_ends）、那时的 hist_v 与索引
         self.reload_hist()
         self.qlists, self.durs, self.durs_key = {}, {}, None   # 各清单的 (fsig, [(名称, 资源提示)])、预计时长（queue_durs）
@@ -735,7 +736,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         job["excl"] = old.get("excl", job["excl"])
         if job["gang_stop"] and job["gang_stop"].get("sent"):   # 停止请求已发：收尾照原重排规则记
             job["stopping"] = True
-        job["est"] = old.get("est") or _S.estimate(self.hist, dict(job, root=q["root"], queue=q["jobs"]))
+        job["est"] = old.get("est") or _S.estimate(self.hist, dict(job, root=q["root"], queue=q["jobs"]), resets=getattr(self, "hist_resets", None))
         k = job["key"] = self.free_key(q, name)
         if local and _C.alive(pid, ("labmon-job:" + name,)):
             self.running[k] = job
@@ -835,7 +836,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
                 use = dict(old.get("use") or {})
                 use.pop("sus_on", None)
                 self.running[key] = dict(req, t0=os.path.getmtime(base + ".ok"), gpus=gpus, use=use,
-                                         est=old.get("est") or _S.estimate(self.hist, req), pstart=_C.pstart(pid), io_sus=old.get("io_sus"),
+                                         est=old.get("est") or _S.estimate(self.hist, req, resets=getattr(self, "hist_resets", None)), pstart=_C.pstart(pid), io_sus=old.get("io_sus"),
                                          cpu_fit=old.get("cpu_fit"))
                 continue
             out.append(req)
@@ -1102,7 +1103,7 @@ class Worker(_K.KeepaliveMixin, _DP.DepsMixin, _S.SchedMixin, _FC.ForecastMixin,
         等了多久（屏障、launch 记的 wait）只算没被临时指令、依赖挡住的时间：挡住期间不算，解除后从那时重新起算
         （否则 pause 半小时一 resume，队首立刻满 wait_cap 成屏障，别的项目全让位）；单元从申请时刻起算。"""
         old = self.wsince.get(r["key"])
-        r["est"] = _S.estimate(self.hist, r, live=self.live_cpu())
+        r["est"] = _S.estimate(self.hist, r, live=self.live_cpu(), resets=getattr(self, "hist_resets", None))
         r["held"] = self.override_hit(r)
         # 依赖没满足（dep_block）、成组的还不能排队（gang_block）：同被临时指令挡住
         r["dep"] = None if r["held"] else self.dep_block(r, now) or self.gang_block(r, now)
