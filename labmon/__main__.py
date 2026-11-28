@@ -747,6 +747,22 @@ READS = {"status": "项目现状：各主机与卡、各车道、运行中（进
          "records": "项目的记录（记录页里与本项目有关的：开始、失败、拉起、掉线、续租、临时指令……），新的在前"}
 
 
+def cmd_colab(argv: list[str]) -> int:
+    """labmon colab sync：在本机调用 google-colab-cli（colab usage）并把个人 CU 摘要同步到看板（绝不上传 Google 凭据）。"""
+    from . import ephemeral as EP
+
+    ap = argparse.ArgumentParser(prog="labmon colab", description="个人 Google Colab 自助命令（绝不向看板上传 Google 凭据）")
+    sub = ap.add_subparsers(dest="sub", required=True)
+    sp = sub.add_parser("sync", help="调用本机 `colab usage` 解析剩余 CU / 消耗速率 / 活跃数并同步到看板")
+    sp.add_argument("--colab-bin", default=None, help="指定 google-colab-cli 可执行文件路径（默认按 PATH → ~/.local/bin/colab 查找）")
+    sp.add_argument("--dry-run", action="store_true", help="仅打印解析结果，不向看板推送")
+    sp.add_argument("--enable", action="store_true", help="同步时顺手开启总览「我的 Colab」个人摘要开关（缺省保持现有开关状态）")
+    a = ap.parse_args(argv)
+    if a.sub == "sync":
+        return EP.sync_colab_usage(colab_bin=a.colab_bin, dry_run=a.dry_run, enable=a.enable)
+    return 2
+
+
 def cmd_read(argv: list[str]) -> int:
     """实验会话的只读命令（#52）：labmon status|disk|records [项目 id]，经 GET /api/project/<id>/<命令>（api.status、api.disk、api.records），
     看板排好版、这里原样打出；--json 打原始数据。项目缺省取 -c 的 monitor.toml（缺省当前目录的）。
@@ -808,6 +824,8 @@ def main(argv: list[str] | None = None) -> int:
         return client.login(la.name, la.admin)
     if argv[:1] == ["report"]:
         return cmd_report(argv[1:])
+    if argv[:1] == ["colab"]:
+        return cmd_colab(argv[1:])
     if argv[:1] and argv[0] in READS:
         return cmd_read(argv)
     if argv[:1] == ["update"]:
@@ -827,8 +845,8 @@ def main(argv: list[str] | None = None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     # pause 等临时指令、borrow、user、server、secret、backup、login、url、update、status、disk、records 有自己的参数解析（上面先截走），列在这里只为 --help 能看到
     ap.add_argument("cmd", choices=["collect", "render", "check", "serve", "wait", "service", "host", "worker", "project", "fleet", "notify", "hostcheck", *OVR, "borrow", "user",
-                                    "server", "secret", "backup", "login", "url", "update", "report", *READS],
-                    help="见下面的用法；pause / resume / focus / unfocus / drain / undrain / borrow / user / server / secret / backup / login / status / disk / records 各有自己的 --help")
+                                    "server", "secret", "backup", "login", "url", "update", "report", "colab", *READS],
+                    help="见下面的用法；pause / resume / focus / unfocus / drain / undrain / borrow / user / server / secret / backup / login / colab / status / disk / records 各有自己的 --help")
     ap.add_argument("sub", nargs="?", choices=["install", "add", "status", "restart", "stop", "list", "return", "restore", "start", "rm", "init", "limit", "probe", "boot", "import", "fit", "clean",
                                                "archive", "push", "pull", "test"],
                     help="service 的动作（install/status/restart/stop），host 的动作（list/return/restore/add/edit/test/key/rm），"

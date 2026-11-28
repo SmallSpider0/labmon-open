@@ -3392,6 +3392,51 @@ t("overview", "推模式临时主机与个人 Colab（#213、#281）：Colab 徽
   clean(page(BC, "#/"), "ephemeral evil #/");
   clean(page(BC, "#/host/colab-t4-01"), "ephemeral evil #/host/colab-t4-01");
 });
+ta("overview", "#288 我的 Colab 在线实例聚合、项目下拉一键复制与心跳单向远程停机 UI", async () => {
+  const S = JSON.parse(JSON.stringify(OVEPH));
+  const calls = [];
+  const fakeFetch = async (u, o) => {
+    const body = o?.body ? JSON.parse(o.body) : null;
+    if (u.startsWith("api/")) calls.push([u, body]);
+    if (u === "api/me") return {ok: true, status: 200, json: async () => structuredClone(meUser)};
+    if (u === "api/ephemeral/colab-t4-01/stop") {
+      return {ok: true, status: 200, json: async () => ({ok: true, host_id: "colab-t4-01", want_stop: true, stop_by: "alice", stop_at: S.generated, msg: "已下发停止指令"})};
+    }
+    return {ok: true, status: 200, json: async () => structuredClone(S)};
+  };
+  const meUser = {name: "alice", role: "user", role_name: "普通用户", account: true, admin: false, write: true, entry: "public", entry_name: "公网",
+                  own: ["proj-a", "proj-b"], hosts: [], scopes: ["read", "project"], token_scopes: ["read", "project"], colab: {enabled: false}};
+  const A = mkCtx(ovSrc, S, {hash: "#/me", filename: "overview.js", path: "/pfx/", fetch: fakeFetch, me: meUser});
+  A.RR = RR;
+  const meHtml = page(A, "#/me");
+  clean(meHtml, "#288 我的 Colab 聚合");
+  has(meHtml, "本人在线 Colab 实例");
+  has(meHtml, "Colab T4 #1"); has(meHtml, "Colab · T4"); has(meHtml, "已跑 3.5h / 24h"); has(meHtml, "Google Drive 剩 12.4/15.0 GiB");
+  has(meHtml, 'href="#/host/colab-t4-01"');
+  has(meHtml, 'data-ephstop="open"');
+  has(meHtml, 'data-colabproj');
+  has(meHtml, "--project proj-a --job");
+  has(meHtml, "labmon colab sync");
+  // 切换项目下拉应更新一键复制命令中的 --project
+  run(A, `ACC.colabProj = "proj-b"; render(false);`);
+  has(el(A, "view").innerHTML, "--project proj-b --job");
+  // 主机详情页：有写权限在线 Colab 实例显示停止按钮，二次确认后调用 POST api/ephemeral/colab-t4-01/stop 并切换为等待生效禁用态
+  const hp = page(A, "#/host/colab-t4-01");
+  clean(hp, "#288 主机页停止按钮");
+  has(hp, "停止实例");
+  run(A, `ephStopAct("open", {host: "colab-t4-01", where: "host"});`);
+  has(el(A, "view").innerHTML, "确认停止");
+  has(el(A, "view").innerHTML, "google.colab.runtime.unassign()");
+  await run(A, `ephStopAct("go", {host: "colab-t4-01", where: "host"})`);
+  ok(calls.some(([u]) => u === "api/ephemeral/colab-t4-01/stop"), "应调用 POST api/ephemeral/colab-t4-01/stop");
+  has(el(A, "view").innerHTML, "已下发停止，等待下次心跳生效（≤30s）");
+  // 离线实例与无写权限用户不显示停止按钮
+  const hpDown = page(A, "#/host/colab-l4-down");
+  ok(!hpDown.includes('data-ephstop="open"'), "离线 Colab 实例不应显示停止按钮");
+  const roUser = {...meUser, write: false, own: []};
+  const R = mkCtx(ovSrc, JSON.parse(JSON.stringify(OVEPH)), {hash: "#/host/colab-t4-01", filename: "overview.js", me: roUser});
+  ok(!page(R, "#/host/colab-t4-01").includes('data-ephstop="open"'), "无项目写权限用户不应显示停止按钮");
+});
 t("project", "项目页临时主机与云盘存储（#213、#281）：Colab 徽标、资源卡区隔实验室共享盘与云盘、云盘 < 1 GiB 标红、时间线与明细展示 artifact_dir 及三类告警", () => {
   const C = pjCtx(PJEPH, EVN), h = app(C);
   clean(h, "ephemeral project");
@@ -3822,14 +3867,20 @@ t("overview", "前端 UI 打磨（#237）：分段按钮组、外部机抽屉重
 });
 
 ta("overview", "#241 补齐 4 处前端实用入口：Colab 引导、本地工作盘清理、单机指令撤销与普通用户空态导航", async () => {
-  // 1. 「我的账号 → 概览」的默认折叠「我的 Colab」区与 google-colab-cli 接入引导（#241、#281）
+  // 1. 「我的账号 → 概览」的默认折叠「我的 Colab」区与 google-colab-cli 接入引导（#241、#281、#288）
   const meHtml = page(mkCtx(ovSrc, OV, {hash: "#/me", filename: "overview.js", path: "/pfx/"}), "#/me");
   clean(meHtml, "我的账号 Colab 引导");
   has(meHtml, "我的 Colab"); has(meHtml, "默认关闭");
   has(meHtml, "google-colab-cli 无头接入");
   has(meHtml, 'href="api/client/ephemeral.py" download="labmon_ephemeral.py"');
-  has(meHtml, "python3 labmon_ephemeral.py run --url http://127.0.0.1:8765/pfx --project &lt;项目ID&gt; --job &lt;任务名&gt; --unassign -- python3 train.py");
+  has(meHtml, `python3 labmon_ephemeral.py run --url http://127.0.0.1:8765/pfx --project ${OV.projects[0].id} --job &lt;任务名&gt; --unassign -- python3 train.py`);
+  has(meHtml, "labmon colab sync");
   has(meHtml, "LABMON_TOKEN"); has(meHtml, 'href="#/me/tokens"');
+  // 无可选项目时回退 <项目ID> 占位
+  const noProjSnap = JSON.parse(JSON.stringify(OV));
+  noProjSnap.projects = [];
+  const meNoProj = page(mkCtx(ovSrc, noProjSnap, {hash: "#/me", filename: "overview.js", path: "/pfx/"}), "#/me");
+  has(meNoProj, "python3 labmon_ephemeral.py run --url http://127.0.0.1:8765/pfx --project &lt;项目ID&gt; --job &lt;任务名&gt; --unassign -- python3 train.py");
 
   // 2. 独立主机本地工作盘缓存预览与清理（POST /api/worker/clean）
   const S = JSON.parse(JSON.stringify(OV));

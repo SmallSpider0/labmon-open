@@ -206,12 +206,17 @@ function clientSec(M) {
     </div>`,
     M.commit ? `<span class="sm mut">看板版本 <code>${esc(M.commit.slice(0, 7))}</code></span>` : "");
 }
-// 「我的账号 → 概览」的「我的 Colab」（#281）：默认折叠、按登录用户隔离，绝不存个人 Google 凭据
+// 「我的账号 → 概览」的「我的 Colab」（#281、#288）：默认折叠、按登录用户隔离，聚合本人在线实例、一键复制片段与远程停机；绝不存个人 Google 凭据
 function myColabSec(M) {
-  const C = M.colab || {}, on = !!C.enabled;
+  const C = M.colab || {}, on = !!C.enabled, now = D.generated || Date.now() / 1000;
   const base = new URL(".", location.href).href.replace(/\/$/, "");
-  const cliCmd = `python3 labmon_ephemeral.py run --url ${base} --project <项目ID> --job <任务名> --unassign -- python3 train.py`;
-  const exp = colabExpireInfo(C.expire_at, D.generated || Date.now() / 1000);
+  const liveColabs = (D.hosts || []).filter(h => isColabHost(h) && h.worker_up);
+  const myProjs = M.admin ? (D.projects || []).map(p => p.id) : (M.own || []);
+  const selProj = (ACC.colabProj && myProjs.includes(ACC.colabProj)) ? ACC.colabProj : (myProjs[0] || "");
+  const projArg = selProj || "<项目ID>";
+  const cliCmd = `python3 labmon_ephemeral.py run --url ${base} --project ${projArg} --job <任务名> --unassign -- python3 train.py`;
+  const syncCmd = "labmon colab sync";
+  const exp = colabExpireInfo(C.expire_at, now);
   const statParts = [
     C.balance != null ? `剩余 <b>${C.balance} CU</b>` : "",
     C.rate != null ? `当前 <b>${C.rate} CU/hr</b>` : "",
@@ -219,17 +224,36 @@ function myColabSec(M) {
     exp ? `<span style="${exp.level ? `color:var(--${exp.level})` : ""}">${esc(exp.text)}</span>` : "",
     C.updated ? `<span class="mut">更新于 ${tsNear(C.updated)}</span>` : "",
   ].filter(Boolean);
-  const sumNote = on
-    ? (C.balance != null ? `已开启 · 剩 ${C.balance} CU` : "已开启 · 等待上报")
-    : "默认关闭";
+  const sumParts = [
+    on ? (C.balance != null ? `已开启 · 剩 ${C.balance} CU` : "已开启 · 等待上报") : "默认关闭",
+    liveColabs.length ? `在线 ${liveColabs.length} 台` : "",
+  ].filter(Boolean);
+  const instList = liveColabs.length
+    ? `<div class="ulist">${liveColabs.map(h => {
+        const up = ephemeralUptime(h, now);
+        const cloud = (h.storage || []).find(x => x.kind === "cloud");
+        const driveHtml = cloud
+          ? ` · <span style="${cloud.avail_gb < 1 ? "color:var(--bad);font-weight:600" : ""}">${esc(cloud.label)} 剩 ${g1(cloud.avail_gb)}/${g1(cloud.total_gb)} GiB</span>`
+          : "";
+        const projHtml = h.project ? (visibleProject(h.project) ? `<a href="#/p/${encodeURIComponent(h.project)}">${esc(h.project)}</a>` : esc(h.project)) : "";
+        const stopMsg = EPH_STOP_MSG?.host === h.id && EPH_STOP_MSG?.where === "me" ? `<div class="rn-state">${esc(EPH_STOP_MSG.m)}</div>` : "";
+        return `<div class="urow sm-row"><div class="u">${icon("cloud")}<div class="t">
+          <a href="#/host/${encodeURIComponent(h.id)}"><b>${esc(h.label || h.id)}</b></a> ${ephemeralBadge(h)}${projHtml ? ` <span class="sm mut">· ${projHtml}</span>` : ""}
+          <div class="sm mut" ${tip(up.tip)}>${up.html}${driveHtml}</div>${stopMsg}</div></div>
+          <div class="acts"><a class="btn mini-btn" href="#/host/${encodeURIComponent(h.id)}">主机页</a>${ephStopPop(h, "me")}</div></div>`;
+      }).join("")}</div>`
+    : `<div class="sm mut">当前没有在线的 Colab 实例。</div>`;
+  const projSel = myProjs.length
+    ? `<label class="sm" style="display:inline-flex;align-items:center;gap:6px">项目<select class="ain sm-sel" data-colabproj aria-label="选择 Colab 接入项目">${myProjs.map(p => `<option value="${esc(p)}"${p === selProj ? " selected" : ""}>${esc(p)}</option>`).join("")}</select></label>`
+    : "";
   return `<section class="card"><details class="dfold">
-    <summary class="row wrap" style="gap:8px;align-items:center"><b>我的 Colab</b><span class="badge ${on ? "b-ok" : "b-mute"}">${esc(sumNote)}</span><span class="sm mut">仅本人可见 · 总览按需显示个人额度摘要</span></summary>
+    <summary class="row wrap" style="gap:8px;align-items:center"><b>我的 Colab</b><span class="badge ${on || liveColabs.length ? "b-ok" : "b-mute"}">${esc(sumParts.join(" · "))}</span><span class="sm mut">仅本人可见 · 总览按需显示个人额度摘要</span></summary>
     <div style="margin-top:10px;display:flex;flex-direction:column;gap:10px">
       <div class="row wrap" style="gap:8px;align-items:center">
         <button type="button" class="btn ${on ? "" : "pri"} mini-btn" data-acc="colab-toggle" ${ACC.busy ? "disabled" : ""}>${on ? "关闭总览摘要" : "开启总览摘要"}</button>
         <span class="sm mut">${on ? "已在总览「主机」表上方显示本人 Colab 摘要（其他用户与管理员均不可见）。" : "关闭时总览完全隐藏，零干扰。看板绝不托管个人 Google OAuth 凭据，也不替你抢卡。"}</span>
       </div>
-      <div class="sm">${statParts.length ? statParts.join(" · ") : '<span class="mut">尚未上报个人 CU 摘要（可用本地 <code>colab usage</code> 顺手推送至 <code>POST /api/ephemeral/colab</code>）。</span>'}</div>
+      <div class="sm">${statParts.length ? statParts.join(" · ") : '<span class="mut">尚未上报个人 CU 摘要（本机执行 <code>labmon colab sync</code> 可一键从 <code>colab usage</code> 同步）。</span>'}</div>
       <div class="row wrap" style="gap:8px;align-items:center">
         <label class="sm" style="display:inline-flex;align-items:center;gap:6px">CU 到期 / 月刷新日（可选）<input id="accolabexp" class="ain" type="date" style="width:auto" value="${esc(C.expire_at || "")}" ${ACC.busy ? "disabled" : ""}></label>
         <button type="button" class="btn mini-btn" data-acc="colab-save" ${ACC.busy ? "disabled" : ""}>保存日期</button>
@@ -237,8 +261,13 @@ function myColabSec(M) {
       </div>
       ${accLine("colab")}
       <div style="border-top:1px solid var(--line);padding-top:8px">
-        <div class="row wrap" style="gap:8px;align-items:center;margin-bottom:6px"><b class="sm">google-colab-cli 无头接入</b><a class="btn mini-btn" href="api/client/ephemeral.py" download="labmon_ephemeral.py">下载 labmon_ephemeral.py</a></div>
+        <div class="row wrap" style="gap:8px;align-items:center;margin-bottom:6px"><b class="sm">本人在线 Colab 实例</b><span class="sm mut">${liveColabs.length} 台在线</span></div>
+        ${instList}
+      </div>
+      <div style="border-top:1px solid var(--line);padding-top:8px">
+        <div class="row wrap" style="gap:8px;align-items:center;margin-bottom:6px"><b class="sm">google-colab-cli 无头接入</b>${projSel}<a class="btn mini-btn" href="api/client/ephemeral.py" download="labmon_ephemeral.py">下载 labmon_ephemeral.py</a></div>
         <div class="account-command"><code tabindex="0" aria-label="Colab 启动命令" style="white-space:pre-wrap">${esc(cliCmd)}</code><button type="button" class="btn mini-btn" data-copy="${esc(cliCmd)}">复制命令</button></div>
+        <div class="account-command" style="margin-top:6px"><code tabindex="0" aria-label="同步 Colab 余额命令">${syncCmd}</code><button type="button" class="btn mini-btn" data-copy="${syncCmd}">复制命令</button><span class="sm mut">本机一键同步 <code>colab usage</code> 余额（加 <code>--enable</code> 顺手开启总览摘要）</span></div>
         <p class="sm mut" style="margin-top:6px">推荐经 <code>google-colab-cli</code> 启动远端实例并导出 <code>LABMON_TOKEN</code>（在<a href="#/me/tokens">令牌</a>页签创建 project 令牌，切勿硬编码）；加 <code>--unassign</code> 可在任务结束后自动释放运行时防空烧 CU，自签名证书可配 <code>--ca</code> / <code>LABMON_CA</code>。</p>
       </div>
     </div></details></section>`;

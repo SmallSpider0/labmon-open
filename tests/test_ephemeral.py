@@ -1,6 +1,7 @@
 """推模式临时主机（Google Colab 等）与云盘共享存储监控测试（#213）。"""
 from __future__ import annotations
 
+import io
 import json
 import os
 import signal
@@ -806,6 +807,250 @@ class EphemeralColabV2Test(unittest.TestCase):
         self.assertEqual(probe["accel"], "A100")
         self.assertEqual(probe["cu_rate"], 11.77)
         self.assertAlmostEqual(probe["started_at"], t0 - 7200.0, delta=1.0)
+
+
+class EphemeralSelfService288Test(unittest.TestCase):
+    """#288：POST /api/ephemeral/<host_id>/stop 权限与生命周期、labmon colab sync 与客户端远程停机止损。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.hosts_file = Path(self.tmp.name) / "hosts.toml"
+        self.hosts_file.write_text("")
+        env = mock.patch.dict(os.environ, {
+            "LABMON_STATE": str(Path(self.tmp.name) / "state"),
+            "LABMON_HOSTS": str(self.hosts_file),
+            "LABMON_NO_NOTIFY": "1",
+            "LABMON_NO_KEYCHAIN": "1",
+            "LABMON_LAN": "off",
+        })
+        env.start()
+        self.addCleanup(env.stop)
+        self.srv = FX.board(self, scopes=("project",), name="boss", role="admin")
+        self.base = f"http://127.0.0.1:{self.srv.server_port}"
+        self.boss_tok = os.environ["LABMON_TOKEN"]
+        self.amy_tok = FX.make_token("amy", role="user", scopes=("project",))
+        self.bob_tok = FX.make_token("bob", role="user", scopes=("project",))
+        self.read_tok = FX.make_token("reader", role="user", scopes=("read",))
+        _reg_project("proj-a", "amy", "Amy 项目")
+        _reg_project("proj-b", "bob", "Bob 项目")
+        self.srv.sync()
+
+    def _req(self, path: str, body: dict | None = None, token: str | None = None, method: str = "POST"):
+        headers = {}
+        if token is not None:
+            headers["Authorization"] = f"Bearer {token}"
+        data = None
+        if method == "POST":
+            headers["Content-Type"] = "application/json"
+            data = json.dumps(body or {}).encode("utf-8")
+        req = urlreq.Request(self.base + path, data=data, headers=headers, method=method)
+        try:
+            with urlreq.urlopen(req, timeout=5) as r:
+                return r.status, json.loads(r.read().decode("utf-8") or "{}")
+        except urlerr.HTTPError as e:
+            return e.code, json.loads(e.read().decode("utf-8") or "{}")
+
+    def test_stop_endpoint_auth_and_want_stop_lifecycle(self):
+        # 1. 不存在返 404；未登录 401；只读令牌 403
+        code, _ = self._req("/api/ephemeral/colab-missing/stop", {}, token=None)
+        self.assertEqual(code, 401)
+        code, _ = self._req("/api/ephemeral/colab-missing/stop", {}, token=self.read_tok)
+        self.assertEqual(code, 403)
+        code, _ = self._req("/api/ephemeral/colab-missing/stop", {}, token=self.amy_tok)
+        self.assertEqual(code, 404)
+
+        # 2. amy 上报在线实例 colab-a1（属于 proj-a）
+        p1 = _sample_payload(host_id="colab-a1", project="proj-a", instance_id="inst-1")
+        code, res = self._req("/api/ephemeral/push", p1, token=self.amy_tok)
+        self.assertEqual(code, 200)
+        self.assertNotIn("action", res)
+
+        # 3. 他人 bob 尝试停止 amy 的实例 → 严格 403
+        code, _ = self._req("/api/ephemeral/colab-a1/stop", {}, token=self.bob_tok)
+        self.assertEqual(code, 403)
+
+        # 4. 备用看板拒绝 409 standby
+        with mock.patch.object(LS, "primary", return_value=False), mock.patch.object(LS, "text", return_value="备用"):
+            code, body = self._req("/api/ephemeral/colab-a1/stop", {}, token=self.amy_tok)
+            self.assertEqual(code, 409)
+            self.assertTrue(body.get("standby"))
+
+        # 5. amy 停止自己的实例 → 200，落盘 want_stop，overview_hosts 透传，事件日志记录 1 条（重复下发幂等不重复刷日志）
+        code, body = self._req("/api/ephemeral/colab-a1/stop", {}, token=self.amy_tok)
+        self.assertEqual(code, 200)
+        self.assertTrue(body["want_stop"])
+        self.assertEqual(body["stop_by"], "amy")
+        code2, _ = self._req("/api/ephemeral/colab-a1/stop", {}, token=self.boss_tok)
+        self.assertEqual(code2, 200)
+        ohs = EP.overview_hosts([{"id": "proj-a"}], {}, {}, time.time() + 1)
+        self.assertTrue(ohs[0]["want_stop"])
+        self.assertEqual(ohs[0]["stop_by"], "amy")
+        from labmon import records as RC
+        stop_evs = [e for e in RC.records(host="colab-a1") if e.get("kind") == "stop"]
+        self.assertEqual(len(stop_evs), 1)
+
+        # 6. 同 instance_id 下次心跳返回 action: "stop"
+        p1_hb = _sample_payload(host_id="colab-a1", project="proj-a", instance_id="inst-1")
+        p1_hb["client_t"] = time.time() + 10
+        with mock.patch.object(EP, "MIN_PUSH_GAP_S", 0.0):
+            code, hb = self._req("/api/ephemeral/push", p1_hb, token=self.amy_tok)
+        self.assertEqual(code, 200)
+        self.assertEqual(hb.get("action"), "stop")
+
+        # 7. 上报 closing=True 后清除 want_stop，且离线实例再调 stop 返 409
+        p1_close = _sample_payload(host_id="colab-a1", project="proj-a", instance_id="inst-1", closing=True)
+        p1_close["jobs"][0]["status"] = "done"
+        code, close_res = self._req("/api/ephemeral/push", p1_close, token=self.amy_tok)
+        self.assertEqual(code, 200)
+        self.assertNotIn("action", close_res)
+        code, _ = self._req("/api/ephemeral/colab-a1/stop", {}, token=self.amy_tok)
+        self.assertEqual(code, 409)
+
+        # 8. 同名 host_id 换新 instance_id 启动时，即使旧实例有残留 want_stop 也会自动清除、绝不误杀新实例
+        p2 = _sample_payload(host_id="colab-a2", project="proj-a", instance_id="inst-old")
+        self._req("/api/ephemeral/push", p2, token=self.amy_tok)
+        self._req("/api/ephemeral/colab-a2/stop", {}, token=self.amy_tok)
+        p2_new = _sample_payload(host_id="colab-a2", project="proj-a", instance_id="inst-new")
+        code, new_res = self._req("/api/ephemeral/push", p2_new, token=self.amy_tok)
+        self.assertEqual(code, 200)
+        self.assertNotIn("action", new_res)
+        ohs2 = [h for h in EP.overview_hosts([{"id": "proj-a"}], {}, {}, time.time() + 1) if h["id"] == "colab-a2"]
+        self.assertFalse(ohs2[0]["want_stop"])
+
+    def test_colab_sync_parse_errors_dry_run_and_push(self):
+        sample = (
+            "Current balance: 85.50 compute units\n"
+            "Usage rate: 1.96 compute units/hr\n"
+            "Active assignments: 2\n"
+        )
+        self.assertEqual(EP.parse_colab_usage(sample), {"balance": 85.5, "rate": 1.96, "active": 2})
+        self.assertEqual(EP.parse_colab_usage("unrecognized output"), {})
+
+        # 找不到 colab 可执行文件 → 返回非零并打印中文安装指引
+        err_buf = io.StringIO()
+        with mock.patch.object(EP.shutil, "which", return_value=None), \
+                mock.patch.object(Path, "is_file", return_value=False), \
+                mock.patch("sys.stderr", err_buf):
+            rc = EP.sync_colab_usage()
+        self.assertNotEqual(rc, 0)
+        self.assertIn("google-colab-cli", err_buf.getvalue())
+
+        # 准备假 colab 脚本：分别模拟未登录、正常输出
+        fake_auth_err = Path(self.tmp.name) / "colab_unauth"
+        fake_auth_err.write_text("#!/bin/sh\necho 'Error: Not logged in. Please run colab login.' >&2\nexit 1\n")
+        fake_auth_err.chmod(0o755)
+        err_buf = io.StringIO()
+        with mock.patch("sys.stderr", err_buf):
+            rc = EP.sync_colab_usage(colab_bin=str(fake_auth_err))
+        self.assertNotEqual(rc, 0)
+        self.assertIn("colab login", err_buf.getvalue())
+
+        fake_ok = Path(self.tmp.name) / "colab_ok"
+        fake_ok.write_text(
+            "#!/bin/sh\n"
+            "echo 'Current balance: 72.25 compute units'\n"
+            "echo 'Usage rate: 1.96 compute units/hr'\n"
+            "echo 'Active assignments: 1'\n"
+        )
+        fake_ok.chmod(0o755)
+
+        # --dry-run 只打印 JSON 不推看板
+        out_buf = io.StringIO()
+        with mock.patch("labmon.client.call") as mcall, mock.patch("sys.stdout", out_buf):
+            rc = EP.sync_colab_usage(colab_bin=str(fake_ok), dry_run=True)
+        self.assertEqual(rc, 0)
+        mcall.assert_not_called()
+        self.assertEqual(json.loads(out_buf.getvalue()), {"balance": 72.25, "rate": 1.96, "active": 1})
+
+        # 走真实 CLI labmon colab sync 推送到测试看板：缺省不强开 enabled；带 --enable 顺手开启
+        from labmon import __main__ as MAIN
+        client_toml = Path(self.tmp.name) / "client.toml"
+        client_toml.write_text(f'[[servers]]\nurl = "{self.base}"\n')
+        out_buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"LABMON_CLIENT": str(client_toml), "LABMON_TOKEN": self.amy_tok}), \
+                mock.patch("sys.stdout", out_buf):
+            rc = MAIN.main(["colab", "sync", "--colab-bin", str(fake_ok)])
+        self.assertEqual(rc, 0)
+        st = EP.get_colab("amy")
+        self.assertEqual(st["balance"], 72.25)
+        self.assertEqual(st["rate"], 1.96)
+        self.assertEqual(st["active"], 1)
+        self.assertFalse(st["enabled"])
+
+        out_buf = io.StringIO()
+        with mock.patch.dict(os.environ, {"LABMON_CLIENT": str(client_toml), "LABMON_TOKEN": self.amy_tok}), \
+                mock.patch("sys.stdout", out_buf):
+            rc = MAIN.main(["colab", "sync", "--colab-bin", str(fake_ok), "--enable"])
+        self.assertEqual(rc, 0)
+        self.assertTrue(EP.get_colab("amy")["enabled"])
+
+    def test_client_remote_stop_terminates_child_and_unassigns(self):
+        """客户端收到心跳响应 action='stop' 时向子进程发 SIGTERM、等待回写 checkpoint、上报终态并自动尝试 unassign_runtime()。"""
+        ckpt = Path(self.tmp.name) / "ckpt.saved"
+        ready_file = Path(self.tmp.name) / "ready.flag"
+        child_script = Path(self.tmp.name) / "train_stub.py"
+        child_script.write_text(
+            "import signal, sys, time\n"
+            f"ckpt = {str(ckpt)!r}\n"
+            f"ready = {str(ready_file)!r}\n"
+            "def on_term(s, f):\n"
+            "    open(ckpt, 'w').write('saved')\n"
+            "    print('PROGRESS 5/10 saved', flush=True)\n"
+            "    sys.exit(0)\n"
+            "signal.signal(signal.SIGTERM, on_term)\n"
+            "open(ready, 'w').write('1')\n"
+            "print('PROGRESS 1/10 start', flush=True)\n"
+            "time.sleep(30)\n"
+        )
+        events: list[str] = []
+        calls = [0]
+
+        def fake_post(url, token, body, timeout=15.0, ca=None):
+            calls[0] += 1
+            if body.get("closing"):
+                events.append("closing:" + str(body["jobs"][0].get("last_line") or ""))
+                return 200, {"ok": True, "warnings": []}
+            events.append(f"hb:{calls[0]}")
+            if calls[0] == 1:
+                return 200, {"ok": True, "warnings": []}
+            return 200, {"ok": True, "warnings": [], "action": "stop"}
+
+        with mock.patch.object(LE, "collect_gpus", return_value=[]), \
+                mock.patch.object(LE, "unassign_runtime", side_effect=lambda: events.append("unassign") or True):
+            # 注意 unassign=False：收到远程停机仍必须自动尝试 unassign_runtime() 止损
+            tr = LE.EphemeralTracker(
+                url="http://127.0.0.1:9", token="lm_test", project="proj-a",
+                job="remote_stop_job", interval=5.0, unassign=False, poster=fake_post,
+            )
+            tr.interval = 0.05  # 加速测试心跳循环，等子进程装好 SIGTERM handler 后触发第二次心跳
+            def _wait_and_stop(orig_post=fake_post):
+                def _wrapped(url, token, body, timeout=15.0, ca=None):
+                    if not body.get("closing") and calls[0] >= 1:
+                        deadline = time.time() + 5.0
+                        while not ready_file.is_file() and time.time() < deadline:
+                            time.sleep(0.02)
+                    return orig_post(url, token, body, timeout=timeout, ca=ca)
+                return _wrapped
+            tr._poster = _wait_and_stop()
+            rc = LE.run_command_wrapped([sys.executable, str(child_script)], tr, grace_s=5.0)
+        self.assertEqual(rc, 0)
+        self.assertTrue(tr.stop_requested)
+        self.assertTrue(ckpt.is_file(), "子进程应收到 SIGTERM 并回写 checkpoint")
+        self.assertEqual(events[-1], "unassign", "终态上报后应自动尝试 unassign_runtime()")
+        self.assertTrue(any(e.startswith("closing:") for e in events))
+
+        # track() 上下文管理器暴露 stop_requested 并在退出时自动尝试 unassign_runtime()
+        unassigned = [False]
+        with mock.patch.object(LE, "collect_gpus", return_value=[]), \
+                mock.patch.object(LE, "unassign_runtime", side_effect=lambda: unassigned.__setitem__(0, True) or True):
+            with LE.track(
+                url="http://127.0.0.1:9", token="lm_test", project="proj-a",
+                job="nb_stop", interval=60.0, unassign=False,
+                poster=lambda u, t, b, timeout=15.0, ca=None: (200, {"ok": True, "warnings": [], "action": "stop"}),
+            ) as tr2:
+                self.assertTrue(tr2.stop_requested)
+        self.assertTrue(unassigned[0])
 
 
 if __name__ == "__main__":

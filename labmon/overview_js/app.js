@@ -253,6 +253,7 @@ document.addEventListener("change", e => {               // 批量续租的勾�
   if ("adopt" in d && ADOPT) { ADOPT.sel[d.adopt] = t.checked; return render(false); }    // 接上卡的勾选
   if ("extf" in d) return extInput(t, "change");
   if ("plf" in d) return poolInput(t, "change");
+  if ("colabproj" in d) { ACC.colabProj = t.value || ""; return render(false); }
   const sel = d.rsel, ack = d.rack;
   if (!RPICK || (!sel && !ack) || FCAP?.pop === "renew" || RPICK.busy) return;      // 输验证码、提交中不改（同 renewDrawer 的 lock）
   const set = sel ? RPICK.sel : RPICK.ack, id = sel || ack;
@@ -413,6 +414,8 @@ document.addEventListener("click", e => {
   if (ov) { if (!ov.disabled) ovrUndoAct(ov.dataset.ovr, ov.dataset); return; }
   const wc = e.target.closest?.("[data-wclean]");
   if (wc) { if (!wc.disabled) wcleanAct(wc.dataset.wclean, wc.dataset); return; }
+  const ep = e.target.closest?.("[data-ephstop]");
+  if (ep) { if (!ep.disabled) ephStopAct(ep.dataset.ephstop, ep.dataset); return; }
   const pj = e.target.closest?.("[data-pj]");
   if (pj) { if (!pj.disabled) pjAct(pj.dataset.pj, pj.dataset.p); return; }
   const cfb = e.target.closest?.("[data-cfb]");

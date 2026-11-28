@@ -1418,7 +1418,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
   <!-- 推模式临时主机 -->
   <div class="algo" id="a-ephemeral">
     <h3>推模式临时主机（Colab 与个人额度）<span class="tag">ephemeral.py · labmon_ephemeral.py</span></h3>
-    <p class="prose">Google Colab 等临时 GPU / TPU 实例没有 SSH 入口、不挂实验室共享盘，几小时就可能被回收。实验会话首选官方 <code>google-colab-cli</code> 无头启动，并在「我的账号 → 我的 Colab」下载零依赖的 <code>labmon_ephemeral.py</code>（支持 <code>--ca</code> 自定义 CA、<code>--unassign</code> 跑完自动释放运行时防空烧 CU、TPU/CPU 自动识别），每 30 秒携带项目令牌向 <code>POST /api/ephemeral/push</code> 上报硬件规格、已跑时长（相对 24h）、内存、任务进度、云盘产物路径 <code>artifact_dir</code> 与 <code>os.statvfs</code> 磁盘余量；看板把它们无缝画进工作台、项目时间线与 <code>labmon wait</code>，并支持按登录用户隔离、默认关闭的「我的 Colab」个人 CU 摘要（绝不托管个人 Google 凭据）。</p>
+    <p class="prose">Google Colab 等临时 GPU / TPU 实例没有 SSH 入口、不挂实验室共享盘，几小时就可能被回收。实验会话首选官方 <code>google-colab-cli</code> 无头启动，并在「我的账号 → 我的 Colab」聚合查看本人在线实例、一键复制按项目生成的接入命令或下载零依赖的 <code>labmon_ephemeral.py</code>（支持 <code>--ca</code> 自定义 CA、<code>--unassign</code> 跑完自动释放运行时防空烧 CU、TPU/CPU 自动识别），每 30 秒携带项目令牌向 <code>POST /api/ephemeral/push</code> 上报硬件规格、已跑时长（相对 24h）、内存、任务进度、云盘产物路径 <code>artifact_dir</code> 与 <code>os.statvfs</code> 磁盘余量；本机可执行 <code>labmon colab sync</code> 一键同步个人 CU 摘要（默认关闭、仅本人可见、绝不托管 Google 凭据）；需提前止损时可在网页点「停止实例」，看板通过心跳单向返回 <code>action: "stop"</code>，客户端优雅终止任务并自动尝试 <code>runtime.unassign()</code> 释放实例。</p>
     <figure>
       <div class="frame">
         <svg viewBox="0 0 760 202" role="img" aria-label="Colab 实例运行训练并把 checkpoint 原子写回 Google Drive，同时通过 labmon_ephemeral.py 每 30 秒推送心跳到看板；超过 180 秒无心跳则结转残留任务并发 ephemeral_down 告警，多实例撞车报 ephemeral_dup，云盘余量低于 1 GiB 标红并报 ephemeral_disk_low">
@@ -1460,6 +1460,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
       <ul>
         <li><b>鉴权与配额</b>：复用项目令牌（<code>project</code> 作用域），校验项目归属；单请求上限 128 KiB，单实例 5 秒节流（终态与优雅退出放行），单项目最多 5 台同时在线，不与 <code>hosts.toml</code> 主机重名。</li>
         <li><b>超时与防僵尸</b>：默认 180 秒无心跳（钳制 90–600 秒；看板重启给足宽限）判 <code>down</code>，残留 <code>running</code> 任务自动结转 <code>failed</code> 并写入 <code>usage/&lt;host&gt;.jsonl</code>、发 <code>ephemeral_down:</code>（附 <code>artifact_dir</code>）；离线 1 小时自动从总览隐去卡片，满 7 天清理状态与曲线、保留 30 天用量历史。</li>
+        <li><b>心跳单向远程停机</b>：有项目写权限的用户在主机页或「我的 Colab」点击「停止实例」（<code>POST /api/ephemeral/&lt;host_id&gt;/stop</code>）后，看板标记 <code>want_stop</code> 并在下次心跳响应返回 <code>action: "stop"</code>，客户端向子进程发送 <code>SIGTERM</code>、等 <code>--grace</code> 回写 checkpoint、上报终态并自动尝试 <code>google.colab.runtime.unassign()</code> 释放实例止损。</li>
         <li><b>云盘隔离与防呆</b>：启动前强制校验 <code>--drive-root</code> 确为独立挂载点，防止未挂载时把 checkpoint 误写进会随回收清空的 <code>/content</code> 本地盘；<code>storage[]</code> 仅用 <code>os.statvfs</code> 读 4 项以内元数据，绝不写入实验室共享盘统计 <code>disk.py</code>。</li>
       </ul>
       <p class="src">规则：<a href="https://github.com/SmallSpider0/labmon-open/blob/main/docs/api.md#推模式临时主机213">api.md「推模式临时主机」</a><a href="https://github.com/SmallSpider0/labmon-open/blob/main/skills/lab-experiments/colab.md">skills/lab-experiments/colab.md</a></p>
