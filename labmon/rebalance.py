@@ -230,6 +230,8 @@ def suggest(hosts: list[dict], prev: dict | None, t: float) -> dict:
             most = None                    # 这台空着时按行比成立的最多几行（#62）
             for k in range(1, len(o["jobs"]) + 1):
                 new = _finish(o, k)
+                if f is not None and new is not None and new > f:
+                    continue
                 opt = {"target": hid, "lane": o["lane"], "before": o.get("before"), "jobs": o["jobs"][:k], "from": f, "to": new,
                        "local": bool(o.get("local")), "gpus": o.get("gpus")}
                 there = _idle_gain(o["jobs"][:k], GAIN_MIN_S * half) if o.get("idle") and not o.get("local") else False
