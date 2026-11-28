@@ -3,6 +3,7 @@ import glob
 import json
 import math
 import os
+import re
 import statistics
 
 from . import common as _C
@@ -1042,11 +1043,95 @@ def cpu_line(st):
     return s
 
 
-def cpu_fit(j, cap, util, room=None, cards=(), hist_peak=None):
+_THREAD_VAR_RE = re.compile(r"(?<![\w-])(" + "|".join(_C.THREAD_VARS) + r")=([^\s;#]+)")
+
+
+def _parse_pos_int(v):
+    s = (str(v) if v is not None else "").strip().strip("\"'")
+    if s.isdigit():
+        n = int(s)
+        return n if n > 0 else None
+    return None
+
+
+def thread_cap(env_text=None, env=None, cmd=None):
+    """从队列 .env 正文/展开环境与任务命令行提取显式固定的 THREAD_VARS（OMP/MKL/OPENBLAS）线程上限（正整数）：
+    未显式固定或赋值引用了 LABMON_CPUS（跟随分配核数动态变化）返回 None；多个变量取 max，命令行覆盖 .env 同名变量。"""
+    vals = {}
+    if env_text is not None:
+        for raw in env_text.splitlines():
+            line = raw.split("#", 1)[0].strip()
+            if not line:
+                continue
+            for m in _THREAD_VAR_RE.finditer(line):
+                k, rhs = m.group(1), m.group(2)
+                if "LABMON_CPUS" in rhs:
+                    vals.pop(k, None)
+                    continue
+                v = _parse_pos_int(env.get(k) if env is not None else rhs)
+                if v is None and env is not None:
+                    v = _parse_pos_int(rhs)
+                if v is not None:
+                    vals[k] = v
+    elif env is not None:
+        for k in _C.THREAD_VARS:
+            v = _parse_pos_int(env.get(k))
+            if v is not None:
+                vals[k] = v
+    if cmd:
+        for m in _THREAD_VAR_RE.finditer(_Q.body(cmd)):
+            k, rhs = m.group(1), m.group(2)
+            if "LABMON_CPUS" in rhs:
+                vals.pop(k, None)
+                continue
+            v = _parse_pos_int(rhs)
+            if v is not None:
+                vals[k] = v
+    return max(vals.values()) if vals else None
+
+
+def job_thread_cap(j, env_of=None):
+    """运行中任务 j 的显式线程上限（复用队列 .env 与命令行 cmd，thread_cap）：
+    env_of(q) 可选（如 Worker.qenv，带 fsig 缓存的 bash source 展开）；未给时按 .env 正文直接解析。"""
+    q = j.get("q")
+    env_file = q.get("env") if isinstance(q, dict) else None
+    if not env_file and j.get("root") and j.get("queue"):
+        p = _Q.env_path(j["root"], j["queue"])
+        env_file = p if os.path.exists(p) else None
+    env_text = _C.read(env_file, None) if env_file else None
+    env = env_of(q) if (env_text is not None and env_of is not None and isinstance(q, dict)) else None
+    return thread_cap(env_text=env_text, env=env, cmd=j.get("cmd"))
+
+
+def cpu_hist_rows(hist, j):
+    """运行中任务 j 同类已完成非 OOM 历史记录（同 tag 同名 › 同 tag › 去种子号同名第一档有 cores_peak 的）：
+    cpu_hist_peak 与 cpu_higher_peak 共用，保持 #282 变体隔离。"""
+    if not hist or not j.get("name"):
+        return []
+    for kind in (("tag_name", "tag", "name") if j.get("tag") else ("name",)):
+        k = _C.hist_key(j, kind)
+        same = [h for h in hist if _C.hist_key(h, kind) == k and ran_ok(h) and not h.get("oom") and h.get("cores_peak") is not None]
+        if same:
+            return same
+    return []
+
+
+def cpu_higher_peak(hist, j, give):
+    """同类历史中曾分配 give > 当前 give 的最近 HIST_N 次完成的最高 1 分钟峰值核数（无为 None）：
+    供 cpu_fit 与 gpu_slack 判定加核是否真能吃进去，避免单线程任务在 cpus=1 ↔ cpus=2 之间触发互斥告警。"""
+    if not give:
+        return None
+    hi = [h for h in cpu_hist_rows(hist, j) if (h.get("give") or 0) > give][-_C.HIST_N:]
+    return max(h["cores_peak"] for h in hi) if hi else None
+
+
+def cpu_fit(j, cap, util, room=None, cards=(), hist_peak=None, thread_cap=None, higher_peak=None):
     """在跑的任务 j（状态 running 的形状：name、gpus、est、use）开跑时给的核数是给少了还是给多了（#46；#37 的“被 CPU 卡住”也是它）。
     从开始量窗口核数起满 CPU_WARM_S（cpu_warm）才判；给的核数 give 是开跑时导出的 LABMON_CPUS（cpus_export(cpu_threads)）；util 各卡近 UTIL_WIN_S 的利用率 {uuid: %}。
     - low（给少了、被 CPU 卡住）：近 CPU_WARM_S 各 1 分钟窗口核数（use.pks）的平均不少于 give × CPU_BOUND_FRAC，且所用的卡里有利用率低于 UTIL_LOW 的
-      （卡吃饱了加核也没用；不用卡的不判，单线程脚本本来就只用 1 核）。sug 建议写的 cpus= 是 give 的 2 倍，封顶到这一类每条最多能给的（room：cpu_budget 的结果，#112；
+      （卡吃饱了加核也没用；不用卡的不判，单线程脚本本来就只用 1 核）。若队列 .env / 命令行已显式固定线程上限 <= give（thread_cap），
+      或同类历史在曾分配更高 give（> 当前 give）的完成记录中最高 1 分钟峰值仍 <= give × 1.1（higher_peak），证明加核也吃不进去，直接抑制 low（#286）。
+      sug 建议写的 cpus= 是 give 的 2 倍，封顶到这一类每条最多能给的（room：cpu_budget 的结果，#112；
       不给时封顶到记账上限 cap）；不比 give 多（已给到上限、配额被别的任务与同类分完了）为 None。low 另带 room 原样（看板写进告警：配额、别的任务记了多少）。
     - high（给多了）：估计来自清单的 cpus=（est.cpu_src 是“提示值”；按历史估的会往实测靠、按实测收小了记账的已经让出，都不判），跑到现在的 1 分钟峰值 use.cores_peak
       （若传了同类历史完成最高峰值 hist_peak，则与它取大，避免已知后段高核的多阶段同类任务在前段早判）不超过 give × CPU_SPARE_FRAC、且少至少 CPU_SPARE_MIN 核
@@ -1061,6 +1146,8 @@ def cpu_fit(j, cap, util, room=None, cards=(), hist_peak=None):
     peak = u.get("cores_peak") or max(x[1] for x in u["pks"])
     out = {"avg": avg, "peak": peak, "give": give}
     if avg >= give * _C.CPU_BOUND_FRAC and any((util.get(g) is not None and util[g] < _C.UTIL_LOW) for g in j.get("gpus") or []):
+        if (thread_cap is not None and thread_cap <= give) or (higher_peak is not None and higher_peak <= give * 1.1 + 1e-6):
+            return None
         lim = room["per"] if room else cap
         return dict(out, how="low", sug=2 * give if lim is None else min(2 * give, lim) if lim > give else None, room=room)
     eff_peak = max(peak, hist_peak) if hist_peak is not None else peak
@@ -1069,17 +1156,22 @@ def cpu_fit(j, cap, util, room=None, cards=(), hist_peak=None):
     return None
 
 
-def gpu_slack(cards, jobs, th, cap):
+def gpu_slack(cards, jobs, th, cap, hist=None, env_of=None):
     """卡吃不满是不是真有余量（fit 开车道、offers 同机多开车道共用一条规则，#35、#37）：
     cards [{uuid, util 近 10 分钟利用率 %（样本不够为 None）}]；jobs 在跑的（状态 running 的形状：name、gpus、est、use）；
-    th 是状态的 throttle（Worker.throttle：这一段限流，门槛 THR_HOT、THR_COOL 只在 thr_step；没在限流为 None）；cap 记账上限（cpu_cap）。
+    th 是状态的 throttle（Worker.throttle：这一段限流，门槛 THR_HOT、THR_COOL 只在 thr_step；没在限流为 None）；cap 记账上限（cpu_cap）；
+    hist 与 env_of 可选，传给 job_thread_cap / cpu_higher_peak 与 cpu_fit 保持唯一口径，避免锁线程或加核无效的单线程任务阻拦同卡开新车道（#286）。
     返回 {throttle: 限流时的那句说明、否则 None（这台先减线程，不开新车道）,
     bound: {卡 uuid: [(任务, 平均核数, 给的核数)]}：利用率低于 UTIL_LOW 的卡上被 CPU 卡住的在跑任务（cpu_fit 的 low；先给它们加核，不在这张卡上开新车道）}。"""
     util = {c["uuid"]: c.get("util") for c in cards}
     low = {u for u, v in util.items() if v is not None and v < _C.UTIL_LOW}
     bound = {}
     for j in jobs:
-        b = cpu_fit(j, cap, util, cards=cards)
+        e = j.get("est")
+        give = cpus_export(cpu_threads(e), cap, job_ngpu(j), cards) if e else None
+        tc = job_thread_cap(j, env_of=env_of) if give is not None else None
+        hp = cpu_higher_peak(hist, j, give) if (hist and give is not None) else None
+        b = cpu_fit(j, cap, util, cards=cards, thread_cap=tc, higher_peak=hp)
         for u in j.get("gpus") or []:
             if b and b["how"] == "low" and u in low:
                 bound.setdefault(u, []).append((j["name"], b["avg"], b["give"]))
@@ -1572,26 +1664,28 @@ class SchedMixin:
     def cpu_hist_peak(self, j):
         """运行中任务 j 同类历史完成记录的最高 1 分钟核数峰值（同 tag 同名 › 同 tag › 去种子号同名第一档，跑成功、非 OOM 的近 HIST_N 条）：
         供 cpu_hints 传入 cpu_fit，避免已知后段高核的多阶段同类任务在前 10 分钟低核阶段早判 cpu_high；无历史为 None。"""
-        for kind in (("tag_name", "tag", "name") if j.get("tag") else ("name",)):
-            k = _C.hist_key(j, kind)
-            same = [h for h in self.hist if _C.hist_key(h, kind) == k and ran_ok(h) and not h.get("oom")]
-            cr = peak_rows(same, "cores_peak")
-            if cr:
-                return max(h["cores_peak"] for h in cr)
-        return None
+        cr = cpu_hist_rows(self.hist, j)[-_C.HIST_N:]
+        return max(h["cores_peak"] for h in cr) if cr else None
 
     def cpu_hints(self, S, util):
         """运行中任务开跑核数给少、给多（cpu_fit，#46）：
         - low（给少了）：同一次运行一旦判出来就留到跑完（j 的 cpu_fit，写进状态、接管时找回），避免 avg/util 在门槛两侧波动时反复出现、消失；
+          队列 .env/命令行显式锁线程 <= give 或同类历史在更高 give 下峰值 <= give × 1.1 时自动抑制（#286）；
         - high（给多了）：仅在整段峰值 cores_peak（及同类历史完成峰值）仍显著低于声明核数时保留；若任务后续进入高核阶段使峰值抬头、不再满足 high，
           自动清除 j["cpu_fit"]（因 cores_peak 单调不减，不会再抖回 high），且本次运行不再反转判为 low，避免多阶段任务产生 cpu_high ↔ cpu_low 反向乒乓。
         给少了的建议核数按这台此刻的快照 S 封顶（cpu_budget：配额减同机别的任务已记的、同类几条同时在跑就均分，#112）。
         fit 开车道（gpu_slack）要的是此刻的样子，照旧现算，不用这份。"""
+        ngpus = snap_ngpus(S)
         for j in self.running.values():
             prev = j.get("cpu_fit")
             if prev and prev.get("how") == "low":
                 continue
-            cur = cpu_fit(j, S["cpu_cap"], util, cpu_budget(S, j), snap_ngpus(S), hist_peak=self.cpu_hist_peak(j))
+            e = j.get("est")
+            give = cpus_export(cpu_threads(e), S["cpu_cap"], job_ngpu(j), ngpus) if e else None
+            tc = job_thread_cap(j, env_of=self.qenv) if give is not None else None
+            hp = cpu_higher_peak(self.hist, j, give) if give is not None else None
+            cur = cpu_fit(j, S["cpu_cap"], util, cpu_budget(S, j), ngpus,
+                          hist_peak=self.cpu_hist_peak(j), thread_cap=tc, higher_peak=hp)
             if prev and prev.get("how") == "high":
                 if cur and cur.get("how") == "high":
                     j["cpu_fit"] = cur

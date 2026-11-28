@@ -378,7 +378,7 @@ labmon worker add 29 /root/data1/alice/proj jobs/a6000.txt --project proj</code>
         <tr><td><code>dep:</code></td><td>会话</td><td>队首的依赖等不来：等的失败了、找不到、成环</td><td>重跑被等的、改对名字、改清单顺序或删 <code>after=</code></td></tr>
         <tr><td><code>cpu:</code></td><td>会话</td><td>队首因 CPU 被挡满 10 分钟</td><td>按原因：别的任务占着就等；<code>cpus=</code> 写多了就改小</td></tr>
         <tr><td><code>throttle:</code></td><td>两边</td><td>容器 CPU 被配额限流 ≥ 25% 持续 10 分钟，本项目有任务实测核数远超给的核数</td><td>查写死的线程数、进程数（没设的 OMP 等已缺省成 <code>$LABMON_CPUS</code>），改成按它；确实要更多核就写 <code>cpus=</code></td></tr>
-        <tr><td><code>cpu_low:</code> <code>cpu_high:</code></td><td>会话</td><td>开跑满 10 分钟：用满了给的核、卡又吃不满（给少了）；或写了 <code>cpus=</code> 峰值却不到一半（给多了）</td><td>同类一条、不重复叫醒。给少了：没开跑的同类照消息把 <code>cpus=</code> 写大一点（建议值已按这台的配额、同机别的车道记的核与同类几条同时在跑算过，不会超配额）；给多了：同类跑完几次都这样后自动按实测记账（开跑仍给 <code>cpus=</code> 的核），不必改，急着让出再写小</td></tr>
+        <tr><td><code>cpu_low:</code> <code>cpu_high:</code></td><td>会话</td><td>开跑满 10 分钟：用满了给的核、卡又吃不满（给少了；若 `.env`/命令行显式锁线程或同类更高核历史仍未吃核则自动抑制）；或写了 <code>cpus=</code> 峰值却不到一半（给多了）</td><td>同类一条、不重复叫醒。给少了：没开跑的同类照消息把 <code>cpus=</code> 写大一点（建议值已按这台的配额、同机别的车道记的核与同类几条同时在跑算过，不会超配额）；给多了：同类跑完几次都这样后自动按实测记账（开跑仍给 <code>cpus=</code> 的核），不必改，急着让出再写小</td></tr>
         <tr><td><code>noprogress:</code></td><td>会话</td><td>在跑的任务超了预计、已跑满 30 分钟，这一次的日志里一直没有进度行</td><td>看它还在不在干活；在跑的不用停，给还没开跑的同类任务补上 <code>PROGRESS k/N</code></td></tr>
         <tr><td><code>drain:</code></td><td>会话</td><td>主机 drain 中，挡着本项目的任务</td><td>续租预备或要还了；需要就换主机</td></tr>
         <tr><td><code>borrow_cut:</code></td><td>两边</td><td>借来的主机上约定前跑不完，这台不会再放它</td><td>把清单行换到别的在用主机（别处接得了时句末写好挪法）；截止是约定时也可请你延长</td></tr>

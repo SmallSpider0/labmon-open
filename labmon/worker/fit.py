@@ -75,7 +75,7 @@ class FitHost:
         self.S = fit_snapshot(st)
         u10 = st.get("util10") or {}
         self.cards = [dict(c, util=u10.get(c["uuid"])) for c in self.S["cards"]]
-        self.slack = _S.gpu_slack(self.cards, st.get("running") or [], st.get("throttle"), self.S["cpu_cap"])
+        self.slack = _S.gpu_slack(self.cards, st.get("running") or [], st.get("throttle"), self.S["cpu_cap"], hist=self.hist)
         self.lanes, self.say, self.why = [], [], None     # 这次假设开的 [(任务, 卡号)] 与各行的说明；最近一行没开成的原因
         self.solo, self.solo_host = {}, None              # 这次分给只有提示值的行的卡 {uuid: 任务}（之后哪一行都不与它同卡）；不用卡的那种占了整台：任务名
         self.last_nofit = False                           # 最近一次 open 是否因整机硬件放不下（nofit）拒放
