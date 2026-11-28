@@ -1108,6 +1108,7 @@ def overview_ephemeral() -> dict:
     }
     h1 = {
         "id": "colab-t4-01", "label": "Colab T4 #1", "ephemeral": True, "project": "proj-a", "instance_id": "inst-t4-01",
+        "started_at": NOW - 3.5 * 3600, "accel": "T4", "cu_rate": 1.96,
         "error": None, "status_error": None, "status": st1, "log": [],
         "done": [{"min": 40.0, "kind": "ephemeral", "root": root1, "queue": "ephemeral", "project": "proj-a", "name": "colab_s0",
                   "rc": "0", "gpus": ["ephemeral-colab-t4-01-gpu-0"], "link": "proj-a", "t0": int(NOW - 4800), "t1": int(NOW - 2400),
@@ -1126,6 +1127,7 @@ def overview_ephemeral() -> dict:
     st2["plan"] = {"t": NOW - 15, "lanes": []}
     h2 = {
         "id": "colab-t4-02", "label": "Colab T4 低余量", "ephemeral": True, "project": "proj-a", "instance_id": "inst-t4-02",
+        "started_at": NOW - 21 * 3600, "accel": "TPU v6e-1", "cu_rate": 2.4,
         "error": None, "status_error": None, "status": st2, "log": [], "done": [],
         "lan_off": False, "auto": False, "platform": None, "borrow": None, "clock": int(NOW), "stopped": None, "age": 15.0, "worker_up": True,
         "storage": [{"path": "/content/drive/MyDrive", "label": "Google Drive", "kind": "cloud", "total_gb": 15.0, "avail_gb": 0.6}],
@@ -1161,6 +1163,7 @@ def project_ephemeral() -> dict:
     art_lost = "/content/drive/MyDrive/labmon/proj-a/runs/colab_lost_1"
     d["hosts"].extend([
         {"id": "colab-t4-01", "label": "Colab T4 #1", "ephemeral": True, "instance_id": "inst-t4-01",
+         "started_at": NOW - 3.5 * 3600, "accel": "T4", "cu_rate": 1.96,
          "ok": True, "error": None, "borrow": None, "stale": False, "last_ok": NOW - 12,
          "gpus": [{"index": 0, "name": "Tesla T4", "util": 88.0, "mem_used": 8192.0, "mem_total": 15360.0, "temp": None, "power": None, "power_limit": None}],
          "gpu_procs": [], "cgroup": {"mem_used": int(5.4 * 2 ** 30), "mem_limit": int(12.7 * 2 ** 30), "mem_rss": int(5.4 * 2 ** 30)},

@@ -364,8 +364,8 @@ function topline() {
     }
     if (h.returned) return `<span class="nw mut" ${tip(`已归还（${ts(h.returned)}），不再连接；还有任务没跑完`)}><span class="cdot" style="background:var(--faint)"></span> ${esc(h.label)} · 已归还</span>`;
     if (h.ephemeral) {
-      const cv = h.ok ? cpuView(h) : null;
-      return `<span class="nw" ${tip(h.ok ? "临时主机在线" + (cv?.has ? "\n" + cv.tip : "") : h.error || "临时主机已离线")}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--faint)"}"></span> ${esc(h.label)} <span class="badge b-mute">临时</span></span>`;
+      const cv = h.ok ? cpuView(h) : null, up = ephemeralUptime(h, NOW);
+      return `<span class="nw" ${tip((h.ok ? "临时主机在线" + (h.started_at ? "\n" + up.tip : "") + (cv?.has ? "\n" + cv.tip : "") : h.error || "临时主机已离线"))}><span class="cdot" style="background:${h.ok ? "var(--ok)" : "var(--faint)"}"></span> ${esc(h.label)} ${ephemeralBadge(h)}</span>`;
     }
     const cv = h.ok ? cpuView(h) : null;
     const pt = h.pool_label ? "\n" + poolBadgeTip(h) : "";
@@ -1323,7 +1323,7 @@ function resourcesCard() {
     const firstShared = D.hosts.find(x => !x.pool && !x.ephemeral && !sg.standalone?.[x.id]);
     const sh = !h.ephemeral && !wd && h === firstShared ? sg.dirs || [] : [], loc = h.ephemeral ? null : sg.local?.[h.id], lb = loc ? (loc.cache || 0) + (loc.scratch || 0) : 0;
     if (wd || sh.length || loc) chips.push(storageChip(sg, sh, loc, lb, wd));
-    const head = `<span class="cdot" style="background:${h.ok ? "var(--ok)" : h.ephemeral ? "var(--faint)" : "var(--bad)"}" ${tip(h.ephemeral ? (h.ok ? "临时主机在线" : h.error || "临时主机已离线") : h.ok ? "探针正常" : h.error || "失败")}></span> ${esc(h.label)}${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : ""}${h.pool_label ? " " + poolBadge(h) : ""}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}${h.stale ? ` <span class="sm" style="color:var(--bad)">（显示 ${ts(h.last_ok)} 的数据）</span>` : ""}`;
+    const head = `<span class="cdot" style="background:${h.ok ? "var(--ok)" : h.ephemeral ? "var(--faint)" : "var(--bad)"}" ${tip(h.ephemeral ? (h.ok ? "临时主机在线" : h.error || "临时主机已离线") : h.ok ? "探针正常" : h.error || "失败")}></span> ${esc(h.label)}${h.ephemeral ? " " + ephemeralBadge(h) : ""}${h.pool_label ? " " + poolBadge(h) : ""}${h.borrow ? " " + borrowBadge(h.borrow, NOW) : ""}${h.stale ? ` <span class="sm" style="color:var(--bad)">（显示 ${ts(h.last_ok)} 的数据）</span>` : ""}`;
     out.push(block(head, chips, tiles.length ? tiles : [`<div class="sm mut">没有数据</div>`]));
   }
   const card = `<div class="card" style="margin-top:10px"><div class="row"><span class="hd">资源</span><span class="sm mut hide-sm">整台主机的数字，含同机别的项目与 labmon 之外的进程</span><span class="sp"></span>

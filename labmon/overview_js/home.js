@@ -176,10 +176,13 @@ function home() {
     const mb = m ? `<div class="row" style="flex-wrap:nowrap"><div class="bar thin" style="flex:1"><i style="width:${100 * m.used / m.limit}%;background:${m.used / m.limit >= 0.9 ? "var(--bad)" : "var(--accent)"}"></i><b style="left:90%"></b></div><span class="sm num nw">${g1(m.used)} / ${g1(m.limit)}</span></div>` : "—";
     const poolTag = h.pool_label ? " " + poolBadge(h) : "";
     const autoTag = h.member_auto ? ` <span class="badge b-ok" ${tip("本人名下自动接入调度的组内服务器（不动已有实验与用户自开保活）")}>我的服务器</span>` : "";
-    return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b>${h.ephemeral ? ` <span class="badge b-mute">临时</span>` : standaloneBadge(h)}${autoTag}${poolTag}</td><td>${workerBadge(h)}</td>
+    const ephUp = h.ephemeral ? ephemeralUptime(h, now) : null;
+    const leaseTip = h.ephemeral ? tip(ephUp.tip)
+      : info?.started ? tip(`${info.os === "darwin" ? "主机" : "容器"} ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : "";
+    return `<tr class="link" tabindex="0" data-go="#/host/${encodeURIComponent(h.id)}"><td><span class="cdot" style="background:${hostDot(h)}"></span> <b>${esc(h.label)}</b>${h.ephemeral ? " " + ephemeralBadge(h) : standaloneBadge(h)}${autoTag}${poolTag}</td><td>${workerBadge(h)}</td>
       <td>${gb}</td><td>${mb}</td><td>${sb}</td><td class="r nw">${info?.cpu_used != null ? g1(info.cpu_used) : "—"} <span class="mut">/ ${info?.cpu_quota ? g1(info.cpu_quota) : info?.nproc ?? "—"}</span>${thrTag(h) ? `<div>${thrTag(h)}</div>` : ""}</td>
       <td class="r">${jobsOf(h).length}</td><td class="r">${(h.status?.waiting || []).length}</td>
-      <td class="sm nw" ${!h.ephemeral && info?.started ? tip(`${info.os === "darwin" ? "主机" : "容器"} ${ts(info.started)} 启动，已运行 ${dur(now - info.started)}`) : ""}>${h.ephemeral ? `<span class="mut">临时实例</span>` : h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${h.ephemeral ? "" : renewChip(h)}</td></tr>`;
+      <td class="sm nw" ${leaseTip}>${h.ephemeral ? ephUp.html : h.lease_end ? `${leaseHtml(h.lease_end, "租期")} <span class="mut">${tsMD(h.lease_end)}</span>` : "—"} ${h.ephemeral ? "" : renewChip(h)}</td></tr>`;
   };
   const hGroups = groupHostsByPool(D.hosts), hasPoolGrp = hGroups.some(g => g.pool), tblFold = ST.get("tblPoolFold", {});
   const hostRowsHtml = !D.hosts.length ? "" : !hasPoolGrp ? D.hosts.map(renderHostRow).join("") : hGroups.map(pg => {
@@ -193,6 +196,19 @@ function home() {
       + `${folded ? `<span class="sm mut">（已折叠）</span>` : ""}</span></td></tr>`
       + (folded ? "" : pg.hosts.map(renderHostRow).join(""));
   }).join("");
+  // 个人 Colab 紧凑摘要（#281）：仅当本人开启且有数据时渲染，未启用或无数据时完全隐藏
+  const mc = D.my_colab;
+  if (mc?.enabled && (mc.balance != null || mc.rate != null || mc.active != null || mc.expire_at)) {
+    const exp = colabExpireInfo(mc.expire_at, now);
+    const items = [
+      mc.balance != null ? `剩余 <b>${mc.balance} CU</b>` : "",
+      mc.rate != null ? `速率 <b>${mc.rate} CU/hr</b>` : "",
+      mc.active != null ? `活跃 <b>${mc.active}</b> 台` : "",
+      exp ? `<span style="${exp.level ? `color:var(--${exp.level});font-weight:600` : ""}" ${tip(exp.tip)}>${esc(exp.text)}</span>` : "",
+      mc.updated ? `<span class="mut">更新于 ${tsNear(mc.updated)}</span>` : "",
+    ].filter(Boolean);
+    s += `<div class="card strip" style="margin-bottom:10px"><div class="info"><div class="line"><span class="it" ${tip("仅本人可见的个人 Colab 额度摘要，可在「我的账号 → 我的 Colab」开关或修改到期日")}>${icon("cloud")}<span><b>我的 Colab</b> · ${items.join(" · ")}</span></span></div></div><div class="rn"><a class="btn mini-btn" href="#/me">管理</a></div></div>`;
+  }
   s += `<div class="card"><div class="chd wrap"><b>主机</b><span class="sm mut">点一行看详情</span>${addExtBtn}</div><div class="scroll"><table>
     <tr><th>主机</th><th>worker</th><th style="min-width:180px" ${tip("每张卡一行（≥ 4 卡自动收成 2 列微条）：条是显存，数字是显存占比 · GPU 近 1 小时平均利用率（保活按 0 算）")}>显存 · 利用率</th><th style="min-width:180px">内存（容器）</th><th style="min-width:160px" ${tip("集群主机显示共享盘；独立主机显示本地工作盘（含低水位/配额闸门）；红线是告警/停止线")}>磁盘</th><th class="r">CPU</th><th class="r">运行</th><th class="r">等待</th><th>租期</th></tr>` +
     (hostRowsHtml || `<tr><td colspan="9" class="empty">${selfView

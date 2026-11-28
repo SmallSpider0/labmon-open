@@ -96,6 +96,17 @@ async function accAct(act, d = {}) {
   }
   if (act === "pushrmgo") return accPost("push", {push: null}, "push", "me");
   if (act === "pushtest") return accPost("push/test", {}, "push", "me");
+  if (act === "colab-toggle") {
+    const cur = !!(ACC.me || ME)?.colab?.enabled;
+    return accPost("ephemeral/colab", {enabled: !cur}, "colab", "me", () => { poll(); });
+  }
+  if (act === "colab-save") {
+    const exp = v("accolabexp").trim();
+    return accPost("ephemeral/colab", {expire_at: exp || null}, "colab", "me", () => { poll(); });
+  }
+  if (act === "colab-clear-exp") {
+    return accPost("ephemeral/colab", {expire_at: null}, "colab", "me", () => { poll(); });
+  }
   if (act === "pushgo" && popIs("acc-push", ME.name)) {
     const k = POP.kind, target = v("acpushkey").trim(), secret = v("acpushsecret");
     if (!target) { ACC.err = {k: "pop", m: k === "bark" ? "要填 Bark 推送密钥" : "要填 ntfy 主题"}; return render(false); }
@@ -187,20 +198,50 @@ function clientSec(M) {
   const base = new URL(".", location.href).href;
   const url = `api/client/install.sh?base=${encodeURIComponent(base)}`;
   const cmd = "sh ~/Downloads/labmon-install.sh";
-  const ephBase = base.replace(/\/$/, "");
-  const ephCmd = `import os; from google.colab import userdata; os.environ["LABMON_TOKEN"] = userdata.get("LABMON_TOKEN")\n!python3 labmon_ephemeral.py run --url ${ephBase} --project <项目ID> --job <任务名> -- python3 train.py`;
   return dSec("命令行", `<div class="account-install">
     <a class="btn" href="${esc(url)}" download="labmon-install.sh">下载安装脚本</a>
     <div class="account-command"><code tabindex="0" aria-label="安装命令">${cmd}</code><button class="btn mini-btn" data-copy="${cmd}">复制命令</button></div>
     <p class="sm mut">运行脚本后执行 <code>labmon login</code>。以后用 <code>labmon update</code> 更新。</p>
     ${M.entry === "public" ? '<p class="sm mut">公网连接需向管理员申请客户端证书，并把证书和私钥路径填进 client.toml。</p>' : ""}
-    <div class="account-install" style="width:100%;border-top:1px solid var(--line);padding-top:10px;margin-top:4px">
-      <div class="row wrap" style="gap:8px;align-items:center"><b class="sm">Colab / 临时上报</b><a class="btn mini-btn" href="api/client/ephemeral.py" download="labmon_ephemeral.py">下载 labmon_ephemeral.py</a></div>
-      <div class="account-command"><code tabindex="0" aria-label="Colab 启动命令" style="white-space:pre-wrap">${esc(ephCmd)}</code><button type="button" class="btn mini-btn" data-copy="${esc(ephCmd)}">复制命令</button></div>
-      <p class="sm mut">先在 Colab Secrets 设置 <code>LABMON_TOKEN</code>（令牌可在<a href="#/me/tokens">令牌</a>页签创建，切勿硬编码进 Notebook），经上方第一行在内核导出后再启动子进程；挂载 Google Drive 可加 <code>--drive-root</code> 与 <code>--artifact-dir</code>。</p>
-    </div>
     </div>`,
     M.commit ? `<span class="sm mut">看板版本 <code>${esc(M.commit.slice(0, 7))}</code></span>` : "");
+}
+// 「我的账号 → 概览」的「我的 Colab」（#281）：默认折叠、按登录用户隔离，绝不存个人 Google 凭据
+function myColabSec(M) {
+  const C = M.colab || {}, on = !!C.enabled;
+  const base = new URL(".", location.href).href.replace(/\/$/, "");
+  const cliCmd = `python3 labmon_ephemeral.py run --url ${base} --project <项目ID> --job <任务名> --unassign -- python3 train.py`;
+  const exp = colabExpireInfo(C.expire_at, D.generated || Date.now() / 1000);
+  const statParts = [
+    C.balance != null ? `剩余 <b>${C.balance} CU</b>` : "",
+    C.rate != null ? `当前 <b>${C.rate} CU/hr</b>` : "",
+    C.active != null ? `活跃 <b>${C.active}</b> 台` : "",
+    exp ? `<span style="${exp.level ? `color:var(--${exp.level})` : ""}">${esc(exp.text)}</span>` : "",
+    C.updated ? `<span class="mut">更新于 ${tsNear(C.updated)}</span>` : "",
+  ].filter(Boolean);
+  const sumNote = on
+    ? (C.balance != null ? `已开启 · 剩 ${C.balance} CU` : "已开启 · 等待上报")
+    : "默认关闭";
+  return `<section class="card"><details class="dfold">
+    <summary class="row wrap" style="gap:8px;align-items:center"><b>我的 Colab</b><span class="badge ${on ? "b-ok" : "b-mute"}">${esc(sumNote)}</span><span class="sm mut">仅本人可见 · 总览按需显示个人额度摘要</span></summary>
+    <div style="margin-top:10px;display:flex;flex-direction:column;gap:10px">
+      <div class="row wrap" style="gap:8px;align-items:center">
+        <button type="button" class="btn ${on ? "" : "pri"} mini-btn" data-acc="colab-toggle" ${ACC.busy ? "disabled" : ""}>${on ? "关闭总览摘要" : "开启总览摘要"}</button>
+        <span class="sm mut">${on ? "已在总览「主机」表上方显示本人 Colab 摘要（其他用户与管理员均不可见）。" : "关闭时总览完全隐藏，零干扰。看板绝不托管个人 Google OAuth 凭据，也不替你抢卡。"}</span>
+      </div>
+      <div class="sm">${statParts.length ? statParts.join(" · ") : '<span class="mut">尚未上报个人 CU 摘要（可用本地 <code>colab usage</code> 顺手推送至 <code>POST /api/ephemeral/colab</code>）。</span>'}</div>
+      <div class="row wrap" style="gap:8px;align-items:center">
+        <label class="sm" style="display:inline-flex;align-items:center;gap:6px">CU 到期 / 月刷新日（可选）<input id="accolabexp" class="ain" type="date" style="width:auto" value="${esc(C.expire_at || "")}" ${ACC.busy ? "disabled" : ""}></label>
+        <button type="button" class="btn mini-btn" data-acc="colab-save" ${ACC.busy ? "disabled" : ""}>保存日期</button>
+        ${C.expire_at ? `<button type="button" class="btn mini-btn" data-acc="colab-clear-exp" ${ACC.busy ? "disabled" : ""}>清除</button>` : ""}
+      </div>
+      ${accLine("colab")}
+      <div style="border-top:1px solid var(--line);padding-top:8px">
+        <div class="row wrap" style="gap:8px;align-items:center;margin-bottom:6px"><b class="sm">google-colab-cli 无头接入</b><a class="btn mini-btn" href="api/client/ephemeral.py" download="labmon_ephemeral.py">下载 labmon_ephemeral.py</a></div>
+        <div class="account-command"><code tabindex="0" aria-label="Colab 启动命令" style="white-space:pre-wrap">${esc(cliCmd)}</code><button type="button" class="btn mini-btn" data-copy="${esc(cliCmd)}">复制命令</button></div>
+        <p class="sm mut" style="margin-top:6px">推荐经 <code>google-colab-cli</code> 启动远端实例并导出 <code>LABMON_TOKEN</code>（在<a href="#/me/tokens">令牌</a>页签创建 project 令牌，切勿硬编码）；加 <code>--unassign</code> 可在任务结束后自动释放运行时防空烧 CU，自签名证书可配 <code>--ca</code> / <code>LABMON_CA</code>。</p>
+      </div>
+    </div></details></section>`;
 }
 const accountList = xs => xs?.length ? xs.map(esc).join("、") : "没有";
 const ME_TABS = [["overview", "概览"], ["security", "登录与安全"], ["tokens", "令牌"], ["push", "推送"]];
@@ -493,7 +534,7 @@ function mePage(tab) {
     ["我的项目", accountList(M.own)],
     ["能用的主机", (M.hosts?.length ? accountList(M.hosts) : "没有单独分配") + (seen.length ? `<span class="sm mut">；你的项目还在 ${accountList(seen)} 上有任务</span>` : "")]
   ]));
-  return head + myServersSec(M) + myExtHostsSec(M) + clientSec(M) + own;
+  return head + myServersSec(M) + myExtHostsSec(M) + myColabSec(M) + clientSec(M) + own;
 }
 function accStatus(u, brief = false) {
   if (u.lock) return `<span class="badge b-bad">${brief ? "已锁定" : `锁到 ${tsNear(u.lock)}`}</span>`;

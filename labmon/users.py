@@ -774,12 +774,14 @@ def remove(name: str, by: str, *, stop_fn=None) -> str:
             auto_hosts = [host_defaults(h) for h in user_hosts() if h.get("member_auto") and k.lower() in host_users(h)]
         except ConfigError:
             auto_hosts = []
+        from . import ephemeral as EP
         from .service import set_user_push
         set_host_users(k, [], by)
         remove_pool_member(k, by)
         for pid in PJ.registered():
             PJ._set_owner(pid, None, by, previous=k)
         set_user_push(k, None)
+        EP.remove_user_colab(k)
         del d["users"][k]
         for kind in ("sessions", "tokens"):
             d[kind] = {h: r for h, r in d[kind].items() if r.get("user") != k}
@@ -1206,16 +1208,21 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
     主机状态里别人项目的临时指令同样去掉 by（_ovr_by，#27）。"""
     if not snap:
         return snap
+    from . import ephemeral as EP
+    my_colab = EP.colab_view(who.name)
     if who.role == "admin":
         hidden = {str(h.get("id")) for h in snap.get("hosts") or [] if is_other_member_auto(h, who)}
-        if not hidden:
+        if not hidden and my_colab is None:
             return snap
         out = dict(snap)
-        out["hosts"] = [h for h in snap.get("hosts") or [] if str(h.get("id")) not in hidden]
-        if isinstance(snap.get("occ"), dict):
-            out["occ"] = {k: v for k, v in snap["occ"].items() if str(k) not in hidden}
-        if isinstance(snap.get("regs"), list):
-            out["regs"] = [x for x in snap["regs"] if not (x.get("state") == "active" and str(x.get("host")) in hidden)]
+        if my_colab is not None:
+            out["my_colab"] = my_colab
+        if hidden:
+            out["hosts"] = [h for h in snap.get("hosts") or [] if str(h.get("id")) not in hidden]
+            if isinstance(snap.get("occ"), dict):
+                out["occ"] = {k: v for k, v in snap["occ"].items() if str(k) not in hidden}
+            if isinstance(snap.get("regs"), list):
+                out["regs"] = [x for x in snap["regs"] if not (x.get("state") == "active" and str(x.get("host")) in hidden)]
         return out
     acc = acc or access(who, snap)
     person, _ = person_of(who.name)
@@ -1285,4 +1292,6 @@ def view(who: Ident, snap: dict, acc: Access | None = None) -> dict:
                                    "projects": {k: v for k, v in (dk["ours"].get("projects") or {}).items() if k in acc.projects}}
     out["fleet"] = _self_fleet(snap.get("fleet"), person, snap, acc)
     out["pool"] = pool_view
+    if my_colab is not None:
+        out["my_colab"] = my_colab
     return out

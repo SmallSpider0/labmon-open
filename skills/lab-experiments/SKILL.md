@@ -115,11 +115,11 @@ description: 本机所有科研项目在实验室 GPU 服务器上跑实验的�
 
 ## 临时算力（Colab 等无共享盘主机）
 
-Google Colab 等无 SSH 入口、无实验室共享盘的短生命周期 GPU 实例走推模式监控上报，详细模板与检查表见 [colab.md](colab.md)：
-- **获取客户端**：从看板 `GET /api/client/ephemeral.py` 下载零依赖单文件 `labmon_ephemeral.py`；令牌优先放 Colab Secrets（`LABMON_TOKEN`），绝不写进 Notebook 代码或云盘明文。
-- **两层存储与防呆**：热数据放 `/content/work/`，只读压缩包与每个任务独占的 checkpoint/产物放 Google Drive `CLOUD_ROOT/runs/<job_id>/`（原子 `os.replace` 回写）；启动必带 `--drive-root` 与 `--artifact-dir`，防未挂载误写本地盘。
-- **防撞与监控**：多实例务必分配不同 `--host` 与 `--job`；用 `labmon_ephemeral.py run` 或 Notebook `track()` 上报（照常输出 `PROGRESS k/N`），看板统一接入时间线、`labmon status`/`disk` 独立分区与 `labmon wait --job`。
-- **断连与告警**：遇 `ephemeral_down:` 按提示中的 `artifact_dir` 在新实例续跑；遇 `ephemeral_dup:` 立刻停掉重复实例；遇 `ephemeral_disk_low:` 清理云盘旧产物（不涉及实验室共享盘）。
+Google Colab 等无 SSH 入口、无实验室共享盘的短生命周期 GPU / TPU 实例，首选官方 `google-colab-cli` 无头工作流并走推模式监控上报（浏览器 Notebook 退为兜底），详细流程与目录规范见 [colab.md](colab.md)：
+- **分流与查余额**：先核实验室队列，需分流时用 `colab usage` 查余量（若本人开启了「我的 Colab」可顺手推 `POST /api/ephemeral/colab`）；抢卡无货最多退避重试 2 次并按阶梯降级（如 A100 → L4/G4），并发实例用独立 `--config` + `-s` 隔离。
+- **Google Drive 两层存储与防呆**：热数据与代码放 `/content/work/`，Drive 按常驻共享层（`datasets/`、`weights/`、`envs/`、`cache/`）与项目隔离层（`projects/<proj>/runs/<job>/`，原子 `os.replace` 回写）组织；严禁把 `.git/`、碎图解压目录、高频日志或令牌放进 Drive；`colab drivemount` 后必带 `--drive-root` 与 `--artifact-dir` 启动。
+- **监控与防空烧**：从 `GET /api/client/ephemeral.py` 下载 `labmon_ephemeral.py`（自签名 CA 加 `--ca` / `LABMON_CA`），用 `labmon_ephemeral.py run --unassign` 包装训练并挂本地 `labmon wait --job`；任务结束或异常后务必复核 `colab stop` 与活跃实例归零。
+- **断连与告警**：遇 `ephemeral_down:` 按提示中的 `artifact_dir` 在新实例 `--resume` 续跑；遇 `ephemeral_dup:` 立刻停掉重复实例；遇 `ephemeral_disk_low:` 定向清理 Drive 旧 `runs/`（严禁对 Drive 跑 `du`/`find`）。
 
 ## 结束一个项目
 

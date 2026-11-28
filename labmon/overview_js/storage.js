@@ -354,9 +354,21 @@ function hostStrip(h) {
   const info = h.status?.info || {}, now = D.generated;
   const it = (ic, html, t = "") => `<span class="it" ${t ? tip(t) : ""}>${icon(ic)}<span>${html}</span></span>`;
   if (h.ephemeral) {
-    let es = it("cloud", `推模式临时主机${h.instance_id ? ` <span class="mut">实例 ${esc(h.instance_id)}</span>` : ""}${h.project && visibleProject(h.project) ? ` · <a href="#/p/${encodeURIComponent(h.project)}">${esc(h.project)}</a>` : ""}`,
+    const colab = isColabHost(h), acc = h.accel || (info.gpus?.[0]?.name ? info.gpus[0].name.replace(/^NVIDIA |^Tesla /, "") : "");
+    const up = ephemeralUptime(h, now);
+    let es = it("cloud", `${colab ? "Colab 运行时" : "推模式临时主机"}${acc ? ` <b>${esc(acc)}</b>` : ""}${h.cu_rate != null ? ` <span class="mut">约 ${h.cu_rate} CU/hr</span>` : ""}${h.instance_id ? ` <span class="mut">实例 ${esc(h.instance_id)}</span>` : ""}${h.project && visibleProject(h.project) ? ` · <a href="#/p/${encodeURIComponent(h.project)}">${esc(h.project)}</a>` : ""}`,
       "仅监控上报，不接入队列调度、平台操作与实验室共享盘");
-    if (info.started) es += it("clock", `实例已上报 ${dur(now - info.started)} <span class="mut">${ts(info.started)} 起</span>`);
+    es += it("clock", `${up.html}${h.started_at || info.started ? ` <span class="mut">${ts(h.started_at || info.started)} 起</span>` : ""}`, up.tip);
+    const stos = h.storage || [];
+    if (stos.length) {
+      const stoHtml = stos.map(x => {
+        const low = x.kind === "cloud" && x.avail_gb < 1;
+        return `<span style="${low ? "color:var(--bad);font-weight:600" : ""}">${esc(x.label)} 剩 ${g1(x.avail_gb)}/${g1(x.total_gb)} GiB</span>`;
+      }).join(" · ");
+      es += it("db", stoHtml, stos.map(x => `${x.label}（${x.path}）：剩 ${g1(x.avail_gb)} / ${g1(x.total_gb)} GiB`).join("\n"));
+    }
+    es += it("zap", `<span class="mut">断连后挂载 Drive 从任务独占目录 <code>--resume</code> 续跑</span>`,
+      "Colab 临时实例可能随时回收：请把 checkpoint 原子写入 Google Drive 独占目录，并建议加 --unassign 防任务结束后空烧 CU");
     return `<div class="card strip"><div class="info"><div class="line">${es}</div></div></div>`;
   }
   const deps = h.status?.local?.jobs || [], bad = deps.filter(r => !r.heal), miss = missW(h);

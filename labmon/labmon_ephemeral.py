@@ -33,6 +33,7 @@ import re
 import secrets
 import signal
 import socket
+import ssl
 import subprocess
 import sys
 import threading
@@ -75,6 +76,17 @@ def resolve_url(explicit: Optional[str] = None) -> str:
     if not (url.startswith("https://") or url.startswith("http://")):
         raise RuntimeError("看板地址须以 https:// 或 http:// 开头")
     return url
+
+
+def resolve_ca(explicit: Optional[str] = None) -> Optional[str]:
+    """按参数 > 环境变量 LABMON_CA > Colab Secrets 顺序解析自定义服务端 CA 证书路径。"""
+    ca = (explicit or os.environ.get("LABMON_CA") or _colab_secret("LABMON_CA") or "").strip()
+    if not ca:
+        return None
+    path = os.path.abspath(os.path.expanduser(ca))
+    if not os.path.isfile(path):
+        raise RuntimeError("找不到自定义 CA 证书文件：{}".format(path))
+    return path
 
 
 def check_drive_mount(drive_root: Optional[str], *, allow_unmounted: bool = False) -> None:
@@ -252,25 +264,84 @@ def collect_storage(drive_root: Optional[str] = None, extra_local: Optional[List
     return out
 
 
-def default_host_id(gpus: List[Dict[str, Any]]) -> str:
-    """根据 GPU 型号或主机名生成简洁的默认临时主机标识。"""
+def detect_accel(gpus: List[Dict[str, Any]], env: Optional[Dict[str, str]] = None) -> str:
+    """识别当前运行时硬件规格（GPU 简称 / TPU 型号 / CPU）；无 GPU 时不误报异常。"""
     if gpus:
-        name = str(gpus[0].get("name") or "gpu").lower()
-        slug = re.sub(r"[^a-z0-9]+", "-", name).strip("-")
-        for short in ("h100", "a100", "l4", "v100", "t4", "p100"):
-            if short in slug:
-                slug = short
-                break
-        slug = slug[:16] or "gpu"
+        raw = str(gpus[0].get("name") or "GPU").strip()
+        upper = raw.upper()
+        for pat, short in (
+            ("H100", "H100"),
+            ("A100", "A100"),
+            ("RTX PRO 6000", "G4"),
+            ("L4", "L4"),
+            ("V100", "V100"),
+            ("T4", "T4"),
+            ("P100", "P100"),
+        ):
+            if pat in upper:
+                return "{}x{}".format(len(gpus), short) if len(gpus) > 1 else short
+        clean = raw.replace("NVIDIA ", "").replace("Tesla ", "").strip()[:28] or "GPU"
+        return "{}x{}".format(len(gpus), clean) if len(gpus) > 1 else clean
+    e = os.environ if env is None else env
+    tpu_type = (e.get("TPU_ACCELERATOR_TYPE") or "").strip()
+    if tpu_type:
+        return ("TPU " + tpu_type)[:32]
+    if any((e.get(k) or "").strip() for k in ("TPU_NAME", "COLAB_TPU_ADDR", "XRT_TPU_CONFIG")) or os.path.exists("/dev/accel0"):
+        return "TPU"
+    return "CPU"
+
+
+def detect_started_at(now: Optional[float] = None) -> float:
+    """估算容器/实例启动时刻（优先读 /proc/1 ctime 或 /proc/uptime，失败回退当前时刻）。"""
+    cur = time.time() if now is None else float(now)
+    try:
+        st = os.stat("/proc/1")
+        ct = float(st.st_ctime)
+        if 0 < cur - ct < 30 * 86400:
+            return round(ct, 3)
+    except OSError:
+        pass
+    try:
+        with open("/proc/uptime", "r", encoding="utf-8") as fh:
+            up = float(fh.readline().split()[0])
+        if 0 <= up < 30 * 86400:
+            return round(cur - up, 3)
+    except (OSError, ValueError, IndexError):
+        pass
+    return round(cur, 3)
+
+
+def unassign_runtime() -> bool:
+    """尝试调用 google.colab.runtime.unassign() 释放当前 Colab 运行时，防空烧 CU。"""
+    try:
+        from google.colab import runtime  # type: ignore[import-not-found]
+        runtime.unassign()
+        print("[labmon-ephemeral] 已触发 Colab 运行时释放（unassign）", file=sys.stderr, flush=True)
+        return True
+    except Exception as exc:  # noqa: BLE001
+        print("[labmon-ephemeral] 跳过 runtime.unassign()（非 Colab 运行时或不可用）：{}".format(exc), file=sys.stderr, flush=True)
+        return False
+
+
+def default_host_id(gpus: List[Dict[str, Any]], accel: Optional[str] = None) -> str:
+    """根据硬件规格或主机名生成简洁的默认临时主机标识。"""
+    acc = accel or detect_accel(gpus)
+    if acc and acc != "CPU":
+        slug = re.sub(r"[^a-z0-9]+", "-", acc.lower()).strip("-")[:16] or "accel"
         return "colab-{}-{}".format(slug, secrets.token_hex(2))
+    if acc == "CPU":
+        return "colab-cpu-{}".format(secrets.token_hex(2))
     hn = re.sub(r"[^a-zA-Z0-9_.-]+", "-", socket.gethostname()).strip("-")[:16] or "cpu"
     return "colab-{}-{}".format(hn.lower(), secrets.token_hex(2))
 
 
-def default_label(host_id: str, gpus: List[Dict[str, Any]]) -> str:
+def default_label(host_id: str, gpus: List[Dict[str, Any]], accel: Optional[str] = None) -> str:
+    acc = accel or detect_accel(gpus)
     if gpus:
-        name = str(gpus[0].get("name") or "GPU").replace("NVIDIA ", "").replace("Tesla ", "")
+        name = str(gpus[0].get("name") or acc or "GPU").replace("NVIDIA ", "").replace("Tesla ", "")
         return "Colab {} ({})".format(name, host_id)[:60]
+    if acc:
+        return "Colab {} ({})".format(acc, host_id)[:60]
     return "Colab ({})".format(host_id)[:60]
 
 
@@ -282,7 +353,13 @@ def parse_progress(line: str) -> Optional[List[int]]:
     return [cur, tot] if tot > 0 else None
 
 
-def post_push(url: str, token: str, payload: Dict[str, Any], timeout: float = 15.0) -> Tuple[int, Dict[str, Any]]:
+def post_push(
+    url: str,
+    token: str,
+    payload: Dict[str, Any],
+    timeout: float = 15.0,
+    ca: Optional[str] = None,
+) -> Tuple[int, Dict[str, Any]]:
     """向看板 POST /api/ephemeral/push 上报一次心跳，返回 (HTTP 状态码, 响应 JSON)。"""
     endpoint = url.rstrip("/") + "/api/ephemeral/push"
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -296,8 +373,9 @@ def post_push(url: str, token: str, payload: Dict[str, Any], timeout: float = 15
             "User-Agent": "labmon-ephemeral/1",
         },
     )
+    ctx = ssl.create_default_context(cafile=ca) if ca else None
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        with urllib.request.urlopen(req, timeout=timeout, context=ctx) as resp:
             body = json.loads(resp.read().decode("utf-8") or "{}")
             return resp.status, body if isinstance(body, dict) else {}
     except urllib.error.HTTPError as e:
@@ -331,6 +409,11 @@ class EphemeralTracker:
         artifact_dir: Optional[str] = None,
         local_paths: Optional[List[str]] = None,
         allow_unmounted: bool = False,
+        ca: Optional[str] = None,
+        unassign: bool = False,
+        started_at: Optional[float] = None,
+        accel: Optional[str] = None,
+        cu_rate: Optional[float] = None,
         poster=post_push,
     ) -> None:
         check_drive_mount(drive_root, allow_unmounted=allow_unmounted)
@@ -339,11 +422,15 @@ class EphemeralTracker:
         self.project = project
         self.job_id = job
         self._poster = poster
+        self.ca = resolve_ca(ca) if ca is not None else None
+        self.unassign = bool(unassign)
+        self.cu_rate = cu_rate
         self._cpu = _CpuSampler()
         init_gpus = collect_gpus()
-        self.host_id = host_id or default_host_id(init_gpus)
+        self.accel = (accel or "").strip()[:32] or detect_accel(init_gpus)
+        self.host_id = host_id or default_host_id(init_gpus, self.accel)
         self.instance_id = instance_id or ("run-" + secrets.token_hex(4))
-        self.label = label or default_label(self.host_id, init_gpus)
+        self.label = label or default_label(self.host_id, init_gpus, self.accel)
         self.est_min = est_min
         self.job_gpus = list(gpus) if gpus is not None else [g["index"] for g in init_gpus]
         self.interval = max(5.0, float(interval))
@@ -358,6 +445,7 @@ class EphemeralTracker:
         self._finished = False
         self._thread: Optional[threading.Thread] = None
         self._start_ts = time.time()
+        self.started_at = float(started_at) if started_at is not None else detect_started_at(self._start_ts)
         self._end_ts: Optional[float] = None
         self._status = "running"
         self._rc: Optional[int] = None
@@ -410,7 +498,7 @@ class EphemeralTracker:
                 "log_mtime": round(self._log_mtime, 3) if self._log_mtime is not None else None,
                 "artifact_dir": self.artifact_dir,
             }
-        return {
+        payload: Dict[str, Any] = {
             "project": self.project,
             "host_id": self.host_id,
             "instance_id": self.instance_id,
@@ -418,6 +506,8 @@ class EphemeralTracker:
             "ttl_s": self.ttl_s,
             "closing": closing,
             "client_t": round(time.time(), 3),
+            "started_at": round(self.started_at, 3),
+            "accel": self.accel,
             "gpus": gpus,
             "cpu_pct": cpu_pct,
             "cpu_count": os.cpu_count(),
@@ -425,6 +515,9 @@ class EphemeralTracker:
             "storage": storage,
             "jobs": [job],
         }
+        if self.cu_rate is not None:
+            payload["cu_rate"] = self.cu_rate
+        return payload
 
     def push_once(self, *, closing: bool = False) -> Tuple[int, Dict[str, Any]]:
         with self._push_lock:
@@ -436,7 +529,10 @@ class EphemeralTracker:
             for attempt in range(retries):
                 if attempt > 0:
                     payload["client_t"] = round(time.time(), 3)
-                code, body = self._poster(self.url, self.token, payload)
+                if self.ca:
+                    code, body = self._poster(self.url, self.token, payload, ca=self.ca)
+                else:
+                    code, body = self._poster(self.url, self.token, payload)
                 if code == 200:
                     for w in body.get("warnings") or []:
                         if w not in self._warned:
@@ -479,6 +575,8 @@ class EphemeralTracker:
         self.push_once(closing=True)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
+        if self.unassign:
+            unassign_runtime()
 
 
 @contextlib.contextmanager
@@ -499,6 +597,11 @@ def track(
     artifact_dir: Optional[str] = None,
     local_paths: Optional[List[str]] = None,
     allow_unmounted: bool = False,
+    ca: Optional[str] = None,
+    unassign: bool = False,
+    started_at: Optional[float] = None,
+    accel: Optional[str] = None,
+    cu_rate: Optional[float] = None,
     poster=post_push,
 ):
     """Notebook 上下文管理器：自动启动后台心跳并在退出或异常时上报终态。"""
@@ -518,6 +621,11 @@ def track(
         artifact_dir=artifact_dir,
         local_paths=local_paths,
         allow_unmounted=allow_unmounted,
+        ca=resolve_ca(ca),
+        unassign=unassign,
+        started_at=started_at,
+        accel=accel,
+        cu_rate=cu_rate,
         poster=poster,
     )
     tr.start()
@@ -652,6 +760,11 @@ def main(argv: Optional[List[str]] = None) -> int:
     rp.add_argument("--drive-root", default=None, help="云盘根目录（如 /content/drive/MyDrive/labmon），启动前校验挂载并只读 statvfs 上报余量")
     rp.add_argument("--artifact-dir", default=None, help="本次任务的云盘持久产物目录（上限 256 字符）")
     rp.add_argument("--log-file", default=None, help="本地实时日志路径（推荐 /tmp/labmon_<job>.log）")
+    rp.add_argument("--ca", default=None, help="自定义服务端 CA 证书路径（缺省读 LABMON_CA）")
+    rp.add_argument("--unassign", action="store_true", help="子进程结束并上报终态后自动尝试 google.colab.runtime.unassign()，防空烧 CU")
+    rp.add_argument("--started-at", type=float, default=None, help="实例启动 Unix 时间戳（缺省自动估算）")
+    rp.add_argument("--accel", default=None, help="硬件规格标签（如 T4 / A100 / TPU v6e1 / CPU，缺省自动识别）")
+    rp.add_argument("--cu-rate", type=float, default=None, help="可选估算 CU/hr 消耗速率")
     rp.add_argument("--allow-unmounted", action="store_true", help="跳过 --drive-root 的挂载点防呆校验（仅用于离线测试）")
     rp.add_argument("cmd", nargs=argparse.REMAINDER, help="在 -- 之后写要执行的实验命令")
 
@@ -678,6 +791,11 @@ def main(argv: Optional[List[str]] = None) -> int:
                 drive_root=args.drive_root,
                 artifact_dir=args.artifact_dir,
                 allow_unmounted=args.allow_unmounted,
+                ca=resolve_ca(args.ca),
+                unassign=args.unassign,
+                started_at=args.started_at,
+                accel=args.accel,
+                cu_rate=args.cu_rate,
             )
         except RuntimeError as e:
             print("[labmon-ephemeral] {}".format(e), file=sys.stderr)

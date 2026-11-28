@@ -684,6 +684,14 @@ class Handler(BaseHTTPRequestHandler):
             if size < 0 or size > EP.PUSH_MAX_BYTES:
                 self._json(400 if size < 0 else 413, {"error": "临时主机上报请求体长度无效或超过 128 KiB 上限"})
                 return False
+        if path == "/api/ephemeral/colab" and self.command == "POST":
+            try:
+                size = int(self.headers.get("Content-Length") or 0)
+            except ValueError:
+                size = -1
+            if size < 0 or size > EP.COLAB_MAX_BYTES:
+                self._json(400 if size < 0 else 413, {"error": "个人 Colab 状态请求体长度无效或超过 8 KiB 上限"})
+                return False
         try:
             ok = self._own(r, path, who)
         except U.Denied as x:
@@ -902,6 +910,7 @@ class Handler(BaseHTTPRequestHandler):
         if out["account"]:                             # 浏览器会话（「我的账号」）：自己的推送（只有打码的目标，#167）
             self._client_tokens(out["tokens"])
             out["push"] = S.push_view(who.name)
+        out["colab"] = EP.get_colab(who.name)          # 个人 Colab 额度状态（#281，仅本人可见）
         return out
 
     def _page(self, html: str | bytes, who: U.Ident):
@@ -941,6 +950,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(200, {"reports": report_headers()})
         if path == "/api/me":
             return self._json(200, self._me(who))
+        if path == "/api/ephemeral/colab":
+            return self._json(200, EP.get_colab(who.name))
         if path == "/api/users":
             got = U.listing(directory=True)
             for u in got["users"]:                     # 各人填没填推送（#167；目标不给管理员看）
@@ -1353,6 +1364,8 @@ class Handler(BaseHTTPRequestHandler):
                         p.wake.set()
                     self.board.overview.wake.set()
                 return self._json(200, res)
+            if act == "ephemeral/colab":
+                return self._json(200, {"ok": True, "colab": EP.save_colab(who.name, body)})
             r = self._cli(act, body, who)
             if r is not None:
                 return self._json(*r)
@@ -2058,6 +2071,8 @@ ROUTES = [
     _R("GET", r"/api/reports", "reports", admin=True),
     _R("POST", r"/api/report", "project", own="report"),
     _R("POST", r"/api/ephemeral/push", "project", own="body"),          # 推模式临时主机心跳上报（#213，ephemeral.py）
+    _R("GET", r"/api/ephemeral/colab", "read"),                         # 个人 Colab 额度摘要读取（#281，仅本人）
+    _R("POST", r"/api/ephemeral/colab", ("project", U.ACCOUNT), own="self"),   # 个人 Colab 额度开关/到期日/CLI 上报（#281）
     _R("GET", r"/api/admin/deploy", "deploy", admin=True),             # 部署（#164）：在跑哪个提交、平台操作、日志里的 Traceback
     _R("GET", r"/api/admin/backup", "backup", admin=True, lan=True),   # 冷备（#163）：笔记本每天经内网入口来取一份（backup pull），不含秘密；公网入口不给（#17）
     _R("POST", r"/api/admin/deploy", "deploy", admin=True, lan=True),  # 收 git bundle 快进、重启：等于在这台上跑新代码，只在内网入口

@@ -10,6 +10,7 @@
 """
 from __future__ import annotations
 
+import datetime
 import fcntl
 import json
 import math
@@ -30,6 +31,8 @@ from .worker.pure import overrun_left
 EPHEMERAL_QUEUE = "ephemeral"
 HOST_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 INSTANCE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$")
+USER_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 RESERVED_HOSTS = frozenset({POOL, "__local__", "all"})
 
 TTL_DEFAULT = 180
@@ -37,12 +40,14 @@ TTL_MIN = 90
 TTL_MAX = 600
 NEXT_HEARTBEAT_S = 30
 PUSH_MAX_BYTES = 128 * 1024
+COLAB_MAX_BYTES = 8 * 1024
 MIN_PUSH_GAP_S = 5.0
 MAX_ACTIVE_PER_PROJECT = 5
 STORAGE_MAX = 4
 GPUS_MAX = 16
 JOBS_MAX = 128
 LABEL_MAX = 60
+ACCEL_MAX = 32
 LAST_LINE_MAX = 200
 ARTIFACT_DIR_MAX = 256
 CLOUD_LOW_GB = 1.0
@@ -497,6 +502,9 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
     cpu_count = _num(body.get("cpu_count"), "cpu_count", lo=1.0, hi=1024.0)
     mem = _norm_mem(body.get("mem"))
     storage = _norm_storage(body.get("storage"))
+    raw_started_at = _cal_ts(body.get("started_at"), offset, t)
+    raw_accel = _clean_text(body.get("accel"), "accel", ACCEL_MAX, truncate=True)
+    raw_cu_rate = _num(body.get("cu_rate"), "cu_rate", lo=0.0, hi=10_000.0)
 
     with _locked():
         recs = _expire_unlocked(t)
@@ -604,6 +612,16 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
             }:
                 wake = True
 
+        first_seen = old.get("first_seen", round(t, 3)) if same_inst else round(t, 3)
+        if same_inst and old.get("started_at") is not None:
+            eff_started_at = float(old["started_at"])
+        elif raw_started_at is not None:
+            eff_started_at = raw_started_at
+        else:
+            eff_started_at = float(first_seen)
+        eff_accel = raw_accel if raw_accel is not None else (old.get("accel") if same_inst else None)
+        eff_cu_rate = round(raw_cu_rate, 2) if raw_cu_rate is not None else (old.get("cu_rate") if same_inst else None)
+
         rec = {
             "host_id": hid,
             "project": pid,
@@ -615,7 +633,10 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
             "down_at": down_at,
             "down_reason": down_reason,
             "lost_jobs": lost_jobs,
-            "first_seen": old.get("first_seen", round(t, 3)) if same_inst else round(t, 3),
+            "first_seen": first_seen,
+            "started_at": round(eff_started_at, 3),
+            "accel": eff_accel,
+            "cu_rate": eff_cu_rate,
             "last_seen": round(t, 3),
             "last_push_t": round(t, 3),
             "client_offset": round(eff_offset, 3),
@@ -677,6 +698,7 @@ def overview_hosts(projects: list[dict], prog: dict, colors: dict, t: float) -> 
         cpu_pct = rec.get("cpu_pct")
         nproc = rec.get("cpu_count")
         cpu_used = round(cpu_pct / 100.0 * (nproc or 1), 2) if cpu_pct is not None else None
+        started_at = rec.get("started_at") or rec.get("first_seen")
         info = {
             "gpus": [{
                 "i": g["index"], "uuid": g["uuid"], "name": g["name"],
@@ -687,7 +709,7 @@ def overview_hosts(projects: list[dict], prog: dict, colors: dict, t: float) -> 
             "mem": {"used": mem["used_gb"], "limit": mem["limit_gb"], "anon": mem["used_gb"], "src": "ephemeral"} if mem else None,
             "cpu_quota": float(nproc) if nproc else None,
             "cpu_used": cpu_used,
-            "started": rec.get("first_seen"),
+            "started": started_at,
             "press": {"thr": None, "psi": None, "nfs": None, "disk": None},
         }
         root = _root_for(hid)
@@ -747,6 +769,7 @@ def overview_hosts(projects: list[dict], prog: dict, colors: dict, t: float) -> 
         entry = {
             "id": hid, "label": rec.get("label") or hid, "ephemeral": True,
             "project": pid, "instance_id": rec["instance_id"],
+            "started_at": started_at, "accel": rec.get("accel"), "cu_rate": rec.get("cu_rate"),
             "error": None if online else (rec.get("down_reason") or "临时主机已离线"),
             "status_error": None, "status": st, "log": [], "done": done_rows[-60:],
             "lan_off": False, "auto": False, "platform": None, "borrow": None,
@@ -808,6 +831,9 @@ def as_probe(hid: str, t: float | None = None) -> tuple[dict | None, str | None]
         "ephemeral": True,
         "online": online,
         "instance_id": rec["instance_id"],
+        "started_at": rec.get("started_at") or rec.get("first_seen"),
+        "accel": rec.get("accel"),
+        "cu_rate": rec.get("cu_rate"),
         "down_at": rec.get("down_at"),
         "down_reason": rec.get("down_reason"),
         "lost_jobs": rec.get("lost_jobs") or [],
@@ -860,3 +886,137 @@ def remove_project(pid: str) -> None:
                             p.unlink()
                     except OSError:
                         pass
+
+
+def _user_colab_dir() -> Path:
+    return _dir() / "users"
+
+
+def _user_colab_file(user: str) -> Path:
+    if not isinstance(user, str) or not USER_ID_RE.fullmatch(user):
+        raise EphemeralError(400, f"用户名 {user!r} 不合法")
+    return _user_colab_dir() / f"{user}.json"
+
+
+def _blank_colab() -> dict:
+    return {
+        "enabled": False,
+        "balance": None,
+        "rate": None,
+        "active": None,
+        "updated": None,
+        "expire_at": None,
+    }
+
+
+def _norm_expire_at(raw) -> str | None:
+    """规范化用户填写的到期日/刷新日：接受 None、空串、YYYY-MM-DD 或 Unix 时间戳，统一存为 YYYY-MM-DD。"""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise EphemeralError(400, "expire_at 须为 YYYY-MM-DD 日期字符串或时间戳")
+    if isinstance(raw, (int, float)):
+        x = float(raw)
+        if not math.isfinite(x) or x <= 0 or x >= 4102444800:
+            raise EphemeralError(400, "expire_at 时间戳超出有效范围")
+        return time.strftime("%Y-%m-%d", time.localtime(x))
+    if isinstance(raw, str):
+        s = raw.strip()
+        if not s:
+            return None
+        if not DATE_RE.fullmatch(s):
+            raise EphemeralError(400, "expire_at 日期格式须为 YYYY-MM-DD")
+        try:
+            datetime.date.fromisoformat(s)
+        except ValueError as e:
+            raise EphemeralError(400, f"expire_at 不是有效日期：{s}") from e
+        return s
+    raise EphemeralError(400, "expire_at 须为 YYYY-MM-DD 日期字符串或时间戳")
+
+
+def get_colab(user: str) -> dict:
+    """读取指定登录用户的个人 Colab 状态（ephemeral/users/<user>.json）；绝不写入 hosts.toml。"""
+    if not isinstance(user, str) or not USER_ID_RE.fullmatch(user):
+        return _blank_colab()
+    raw = load_json(_user_colab_file(user), None)
+    if not isinstance(raw, dict):
+        return _blank_colab()
+    base = _blank_colab()
+    base["enabled"] = bool(raw.get("enabled", False))
+    for k in ("balance", "rate", "updated"):
+        v = raw.get(k)
+        if isinstance(v, (int, float)) and not isinstance(v, bool) and math.isfinite(float(v)):
+            base[k] = float(v)
+    act = raw.get("active")
+    if isinstance(act, int) and not isinstance(act, bool) and act >= 0:
+        base["active"] = act
+    exp = raw.get("expire_at")
+    if isinstance(exp, str) and DATE_RE.fullmatch(exp):
+        base["expire_at"] = exp
+    return base
+
+
+def colab_view(user: str) -> dict | None:
+    """供 users.view 注入快照的个人 my_colab 字段：仅本人可见，未启用时返回 None。"""
+    d = get_colab(user)
+    return d if d["enabled"] else None
+
+
+def save_colab(user: str, body: dict, *, t: float | None = None) -> dict:
+    """增量保存指定登录用户的个人 Colab 状态（走主备租约，存 ephemeral/users/<user>.json）。"""
+    LS.need("保存个人 Colab 状态")
+    t = time.time() if t is None else float(t)
+    if not isinstance(body, dict):
+        raise EphemeralError(400, "请求体须为 JSON 对象")
+    p = _user_colab_file(user)
+
+    with _locked():
+        cur = get_colab(user)
+        usage_touched = False
+        if "enabled" in body:
+            if not isinstance(body["enabled"], bool):
+                raise EphemeralError(400, "enabled 须为布尔值")
+            cur["enabled"] = body["enabled"]
+        if "balance" in body:
+            v = _num(body["balance"], "balance", lo=0.0, hi=1_000_000.0)
+            cur["balance"] = round(v, 2) if v is not None else None
+            if v is not None:
+                usage_touched = True
+        if "rate" in body:
+            v = _num(body["rate"], "rate", lo=0.0, hi=10_000.0)
+            cur["rate"] = round(v, 2) if v is not None else None
+            if v is not None:
+                usage_touched = True
+        if "active" in body:
+            v = body["active"]
+            if v is None:
+                cur["active"] = None
+            elif isinstance(v, bool) or not isinstance(v, int) or v < 0 or v > 100:
+                raise EphemeralError(400, "active 须为 0–100 的整数或 null")
+            else:
+                cur["active"] = v
+                usage_touched = True
+        if "expire_at" in body:
+            cur["expire_at"] = _norm_expire_at(body["expire_at"])
+        if "updated" in body:
+            v = _num(body["updated"], "updated", lo=0.0)
+            cur["updated"] = round(min(v, t + 60.0), 3) if v is not None else None
+        elif usage_touched:
+            cur["updated"] = round(t, 3)
+
+        p.parent.mkdir(parents=True, exist_ok=True)
+        save_json(p, cur)
+    return cur
+
+
+def remove_user_colab(user: str) -> None:
+    """删除账号时清理其个人 Colab 状态文件。"""
+    if not isinstance(user, str) or not USER_ID_RE.fullmatch(user):
+        return
+    with _locked():
+        p = _user_colab_file(user)
+        try:
+            if p.exists():
+                p.unlink()
+        except OSError:
+            pass
