@@ -465,6 +465,38 @@ class EphemeralServerApiTest(unittest.TestCase):
         self.assertEqual(code, 200)
         self.assertIn(b"def track(", raw)
 
+    def test_colab_http_api_auth_isolation_and_standby(self):
+        """#281：GET/POST /api/ephemeral/colab 与 /api/me 用户隔离、只读拒写、8 KiB 上限与备用拒写。"""
+        # 未登录 401
+        code, _ = self._req("/api/ephemeral/colab", {"enabled": True}, token=None)
+        self.assertEqual(code, 401)
+        # read 令牌 403
+        code, _ = self._req("/api/ephemeral/colab", {"enabled": True}, token=self.read_tok)
+        self.assertEqual(code, 403)
+        # 超 8 KiB 回 413
+        code, _ = self._req("/api/ephemeral/colab", {"pad": "x" * 9000}, token=self.amy_tok)
+        self.assertEqual(code, 413)
+        # amy 开启并上报
+        code, raw = self._req(
+            "/api/ephemeral/colab",
+            {"enabled": True, "balance": 42.5, "rate": 1.5, "active": 1, "expire_at": "2026-12-20"},
+            token=self.amy_tok,
+        )
+        self.assertEqual(code, 200)
+        self.assertEqual(json.loads(raw)["colab"]["balance"], 42.5)
+        # GET /api/ephemeral/colab 与 /api/me 按用户严格隔离（管理员也看不到 amy 的个人 Colab 额度）
+        code, raw_a = self._req("/api/ephemeral/colab", method="GET", token=self.amy_tok)
+        self.assertEqual((code, json.loads(raw_a)["balance"]), (200, 42.5))
+        code, raw_adm = self._req("/api/ephemeral/colab", method="GET", token=self.boss_tok)
+        self.assertEqual((code, json.loads(raw_adm)["balance"], json.loads(raw_adm)["enabled"]), (200, None, False))
+        code, raw_me = self._req("/api/me", method="GET", token=self.boss_tok)
+        self.assertEqual((code, json.loads(raw_me)["colab"]["enabled"]), (200, False))
+        # 备用看板拒绝写入
+        with mock.patch.object(LS, "primary", return_value=False), mock.patch.object(LS, "text", return_value="备用"):
+            code, raw_sb = self._req("/api/ephemeral/colab", {"balance": 10.0}, token=self.amy_tok)
+            self.assertEqual(code, 409)
+            self.assertTrue(json.loads(raw_sb).get("standby"))
+
 
 class EphemeralClientTest(unittest.TestCase):
     """零依赖客户端 labmon_ephemeral.py 单元测试（挂载防呆、statvfs、run 包装与 track()）。"""
@@ -615,6 +647,165 @@ class EphemeralClientTest(unittest.TestCase):
             self.assertTrue(fin_done.is_set())
             self.assertEqual(order[-1], (True, "done"))
             self.assertEqual(order[-2], (False, "running"))
+
+    def test_ca_unassign_and_tpu_cpu_detection(self):
+        """#281：--ca/LABMON_CA、--unassign 终态释放、TPU/CPU 规格识别与 started_at/accel/cu_rate 上报。"""
+        with tempfile.TemporaryDirectory() as td:
+            ca_file = Path(td) / "ca.pem"
+            ca_file.write_text("dummy-ca")
+            self.assertEqual(LE.resolve_ca(str(ca_file)), str(ca_file))
+            with mock.patch.dict(os.environ, {"LABMON_CA": str(ca_file)}):
+                self.assertEqual(LE.resolve_ca(None), str(ca_file))
+            with self.assertRaises(RuntimeError):
+                LE.resolve_ca(str(Path(td) / "missing.pem"))
+
+            # post_push 带 ca 时创建带 cafile 的 SSL 上下文
+            with mock.patch.object(LE.ssl, "create_default_context", return_value="CTX") as mk_ctx, \
+                    mock.patch.object(LE.urllib.request, "urlopen") as uopen:
+                resp = mock.MagicMock()
+                resp.status = 200
+                resp.read.return_value = b'{"ok": true}'
+                uopen.return_value.__enter__.return_value = resp
+                code, body = LE.post_push("https://board.example", "tok", {"a": 1}, ca=str(ca_file))
+                self.assertEqual(code, 200)
+                mk_ctx.assert_called_once_with(cafile=str(ca_file))
+                self.assertEqual(uopen.call_args.kwargs.get("context"), "CTX")
+
+        # TPU 与纯 CPU 规格识别
+        self.assertEqual(LE.detect_accel([{"name": "NVIDIA A100-SXM4-40GB"}]), "A100")
+        self.assertEqual(LE.detect_accel([{"name": "Tesla T4"}]), "T4")
+        self.assertEqual(LE.detect_accel([], env={"TPU_ACCELERATOR_TYPE": "v6e-1"}), "TPU v6e-1")
+        self.assertEqual(LE.detect_accel([], env={"COLAB_TPU_ADDR": "10.0.0.2:8470"}), "TPU")
+        self.assertEqual(LE.detect_accel([], env={}), "CPU")
+        hid_tpu = LE.default_host_id([], accel="TPU v6e-1")
+        self.assertTrue(hid_tpu.startswith("colab-tpu-v6e-1-"))
+        self.assertIn("TPU v6e-1", LE.default_label(hid_tpu, [], accel="TPU v6e-1"))
+        hid_cpu = LE.default_host_id([], accel="CPU")
+        self.assertTrue(hid_cpu.startswith("colab-cpu-"))
+
+        # --unassign 在 finish() 发送终态心跳之后才调用 unassign_runtime()
+        seq: list[str] = []
+
+        def fake_post(url, token, body, timeout=15.0, ca=None):
+            seq.append("push:" + ("close" if body.get("closing") else "open"))
+            return 200, {"ok": True, "warnings": []}
+
+        with mock.patch.object(LE, "collect_gpus", return_value=[]), \
+                mock.patch.object(LE, "unassign_runtime", side_effect=lambda: seq.append("unassign") or True):
+            tr = LE.EphemeralTracker(
+                url="http://127.0.0.1:9", token="lm_test", project="proj-a",
+                job="tpu_job", interval=60.0, unassign=True,
+                started_at=1700000000.0, accel="TPU v6e-1", cu_rate=2.4, poster=fake_post,
+            )
+            payload = tr.build_payload()
+            self.assertEqual(payload["started_at"], 1700000000.0)
+            self.assertEqual(payload["accel"], "TPU v6e-1")
+            self.assertEqual(payload["cu_rate"], 2.4)
+            tr.start()
+            tr.finish(ok=True, rc=0)
+            self.assertEqual(seq, ["push:open", "push:close", "unassign"])
+
+
+class EphemeralColabV2Test(unittest.TestCase):
+    """#281：个人 Colab 状态隔离存储、API 鉴权、started_at/accel/cu_rate 透传与删账号清理。"""
+
+    def setUp(self):
+        self.td = tempfile.TemporaryDirectory()
+        self.root = Path(self.td.name)
+        self.env = mock.patch.dict(os.environ, {
+            "LABMON_STATE": str(self.root / "state"),
+            "LABMON_HOSTS": str(self.root / "hosts.toml"),
+            "LABMON_NO_NOTIFY": "1",
+            "LABMON_NO_KEYCHAIN": "1",
+            "LABMON_LAN": "on",
+        })
+        self.env.start()
+        (self.root / "hosts.toml").write_text("")
+        LS.set_marker("primary", "test")
+
+    def tearDown(self):
+        self.env.stop()
+        self.td.cleanup()
+
+    def test_user_colab_storage_isolation_and_validation(self):
+        # 默认关闭
+        self.assertEqual(EP.get_colab("alice"), {
+            "enabled": False, "balance": None, "rate": None, "active": None, "updated": None, "expire_at": None,
+        })
+        self.assertIsNone(EP.colab_view("alice"))
+
+        # 增量保存：先由 CLI 推余额（不自动开启），再由前端开启并设到期日，两边互不覆盖
+        s1 = EP.save_colab("alice", {"balance": 88.5, "rate": 1.96, "active": 1}, t=1700001000.0)
+        self.assertFalse(s1["enabled"])
+        self.assertEqual(s1["balance"], 88.5)
+        self.assertEqual(s1["updated"], 1700001000.0)
+        self.assertIsNone(EP.colab_view("alice"))
+
+        s2 = EP.save_colab("alice", {"enabled": True, "expire_at": "2026-12-15"}, t=1700001050.0)
+        self.assertTrue(s2["enabled"])
+        self.assertEqual(s2["balance"], 88.5)
+        self.assertEqual(s2["expire_at"], "2026-12-15")
+        self.assertEqual(s2["updated"], 1700001000.0)
+        self.assertIsNotNone(EP.colab_view("alice"))
+
+        # 接受 Unix 时间戳作为 expire_at，拒绝非法日期
+        s3 = EP.save_colab("alice", {"expire_at": 1796083200}, t=1700001100.0)
+        self.assertRegex(s3["expire_at"], r"^\d{4}-\d{2}-\d{2}$")
+        with self.assertRaises(EP.EphemeralError):
+            EP.save_colab("alice", {"expire_at": "2026-02-31"})
+        with self.assertRaises(EP.EphemeralError):
+            EP.save_colab("alice", {"enabled": "yes"})
+
+        # 绝不写 hosts.toml
+        self.assertEqual((self.root / "hosts.toml").read_text(), "")
+
+        # 按用户严格隔离：users.view(alice) 见 alice；users.view(admin) 与 users.view(bob) 绝不见 alice 的 my_colab
+        base_snap = {"generated": 1700001200.0, "lan": True, "hosts": [], "projects": [], "archived": [],
+                     "rebalance": {}, "colors": {}, "regs": [], "occ": {}, "event_kinds": {}}
+        alice_id = U.Ident("alice", "user", frozenset({"read", "project"}), "session", "ka")
+        bob_id = U.Ident("bob", "user", frozenset({"read", "project"}), "session", "kb")
+        admin_id = U.Ident("admin", "admin", frozenset(U.SCOPES), "session", "kadm")
+
+        va = U.view(alice_id, base_snap)
+        vb = U.view(bob_id, base_snap)
+        vadm = U.view(admin_id, base_snap)
+        self.assertEqual(va["my_colab"]["balance"], 88.5)
+        self.assertIsNone(vb.get("my_colab"))
+        self.assertIsNone(vadm.get("my_colab"))
+        self.assertNotIn("my_colab", base_snap, "users.view 不得原地修改共享 snap")
+
+        # 删除账号同步清理个人 Colab 状态文件
+        EP.remove_user_colab("alice")
+        self.assertIsNone(EP.colab_view("alice"))
+        self.assertFalse(EP.get_colab("alice")["enabled"])
+
+    def test_push_started_at_accel_cu_rate_passthrough(self):
+        cfg_toml = 'id = "proj-v2"\ntitle = "V2"\n'
+        PJ.put_config("proj-v2", cfg_toml, by="admin")
+        t0 = 1793800000.0
+        EP.push({
+            "project": "proj-v2", "host_id": "colab-a100-01", "instance_id": "inst-a1",
+            "label": "Colab A100", "started_at": t0 - 7200.0, "accel": "A100", "cu_rate": 11.77,
+            "client_t": t0, "gpus": [{"index": 0, "name": "NVIDIA A100", "mem_used": 4096, "mem_total": 40960, "util": 60}],
+            "jobs": [{"id": "j1", "status": "running", "gpus": [0]}],
+        }, who="admin", t=t0)
+        # 同 instance_id 第二次心跳不传 accel/cu_rate 时应保留已落盘值且锚定 started_at
+        EP.push({
+            "project": "proj-v2", "host_id": "colab-a100-01", "instance_id": "inst-a1",
+            "started_at": t0 - 100.0, "client_t": t0 + 30.0,
+            "gpus": [{"index": 0, "name": "NVIDIA A100", "mem_used": 4096, "mem_total": 40960, "util": 65}],
+            "jobs": [{"id": "j1", "status": "running", "gpus": [0]}],
+        }, who="admin", t=t0 + 30.0)
+        ohs = EP.overview_hosts([{"id": "proj-v2"}], {}, {}, t0 + 35.0)
+        self.assertEqual(len(ohs), 1)
+        self.assertEqual(ohs[0]["accel"], "A100")
+        self.assertEqual(ohs[0]["cu_rate"], 11.77)
+        self.assertAlmostEqual(ohs[0]["started_at"], t0 - 7200.0, delta=1.0)
+        probe, err = EP.as_probe("colab-a100-01", t0 + 35.0)
+        self.assertIsNone(err)
+        self.assertEqual(probe["accel"], "A100")
+        self.assertEqual(probe["cu_rate"], 11.77)
+        self.assertAlmostEqual(probe["started_at"], t0 - 7200.0, delta=1.0)
 
 
 if __name__ == "__main__":

@@ -1,132 +1,175 @@
-# 临时算力（Google Colab 等无共享盘主机）
+# 临时算力（Google Colab 无头 CLI 与 Google Drive 规范）
 
-[SKILL.md](SKILL.md)「临时算力」的展开指南。面向 Google Colab、Kaggle 等**无 SSH 入口、无实验室共享盘、几小时可能被回收**的临时 GPU 节点。
+[SKILL.md](SKILL.md)「临时算力」的展开指南。面向 Google Colab 等**无 SSH 入口、无实验室共享盘、最长连续运行约 24 小时且可能随时被回收**的临时 GPU / TPU 节点。
 
-**职责分工**：labmon 只负责接收临时实例的推模式监控心跳、统一时间线、`labmon wait` 唤醒与存储余量提醒；**绝不承担**代码同步、文件传输或远端队列编排。数据与 checkpoint 的持久化、多实例防撞与断点续跑由实验会话按本指南落实。
+**职责分工（硬边界）**：
+- **labmon 只做轻量监控与按用户隔离的个人额度展示**：接收 `labmon_ephemeral.py` 的心跳、画统一时间线、发 `labmon wait` 唤醒、展示本人开启的 CU 摘要。
+- **绝不**把个人 Google OAuth 凭据交给看板、**绝不**让看板替用户抢卡、**绝不**把 labmon 当代码同步或文件传输服务。抢卡、挂载 Drive、环境与数据准备、断连续跑与停机收尾全部由实验会话按本指南完成。
 
 ---
 
-## 1. 两层存储分工与 Google Drive 目录布局
+## 1. 无头透明工作流（首选：`google-colab-cli`）
 
-Colab 本地盘 `/content` 读写快但回收即清零；Google Drive `/content/drive/MyDrive` 持久共享但小文件随机 I/O 慢且容易触发 FUSE 缓存延迟。务必区分两层：
+优先使用官方 `google-colab-cli`（`colab` 命令）在终端无头操作 Colab，**浏览器 Notebook 仅作兜底**。完整闭环按以下 6 步执行：
 
-- **热盘（`/content/work/`）**：存放解压后的小文件数据集、中间临时文件、高频日志。
-- **冷盘（`CLOUD_ROOT`，位于 Google Drive）**：存放只读压缩数据集、模型权重、每个任务独立的 checkpoint 与最终结果。
+### 步骤 1：分流决策 + 查余额并顺手推个人摘要
+1. 先看实验室卡况（`labmon status` / `labmon host list`）：仅当实验室 GPU 排队拥堵、需要 A100/L4/TPU 突发算力或短跑消融时才分流到 Colab；长周期多卡训练仍优先实验室主机。
+2. 查个人 Colab 余额与活跃实例：
+   ```bash
+   colab usage
+   ```
+3. 若用户在看板「我的账号 → 我的 Colab」开启了个人摘要，可顺手用标准库把余额、当前速率与活跃数推给看板（**仅本人可见**，走 `project` 令牌，绝不传 Google 凭据）：
+   ```python
+   python3 -c '
+   import json, os, urllib.request
+   req = urllib.request.Request(
+       os.environ["LABMON_URL"].rstrip("/") + "/api/ephemeral/colab",
+       data=json.dumps({"balance": 85.5, "rate": 1.96, "active": 1}).encode(),
+       headers={"Authorization": "Bearer " + os.environ["LABMON_TOKEN"], "Content-Type": "application/json"},
+   )
+   urllib.request.urlopen(req, timeout=15).read()
+   '
+   ```
 
-推荐统一目录布局：
+### 步骤 2：抢卡退避与阶梯降级（防风控）
+1. 按任务显存需求选目标规格，优先按性价比阶梯申请（例如 `A100` → `L4` / `G4` → `T4`，或 TPU `v6e-1`）。
+2. **退避与降级规则**：
+   - 目标规格无库存（quota / unavailable）时，**最多退避重试 2 次**（如间隔 30s、60s），切勿高频死循环刷 API 触发 Google 风控；
+   - 2 次仍无货则按阶梯降级到下一档可用规格，或回退实验室队列；
+   - 网络瞬断（TLS/连接重置）最多重试 1–2 次即报错交回决策。
+
+### 步骤 3：多实例并发隔离（`--config` + `-s`）
+同时开多台 Colab 跑不同 seed / 消融时，务必做到**三层隔离**：
+1. **CLI 会话隔离**：每个并发实例使用独立的 `--config <dir>` 与独立会话标识 `-s <session>`（避免复用同一个本地配置状态互相顶掉连接）。
+2. **看板与任务隔离**：不同实例分配不同 `--host-id`（如 `colab-l4-01`、`colab-l4-02`，不与 `hosts.toml` 重名，单项目最多 5 台同时在线）与不同 `--job`（如 `exp1_s0`、`exp1_s1`）。
+3. **产物目录隔离**：每个任务独占 `--artifact-dir` 子目录（`projects/<proj>/runs/<job_id>/`）；若误在两台实例跑了同一 `--job`，看板会立即返回 `warnings: ["duplicate_job:<job_id>"]` 并触发 `ephemeral_dup:` 告警——**立刻停掉多余实例**。
+
+### 步骤 4：挂载 Google Drive（`colab drivemount` 单次确认）
+1. 新实例启动后执行 `colab drivemount`（首次在当前账号/会话下按提示完成一次浏览器授权确认；后续同会话内可直接挂载到 `/content/drive/MyDrive`）。
+2. **禁止裸写未挂载路径**：启动训练前由 `labmon_ephemeral.py --drive-root /content/drive/MyDrive/labmon` 自动校验挂载点确为非根独立文件系统，未挂载直接退出码 2 拒绝启动，防止 checkpoint 悄悄写进 `/content` 容器盘在回收后丢失。
+
+### 步骤 5：启动训练（自动套 `labmon_ephemeral.py run --unassign` + 本地 `labmon wait`）
+1. 在远端实例用 Python 标准库获取零依赖客户端（Python 3.8+ 纯标准库；若公网入口使用自签名 CA，加 `--ca <ca.pem>` 或设 `LABMON_CA`）：
+   ```bash
+   python3 -c '
+   import os, urllib.request
+   req = urllib.request.Request(
+       os.environ["LABMON_URL"].rstrip("/") + "/api/client/ephemeral.py",
+       headers={"Authorization": "Bearer " + os.environ["LABMON_TOKEN"]},
+   )
+   with urllib.request.urlopen(req, timeout=15) as r, open("/content/labmon_ephemeral.py", "wb") as f:
+       f.write(r.read())
+   '
+   ```
+2. 按需把本次运行所需的最小代码包传到 `/content/work/src`（**不要把 git 仓库放进 Google Drive**），并把只读数据压缩包从 Drive 解压到热盘 `/content/work/data`。
+3. 统一用 `labmon_ephemeral.py run --unassign` 包装训练命令：
+   ```bash
+   python3 /content/labmon_ephemeral.py run \
+     --url "$LABMON_URL" \
+     --project proj-a \
+     --host-id colab-l4-01 \
+     --job exp1_s0 \
+     --est 90 \
+     --drive-root /content/drive/MyDrive/labmon \
+     --artifact-dir /content/drive/MyDrive/labmon/projects/proj-a/runs/exp1_s0 \
+     --unassign \
+     -- python3 /content/work/src/train.py \
+          --data /content/work/data \
+          --out /content/drive/MyDrive/labmon/projects/proj-a/runs/exp1_s0 \
+          --resume
+   ```
+   - 自动上报 `started_at`（看板显示 `已跑 Xh / 24h`）、`accel`（兼容 GPU / TPU / 纯 CPU）、`PROGRESS k/N` 进度与 `os.statvfs` 磁盘余量；
+   - 收到 `SIGTERM` 透传子进程并等待 `--grace`（默认 15s）回写最后一次 checkpoint；
+   - `--unassign` 在子进程结束并上报终态心跳后自动尝试 `google.colab.runtime.unassign()`，防止异常退出后实例空转烧 CU。
+4. 本地实验会话照常挂 `labmon wait --project proj-a --job exp1_s0` 等待完成或断连唤醒。
+
+### 步骤 6：断连续跑与强制 `colab stop` 收尾
+1. **断连 / 被回收后续跑**：超过 180s 无心跳看板自动标 `down`、把残留 `running` 结转 `failed` 并触发 `ephemeral_down:`（含 `artifact_dir`）唤醒 `labmon wait`。开新实例、挂载 Drive、核对 `<artifact_dir>/ckpt.pt` 完整性后，用相同 `--job` / `--artifact-dir` 和 `--resume` 续跑即可。
+2. **强制收尾**：实验跑完或提前中止后，**必须确认执行 `colab stop`（对应 `-s` / `--config`）** 并复核 `colab usage` 活跃数归零，避免 `--unassign` 在极端断网下未生效而持续空烧 CU；顺手推送一次最新的 `colab usage` 余额给看板。
+
+---
+
+## 2. Google Drive 共享盘目录规范（类比实验室 `/root/data1`）
+
+Colab 本地盘 `/content` 读写快但回收即清零；Google Drive `/content/drive/MyDrive` 持久但小文件随机 I/O 慢、易触发 FUSE 缓存延迟。**严格区分两层存储**：
+
+- **热盘（`/content/work/`，容器本地盘）**：代码工作目录、解压后的小文件数据集、中间缓存、高频训练日志（`/tmp/labmon_<job>.log`）。
+- **冷盘（`/content/drive/MyDrive/labmon/`，Google Drive 准共享盘）**：按「常驻共享层 + 项目隔离层」组织：
 
 ```text
-/content/drive/MyDrive/labmon/<project_id>/
-├── datasets/        # 只读压缩包（如 train.tar.gz），启动时解压到 /content/work/data/
-├── weights/         # 只读预训练权重
-└── runs/
-    └── <job_id>/    # 每个任务独占一个目录（上报为 --artifact-dir）
-        ├── ckpt.pt          # 原子回写的最新 checkpoint
-        ├── metrics.jsonl    # 指标日志
-        └── DONE             # 最终完成标记
+/content/drive/MyDrive/labmon/
+├── datasets/                          # [常驻共享层] 只读压缩数据集（如 imagenet_sub.tar.gz），启动时解压到 /content/work/data/
+├── weights/                           # [常驻共享层] 只读预训练权重（如 llama3-8b.safetensors）
+├── envs/                              # [常驻共享层] 可复用的 wheel 离线包或轻量环境脚本（非解压后的海量 venv）
+├── cache/                             # [常驻共享层] HuggingFace / Torch 大文件只读缓存（单文件为主）
+└── projects/
+    └── <project_id>/
+        └── runs/
+            └── <job_id>/              # [项目隔离层] 每个任务独占目录（上报为 --artifact-dir）
+                ├── ckpt.pt            # 原子替换（先写 .tmp 再 os.replace）的最新 checkpoint
+                ├── metrics.jsonl      # 追加指标日志
+                └── DONE               # 最终完成标记
+```
+
+### 严禁放进 Google Drive 的内容
+- **严禁放代码仓库（`.git/`）**：海量碎文件会拖垮 Drive FUSE 同步，且易产生冲突副本；代码按需打包/拉取到 `/content/work/src/`。
+- **严禁放临时小文件、高频日志与 TensorBoard 碎事件文件**：写到 `/content/work/` 或 `/tmp/`，阶段性汇总再落盘 Drive。
+- **严禁把海量碎图数据集直接解压在 Drive 里**：必须以单个 `.tar` / `.tar.gz` / `.parquet` / WebDataset 存在 `datasets/`，实例启动后解压到 `/content/work/data/` 读取。
+- **严禁存放令牌、私钥、OAuth 凭据明文**：`LABMON_TOKEN` 只经环境变量或 Colab Secrets 注入，绝不落盘 Drive。
+- **严禁对 Google Drive 跑 `du` / `find` 全盘扫描**：看板只用 `os.statvfs` 读总余量，剩余低于 1 GiB 会标红并触发 `ephemeral_disk_low:` 告警，收到后定向清理旧 `runs/` 目录。
+
+---
+
+## 3. 原子回写 checkpoint 模板
+
+```python
+import os, pathlib, torch
+
+def save_ckpt_atomic(state, path: pathlib.Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    torch.save(state, tmp)
+    os.replace(tmp, path)          # 同挂载点原子替换，避免断线留下半截坏文件
 ```
 
 ---
 
-## 2. 启动防呆：挂载、本地解压、原子回写（10 行模板）
+## 4. 兜底方案：浏览器 Notebook 接入
 
-Colab 偶发 Drive 未挂载，若直接向 `/content/drive/MyDrive/...` 写入，会把 checkpoint 悄悄写进本地容器盘、实例回收后全丢。
+仅在 `google-colab-cli` 不可用或需要交互式调试时退回浏览器 Notebook：
 
-1. **挂载并校验**（`labmon_ephemeral.py --drive-root` 也会在启动前自动校验其为真实挂载点且非 `/content` 同一文件系统，未挂载直接退出码 2 拒绝启动）：
+1. 在 Colab 左侧钥匙图标（Secrets）添加 `LABMON_URL` 与 `LABMON_TOKEN`（project 令牌），打开 Notebook 访问开关；**绝不硬编码进单元格**。
+2. 挂载 Drive 并下载客户端：
    ```python
-   from google.colab import drive
+   import os, urllib.request
+   from google.colab import drive, userdata
+
    drive.mount("/content/drive", force_remount=False)
+   os.environ["LABMON_URL"] = userdata.get("LABMON_URL")
+   os.environ["LABMON_TOKEN"] = userdata.get("LABMON_TOKEN")
+
+   req = urllib.request.Request(
+       os.environ["LABMON_URL"].rstrip("/") + "/api/client/ephemeral.py",
+       headers={"Authorization": "Bearer " + os.environ["LABMON_TOKEN"]},
+   )
+   with urllib.request.urlopen(req, timeout=15) as r, open("/content/labmon_ephemeral.py", "wb") as f:
+       f.write(r.read())
    ```
-2. **解压到热盘 + 训练 + 原子回写 checkpoint**：
+3. 使用上下文管理器 `track()`（同样支持 `unassign=True`、`ca=...`）：
    ```python
-   import os, shutil, tarfile, pathlib
+   import sys; sys.path.insert(0, "/content")
+   import labmon_ephemeral as LE
 
-   CLOUD_ROOT = pathlib.Path("/content/drive/MyDrive/labmon/proj-a")
-   WORK = pathlib.Path("/content/work")
-   ART_DIR = CLOUD_ROOT / "runs" / "colab_s1"
-   ART_DIR.mkdir(parents=True, exist_ok=True)
-   if not (WORK / "data").exists():
-       tarfile.open(CLOUD_ROOT / "datasets" / "data.tar.gz").extractall(WORK / "data")
-
-   def save_ckpt_atomic(state, path: pathlib.Path):
-       tmp = path.with_suffix(".tmp")
-       torch.save(state, tmp)
-       os.replace(tmp, path)          # 同挂载点原子替换，避免断线留下半截坏文件
+   with LE.track(
+       project="proj-a",
+       host_id="colab-t4-01",
+       job="exp1_s0",
+       est_min=90,
+       drive_root="/content/drive/MyDrive/labmon",
+       artifact_dir="/content/drive/MyDrive/labmon/projects/proj-a/runs/exp1_s0",
+       unassign=True,
+   ) as run:
+       for step in range(1, 101):
+           loss = train_one_step()
+           run.progress(step, 100, line=f"loss={loss:.4f}")
    ```
-
----
-
-## 3. 获取零依赖客户端并接入看板
-
-零依赖客户端 `labmon_ephemeral.py` 仅使用 Python 3.8+ 标准库，在 Colab 单元中用标准库即可下载：
-
-```python
-import os, urllib.request
-from google.colab import userdata
-
-os.environ["LABMON_URL"] = userdata.get("LABMON_URL")       # 看板地址
-os.environ["LABMON_TOKEN"] = userdata.get("LABMON_TOKEN")   # project 作用域令牌，绝不写进 Notebook 代码
-
-req = urllib.request.Request(
-    os.environ["LABMON_URL"].rstrip("/") + "/api/client/ephemeral.py",
-    headers={"Authorization": "Bearer " + os.environ["LABMON_TOKEN"]},
-)
-with urllib.request.urlopen(req, timeout=15) as r, open("/content/labmon_ephemeral.py", "wb") as f:
-    f.write(r.read())
-```
-
-### 方式 A：CLI 包装命令（推荐，自动捕获 `PROGRESS i/N` 与 `SIGTERM`）
-
-```bash
-python3 /content/labmon_ephemeral.py run \
-  --project proj-a \
-  --host-id colab-t4-01 \
-  --label "Colab T4 #1" \
-  --job colab_s1 \
-  --est 90 \
-  --drive-root /content/drive/MyDrive \
-  --artifact-dir /content/drive/MyDrive/labmon/proj-a/runs/colab_s1 \
-  -- python3 train.py --resume /content/drive/MyDrive/labmon/proj-a/runs/colab_s1/ckpt.pt
-```
-
-- 训练脚本照旧向 stdout 输出 `PROGRESS k/N`（flush），客户端会自动解析并上报，项目页自动计算速度与预计结束时间。
-- 收到 `SIGTERM`（Colab 即将回收前）会透传给子进程，等待最多 `--grace`（默认 15s）让训练写完最后一次 checkpoint，再上报最终状态退出。
-
-### 方式 B：Notebook 内 `track()` 上下文管理器
-
-```python
-import sys; sys.path.insert(0, "/content")
-import labmon_ephemeral as LE
-
-with LE.track(
-    project="proj-a",
-    host_id="colab-t4-01",
-    job="colab_s1",
-    est_min=90,
-    drive_root="/content/drive/MyDrive",
-    artifact_dir="/content/drive/MyDrive/labmon/proj-a/runs/colab_s1",
-) as run:
-    for step in range(1, 101):
-        loss = train_one_step()
-        run.progress(step, 100, line=f"loss={loss:.4f}")
-```
-
----
-
-## 4. 多 Colab 并发防撞检查表
-
-同时开多个 Colab 跑同一项目时，按以下 4 条防撞：
-
-1. **不同实例取不同 `--host-id`**（如 `colab-t4-01`、`colab-t4-02`），且不要与 `hosts.toml` 里的实验室主机重名；单项目最多 5 台同时在线。
-2. **不同实例跑不同 `--job`**（如 `exp1_s0`、`exp1_s1`），且每个任务独占 `--artifact-dir` 子目录（`runs/<job_id>/`）。
-3. **禁止多实例写同一个 checkpoint 或汇总文件**；若误在两台实例跑了同一个 `--job`，看板会立即在心跳响应里返回 `warnings: ["duplicate_job:<job_id>"]` 并在项目里产出 `ephemeral_dup:` 告警——**立刻停掉多余那台**。
-4. **关注云盘余量**：Google Drive 剩余低于 1 GiB 时看板会标红并产出 `ephemeral_disk_low:` 告警，且 `labmon disk` 会单列临时主机存储区，及时清理旧 `runs/` 目录避免写盘失败。
-
----
-
-## 5. 断连 / 被回收后续跑
-
-1. 临时实例超过 180 秒无心跳（默认 TTL）时，看板自动把残留 `running` 任务结转为 `failed` 并触发 `ephemeral_down:` 告警（含 `artifact_dir`），唤醒本地挂着的 `labmon wait`。
-2. 在新开的 Colab 实例重新挂载 Google Drive，核对 `<artifact_dir>/ckpt.pt` 是否完整。
-3. 用相同 `--job` 与 `--artifact-dir`、开启训练脚本的 `--resume` 重新运行即可（可沿用原 `--host-id` 或换新 `--host-id`，旧实例 `instance_id` 会自动结转、不冲突）。
-4. 切勿把 `LABMON_TOKEN` 写进 Notebook 单元格或保存到 Google Drive 文本文件中；优先使用 Colab Secrets（左侧钥匙图标）并开启 Notebook 访问权限。

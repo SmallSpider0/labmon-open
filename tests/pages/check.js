@@ -3335,21 +3335,30 @@ t("overview", "独立主机分类与域隔离（#114）：主机表与主机页�
 
 /* ---------- #213 推模式临时主机与云盘存储 ---------- */
 const OVEPH = J("overview_ephemeral.json"), PJEPH = J("project_ephemeral.json");
-t("overview", "推模式临时主机（#213）：总览标「临时」徽标、云盘余量与低余量标红、租期列写临时实例，主机页隐藏续租/借用/临时指令与实验室共享盘", () => {
+t("overview", "推模式临时主机与个人 Colab（#213、#281）：Colab 徽标、已跑 Xh/24h、云盘低余量标红、个人摘要默认隐藏与开启展示、主机页运行时小条", () => {
   const C = ovCtx(OVEPH, RR);
   ok(run(C, 'hostShort({id: "colab-t4-01", ephemeral: true})') === "临时 colab-t4-01", "hostShort 临时前缀");
   const home = page(C, "#/"); clean(home, "ephemeral #/");
-  has(home, '<span class="badge b-mute">临时</span>');
-  has(home, "临时实例");
+  has(home, "Colab · T4");
+  has(home, "Colab · TPU v6e-1");
+  has(home, "已跑 3.5h / 24h");
+  has(home, "已跑 21h / 24h");
+  ok(!home.includes("我的 Colab"), "未启用 my_colab 时总览完全隐藏个人摘要");
   has(home, "Google Drive 剩 12.4 GiB");
   has(home, 'style="color:var(--bad);font-weight:600"', "云盘 < 1 GiB 标红");
   has(home, "Google Drive 剩 0.6 GiB");
   has(home, "临时离线");
   ok(!run(C, 'alertsOf(D.hosts.find(h => h.id === "colab-t4-01"))').some(a => a.msg.includes("worker 不在")), "在线临时主机不报 worker 不在");
   ok(!run(C, 'alertsOf(D.hosts.find(h => h.id === "colab-l4-down"))').some(a => a.msg.includes("labmon worker start")), "离线临时主机不提示 labmon worker start");
-  // 主机页：展示实例 id、项目链接、云盘/本地盘资源卡，不显示续租、借用、接上卡、临时指令/队列/本地盘选项卡
+  // 开启个人 my_colab 且有数据时，主机表上方渲染一行紧凑个人摘要
+  const withColab = JSON.parse(JSON.stringify(OVEPH));
+  withColab.my_colab = {enabled: true, balance: 85.5, rate: 1.96, active: 1, updated: withColab.generated - 120, expire_at: "2026-12-01"};
+  const homeC = page(ovCtx(withColab, RR), "#/"); clean(homeC, "ephemeral my_colab #/");
+  has(homeC, "我的 Colab"); has(homeC, "85.5 CU"); has(homeC, "1.96 CU/hr"); has(homeC, "活跃 <b>1</b> 台");
+  // 主机页：展示紧凑 Colab 运行时信息条（硬件、已跑时长、Drive/本地盘余量、断连续跑提示），隐藏续租/借用/临时指令
   const hp = page(C, "#/host/colab-t4-01"); clean(hp, "ephemeral #/host/colab-t4-01");
-  has(hp, "inst-t4-01"); has(hp, "临时在线"); has(hp, "Google Drive"); has(hp, "Colab 本地盘");
+  has(hp, "Colab 运行时"); has(hp, "inst-t4-01"); has(hp, "已跑 3.5h / 24h"); has(hp, "约 1.96 CU/hr");
+  has(hp, "断连后挂载 Drive"); has(hp, "临时在线"); has(hp, "Google Drive"); has(hp, "Colab 本地盘");
   has(hp, "colab_s1"); ok(!hp.includes("旧队列"), "临时主机任务不应标成旧队列");
   ok(!hp.includes("续租"), "临时主机页不应出现续租");
   ok(!hp.includes("借用详情"), "临时主机页不应出现借用详情");
@@ -3365,17 +3374,17 @@ t("overview", "推模式临时主机（#213）：总览标「临时」徽标、�
   // 恶意字符串在临时主机字段里必须全部转义
   const badSnap = JSON.parse(JSON.stringify(OVEPH));
   const bh = badSnap.hosts.find(h => h.id === "colab-t4-01");
-  bh.label = "云" + BAD; bh.instance_id = "id" + BAD;
+  bh.label = "云" + BAD; bh.instance_id = "id" + BAD; bh.accel = "T4" + BAD;
   bh.storage[0].label = "盘" + BAD; bh.storage[0].path = "/drv/" + BAD;
   bh.status.running[0].artifact_dir = "/art/" + BAD;
   const BC = ovCtx(badSnap, RR);
   clean(page(BC, "#/"), "ephemeral evil #/");
   clean(page(BC, "#/host/colab-t4-01"), "ephemeral evil #/host/colab-t4-01");
 });
-t("project", "项目页临时主机与云盘存储（#213）：资源卡区隔实验室共享盘与云盘、云盘 < 1 GiB 标红、时间线与明细展示 artifact_dir 及三类告警", () => {
+t("project", "项目页临时主机与云盘存储（#213、#281）：Colab 徽标、资源卡区隔实验室共享盘与云盘、云盘 < 1 GiB 标红、时间线与明细展示 artifact_dir 及三类告警", () => {
   const C = pjCtx(PJEPH, EVN), h = app(C);
   clean(h, "ephemeral project");
-  has(h, "Colab T4 #1"); has(h, "临时");
+  has(h, "Colab T4 #1"); has(h, "Colab · T4");
   has(h, "/content/drive/MyDrive/labmon/proj-a/runs/colab_s1");
   has(h, "临时主机 Colab L4 离线（colab-l4-down）心跳超时离线");
   // 资源卡：第一台实验室主机（srv-a）仍展示共享盘，临时主机展示云盘与本地盘且 < 1 GiB 标红
@@ -3802,13 +3811,13 @@ t("overview", "前端 UI 打磨（#237）：分段按钮组、外部机抽屉重
 });
 
 ta("overview", "#241 补齐 4 处前端实用入口：Colab 引导、本地工作盘清理、单机指令撤销与普通用户空态导航", async () => {
-  // 1. Colab 临时 worker 接入引导（我的账号 → 命令行）
+  // 1. 「我的账号 → 概览」的默认折叠「我的 Colab」区与 google-colab-cli 接入引导（#241、#281）
   const meHtml = page(mkCtx(ovSrc, OV, {hash: "#/me", filename: "overview.js", path: "/pfx/"}), "#/me");
   clean(meHtml, "我的账号 Colab 引导");
-  has(meHtml, "Colab / 临时上报");
+  has(meHtml, "我的 Colab"); has(meHtml, "默认关闭");
+  has(meHtml, "google-colab-cli 无头接入");
   has(meHtml, 'href="api/client/ephemeral.py" download="labmon_ephemeral.py"');
-  has(meHtml, 'from google.colab import userdata; os.environ[&quot;LABMON_TOKEN&quot;] = userdata.get(&quot;LABMON_TOKEN&quot;)');
-  has(meHtml, "!python3 labmon_ephemeral.py run --url http://127.0.0.1:8765/pfx --project &lt;项目ID&gt; --job &lt;任务名&gt; -- python3 train.py");
+  has(meHtml, "python3 labmon_ephemeral.py run --url http://127.0.0.1:8765/pfx --project &lt;项目ID&gt; --job &lt;任务名&gt; --unassign -- python3 train.py");
   has(meHtml, "LABMON_TOKEN"); has(meHtml, 'href="#/me/tokens"');
 
   // 2. 独立主机本地工作盘缓存预览与清理（POST /api/worker/clean）

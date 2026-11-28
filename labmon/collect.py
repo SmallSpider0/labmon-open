@@ -613,7 +613,10 @@ def _hosts(cfg: dict, probes: dict, lan_off: bool, glob_snap: dict, snap: dict, 
             online = bool(p and p.get("online"))
             hd = {"id": h["id"], "label": h["label"], "ephemeral": True, "ok": online,
                   "error": None if online else (p.get("down_reason") or err or "已离线" if p else err),
-                  "instance_id": p.get("instance_id") if p else None}
+                  "instance_id": p.get("instance_id") if p else None,
+                  "started_at": p.get("started_at") if p else None,
+                  "accel": p.get("accel") if p else None,
+                  "cu_rate": p.get("cu_rate") if p else None}
             raw_by_host[h["id"]] = p
             rec = {"t": t, "host": h["id"], "ok": online}
             if p:

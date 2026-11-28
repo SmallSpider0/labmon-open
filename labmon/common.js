@@ -354,8 +354,44 @@ function alertBox(al, open = false) {
 }
 // 主机的名字只有三种写法：短名 hostShort（表格的主机列、小图与时间线的行名、车道名、KPI 的注；直接借来的叫「借 EVA」，其余用 id）；
 // 全名 h.label（主机清单里写的，借来的是「节点（借 EVA）」：告警、标题、悬停里的整句话）；组内服务器 fName「使用人（id）」（overview.html）
-// pool：项目快照里的算力池；ephemeral：推模式临时主机（#213）
+// pool：项目快照里的算力池；ephemeral：推模式临时主机（#213、#281）
 const hostShort = h => h.pool ? h.label || "算力池" : h.ephemeral ? `临时 ${h.id}` : h.borrow && !h.borrow.swap ? `借 ${h.borrow.holder}` : h.id;
+const isColabHost = h => !!(h?.ephemeral && (/^colab/i.test(h.id || "") || /colab/i.test(h.label || "") || h.accel));
+// Colab / 临时主机徽标（两页共用，#281）：有硬件规格时副标与悬停可见
+function ephemeralBadge(h) {
+  if (!h?.ephemeral) return "";
+  const colab = isColabHost(h), acc = h.accel ? String(h.accel) : "";
+  const lines = [colab ? "Colab 推模式临时实例" : "推模式临时主机",
+    acc ? `硬件规格：${acc}` : "",
+    h.cu_rate != null ? `估算消耗：约 ${h.cu_rate} CU/hr` : "",
+    h.instance_id ? `实例：${h.instance_id}` : ""].filter(Boolean);
+  const text = colab ? (acc ? `Colab · ${acc}` : "Colab") : "临时";
+  return `<span class="badge b-mute" ${tip(lines.join("\n"))}>${esc(text)}</span>`;
+}
+// 临时主机已跑时长（相对 24h 参考上限，#281）：有 started_at 时显示「已跑 Xh / 24h」，无时回退「临时实例」
+function ephemeralUptime(h, now) {
+  const s = h?.started_at || h?.status?.info?.started;
+  if (!s || !now) return {html: `<span class="mut">临时实例</span>`, tip: "推模式临时实例（无固定租期）"};
+  const hrs = Math.max(0, (now - s) / 3600);
+  const txt = `已跑 ${hrs < 10 ? hrs.toFixed(1) : Math.round(hrs)}h / 24h`;
+  const col = hrs >= 23 ? "color:var(--bad);font-weight:600" : hrs >= 20 ? "color:var(--warn);font-weight:600" : "";
+  return {
+    html: `<span${col ? ` style="${col}"` : ""}>${txt}</span>`,
+    tip: `实例 ${ts(s)} 启动，已运行 ${dur(Math.max(0, now - s))}（Colab 最长连续运行参考 24h，请确保 checkpoint 原子写入 Google Drive）`,
+  };
+}
+// 个人 Colab 手动到期/刷新日提醒（#281）
+function colabExpireInfo(expireAt, nowSec) {
+  if (!expireAt || typeof expireAt !== "string") return null;
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(expireAt.trim());
+  if (!m) return null;
+  const target = new Date(+m[1], +m[2] - 1, +m[3], 23, 59, 59).getTime() / 1000;
+  const days = Math.floor((target - (nowSec || Date.now() / 1000)) / 86400);
+  if (days < 0) return {text: `已过期 ${-days} 天（${expireAt}）`, level: "bad", tip: `手动填写的到期/刷新日 ${expireAt} 已过`};
+  if (days === 0) return {text: `今日到期（${expireAt}）`, level: "bad", tip: `手动填写的到期/刷新日为今天 ${expireAt}`};
+  if (days <= 3) return {text: `${days} 天后到期（${expireAt}）`, level: "warn", tip: `手动填写的到期/刷新日为 ${expireAt}`};
+  return {text: `到期 ${expireAt}（剩 ${days} 天）`, level: null, tip: `手动填写的到期/刷新日为 ${expireAt}`};
+}
 // 车道名：车道的 label（采集时按主机编号的“车道 N”，接可选的用途），后面接清单名（清单文件名去掉扩展名，#47：登记多了好认），
 // 页面上有几台真主机时前面加主机短名。lane {host: 主机 id, label, queue?: 清单路径}，hosts 是页面上的主机表；laneLabel 不带主机（时间线行挂在主机表头下面）。
 // 算力池（#89）不是主机、不算进“几台”：池里待放的车道总写「算力池」在前，免得和真主机的“车道 1”混在一起
