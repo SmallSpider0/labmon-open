@@ -5333,6 +5333,75 @@ class OffersTest(UnitBase):
         self.offer(qs, self.heads(qs))
         self.assertEqual([o for o in self.w.offer if o["project"] == "pa"], [])
 
+    def test_done_after_dep_not_treated_as_blocking_or_inserted_before(self):
+        # #273：目标清单里有行写了 after=pre_done，但 pre_done 早已完成（dep_waiting 为假）：
+        # 不再误判阻塞、不插队（before 为 None，接在末尾）；挪来的行写了已完成 after= 也不标 dep、不排到最后
+        self.hosts.usage("t", [usage_row("pre_done", "pa", self.now - 7200, self.now - 3600, ram_peak=1.0, vram_peak=1000.0, gpus=["GPU-a"])])
+        self.w.reload_hist()
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(5)]
+                    + ["a5|true   # est_min=120 vram=20 after=pre_done"], run=1)
+        q, r = self.local_lane(["b0|true   # est_min=60 vram=20", "b1|true   # est_min=60 vram=20 after=pre_done"], name="r")
+        o = self.cross([q], [r])
+        self.assertEqual((o["lane"], o["before"]), ([q["root"], "jobs/r.txt"], None))
+        self.assertTrue(o["jobs"])
+        self.assertFalse(o["jobs"][0]["dep"])
+        s = self.suggest()["pa"]
+        if not s.get("local"):
+            self.assertIn("接在 %s/jobs/r.txt 后面" % q["root"], s["text"])
+            self.assertNotIn("插在", s["text"])
+            self.assertNotIn("放最后", s["text"])
+
+    def test_fast_lane_not_inserted_into_slower_target_lane(self):
+        # #273：源主机快车道（5 小时后完）绝不被挪去目标主机更晚完工的慢车道（12 小时后完）插队；
+        # 无论目标清单里的 after= 是已完成还是仍在等别处不相关的任务，只要目标清单不等源候选行，都不挪
+        self.hosts.usage("t", [usage_row("pre_done", "pa", self.now - 7200, self.now - 3600, ram_peak=1.0, vram_peak=1000.0, gpus=["GPU-a"])])
+        self.w.reload_hist()
+        self.origin(["a0|true   # est_min=120 vram=20", "a1|true   # est_min=120 vram=20", "a2|true   # est_min=120 vram=20"], run=1)
+        # 1) 目标慢车道含已完成 after=pre_done（共 12 小时）
+        q_done, r_done = self.local_lane(["b0|true   # est_min=360 vram=20", "b1|true   # est_min=360 vram=20 after=pre_done"], name="r_done")
+        o1 = self.cross([q_done], [r_done])
+        self.assertEqual((o1["jobs"], o1["before"]), ([], None))
+        self.assertNotIn("pa", self.suggest())
+        # 2) 目标慢车道含真实未满足的外部依赖 after=ext_wait（与 a1/a2 无关，目标清单 12 小时后完）
+        self.origin(["ext_wait|true   # est_min=360 vram=20"], run=6, host="o2", name="ext")
+        q_wait, r_wait = self.local_lane(["b1|true   # est_min=360 vram=20 after=ext_wait"], name="r_wait")
+        o2 = self.cross([q_wait], [r_wait])
+        self.assertEqual((o2["jobs"], o2["before"]), ([], None))
+        self.assertNotIn("pa", self.suggest())
+
+    def test_rebalance_rejects_makespan_regression_including_idle_gain(self):
+        # #273：rebalance.suggest 硬底线（含空机按行比 _idle_gain）：若挪动后含被插队车道 own 在内的新完工 new 晚于原全局 makespan f，直接拒绝
+        t, H = self.now, self.H
+        base_offer = {
+            "project": "pa", "lane": ["/r", "jobs/slow.txt"], "before": "b1", "idle": True,
+            "free": t + 12 * H,
+            "ends": {"o|/r|jobs/fast.txt": t + 4 * H},
+            "why": None, "stop": None,
+            "jobs": [{"host": "o", "root": "/r", "queue": "jobs/fast.txt", "name": "a1",
+                      "there": t + 4 * H, "rest": t + 2 * H, "end": t + 2 * H, "own": t + 14 * H, "dep": False}],
+        }
+        # own=14h > f=12h：尽管 there-end=2h 满足 _idle_gain，仍被硬底线拒绝
+        hosts_bad = [{"id": "t", "label": "t", "worker_up": True, "status": {"offers": [base_offer]}}]
+        self.assertEqual(RB.suggest(hosts_bad, None, t), {})
+        # 对照：own=12h == f=12h（不恶化全局 makespan）时，空机按行比照常生效
+        ok_offer = dict(base_offer, jobs=[dict(base_offer["jobs"][0], own=t + 12 * H)])
+        hosts_ok = [{"id": "t", "label": "t", "worker_up": True, "status": {"offers": [ok_offer]}}]
+        s = RB.suggest(hosts_ok, None, t)["pa"]
+        self.assertTrue(s["idle"])
+        self.assertEqual((s["target"], s["jobs"][0]["name"]), ("t", "a1"))
+
+    def test_real_waiting_after_dep_still_inserts_before(self):
+        # #273：目标清单确实存在未满足的 after= 依赖（b1 等别处还在跑的 ext_wait），且源清单比目标清单更晚时，仍保留合理插队
+        self.origin(["a%d|true   # est_min=120 vram=20" % i for i in range(6)], run=1)
+        self.origin(["ext_wait|true   # est_min=240 vram=20"], run=4, host="o2", name="ext")
+        q, r = self.local_lane(["b0|true   # est_min=60 vram=20", "b1|true   # est_min=60 vram=20 after=ext_wait"], name="r_real")
+        o = self.cross([q], [r])
+        self.assertEqual((o["lane"], o["before"]), ([q["root"], "jobs/r_real.txt"], "b1"))
+        self.assertTrue(o["jobs"])
+        s = self.suggest()["pa"]
+        self.assertIn("插在 %s/jobs/r_real.txt 里 b1 前面" % q["root"], s["text"])
+        self.assertLess(s["to"], s["from"])
+
 
 class ForecastTest(UnitBase):
     """推演写进状态的 plan（forecast）：运行中的单元是 run 条，等待中的单元排在它后面、after 写着等谁，放不下的写原因；输入没变不重算。"""

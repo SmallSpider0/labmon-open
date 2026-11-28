@@ -145,6 +145,8 @@ class OffersMixin:
             tgt = sorted((q for q in qs if q["project"] == p and q["kind"] == "queue"
                           and self.list_env(info[q["key"]]["root"], info[q["key"]]["queue"]) == env),
                          key=lambda q: ends.get((info[q["key"]]["root"], info[q["key"]]["queue"])) or now)[:1]
+            if tgt and cands:
+                cands = self._trim_for_target(p, cands, tgt[0], ends.get((info[tgt[0]["key"]]["root"], info[tgt[0]["key"]]["queue"])))
             o["lane"] = [info[tgt[0]["key"]]["root"], info[tgt[0]["key"]]["queue"]] if tgt and cands else None
             o["before"] = self.move_before(p, cands, tgt[0]) if o["lane"] else None
             src = {(ln["host"], ln["root"], ln["queue"]): ln["end"] for ln in lns}    # 原处各清单挪走前 k 行后何时跑完
@@ -155,18 +157,31 @@ class OffersMixin:
                     break
                 c = cands[k - 1]
                 o["jobs"].append(dict({x: v for x, v in c.items() if x not in ("h", "i", "lane")}, end=got[0], own=got[1],
-                                      dep=bool(c["h"]["deps"] or c["h"]["deps_any"])))
+                                      dep=self.dep_waiting(p, c["h"])))
                 src[(c["host"], c["root"], c["queue"])] = c["rest"]
                 if self.moved_past(got[0], list(src.values())):
                     break
         out += self.local_offers(own, others, now, waiters, renew, cx)
         return out
 
+    def _trim_for_target(self, p, cands, q, tgt_end):
+        """目标为已有清单 q（原推演预计完工 tgt_end）时，禁止把原处预计完工已不晚于目标清单的行挪去插队（快车道挪向慢车道）；
+        目标清单中正在等依赖的行（dep_waiting）直接或间接依赖该候选行时除外（#167 汇总行等训练行）。"""
+        if tgt_end is None or not cands:
+            return cands
+        cap = round(tgt_end)
+        waiters = [(p, x["name"]) for x in q["jobs"] if self.dep_waiting(p, x)]
+        for i, c in enumerate(cands):
+            if c["there"] is not None and c["there"] <= cap:
+                if not (waiters and self.dep_reaches(waiters, {(p, c["name"])})):
+                    return cands[:i]
+        return cands
+
     def move_before(self, p, cands, q):
-        """项目 p 挪来的几行 cands 接进本机清单 q（这一遍推演里的那条，forecast 的 qs 项）时插在哪一行前面：q 里第一条写了 after=/afterany= 的行
-        （它要等别的任务，清单顺序也算依赖，接在它后面会被它堵住，#43）；挪来的有（直接或经别的清单间接）等它或它后面哪一行的不插
-        （插在前面就成环，Codex 审 #63），为 None：接在末尾。跨主机接过来（offers）与同机挪到另一条清单（lane_offer）共用。"""
-        b = next((x["name"] for x in q["jobs"] if x["deps"] or x["deps_any"]), None)
+        """项目 p 挪来的几行 cands 接进本机清单 q（这一遍推演里的那条，forecast 的 qs 项）时插在哪一行前面：q 里第一条仍有未满足
+        after=/afterany= 依赖（dep_waiting）的行（它要等别的任务，清单顺序也算依赖，接在它后面会被它堵住，#43；前置已 done 的不插队）；
+        挪来的有（直接或经别的清单间接）等它或它后面哪一行的不插（插在前面就成环，Codex 审 #63），为 None：接在末尾。跨主机接过来（offers）与同机挪到另一条清单（lane_offer）共用。"""
+        b = next((x["name"] for x in q["jobs"] if self.dep_waiting(p, x)), None)
         if b:
             tj = [x["name"] for x in q["jobs"]]
             if self.dep_reaches([k[:2] for c in cands for k in _DP.dep_keys(dict(c["h"], project=p))], {(p, n) for n in tj[tj.index(b):]}):
@@ -247,13 +262,13 @@ class OffersMixin:
                 return
             c = cands[k - 1]
             o["jobs"].append(dict({x: v for x, v in c.items() if x not in ("h", "i", "lane")}, end=got[0], own=got[1],
-                                  dep=bool(c["h"]["deps"] or c["h"]["deps_any"]), rest=got[2].get((c["root"], c["queue"]), round(now))))
+                                  dep=self.dep_waiting(p, c["h"]), rest=got[2].get((c["root"], c["queue"]), round(now))))
             if self.moved_past(got[0], [got[1]]):
                 return
 
     def lane_offer(self, p, lns, free, now, waiters, cx, ends):
         """同机挪到另一条清单（#110）：本机这个项目排得最晚的清单（同卡几条车道争卡、它排在别的车道后面才跑完，或只是行多）队尾几行，
-        接到本机同一种环境（目录与 .env，list_env）、预计最早跑完的另一条清单后面（那条里有写了 after= 的行就插在它前面，move_before），整批能提前多少。
+        接到本机同一种环境（目录与 .env，list_env）、预计最早跑完的另一条清单后面（那条里有仍有未满足 after= 依赖的行就插在它前面，move_before），整批能提前多少。
         不加车道、同时跑的条数不变，所以不看卡的余量（local_cards）、只有提示值的 GPU 行照挪；挑行（move_cands）、推演（local_moves → try_move：
         从原队列拿掉、接进那条清单）、看板的门槛都同跨主机的。返回 offers 的一项（local: true，lane 是接在后面的那条 [目录, 清单]），
         没有能挪的为 None（不写原因，同新开车道）。lns：本机这个项目在原处跑得了的清单（proj_lanes）；free：本机这个项目原推演里何时跑完；
@@ -269,6 +284,9 @@ class OffersMixin:
             return None
         cands, why = self.move_cands([ln for ln in lns if ln is not tgt], now, waiters)
         q = next(q for q in cx["qs"] if q["key"] == keys[(tgt["root"], tgt["queue"])])
+        cands = self._trim_for_target(p, cands, q, tgt["end"])
+        if not cands:
+            return None
         o = {"project": p, "local": True, "lane": [tgt["root"], tgt["queue"]], "before": self.move_before(p, cands, q), "free": round(free),
              "jobs": [], "why": why, "stop": None, "gpus": None, "ends": ends}
         self.local_moves(o, p, cands, q["key"], cx, now)
@@ -379,7 +397,7 @@ class OffersMixin:
             f = self.dur_k(dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"]))   # 与 forecast 拼本机清单行同口径：dur 取此刻的 k，durk 给推演按开跑时同卡的条数取
             jobs.append(self.job_spec(c["name"], c["h"], _S.estimate(self.hist, dict(c["h"], name=c["name"], project=p, root=c["root"], queue=c["queue"])),
                                       (f(self.k_now()) or {}).get("min"), f, (f(self.k_now()) or {}).get("cut")))
-        jobs = [x for x in jobs if not (x["deps"] or x["deps_any"])] + [x for x in jobs if x["deps"] or x["deps_any"]]
+        jobs = [x for x in jobs if not self.dep_waiting(p, x)] + [x for x in jobs if self.dep_waiting(p, x)]
         key, n0 = tgt or "offer:" + p, 0
         for i, q in enumerate(qs):
             if q["key"] == key:
