@@ -14,22 +14,13 @@
 
 ### 步骤 1：分流决策 + 查余额并顺手推个人摘要
 1. 先看实验室卡况（`labmon status` / `labmon host list`）：仅当实验室 GPU 排队拥堵、需要 A100/L4/TPU 突发算力或短跑消融时才分流到 Colab；长周期多卡训练仍优先实验室主机。
-2. 查个人 Colab 余额与活跃实例：
+2. 查个人 Colab 余额与活跃实例，并一键同步到看板（**仅本人可见**，绝不向看板上传 Google OAuth 凭据）：
    ```bash
-   colab usage
+   labmon colab sync           # 本机调用 colab usage 解析并推送到 POST /api/ephemeral/colab
+   labmon colab sync --enable  # 同步并顺手开启总览「我的 Colab」个人摘要
+   labmon colab sync --dry-run # 仅打印解析结果，不推送
    ```
-3. 若用户在看板「我的账号 → 我的 Colab」开启了个人摘要，可顺手用标准库把余额、当前速率与活跃数推给看板（**仅本人可见**，走 `project` 令牌，绝不传 Google 凭据）：
-   ```python
-   python3 -c '
-   import json, os, urllib.request
-   req = urllib.request.Request(
-       os.environ["LABMON_URL"].rstrip("/") + "/api/ephemeral/colab",
-       data=json.dumps({"balance": 85.5, "rate": 1.96, "active": 1}).encode(),
-       headers={"Authorization": "Bearer " + os.environ["LABMON_TOKEN"], "Content-Type": "application/json"},
-   )
-   urllib.request.urlopen(req, timeout=15).read()
-   '
-   ```
+   若本机未装或未登录 `google-colab-cli`，命令会返回非零并打印安装/登录指引（`colab login`）。也可在看板「我的账号 → 概览 → 我的 Colab」直接复制按本人项目生成的接入命令并查看在线实例。
 
 ### 步骤 2：抢卡退避与阶梯降级（防风控）
 1. 按任务显存需求选目标规格，优先按性价比阶梯申请（例如 `A100` → `L4` / `G4` → `T4`，或 TPU `v6e-1`）。
@@ -83,9 +74,10 @@
    - `--unassign` 在子进程结束并上报终态心跳后自动尝试 `google.colab.runtime.unassign()`，防止异常退出后实例空转烧 CU。
 4. 本地实验会话照常挂 `labmon wait --project proj-a --job exp1_s0` 等待完成或断连唤醒。
 
-### 步骤 6：断连续跑与强制 `colab stop` 收尾
+### 步骤 6：断连续跑、网页远程安全停机与强制 `colab stop` 收尾
 1. **断连 / 被回收后续跑**：超过 180s 无心跳看板自动标 `down`、把残留 `running` 结转 `failed` 并触发 `ephemeral_down:`（含 `artifact_dir`）唤醒 `labmon wait`。开新实例、挂载 Drive、核对 `<artifact_dir>/ckpt.pt` 完整性后，用相同 `--job` / `--artifact-dir` 和 `--resume` 续跑即可。
-2. **强制收尾**：实验跑完或提前中止后，**必须确认执行 `colab stop`（对应 `-s` / `--config`）** 并复核 `colab usage` 活跃数归零，避免 `--unassign` 在极端断网下未生效而持续空烧 CU；顺手推送一次最新的 `colab usage` 余额给看板。
+2. **网页远程安全停机止损**：在看板主机详情页或「我的账号 → 概览 → 我的 Colab」点「停止实例」（或调用 `POST /api/ephemeral/<host_id>/stop`，仅本人有写权限的项目可用），看板记录 `want_stop` 并在下次心跳（≤30s）返回 `action: "stop"`。`labmon_ephemeral.py run` 收到后会向子进程发 `SIGTERM`、等 `--grace` 回写 checkpoint、上报终态并**自动尝试 `google.colab.runtime.unassign()`** 释放实例止损（即使未传 `--unassign`；Notebook `track()` 模式也可在循环里检查 `run.stop_requested` 提前保存并退出）。
+3. **强制收尾**：实验跑完或提前中止后，**必须确认执行 `colab stop`（对应 `-s` / `--config`）** 并复核 `colab usage` 活跃数归零，避免 `--unassign` 在极端断网下未生效而持续空烧 CU；顺手执行 `labmon colab sync` 同步最新余额给看板。
 
 ---
 

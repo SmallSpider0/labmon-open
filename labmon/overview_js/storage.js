@@ -349,6 +349,59 @@ function workDiskBlock(wd, h) {
     + foot;
 }
 const canEditExt = h => !!(h?.standalone && LIVE && ME && (ME.admin ? canOps() : ME.write && h.owner && h.owner.toLowerCase() === ME.name.toLowerCase()));
+// 临时主机单向远程安全停止（POST /api/ephemeral/<id>/stop，#288）：主机详情页与「我的 Colab」共用唯一实现
+let EPH_STOP_MSG = null, EPH_STOP_ERR = null, EPH_STOP_T = 0;
+function canStopEphemeral(h) {
+  if (!LIVE || !ME?.write || !h?.ephemeral || !h.worker_up) return false;
+  if (ME.admin) return true;
+  return !!(h.project && (ME.own || []).includes(h.project));
+}
+function ephStopPop(h, where = "host") {
+  if (!canStopEphemeral(h)) return "";
+  if (h.want_stop) {
+    return `<button type="button" class="btn mini-btn" disabled ${tip("已下发停止指令，客户端将在下次心跳（≤30s）触发优雅终止并尝试释放运行时")}>已下发停止，等待下次心跳生效（≤30s）</button>`;
+  }
+  const key = `${h.id}:${where}`, open = popIs("eph-stop", key);
+  const btn = `<button type="button" class="btn mini-btn danger" data-ephstop="open" data-host="${esc(h.id)}" data-where="${esc(where)}" aria-haspopup="dialog" aria-expanded="${open}">停止实例</button>`;
+  const body = open ? `<b>停止临时实例 ${esc(h.label || h.id)}？</b>
+    <div class="rn-note">将向该实例下发远程停止指令：下次心跳（≤30s）会向训练进程发送 <code>SIGTERM</code>，等待 <code>--grace</code> 回写 checkpoint，上报终态后自动尝试 <code>google.colab.runtime.unassign()</code> 释放实例止损。</div>
+    ${POP.err ? `<div class="rn-err">${esc(POP.err)}</div>` : ""}` : "";
+  const go = `<button type="button" class="btn pri dz" data-ephstop="go" data-host="${esc(h.id)}" data-where="${esc(where)}" ${POP?.busy ? "disabled" : ""}>${POP?.busy ? "下发中…" : "确认停止"}</button>`;
+  return popConfirm(btn, open, body, go, true);
+}
+async function ephStopAct(act, d = {}) {
+  const host = d.host || "", where = d.where || "host", h = (D.hosts || []).find(x => x.id === host);
+  if (!h || !canStopEphemeral(h) || h.want_stop) return;
+  const key = `${host}:${where}`;
+  if (act === "open") {
+    popToggle("eph-stop", key, {busy: false, err: null});
+    EPH_STOP_ERR = null;
+    return render(false);
+  }
+  if (act === "go" && popIs("eph-stop", key) && !POP.busy) {
+    const pop = POP;
+    pop.busy = true; pop.err = null; render(false);
+    try {
+      const r = await postJSON(`api/ephemeral/${encodeURIComponent(host)}/stop`, {});
+      const j = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(j.error || "HTTP " + r.status);
+      h.want_stop = true;
+      h.stop_by = j.stop_by || ME?.name || null;
+      h.stop_at = j.stop_at || Date.now() / 1000;
+      if (POP === pop) popClose();
+      EPH_STOP_ERR = null;
+      EPH_STOP_MSG = {host, where, m: j.msg || "已下发停止，等待下次心跳生效（≤30s）"};
+      clearTimeout(EPH_STOP_T);
+      EPH_STOP_T = setTimeout(() => { EPH_STOP_MSG = null; render(false); }, 30000);
+      render(false);
+      if (ME?.admin) collectNow(true); else poll();
+    } catch (e) {
+      if (POP === pop) { pop.busy = false; pop.err = e.message || String(e); }
+      else EPH_STOP_ERR = {host, where, m: e.message || String(e)};
+      render(false);
+    }
+  }
+}
 // 概况条：租期、容器、本地依赖（续租会清空本地盘），空闲时续租按钮也在这里
 function hostStrip(h) {
   const info = h.status?.info || {}, now = D.generated;
@@ -369,7 +422,10 @@ function hostStrip(h) {
     }
     es += it("zap", `<span class="mut">断连后挂载 Drive 从任务独占目录 <code>--resume</code> 续跑</span>`,
       "Colab 临时实例可能随时回收：请把 checkpoint 原子写入 Google Drive 独占目录，并建议加 --unassign 防任务结束后空烧 CU");
-    return `<div class="card strip"><div class="info"><div class="line">${es}</div></div></div>`;
+    const stopBtn = ephStopPop(h, "host");
+    const msg = EPH_STOP_MSG?.host === h.id && EPH_STOP_MSG?.where === "host" ? `<div class="rn-state">${esc(EPH_STOP_MSG.m)}</div>` : "";
+    const err = EPH_STOP_ERR?.host === h.id && EPH_STOP_ERR?.where === "host" ? `<div class="rn-err">${esc(EPH_STOP_ERR.m)}</div>` : "";
+    return `<div class="card strip"><div class="info"><div class="line">${es}</div></div>${stopBtn ? `<div class="rn">${stopBtn}</div>` : ""}${msg}${err}</div>`;
   }
   const deps = h.status?.local?.jobs || [], bad = deps.filter(r => !r.heal), miss = missW(h);
   let s = "";

@@ -14,7 +14,11 @@ import datetime
 import fcntl
 import json
 import math
+import os
 import re
+import shutil
+import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -621,6 +625,10 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
             eff_started_at = float(first_seen)
         eff_accel = raw_accel if raw_accel is not None else (old.get("accel") if same_inst else None)
         eff_cu_rate = round(raw_cu_rate, 2) if raw_cu_rate is not None else (old.get("cu_rate") if same_inst else None)
+        # 远程停止指令仅对同一在线 instance_id 生效；closing=True 或换新 instance_id 时自动清除
+        want_stop = bool(old.get("want_stop")) if (same_inst and not closing) else False
+        stop_by = old.get("stop_by") if want_stop else None
+        stop_at = old.get("stop_at") if want_stop else None
 
         rec = {
             "host_id": hid,
@@ -630,6 +638,9 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
             "ttl_s": ttl_s,
             "state": state,
             "closing": closing,
+            "want_stop": want_stop,
+            "stop_by": stop_by,
+            "stop_at": stop_at,
             "down_at": down_at,
             "down_reason": down_reason,
             "lost_jobs": lost_jobs,
@@ -654,14 +665,17 @@ def push(body: dict, *, who: str | None = None, who_role: str = "admin", t: floa
         dups = _dup_running_unlocked([r for r in recs if r["host_id"].lower() != hid.lower()], pid, iid, jobs) if state == "online" else []
         warnings = [f"duplicate_job:{jid}" for jid in dups]
 
-    return {
+    resp: dict = {
         "ok": True,
         "server_t": round(t, 3),
         "host_id": hid,
         "next_s": NEXT_HEARTBEAT_S,
         "warnings": warnings,
         "project": pid,
-    }, wake
+    }
+    if want_stop and state == "online":
+        resp["action"] = "stop"
+    return resp, wake
 
 
 def _job_eta(j: dict, prog_map: dict, pid: str, t: float) -> float:
@@ -770,6 +784,9 @@ def overview_hosts(projects: list[dict], prog: dict, colors: dict, t: float) -> 
             "id": hid, "label": rec.get("label") or hid, "ephemeral": True,
             "project": pid, "instance_id": rec["instance_id"],
             "started_at": started_at, "accel": rec.get("accel"), "cu_rate": rec.get("cu_rate"),
+            "want_stop": bool(rec.get("want_stop")) if online else False,
+            "stop_by": rec.get("stop_by") if (online and rec.get("want_stop")) else None,
+            "stop_at": rec.get("stop_at") if (online and rec.get("want_stop")) else None,
             "error": None if online else (rec.get("down_reason") or "临时主机已离线"),
             "status_error": None, "status": st, "log": [], "done": done_rows[-60:],
             "lan_off": False, "auto": False, "platform": None, "borrow": None,
@@ -1020,3 +1037,170 @@ def remove_user_colab(user: str) -> None:
                 p.unlink()
         except OSError:
             pass
+
+
+def owner_project(hid: str) -> str | None:
+    """读取已落盘临时主机所属的项目 id（供路由层权限校验使用）；不存在或标识非法时返回 None。"""
+    if not isinstance(hid, str) or not HOST_ID_RE.fullmatch(hid):
+        return None
+    rec = load_json(_file(hid), None)
+    if isinstance(rec, dict) and isinstance(rec.get("project"), str):
+        return rec["project"]
+    return None
+
+
+def request_stop(hid: str, *, who: str, t: float | None = None) -> dict:
+    """下发临时主机单向远程安全停止指令（走主备租约，等待下次心跳返回 action='stop' 生效）。"""
+    LS.need("远程停止临时主机")
+    t = time.time() if t is None else float(t)
+    if not isinstance(hid, str) or not HOST_ID_RE.fullmatch(hid):
+        raise EphemeralError(400, f"临时主机标识 {hid!r} 不合法")
+    with _locked():
+        recs = _expire_unlocked(t)
+        rec = next((r for r in recs if r["host_id"] == hid), None)
+        if rec is None:
+            raise EphemeralError(404, f"找不到临时主机 {hid}")
+        if rec.get("state") != "online":
+            raise EphemeralError(409, f"临时主机 {hid} 当前已离线，无需停止")
+        already = bool(rec.get("want_stop"))
+        if not already:
+            rec = dict(rec)
+            rec["want_stop"] = True
+            rec["stop_by"] = who
+            rec["stop_at"] = round(t, 3)
+            save_json(_file(hid), rec)
+            log_events([{
+                "kind": "stop",
+                "host": hid,
+                "project": rec["project"],
+                "who": who,
+                "msg": f"{who} 下发临时主机 {rec.get('label') or hid} 远程停止指令（等待下次心跳生效）",
+            }], t)
+    return {
+        "ok": True,
+        "host_id": hid,
+        "project": rec["project"],
+        "want_stop": True,
+        "stop_by": rec.get("stop_by"),
+        "stop_at": rec.get("stop_at"),
+        "msg": "已下发停止指令，将在下次心跳（≤30s）触发优雅终止并尝试释放实例",
+    }
+
+
+_COLAB_BALANCE_RE = re.compile(r"current\s+balance\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+_COLAB_RATE_RE = re.compile(r"usage\s+rate\s*[:=]\s*([0-9]+(?:\.[0-9]+)?)", re.IGNORECASE)
+_COLAB_ACTIVE_RE = re.compile(r"active\s+assignments\s*[:=]\s*([0-9]+)", re.IGNORECASE)
+_COLAB_AUTH_ERR_RE = re.compile(
+    r"not\s+logged\s+in|login\s+required|please\s+run\s+.*colab\s+login|oauth|unauthorized|unauthenticated|no\s+credentials|credentials\s+not\s+found|invalid_grant",
+    re.IGNORECASE,
+)
+
+
+def find_colab_bin(explicit: str | None = None) -> str:
+    """按 --colab-bin → PATH 中的 colab → ~/.local/bin/colab 顺序查找 google-colab-cli 可执行文件。"""
+    if explicit:
+        p = Path(explicit).expanduser()
+        if p.is_file() and os.access(p, os.X_OK):
+            return str(p)
+        resolved = shutil.which(explicit)
+        if resolved:
+            return resolved
+        raise FileNotFoundError(f"指定的 colab 可执行文件不存在或不可执行：{explicit}")
+    found = shutil.which("colab")
+    if found:
+        return found
+    local_bin = Path("~/.local/bin/colab").expanduser()
+    if local_bin.is_file() and os.access(local_bin, os.X_OK):
+        return str(local_bin)
+    raise FileNotFoundError(
+        "未找到 google-colab-cli（colab 命令）。请在本机安装并登录：\n"
+        "  pip install google-colab-cli   # 或 pipx install google-colab-cli\n"
+        "  colab login\n"
+        "若已安装在其他路径，可用 --colab-bin /path/to/colab 指定。"
+    )
+
+
+def parse_colab_usage(text: str) -> dict:
+    """解析 `colab usage` 输出中的 Current balance、Usage rate、Active assignments。"""
+    out: dict = {}
+    m = _COLAB_BALANCE_RE.search(text or "")
+    if m:
+        out["balance"] = round(float(m.group(1)), 2)
+    m = _COLAB_RATE_RE.search(text or "")
+    if m:
+        out["rate"] = round(float(m.group(1)), 2)
+    m = _COLAB_ACTIVE_RE.search(text or "")
+    if m:
+        out["active"] = int(m.group(1))
+    return out
+
+
+def sync_colab_usage(*, colab_bin: str | None = None, dry_run: bool = False, enable: bool = False) -> int:
+    """本机 CLI `labmon colab sync`：调用 `colab usage` 并推送个人 CU 摘要到看板（绝不上传 Google 凭据）。"""
+    from . import client
+
+    try:
+        exe = find_colab_bin(colab_bin)
+    except FileNotFoundError as e:
+        print(f"[labmon] {e}", file=sys.stderr)
+        return 3
+    try:
+        proc = subprocess.run([exe, "usage"], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as e:
+        print(f"[labmon] 执行 `{exe} usage` 失败：{e}", file=sys.stderr)
+        return 3
+    combined = "\n".join(x for x in (proc.stdout, proc.stderr) if x).strip()
+    if proc.returncode != 0:
+        if _COLAB_AUTH_ERR_RE.search(combined):
+            print(
+                "[labmon] 本机 google-colab-cli 尚未登录 Google 账号或登录已过期。\n"
+                "请先在本机终端执行 `colab login` 完成 OAuth 登录后重试（看板绝不托管个人 Google 凭据）。",
+                file=sys.stderr,
+            )
+            if combined:
+                print(f"[labmon] 原始输出：{combined[:300]}", file=sys.stderr)
+            return 3
+        print(f"[labmon] `{exe} usage` 退出码 {proc.returncode}：{combined[:300] or '无输出'}", file=sys.stderr)
+        return 3
+    parsed = parse_colab_usage(combined)
+    if not parsed:
+        if _COLAB_AUTH_ERR_RE.search(combined):
+            print(
+                "[labmon] 本机 google-colab-cli 尚未登录 Google 账号。请先执行 `colab login` 登录后重试。",
+                file=sys.stderr,
+            )
+            return 3
+        print(
+            "[labmon] 无法从 `colab usage` 输出中解析 Current balance / Usage rate / Active assignments。\n"
+            f"[labmon] 原始输出：{combined[:300] or '（空）'}",
+            file=sys.stderr,
+        )
+        return 3
+    payload = dict(parsed)
+    if enable:
+        payload["enabled"] = True
+    if dry_run:
+        print(json.dumps(payload, ensure_ascii=False, indent=2))
+        return 0
+    try:
+        res = client.call("POST", "/api/ephemeral/colab", payload)
+    except client.Failed as e:
+        print(f"[labmon] 同步个人 Colab 摘要失败：{e.msg}", file=sys.stderr)
+        return 3
+    except client.Unreachable as e:
+        print(f"[labmon] {e}", file=sys.stderr)
+        return 2
+    colab = res.get("colab") if isinstance(res, dict) else {}
+    parts = []
+    if "balance" in parsed:
+        parts.append(f"剩余 {parsed['balance']} CU")
+    if "rate" in parsed:
+        parts.append(f"当前速率 {parsed['rate']} CU/hr")
+    if "active" in parsed:
+        parts.append(f"活跃 {parsed['active']} 台")
+    summary = "，".join(parts)
+    if isinstance(colab, dict) and not colab.get("enabled"):
+        print(f"[labmon] 已同步个人 Colab 摘要（{summary}）；总览摘要当前为关闭，可加 --enable 或在「我的账号 → 我的 Colab」开启。")
+    else:
+        print(f"[labmon] 已同步个人 Colab 摘要（{summary}）。")
+    return 0

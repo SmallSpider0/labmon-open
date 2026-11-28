@@ -723,6 +723,15 @@ class Handler(BaseHTTPRequestHandler):
                 return False
             U.need_holder(who, str(body.get("id") or ""))
             return True
+        if r.own == "ephemeral_stop":                  # 临时主机单向远程停止（#288）：管理员或该实例所属项目的主人
+            if who.role == "admin":
+                return True
+            m = EPHEMERAL_STOP_PATH.fullmatch(path)
+            hid = unquote(m[1]) if m else ""
+            pid = EP.owner_project(hid)
+            if pid is not None:
+                U.need_project(who, pid)
+            return True
         if who.role == "admin" or r.own == "self" or (r.own is None and r.method == "GET"):
             return True
         if r.own is None:
@@ -1366,6 +1375,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(200, res)
             if act == "ephemeral/colab":
                 return self._json(200, {"ok": True, "colab": EP.save_colab(who.name, body)})
+            esm = EPHEMERAL_STOP_PATH.fullmatch("/api/" + act)
+            if esm:
+                hid = unquote(esm[1])
+                res = EP.request_stop(hid, who=who.name)
+                pid = res.get("project")
+                if pid and (p := self.board.projects.get(pid)):
+                    p.wake.set()
+                self.board.overview.wake.set()
+                log(f"临时主机：{who.name} 下发远程停止 {hid}")
+                return self._json(200, res)
             r = self._cli(act, body, who)
             if r is not None:
                 return self._json(*r)
@@ -2035,6 +2054,7 @@ PROJECT_CONFIG_PATH = re.compile(r"/api/project/([^/]+)/config")
 PROJECT_READ_PATH = re.compile(r"/api/project/([^/]+)/(status|disk|records)")   # 实验会话的只读命令（#52）：labmon status、disk、records
 EXT_HOST_PATH = re.compile(r"/api/hosts/external/([^/]+)")                      # 外部主机改/删（#114）：PUT / DELETE
 EXT_HOST_ACT = re.compile(r"/api/hosts/external/([^/]+)/(test|key)")            # 外部主机测试/密钥（#114）：POST
+EPHEMERAL_STOP_PATH = re.compile(r"/api/ephemeral/([^/]+)/stop")                # 临时主机心跳单向远程安全停止（#288）：POST
 CLI_READS = re.compile(r"/api/(hosts|disk|project/[^/]+/(config|status|disk|records)|client/wheel|reports)")     # 命令行读的接口：备用上同样回 409 standby（_standby），命令行接着找主那台
 STANDBY_OK = re.compile(r"/api/(login|setup|logout|password|tokens/add|revoke|users/.*|admin/deploy)")
 
@@ -2059,7 +2079,7 @@ class Route(NamedTuple):
 OPEN = ""
 # own（#167，Handler._own）：普通用户的这个请求按什么核。path 地址里的项目要是他的；new 同 path，还没登记的也放（第一次推就登记）；
 # body 请求体的 project；worker、override、init、wait、reg 见 _own；self 只动自己的账号；fleet_srv 本人持有服务器的曲线（#211）；fleet_manage 切换本人服务器接入（#224）；ext_host 外部主机（#114）。
-OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self", "host_assign", "fleet_srv", "fleet_manage", "ext_host")
+OWN = ("path", "new", "body", "report", "worker", "override", "init", "wait", "reg", "self", "host_assign", "fleet_srv", "fleet_manage", "ext_host", "ephemeral_stop")
 _R = lambda m, p, scope, admin=False, lan=False, own=None, ops=False: Route(m, re.compile(p), scope, admin, lan, own, ops)   # noqa: E731
 # 看板服务的路由表（#160）：每条路由要什么权限只在这里写；Handler._allow 按它调 users.check。
 # 没登记的路径 GET 按 read、POST 与 PUT 按管理员的 admin（新写路由忘了登记时从严）。平台操作由 ops 核对账号入口许可；部署等纯内网路由用 lan。
@@ -2073,6 +2093,7 @@ ROUTES = [
     _R("POST", r"/api/ephemeral/push", "project", own="body"),          # 推模式临时主机心跳上报（#213，ephemeral.py）
     _R("GET", r"/api/ephemeral/colab", "read"),                         # 个人 Colab 额度摘要读取（#281，仅本人）
     _R("POST", r"/api/ephemeral/colab", ("project", U.ACCOUNT), own="self"),   # 个人 Colab 额度开关/到期日/CLI 上报（#281）
+    _R("POST", EPHEMERAL_STOP_PATH.pattern, ("project", U.ACCOUNT), own="ephemeral_stop"),  # 临时主机单向远程停机（#288）
     _R("GET", r"/api/admin/deploy", "deploy", admin=True),             # 部署（#164）：在跑哪个提交、平台操作、日志里的 Traceback
     _R("GET", r"/api/admin/backup", "backup", admin=True, lan=True),   # 冷备（#163）：笔记本每天经内网入口来取一份（backup pull），不含秘密；公网入口不给（#17）
     _R("POST", r"/api/admin/deploy", "deploy", admin=True, lan=True),  # 收 git bundle 快进、重启：等于在这台上跑新代码，只在内网入口

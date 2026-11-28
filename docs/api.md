@@ -109,6 +109,7 @@ curl -s -X POST -H "Authorization: Bearer $(cat ~/.config/labmon/deploy.token)" 
 | `POST /api/fleet/manage`（组员服务器切换接入本人调度 / 仅监控，#224） | `project`；`own="fleet_manage"`：普通用户仅限持有人本人（`users.need_holder`，非持有人或不存在 403），管理员须具平台操作许可（`users.can_ops`）；仅主服务可写 |
 | `POST /api/ephemeral/push`（推模式临时主机心跳上报，#213、#281） | `project`；校验 `project` 归属（`users.need_project`），单请求 ≤ 128 KiB，仅主服务可写 |
 | `GET /api/ephemeral/colab`、`POST /api/ephemeral/colab`（个人 Colab 额度摘要，#281） | `GET` 要 `read`，`POST` 要 `project` 或浏览器会话（`own="self"`，单请求 ≤ 8 KiB，仅主服务可写）；按登录用户严格隔离，仅本人可见 |
+| `POST /api/ephemeral/<host_id>/stop`（临时主机单向远程安全停机，#288） | `project` 或浏览器会话（`own="ephemeral_stop"`，仅主服务可写）；按该实例所属项目校验写权限（`users.need_project`），无权回 403、离线回 409、不存在回 404 |
 | `GET /api/project/<id>/(status\|disk\|records)`（实验会话的只读命令，#52） | `read`；普通用户只看自己的项目（`users.need_project`） |
 | `POST /project/owner`、`/project/delete` | `admin`，只给管理员 |
 | `POST /api/wait`、`/api/project/<id>/check`、`/api/project/init`、`/api/worker/(add\|rm\|status\|fit\|clean)`、`/api/override/(pause\|resume)`（[命令行](#命令行162)） | `project`；普通用户只改自己下的暂停，项目级的与带 `--host` 的同一条（`users.need_pause`，#16、#27）；`worker/clean` 普通用户必须指定本人名下 `--project` |
@@ -387,9 +388,10 @@ labmon records [项目 id] [--host H] [--cat C] [-q 词] [-n 30] [--json]   # �
     }
     ```
   - **配额与限流**：单项目最多 **5 台**同时在线临时主机（超限回 429）；同一 `host_id` 两次上报至少间隔 **5 秒**（超限回 429，`closing: true` 与包含任务终态跃迁的心跳放行）；跨项目抢占在线 `host_id` 回 409；项目已归档回 409。
-  - **响应**：`{"ok": true, "server_t": ..., "host_id": "...", "next_s": 30, "warnings": ["duplicate_job:<job_id>"], "project": "..."}`。当同项目存在 ≥ 2 台在线临时实例同时上报相同 `job_id` 为 `running` 时返回 `warnings`，并在项目快照中生成 `ephemeral_dup:` 告警。
+  - **响应**：`{"ok": true, "server_t": ..., "host_id": "...", "next_s": 30, "warnings": ["duplicate_job:<job_id>"], "project": "..."}`（若当前在线 `instance_id` 已被下发远程停止，另带 `"action": "stop"`）。当同项目存在 ≥ 2 台在线临时实例同时上报相同 `job_id` 为 `running` 时返回 `warnings`，并在项目快照中生成 `ephemeral_dup:` 告警。
+  - **心跳单向远程安全停机（#288）**：`POST /api/ephemeral/<host_id>/stop`（`project` 作用域或浏览器会话，走 `lease.need`，普通用户严格按该实例所属 `project` 经 `users.need_project` 校验，无权回 403、已离线回 409、不存在回 404）。在 `ephemeral/<host_id>.json` 记录 `want_stop: true`、`stop_by`、`stop_at` 并记入事件日志；下次同 `instance_id` 的心跳响应返回 `"action": "stop"`，客户端 `labmon_ephemeral.py` 收到后触发与 `SIGTERM` 相同的优雅终止链路并自动尝试 `google.colab.runtime.unassign()` 释放实例止损；上报 `closing: true` 或换新 `instance_id` 时自动清除 `want_stop`。
   - **超时结转与清理**：在线超过 `ttl_s`（看板重启宽限取 `max(last_seen, RUNNING["started"])`）自动标 `down`，将残留 `running` 任务结转为 `failed`（`rc=-1`），复用 `overview._keep_usage` 写入 `overview/usage/<host_id>.jsonl` 并生成 `ephemeral_down:` 告警；离线满 1 小时（无丢失任务）总览隐藏卡片，离线满 7 天自动清理状态文件与 `series`，保留 30 天用量历史。
-- **个人 Colab 额度摘要（#281）**：按登录用户隔离存在 `<state_dir>/ephemeral/users/<user>.json`（绝不写入 `hosts.toml`）。
+- **个人 Colab 额度摘要与本机同步（#281、#288）**：按登录用户隔离存在 `<state_dir>/ephemeral/users/<user>.json`（绝不写入 `hosts.toml`）。
   - `GET /api/ephemeral/colab`（`read` 作用域）：读取当前登录用户自己的 `{enabled, balance, rate, active, updated, expire_at}`（`GET /api/me` 同样带 `colab` 字段）。
-  - `POST /api/ephemeral/colab`（`project` 作用域或浏览器会话，上限 8 KiB，走 `lease.need`）：增量合并保存本人字段（`enabled` 布尔默认 `false`、`balance` 剩余 CU、`rate` 当前 CU/hr、`active` 活跃实例数、`expire_at` 手动到期日/刷新日接受 `YYYY-MM-DD` 或 Unix 时间戳）。
+  - `POST /api/ephemeral/colab`（`project` 作用域或浏览器会话，上限 8 KiB，走 `lease.need`）：增量合并保存本人字段（`enabled` 布尔默认 `false`、`balance` 剩余 CU、`rate` 当前 CU/hr、`active` 活跃实例数、`expire_at` 手动到期日/刷新日接受 `YYYY-MM-DD` 或 Unix 时间戳）。本机命令行可直接跑 `labmon colab sync [--colab-bin PATH] [--dry-run] [--enable]` 自动调用 `colab usage` 解析并推送。
   - **严格按人隔离**：全局快照本身不含任何人的 `my_colab`；`users.view` 仅为当前登录用户本人注入 `my_colab`（且仅在 `enabled: true` 时非空），其他用户与管理员均不可见他人的个人 Colab 额度；删除账号时同步清理该状态文件。

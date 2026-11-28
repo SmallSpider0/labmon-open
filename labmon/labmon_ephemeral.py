@@ -414,6 +414,7 @@ class EphemeralTracker:
         started_at: Optional[float] = None,
         accel: Optional[str] = None,
         cu_rate: Optional[float] = None,
+        on_stop=None,
         poster=post_push,
     ) -> None:
         check_drive_mount(drive_root, allow_unmounted=allow_unmounted)
@@ -422,6 +423,7 @@ class EphemeralTracker:
         self.project = project
         self.job_id = job
         self._poster = poster
+        self._on_stop = on_stop
         self.ca = resolve_ca(ca) if ca is not None else None
         self.unassign = bool(unassign)
         self.cu_rate = cu_rate
@@ -442,6 +444,8 @@ class EphemeralTracker:
         self._lock = threading.Lock()
         self._push_lock = threading.Lock()
         self._stop = threading.Event()
+        self._remote_stop = threading.Event()
+        self.stop_reason: Optional[str] = None
         self._finished = False
         self._thread: Optional[threading.Thread] = None
         self._start_ts = time.time()
@@ -453,6 +457,11 @@ class EphemeralTracker:
         self._last_line: Optional[str] = None
         self._log_mtime: Optional[float] = None
         self._warned: set = set()
+
+    @property
+    def stop_requested(self) -> bool:
+        """是否已收到看板下发的单向远程安全停止指令（action == 'stop'）。"""
+        return self._remote_stop.is_set()
 
     def progress(self, current: int, total: int, line: Optional[str] = None) -> None:
         """手动更新当前任务的进度（Notebook 模式常用）。"""
@@ -520,12 +529,13 @@ class EphemeralTracker:
         return payload
 
     def push_once(self, *, closing: bool = False) -> Tuple[int, Dict[str, Any]]:
+        trigger_stop = False
+        code, body = 0, {}
         with self._push_lock:
             if not closing and self._finished:
                 return 0, {}
             payload = self.build_payload(closing=closing)
             retries = 3 if closing else 1
-            code, body = 0, {}
             for attempt in range(retries):
                 if attempt > 0:
                     payload["client_t"] = round(time.time(), 3)
@@ -538,15 +548,28 @@ class EphemeralTracker:
                         if w not in self._warned:
                             self._warned.add(w)
                             print("[labmon-ephemeral] 警告：{}".format(w), file=sys.stderr, flush=True)
-                    return code, body
+                    if not closing and body.get("action") == "stop":
+                        if not self._remote_stop.is_set():
+                            self._remote_stop.set()
+                            self.stop_reason = "看板远程停止"
+                            trigger_stop = True
+                    break
                 if code in (400, 401, 403, 404, 413):
                     print("[labmon-ephemeral] 上报被拒（HTTP {}）：{}".format(code, body.get("error") or body), file=sys.stderr, flush=True)
-                    return code, body
+                    break
                 if attempt + 1 < retries:
                     time.sleep(2.0 * (attempt + 1))
-            if code != 200:
+            if code != 200 and code not in (400, 401, 403, 404, 413):
                 print("[labmon-ephemeral] 上报未成功（HTTP {}）：{}".format(code, body.get("error") or body), file=sys.stderr, flush=True)
-            return code, body
+        if trigger_stop:
+            print("[labmon-ephemeral] 收到看板远程停止指令，正在优雅终止并准备释放运行时…", file=sys.stderr, flush=True)
+            cb = self._on_stop
+            if cb is not None:
+                try:
+                    cb()
+                except Exception as exc:  # noqa: BLE001
+                    print("[labmon-ephemeral] 执行远程停止回调失败：{}".format(exc), file=sys.stderr, flush=True)
+        return code, body
 
     def start(self) -> None:
         self._finished = False
@@ -564,18 +587,19 @@ class EphemeralTracker:
     def finish(self, *, ok: bool, rc: int = 0, note: Optional[str] = None) -> None:
         self._finished = True
         self._stop.set()
+        eff_note = note if note is not None else self.stop_reason
         with self._lock:
             self._status = "done" if ok else "failed"
             self._rc = int(rc)
             self._end_ts = time.time()
-            if note:
-                self._last_line = str(note)[:LAST_LINE_MAX]
+            if eff_note:
+                self._last_line = str(eff_note)[:LAST_LINE_MAX]
                 self._log_mtime = self._end_ts
         # _push_lock 保证等待任何在途普通心跳完全返回后，才发送最终 closing=True 状态
         self.push_once(closing=True)
         if self._thread and self._thread.is_alive():
             self._thread.join(timeout=1.0)
-        if self.unassign:
+        if self.unassign or self.stop_requested:
             unassign_runtime()
 
 
@@ -645,10 +669,9 @@ def run_command_wrapped(
     log_file: Optional[str] = None,
     grace_s: float = DEFAULT_GRACE,
 ) -> int:
-    """运行实验子进程，实时透传输出、捕获 PROGRESS，并在收到 SIGTERM 时透传并等待子进程回写 checkpoint。"""
+    """运行实验子进程，实时透传输出、捕获 PROGRESS，并在收到 SIGTERM 或看板远程停止时透传并等待子进程回写 checkpoint。"""
     if not cmd:
         raise RuntimeError("请提供要执行的命令（在 -- 之后）")
-    tracker.start()
     log_fh = open(log_file, "a", encoding="utf-8") if log_file else None
     proc = subprocess.Popen(
         cmd,
@@ -661,6 +684,7 @@ def run_command_wrapped(
 
     sig_caught = [0]
     grace_timer: List[Optional[threading.Timer]] = [None]
+    stop_lock = threading.Lock()
 
     def _kill_proc() -> None:
         if proc.poll() is not None:
@@ -676,24 +700,33 @@ def run_command_wrapped(
             except OSError:
                 pass
 
-    def _on_signal(signum: int, _frame: Any) -> None:
-        sig_caught[0] = signum
-        if proc.poll() is None:
-            try:
-                if os.name == "posix":
-                    os.killpg(proc.pid, signal.SIGTERM)
-                else:
-                    proc.terminate()
-            except OSError:
+    def _trigger_stop(signum: int) -> None:
+        with stop_lock:
+            sig_caught[0] = signum
+            if proc.poll() is None:
                 try:
-                    proc.terminate()
+                    if os.name == "posix":
+                        os.killpg(proc.pid, signal.SIGTERM)
+                    else:
+                        proc.terminate()
                 except OSError:
-                    pass
-            if grace_timer[0] is None:
-                tm = threading.Timer(max(0.05, float(grace_s)), _kill_proc)
-                tm.daemon = True
-                tm.start()
-                grace_timer[0] = tm
+                    try:
+                        proc.terminate()
+                    except OSError:
+                        pass
+                if grace_timer[0] is None:
+                    tm = threading.Timer(max(0.05, float(grace_s)), _kill_proc)
+                    tm.daemon = True
+                    tm.start()
+                    grace_timer[0] = tm
+
+    def _on_signal(signum: int, _frame: Any) -> None:
+        _trigger_stop(signum)
+
+    tracker._on_stop = lambda: _trigger_stop(signal.SIGTERM)
+    tracker.start()
+    if tracker.stop_requested:
+        _trigger_stop(signal.SIGTERM)
 
     prev_term = signal.getsignal(signal.SIGTERM)
     prev_int = signal.getsignal(signal.SIGINT)
