@@ -2067,6 +2067,17 @@ t("timeline", "拖过以后刷新不改视图；点「回到现在」回到近�
 });
 // 页面一直开着：每轮刷新换上新快照（“现在”往后走），现在线在视图里的位置不变（维护者 11-09：拖过以后视图锁在绝对时刻，过一阵只剩历史）
 const nowAt = X => { const r = run(X, "tlRange()"), now = run(X, "TL.cfg.now()"); return {at: (now - r.t0) / (r.t1 - r.t0), w: r.t1 - r.t0, r, now}; };
+t("timeline", "在 7 天或全部预设下拖动后点「回到现在」，切回近景且现在线回到左起 1/3", () => {
+  for (const tl of ["week", "all"]) {
+    const A = pjCtx(PJD, EVN);
+    run(A, `TL.fw = 0; tlClick({dataset: {tl: "${tl}"}}); tlView({t0: ${NOW - 5 * H}, t1: ${NOW - 4 * H}}, false)`);
+    run(A, 'tlClick({dataset: {tz: "now"}})');
+    ok(run(A, 'TL.cfg.get("tl")') === "near", `${tl}：回到现在没切回 near`);
+    ok(run(A, "TL.v") === null, `${tl}：回到现在没清掉拖过的视图`);
+    const a = nowAt(A);
+    ok(near(a.at, 1 / 3), `${tl}：现在线不在左起 1/3：${JSON.stringify(a)}`);
+  }
+});
 t("timeline", "页面一直开着、选着预设：每轮刷新按新的现在定视图，现在线位置不变", () => {
   for (const tl of ["near", "day", "week"]) {
     const A = pjCtx(PJD, EVN); run(A, `TL.v = null; TL.fw = 0; LS.set("tl", "${tl}"); drawTimeline()`); const a = nowAt(A);

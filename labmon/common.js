@@ -435,7 +435,7 @@ function fit(s, px, mid = false) {
 /* ---------- 时间线（项目页与工作台共用）：视图（预设窗口、拖动、缩放）、刻度、里程碑与现在线、任务条与占用条 ---------- */
 // 预设窗口：相对现在的小时数（近景按现在前后的任务定宽，见 tlFit；全部包住所有任务），每次重画按页面上的“现在”重算。
 // 拖动或缩放后视图记成相对现在的偏移（TL.v = {a, b}：开始、结束减去现在，秒；存在本机），宽度不变、随现在往右平移，现在线停在屏幕上原来的位置；
-// 点预设或“回到现在”恢复按预设定视图
+// 点预设恢复按预设定视图，点“回到现在”回到近景视图
 const TL_WIN = {near: ["近景", null, null], day: ["24 小时", -6, 18], week: ["7 天", -6 * 24, 24], all: ["全部", null, null]};
 const TL_MIN = 1800, TL_MAX = 60 * 86400;
 // 每页调一次 tlInit：get、set 读写本机存的设置（视图 tlv、预设 tl），now() 是页面上的“现在”，all() 给「全部」要包住的 [最早, 最晚]（经 tlSpan 算），
@@ -540,7 +540,7 @@ function tlBar() {
 function tlClick(t) {
   if (t.dataset.tlkey != null) { TL.key = !TL.key; TL.cfg.draw(); }
   else if (t.dataset.tl) { TL.cfg.set("tl", t.dataset.tl); tlFollow(); }
-  else if (t.dataset.tz === "now") tlFollow();
+  else if (t.dataset.tz === "now") { TL.cfg.set("tl", "near"); tlFollow(); }
   else tlZoom(t.dataset.tz === "in" ? 0.5 : 2);
 }
 function tlTicks(t0, t1, n) {
